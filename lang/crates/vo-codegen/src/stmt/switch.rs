@@ -1,6 +1,7 @@
 //! Switch and type switch statement compilation.
 
 use vo_analysis::objects::TypeKey;
+use vo_common_core::instruction::pack_iface_assert_flags;
 use vo_runtime::SlotType;
 use vo_syntax::ast::StmtKind;
 use vo_vm::instruction::Opcode;
@@ -54,7 +55,7 @@ fn emit_type_switch_binding(
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
-) {
+) -> Result<(), CodegenError> {
     let type_key = single_type.unwrap_or_else(|| info.any_type());
     let slots = info.type_slot_count(type_key);
     let slot_types = info.type_slot_types(type_key);
@@ -73,7 +74,11 @@ fn emit_type_switch_binding(
 
     if single_type.is_some() {
         let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
-        let flags = assert_kind | ((slots as u8) << 3);
+        let flags = pack_iface_assert_flags(assert_kind, false, slots).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "IfaceAssert ABI supports at most 31 target slots, got {slots}"
+            ))
+        })?;
         func.emit_with_flags(
             Opcode::IfaceAssert,
             flags,
@@ -98,6 +103,7 @@ fn emit_type_switch_binding(
         }
         .emit_with_copy(func, value_slot);
     }
+    Ok(())
 }
 
 /// Compile type switch statement
@@ -172,12 +178,8 @@ pub(crate) fn compile_type_switch(
                     let (assert_kind, target_id) = compute_iface_assert_params(type_key, ctx, info);
 
                     // Allocate temp for IfaceAssert result (value + ok)
-                    let target_slots = info.type_slot_count(type_key) as u8;
-                    let result_slots: u16 = if assert_kind == 1 {
-                        2
-                    } else {
-                        target_slots as u16
-                    };
+                    let target_slots = info.type_slot_count(type_key);
+                    let result_slots: u16 = if assert_kind == 1 { 2 } else { target_slots };
                     // result + ok bool
                     let mut assert_result_types = info.type_slot_types(type_key);
                     assert_result_types.push(SlotType::Value); // ok bool
@@ -186,7 +188,14 @@ pub(crate) fn compile_type_switch(
 
                     // IfaceAssert: a=dst, b=src_iface, c=target_id
                     // flags = assert_kind | (has_ok << 2) | (target_slots << 3)
-                    let flags = assert_kind | (1 << 2) | ((target_slots) << 3);
+                    let flags =
+                        pack_iface_assert_flags(assert_kind, true, target_slots).ok_or_else(
+                            || {
+                                CodegenError::Internal(format!(
+                                    "IfaceAssert ABI supports at most 31 target slots, got {target_slots}"
+                                ))
+                            },
+                        )?;
                     func.emit_with_flags(
                         Opcode::IfaceAssert,
                         flags,
@@ -227,7 +236,7 @@ pub(crate) fn compile_type_switch(
                 ctx,
                 func,
                 info,
-            );
+            )?;
         }
 
         // Compile case body

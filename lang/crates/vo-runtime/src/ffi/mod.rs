@@ -530,7 +530,7 @@ impl<'a> ExternCallContext<'a> {
     /// Write return value as GcRef.
     #[inline]
     pub fn ret_ref(&mut self, n: u16, val: GcRef) {
-        debug_assert!(
+        assert!(
             self.gc.canonicalize_ref(val).is_some(),
             "ret_ref: invalid GcRef {:p} for extern_id={} ret_slot={}",
             val,
@@ -701,6 +701,11 @@ impl<'a> ExternCallContext<'a> {
             .and_then(|rt| rt.struct_meta_id())
     }
 
+    pub fn require_struct_meta_id_from_rttid(&self, rttid: u32, context: &str) -> u32 {
+        self.get_struct_meta_id_from_rttid(rttid)
+            .unwrap_or_else(|| panic!("{context}: missing StructMeta id for RTTID {rttid}"))
+    }
+
     /// Get interface_meta_id from rttid.
     /// Handles both direct Interface types and Named interface types.
     pub fn get_interface_meta_id_from_rttid(&self, rttid: u32) -> Option<u32> {
@@ -718,6 +723,11 @@ impl<'a> ExternCallContext<'a> {
             }
             _ => None,
         }
+    }
+
+    pub fn require_interface_meta_id_from_rttid(&self, rttid: u32, context: &str) -> u32 {
+        self.get_interface_meta_id_from_rttid(rttid)
+            .unwrap_or_else(|| panic!("{context}: missing InterfaceMeta id for RTTID {rttid}"))
     }
 
     /// Get named_type_id from rttid.
@@ -994,11 +1004,26 @@ impl<'a> ExternCallContext<'a> {
     ) -> InterfaceSlot {
         use crate::objects::{array, interface};
 
+        let expected_slots = match vk {
+            ValueKind::Interface => 2,
+            ValueKind::Struct | ValueKind::Array => self.get_type_slot_count(rttid) as usize,
+            _ => 1,
+        };
+        assert_eq!(
+            raw_slots.len(),
+            expected_slots,
+            "box_to_interface: RTTID {rttid} {:?} provided {} raw slot(s), expected {}",
+            vk,
+            raw_slots.len(),
+            expected_slots
+        );
+
         match vk {
             ValueKind::Struct => {
                 // Resolve struct_meta_id from rttid so the GC object gets correct
                 // slot_types for scanning (prevents misinterpreting int as GcRef).
-                let struct_meta_id = self.get_struct_meta_id_from_rttid(rttid).unwrap_or(0);
+                let struct_meta_id =
+                    self.require_struct_meta_id_from_rttid(rttid, "box_to_interface");
                 let new_ref = self.alloc_and_copy_slots(raw_slots, struct_meta_id);
                 let slot0 = interface::pack_slot0(0, rttid, vk);
                 InterfaceSlot::new(slot0, new_ref as u64)
@@ -1022,10 +1047,10 @@ impl<'a> ExternCallContext<'a> {
                 let elem_meta = self.value_meta_for_value_rttid(elem_value_rttid);
                 let new_ref = array::create(self.gc, elem_meta, elem_bytes, array_len);
 
-                // Copy raw_slots to array data area
-                let data_ptr = array::data_ptr_bytes(new_ref) as *mut u64;
-                for (i, &val) in raw_slots.iter().enumerate() {
-                    unsafe { *data_ptr.add(i) = val };
+                for i in 0..array_len {
+                    let src_start = i * elem_slots;
+                    let src_end = src_start + elem_slots;
+                    array::set_n(new_ref, i, &raw_slots[src_start..src_end], elem_bytes);
                 }
                 if elem_vk.may_contain_gc_refs() {
                     self.gc.mark_allocated_for_scan(new_ref);
@@ -1036,11 +1061,11 @@ impl<'a> ExternCallContext<'a> {
             }
             ValueKind::Interface => {
                 // Preserve itab_id: return as-is
-                InterfaceSlot::new(raw_slots[0], raw_slots.get(1).copied().unwrap_or(0))
+                InterfaceSlot::new(raw_slots[0], raw_slots[1])
             }
             _ => {
                 let slot0 = interface::pack_slot0(0, rttid, vk);
-                InterfaceSlot::new(slot0, raw_slots.first().copied().unwrap_or(0))
+                InterfaceSlot::new(slot0, raw_slots[0])
             }
         }
     }
@@ -1297,31 +1322,30 @@ impl<'a> ExternCallContext<'a> {
 
         match rt {
             RuntimeType::Named { id: named_id, .. } => {
-                if let Some(named_meta) = self.module.named_type_metas.get(*named_id as usize) {
-                    let underlying_vk = named_meta.underlying_meta.value_kind();
-                    let underlying_meta_id = named_meta.underlying_meta.meta_id();
-                    match underlying_vk {
-                        crate::ValueKind::Struct => {
-                            if let Some(meta) = self.struct_meta(underlying_meta_id as usize) {
-                                return meta.slot_count();
-                            }
-                        }
-                        crate::ValueKind::Interface => return 2,
-                        _ => return 1,
-                    }
-                }
-                1
+                let named_meta = self
+                    .module
+                    .named_type_metas
+                    .get(*named_id as usize)
+                    .expect("get_type_slot_count: named type metadata not found");
+                self.get_type_slot_count(named_meta.underlying_rttid.rttid())
             }
-            RuntimeType::Struct { meta_id, .. } => {
-                if let Some(meta) = self.struct_meta(*meta_id as usize) {
-                    return meta.slot_count();
-                }
-                2
-            }
+            RuntimeType::Struct { meta_id, .. } => self
+                .struct_meta(*meta_id as usize)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "get_type_slot_count: StructMeta id {} not found for RTTID {}",
+                        meta_id, rttid
+                    )
+                })
+                .slot_count(),
             RuntimeType::Interface { .. } => 2,
             RuntimeType::Array { len, elem } => {
                 let elem_slots = self.get_type_slot_count(elem.rttid());
-                elem_slots * (*len as u16)
+                let len = u16::try_from(*len)
+                    .expect("get_type_slot_count: array length exceeds u16 slot accounting");
+                elem_slots
+                    .checked_mul(len)
+                    .expect("get_type_slot_count: array slot count overflow")
             }
             _ => 1,
         }
@@ -1336,11 +1360,12 @@ impl<'a> ExternCallContext<'a> {
         let rttid = value_rttid.rttid();
         let vk = value_rttid.value_kind();
         match vk {
-            ValueKind::Struct => {
-                ValueMeta::new(self.get_struct_meta_id_from_rttid(rttid).unwrap_or(0), vk)
-            }
+            ValueKind::Struct => ValueMeta::new(
+                self.require_struct_meta_id_from_rttid(rttid, "value_meta_for_value_rttid"),
+                vk,
+            ),
             ValueKind::Interface => ValueMeta::new(
-                self.get_interface_meta_id_from_rttid(rttid).unwrap_or(0),
+                self.require_interface_meta_id_from_rttid(rttid, "value_meta_for_value_rttid"),
                 vk,
             ),
             _ => ValueMeta::new(0, vk),
@@ -1417,8 +1442,7 @@ impl<'a> ExternCallContext<'a> {
     ///
     /// When boxing basic-type values into `any` interface slots the rttid must
     /// match the compile-time registered rttid or type assertions will fail.
-    /// Returns `0` if not found (safe fallback for modules that omit the basic
-    /// type, though in practice all compiled modules register them).
+    /// Fails fast if the module metadata is malformed and omitted the basic type.
     pub fn find_basic_type_rttid(&self, vk: ValueKind) -> u32 {
         use crate::RuntimeType;
         self.module
@@ -1426,7 +1450,7 @@ impl<'a> ExternCallContext<'a> {
             .iter()
             .position(|rt| matches!(rt, RuntimeType::Basic(k) if *k == vk))
             .map(|i| i as u32)
-            .unwrap_or(0)
+            .unwrap_or_else(|| panic!("missing RuntimeType::Basic({vk:?})"))
     }
 
     /// Return the underlying `ValueMeta.meta_id()` for a Named type.
@@ -1769,5 +1793,70 @@ impl ExternRegistry {
     /// Check if the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ffi_runtime_metadata_does_not_fallback_to_meta_zero() {
+        let ffi_src = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("ffi production source");
+        let sources = [
+            ("ffi/mod.rs", ffi_src),
+            (
+                "builtins/dynamic.rs",
+                include_str!("../builtins/dynamic.rs")
+                    .split("#[cfg(test)]")
+                    .next()
+                    .expect("dynamic production source"),
+            ),
+        ];
+
+        for (name, src) in sources {
+            let normalized = src.split_whitespace().collect::<Vec<_>>().join(" ");
+            for forbidden in [
+                "get_struct_meta_id_from_rttid(rttid) .unwrap_or(0)",
+                "get_interface_meta_id_from_rttid(rttid) .unwrap_or(0)",
+                "get_struct_meta_id_from_rttid(actual_rttid) .unwrap_or(0)",
+                "InterfaceSlot::new(raw_slots[0], raw_slots.get(1).copied().unwrap_or(0))",
+                "InterfaceSlot::new(slot0, raw_slots.first().copied().unwrap_or(0))",
+                "if let Some(meta) = self.struct_meta(*meta_id as usize) { return meta.slot_count(); } 2",
+                "if let Some(named_meta) = self.module.named_type_metas.get(*named_id as usize)",
+                "require_struct_meta_id_from_rttid(actual_rttid, \"dynamic call result boxing\")",
+                ".unwrap_or(0)",
+                "debug_assert!",
+                concat!(".unwrap_or", "_default()"),
+            ] {
+                assert!(
+                    !normalized.contains(forbidden),
+                    "{name} must fail fast on RTTID-to-runtime-metadata drift instead of falling back to metadata id 0"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn box_to_interface_raw_slots_are_exact_layout_authority() {
+        let ffi_src = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("ffi production source");
+        let normalized = ffi_src.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            normalized.contains("assert_eq!( raw_slots.len(), expected_slots,"),
+            "box_to_interface must reject raw slot-count drift before reading slots"
+        );
+        assert!(
+            normalized.contains("array::set_n(new_ref, i, &raw_slots[src_start..src_end], elem_bytes);"),
+            "array boxing must copy by exact element layout instead of treating packed arrays as u64 buffers"
+        );
+        assert!(
+            normalized.contains(".checked_mul(len)"),
+            "array runtime slot counts must be overflow-checked"
+        );
     }
 }

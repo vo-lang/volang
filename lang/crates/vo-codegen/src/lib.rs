@@ -216,15 +216,11 @@ fn register_types(
                             .map(|&m| {
                                 let obj = &tc_objs.lobjs[m];
                                 let name = obj.name().to_string();
-                                let sig = if let Some(sig_type) = obj.typ() {
-                                    signature_type_to_runtime_type(sig_type, tc_objs, info, ctx)
-                                } else {
-                                    vo_runtime::RuntimeType::Func {
-                                        params: Vec::new(),
-                                        results: Vec::new(),
-                                        variadic: false,
-                                    }
-                                };
+                                let sig_type = obj.typ().unwrap_or_else(|| {
+                                    panic!("interface method {name} is missing signature type")
+                                });
+                                let sig =
+                                    signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                                 let signature_rttid = ctx.intern_rttid(sig);
                                 vo_vm::bytecode::InterfaceMethodMeta {
                                     name,
@@ -302,15 +298,10 @@ fn register_types(
                         .map(|&m| {
                             let obj = &tc_objs.lobjs[m];
                             let name = obj.name().to_string();
-                            let sig = if let Some(sig_type) = obj.typ() {
-                                signature_type_to_runtime_type(sig_type, tc_objs, info, ctx)
-                            } else {
-                                vo_runtime::RuntimeType::Func {
-                                    params: Vec::new(),
-                                    results: Vec::new(),
-                                    variadic: false,
-                                }
-                            };
+                            let sig_type = obj.typ().unwrap_or_else(|| {
+                                panic!("interface method {name} is missing signature type")
+                            });
+                            let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                             let signature_rttid = ctx.intern_rttid(sig);
                             vo_vm::bytecode::InterfaceMethodMeta {
                                 name,
@@ -892,13 +883,11 @@ fn collect_promoted_methods(_project: &Project, ctx: &mut CodegenContext, info: 
                     continue;
                 };
 
-                let sig_rttid = tc_objs.lobjs[obj_key]
-                    .typ()
-                    .map(|sig_type| {
-                        let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
-                        ctx.intern_rttid(sig)
-                    })
-                    .unwrap_or(0);
+                let sig_type = tc_objs.lobjs[obj_key].typ().unwrap_or_else(|| {
+                    panic!("promoted method {method_name} is missing signature type")
+                });
+                let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
+                let sig_rttid = ctx.intern_rttid(sig);
 
                 // Determine is_pointer_receiver for the promoted method:
                 // - If the embedding path contains a pointer step (e.g., struct embeds *T),
@@ -1024,21 +1013,21 @@ fn tuple_to_value_rttids(
 ) -> Vec<vo_runtime::ValueRttid> {
     use vo_analysis::typ::Type;
     use vo_runtime::ValueRttid;
-    if let Type::Tuple(tuple) = &tc_objs.types[tuple_key] {
-        tuple
-            .vars()
-            .iter()
-            .filter_map(|&v| {
-                tc_objs.lobjs[v].typ().map(|t| {
-                    let rttid = ctx.intern_type_key(t, info);
-                    let vk = info.type_value_kind(t);
-                    ValueRttid::new(rttid, vk)
-                })
-            })
-            .collect()
-    } else {
-        Vec::new()
-    }
+    let Type::Tuple(tuple) = &tc_objs.types[tuple_key] else {
+        panic!("runtime_value_rttids_from_tuple requires tuple type metadata");
+    };
+    tuple
+        .vars()
+        .iter()
+        .map(|&v| {
+            let t = tc_objs.lobjs[v]
+                .typ()
+                .expect("tuple object must have type metadata");
+            let rttid = ctx.intern_type_key(t, info);
+            let vk = info.type_value_kind(t);
+            ValueRttid::new(rttid, vk)
+        })
+        .collect()
 }
 
 /// Convert a Signature type to RuntimeType::Func with proper params/results
@@ -1058,11 +1047,7 @@ fn signature_type_to_runtime_type(
             variadic: sig.variadic(),
         }
     } else {
-        RuntimeType::Func {
-            params: Vec::new(),
-            results: Vec::new(),
-            variadic: false,
-        }
+        panic!("signature_type_to_runtime_type requires signature type metadata")
     }
 }
 
@@ -1289,22 +1274,7 @@ fn compile_func_body(
 
 /// Emit GlobalSet or GlobalSetN depending on slot count.
 fn emit_global_set(builder: &mut FuncBuilder, global_idx: u32, src: u16, slots: u16) {
-    if slots == 1 {
-        builder.emit_op(
-            vo_vm::instruction::Opcode::GlobalSet,
-            global_idx as u16,
-            src,
-            0,
-        );
-    } else {
-        builder.emit_with_flags(
-            vo_vm::instruction::Opcode::GlobalSetN,
-            slots as u8,
-            global_idx as u16,
-            src,
-            0,
-        );
-    }
+    builder.emit_global_set(global_idx as u16, src, slots);
 }
 
 /// Compile global array initialization: allocate heap array and store GcRef in global.
@@ -1330,9 +1300,9 @@ fn compile_global_array_init(
     let len_reg_count = if flags == 0 { 2 } else { 1 };
     let len_reg = func.alloc_slots(&vec![vo_runtime::SlotType::Value; len_reg_count]);
 
-    // Get elem_meta: (rttid << 8) | elem_vk
-    let elem_rttid = ctx.intern_type_key(elem_type, info);
-    let elem_meta = ((elem_rttid as u64) << 8) | (elem_vk as u64);
+    // ValueMeta is the layout authority: Struct/Interface metadata stores
+    // runtime metadata ids, not RTTIDs.
+    let elem_meta = ctx.compute_value_meta_raw(elem_type, info) as u64;
     let meta_idx = ctx.const_int(elem_meta as i64);
     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
 

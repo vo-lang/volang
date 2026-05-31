@@ -45,6 +45,16 @@ pub extern "C" fn jit_go_start(
     let module = unsafe { &*(ctx.module) };
 
     if is_closure_call != 0 {
+        if closure_ref != 0 {
+            let func_id = closure::func_id(closure_ref as GcRef);
+            if module.functions.get(func_id as usize).is_none() {
+                return vo_runtime::jit_api::set_jit_infra_error(
+                    ctx,
+                    vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                    func_id as u64,
+                );
+            }
+        }
         if let Err(kind) =
             unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) }
         {
@@ -105,6 +115,16 @@ pub extern "C" fn jit_go_island(
     let island_id = vo_runtime::island::id(island_handle);
 
     if island_id == vm.state.current_island_id {
+        if closure_ref != 0 {
+            let func_id = closure::func_id(closure);
+            if module.functions.get(func_id as usize).is_none() {
+                return vo_runtime::jit_api::set_jit_infra_error(
+                    ctx,
+                    vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                    func_id as u64,
+                );
+            }
+        }
         if let Err(kind) =
             unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) }
         {
@@ -143,7 +163,7 @@ pub extern "C" fn jit_go_island(
             arg_data,
         };
 
-        crate::exec::prepare_queue_handles_for_transfer(
+        if crate::exec::prepare_queue_handles_for_transfer(
             &result,
             island_id,
             &func_def.capture_types,
@@ -151,7 +171,15 @@ pub extern "C" fn jit_go_island(
             &module.struct_metas,
             &module.runtime_types,
             &mut vm.state,
-        );
+        )
+        .is_err()
+        {
+            return vo_runtime::jit_api::set_jit_infra_error(
+                ctx,
+                vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                func_id as u64,
+            );
+        }
         let data = crate::exec::pack_closure_for_island(
             &vm.state.gc,
             &result,

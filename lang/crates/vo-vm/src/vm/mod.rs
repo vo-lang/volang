@@ -44,9 +44,9 @@ use helpers::{
     string_index, string_len, user_panic,
 };
 
-use crate::bytecode::Module;
+use crate::bytecode::{FunctionDef, Module};
 use crate::exec;
-use crate::fiber::Fiber;
+use crate::fiber::{Fiber, FiberCapacityError};
 /// Result of wait_for_work() — what the scheduling loop should do next.
 enum WaitResult {
     /// Work became available, retry the loop.
@@ -74,6 +74,14 @@ fn exec_result_allows_gc_step(result: &ExecResult) -> bool {
 #[inline]
 fn exec_result_marks_gc_fiber_roots_dirty(result: &ExecResult) -> bool {
     !matches!(result, ExecResult::Interrupted)
+}
+
+fn fiber_capacity_error_to_vm_error(err: FiberCapacityError) -> VmError {
+    VmError::RuntimeTrap {
+        kind: RuntimeTrapKind::StackOverflow,
+        msg: err.message(),
+        loc: None,
+    }
 }
 
 use crate::instruction::{Instruction, Opcode};
@@ -108,7 +116,7 @@ pub struct Vm {
 fn validate_externs_registered(
     registry: &vo_runtime::ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
-) {
+) -> Result<(), VmError> {
     let mut missing: Vec<(usize, &str)> = Vec::new();
     for (id, def) in externs.iter().enumerate() {
         if !registry.has(id as u32) {
@@ -117,14 +125,14 @@ fn validate_externs_registered(
     }
 
     if missing.is_empty() {
-        return;
+        return Ok(());
     }
 
     let mut msg = String::from("unresolved extern functions:\n");
     for (id, name) in missing {
         msg.push_str(&format!("  - [{}] {}\n", id, name));
     }
-    panic!("{}", msg);
+    Err(VmError::Jit(msg))
 }
 
 #[cfg(debug_assertions)]
@@ -138,12 +146,12 @@ fn debug_validate_extern_returns(
     extern_id: u32,
     bp: usize,
     inst: &Instruction,
-) {
+) -> Result<(), String> {
     let Some(extern_def) = module.externs.get(extern_id as usize) else {
-        return;
+        return Ok(());
     };
     let Some(func) = module.functions.get(func_id as usize) else {
-        return;
+        return Ok(());
     };
 
     let ret_start = inst.a as usize;
@@ -151,12 +159,33 @@ fn debug_validate_extern_returns(
     let scan_end = ret_end.min(func.slot_types.len());
     let mut slot_idx = ret_start;
     while slot_idx < scan_end {
-        match func.slot_types[slot_idx] {
+        let Some(slot_type) = func.slot_types.get(slot_idx) else {
+            return Err(format!(
+                "CallExtern return slot metadata missing caller_func={} caller_name={} extern={} ret_slot={}",
+                func_id, func.name, extern_id, slot_idx
+            ));
+        };
+        match *slot_type {
             vo_runtime::SlotType::GcRef => {
-                let raw = fiber.stack[bp + slot_idx];
+                let Some(stack_idx) = bp.checked_add(slot_idx) else {
+                    return Err(format!(
+                        "CallExtern return stack index overflow caller_func={} caller_name={} extern={} ret_slot={}",
+                        func_id, func.name, extern_id, slot_idx
+                    ));
+                };
+                let Some(&raw) = fiber.stack.get(stack_idx) else {
+                    return Err(format!(
+                        "CallExtern return stack index {} out of bounds for stack length {} caller_func={} caller_name={} extern={}",
+                        stack_idx,
+                        fiber.stack.len(),
+                        func_id,
+                        func.name,
+                        extern_id
+                    ));
+                };
                 if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
                     let (in_all, in_index, index_len) = gc.debug_ref_membership(raw as GcRef);
-                    panic!(
+                    return Err(format!(
                         "CallExtern returned invalid GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
                         fiber_id.to_raw(),
                         func_id,
@@ -168,7 +197,7 @@ fn debug_validate_extern_returns(
                         in_all,
                         in_index,
                         index_len,
-                    );
+                    ));
                 }
                 slot_idx += 1;
             }
@@ -177,14 +206,44 @@ fn debug_validate_extern_returns(
                     slot_idx += 1;
                     continue;
                 }
-                let slot0 = fiber.stack[bp + slot_idx];
-                let slot1 = fiber.stack[bp + slot_idx + 1];
+                let Some(stack_idx0) = bp.checked_add(slot_idx) else {
+                    return Err(format!(
+                        "CallExtern interface return stack index overflow caller_func={} caller_name={} extern={} ret_slot={}",
+                        func_id, func.name, extern_id, slot_idx
+                    ));
+                };
+                let Some(stack_idx1) = stack_idx0.checked_add(1) else {
+                    return Err(format!(
+                        "CallExtern interface return pair index overflow caller_func={} caller_name={} extern={} ret_slot={}",
+                        func_id, func.name, extern_id, slot_idx
+                    ));
+                };
+                let Some(&slot0) = fiber.stack.get(stack_idx0) else {
+                    return Err(format!(
+                        "CallExtern interface return stack index {} out of bounds for stack length {} caller_func={} caller_name={} extern={}",
+                        stack_idx0,
+                        fiber.stack.len(),
+                        func_id,
+                        func.name,
+                        extern_id
+                    ));
+                };
+                let Some(&slot1) = fiber.stack.get(stack_idx1) else {
+                    return Err(format!(
+                        "CallExtern interface return stack index {} out of bounds for stack length {} caller_func={} caller_name={} extern={}",
+                        stack_idx1,
+                        fiber.stack.len(),
+                        func_id,
+                        func.name,
+                        extern_id
+                    ));
+                };
                 if vo_runtime::objects::interface::data_is_gc_ref(slot0)
                     && slot1 != 0
                     && gc.canonicalize_ref(slot1 as GcRef).is_none()
                 {
                     let (in_all, in_index, index_len) = gc.debug_ref_membership(slot1 as GcRef);
-                    panic!(
+                    return Err(format!(
                         "CallExtern returned invalid interface GcRef fiber={} caller_func={} caller_name={} extern={} extern_name={} ret_slot={} raw=0x{:016x} in_all_objects={} in_object_index={} object_index_len={}",
                         fiber_id.to_raw(),
                         func_id,
@@ -196,7 +255,7 @@ fn debug_validate_extern_returns(
                         in_all,
                         in_index,
                         index_len,
-                    );
+                    ));
                 }
                 slot_idx += 2;
             }
@@ -205,6 +264,51 @@ fn debug_validate_extern_returns(
             }
         }
     }
+    Ok(())
+}
+
+fn check_extern_frame_range(
+    op: &'static str,
+    func: &FunctionDef,
+    bp: usize,
+    stack_len: usize,
+    start: u16,
+    count: u16,
+) -> Result<(), String> {
+    if count == 0 {
+        return Ok(());
+    }
+
+    let start = start as usize;
+    let count = count as usize;
+    let Some(end) = start.checked_add(count) else {
+        return Err(format!(
+            "CallExtern {op} range {start}..+{count} overflows slot index space in function {}",
+            func.name
+        ));
+    };
+    let local_slots = func.local_slots as usize;
+    if end > local_slots {
+        return Err(format!(
+            "CallExtern {op} range {start}..{end} out of bounds for function {} with {local_slots} local slots",
+            func.name
+        ));
+    }
+    let Some(stack_end) = bp.checked_add(end) else {
+        return Err(format!(
+            "CallExtern {op} stack range bp {bp} + end {end} overflows stack index space in function {}",
+            func.name
+        ));
+    };
+    if stack_end > stack_len {
+        return Err(format!(
+            "CallExtern {op} stack range {}..{} out of bounds for stack length {stack_len} in function {}",
+            bp + start,
+            stack_end,
+            func.name
+        ));
+    }
+    Ok(())
 }
 
 impl Vm {
@@ -351,15 +455,16 @@ impl Vm {
     }
 
     #[cfg(feature = "std")]
-    pub fn load(&mut self, module: Module) {
-        self.load_with_extensions(module, None);
+    pub fn load(&mut self, module: Module) -> Result<(), VmError> {
+        self.load_with_extensions(module, None)
     }
 
     #[cfg(not(feature = "std"))]
-    pub fn load(&mut self, module: Module) {
+    pub fn load(&mut self, module: Module) -> Result<(), VmError> {
         vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
 
         self.finish_load(module);
+        Ok(())
     }
 
     /// Load a module with optional extension loader for native extensions.
@@ -368,7 +473,7 @@ impl Vm {
         &mut self,
         module: Module,
         ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
-    ) {
+    ) -> Result<(), VmError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
@@ -386,12 +491,13 @@ impl Vm {
                 .register_from_extension_loader(loader, &module.externs);
         }
 
-        validate_externs_registered(&self.state.extern_registry, &module.externs);
+        validate_externs_registered(&self.state.extern_registry, &module.externs)?;
 
         self.extension_specs = ext_loader.as_ref().map(|loader| loader.specs().to_vec());
         self.extension_loader = ext_loader;
 
         self.finish_load(module);
+        Ok(())
     }
 
     /// Broadcast a host bridge pointer to all loaded extension dylibs.
@@ -442,11 +548,11 @@ impl Vm {
     /// Create a new island - shared by VM interpreter and JIT callbacks.
     /// Returns the island handle (GcRef).
     #[cfg(feature = "std")]
-    pub fn create_island(&mut self) -> GcRef {
+    pub fn create_island(&mut self) -> Result<GcRef, VmError> {
         let next_id = self.state.next_island_id;
-        self.state.next_island_id += 1;
         if self.state.external_island_transport {
-            return vo_runtime::island::create(&mut self.state.gc, next_id);
+            self.state.next_island_id += 1;
+            return Ok(vo_runtime::island::create(&mut self.state.gc, next_id));
         }
 
         use vo_runtime::island_transport::{InThreadTransport, IslandSender};
@@ -454,7 +560,8 @@ impl Vm {
         let module = self
             .module
             .as_ref()
-            .expect("module required for create_island");
+            .ok_or_else(|| VmError::Jit("create_island requires loaded module".to_string()))?;
+        self.state.next_island_id += 1;
 
         // Create transport pair for the new island
         let (island_sender, island_transport) = InThreadTransport::new();
@@ -474,9 +581,16 @@ impl Vm {
         }
 
         // Register this island's sender in the shared registry
-        let registry = self.state.island_registry.as_ref().unwrap().clone();
+        let registry = self
+            .state
+            .island_registry
+            .as_ref()
+            .ok_or_else(|| VmError::Jit("create_island missing island registry".to_string()))?
+            .clone();
         {
-            let mut guard = registry.lock().unwrap();
+            let mut guard = registry
+                .lock()
+                .map_err(|_| VmError::Jit("create_island island registry poisoned".to_string()))?;
             guard.insert(next_id, island_sender.clone());
         }
         // Also register in island_senders
@@ -516,17 +630,17 @@ impl Vm {
             join_handle: Some(join_handle),
         });
 
-        handle
+        Ok(handle)
     }
 
     /// Spawn the entry function as a new fiber.  Called by `run()` only.
     fn spawn_entry(&mut self) -> Result<(), VmError> {
         let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
         let entry_func = module.entry_func;
-        if entry_func as usize >= module.functions.len() {
-            return Err(VmError::InvalidFunctionId(entry_func));
-        }
-        let func = &module.functions[entry_func as usize];
+        let func = module
+            .functions
+            .get(entry_func as usize)
+            .ok_or(VmError::InvalidFunctionId(entry_func))?;
         let mut fiber = Fiber::new(0);
         fiber.push_frame(entry_func, func.local_slots, func.gc_scan_slots, 0, 0);
         self.scheduler.spawn(fiber);
@@ -553,10 +667,10 @@ impl Vm {
     pub fn run_init(&mut self) -> Result<SchedulingOutcome, VmError> {
         let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
         let init_func = module.island_init_func;
-        if init_func as usize >= module.functions.len() {
-            return Err(VmError::InvalidFunctionId(init_func));
-        }
-        let func = &module.functions[init_func as usize];
+        let func = module
+            .functions
+            .get(init_func as usize)
+            .ok_or(VmError::InvalidFunctionId(init_func))?;
         let mut fiber = Fiber::new(0);
         fiber.push_frame(init_func, func.local_slots, func.gc_scan_slots, 0, 0);
         self.scheduler.spawn(fiber);
@@ -874,14 +988,18 @@ impl Vm {
                     self.scheduler.block_for_host_event(token, delay_ms);
                 }
                 crate::fiber::BlockReason::HostEventReplay(token) => {
-                    let fiber = self.scheduler.current_fiber_mut().unwrap();
-                    fiber.current_frame_mut().unwrap().pc -= 1;
+                    if let Err(err) = self.rewind_current_frame_for_replay("HostEventReplay") {
+                        let _ = self.scheduler.kill_current();
+                        return Some(Err(err));
+                    }
                     self.scheduler.block_for_host_event_replay(token);
                 }
                 #[cfg(feature = "std")]
                 crate::fiber::BlockReason::Io(token) => {
-                    let fiber = self.scheduler.current_fiber_mut().unwrap();
-                    fiber.current_frame_mut().unwrap().pc -= 1;
+                    if let Err(err) = self.rewind_current_frame_for_replay("Io") {
+                        let _ = self.scheduler.kill_current();
+                        return Some(Err(err));
+                    }
                     self.scheduler.block_for_io(token);
                 }
             },
@@ -893,7 +1011,12 @@ impl Vm {
                 let loc = loc_tuple.map(|(func_id, pc)| ErrorLocation { func_id, pc });
                 if !is_bounded {
                     if let Some(kind) = trap_kind {
-                        let msg = msg.expect("runtime trap should have message");
+                        let Some(msg) = msg else {
+                            return Some(Err(VmError::Jit(format!(
+                                "runtime trap {:?} missing panic payload",
+                                kind
+                            ))));
+                        };
                         return Some(Err(VmError::RuntimeTrap { kind, msg, loc }));
                     }
                     return Some(Err(VmError::PanicUnwound { msg, loc }));
@@ -917,6 +1040,20 @@ impl Vm {
         None
     }
 
+    fn rewind_current_frame_for_replay(&mut self, label: &str) -> Result<(), VmError> {
+        let fiber = self.scheduler.current_fiber_mut().ok_or_else(|| {
+            VmError::Jit(format!("{label} requires a current fiber before blocking"))
+        })?;
+        let frame = fiber.current_frame_mut().ok_or_else(|| {
+            VmError::Jit(format!("{label} requires an active frame before blocking"))
+        })?;
+        frame.pc = frame
+            .pc
+            .checked_sub(1)
+            .ok_or_else(|| VmError::Jit(format!("{label} cannot rewind pc 0")))?;
+        Ok(())
+    }
+
     /// Report deadlock with detailed fiber state.
     fn report_deadlock(&self) -> Result<(), VmError> {
         if let Some(module) = self.module.as_ref() {
@@ -928,7 +1065,13 @@ impl Vm {
                 }
                 msg.push_str(&format!("  fiber={} state={:?}\n", id, fiber.state));
                 if let Some(frame) = fiber.frames.last() {
-                    let func = &module.functions[frame.func_id as usize];
+                    let Some(func) = module.functions.get(frame.func_id as usize) else {
+                        msg.push_str(&format!(
+                            "    missing function id {} pc={}\n",
+                            frame.func_id, frame.pc
+                        ));
+                        continue;
+                    };
                     let code = &func.code;
                     let pc = frame.pc;
                     let prev_pc = pc.saturating_sub(1);
@@ -981,7 +1124,14 @@ impl Vm {
         };
         let mut func_id: u32 = unsafe { (*frame_ptr).func_id };
         let mut bp: usize = unsafe { (*frame_ptr).bp };
-        let mut func = &module.functions[func_id as usize];
+        let mut func = match module.functions.get(func_id as usize) {
+            Some(func) => func,
+            None => {
+                return ExecResult::JitError(format!(
+                    "active frame references missing function id {func_id}"
+                ));
+            }
+        };
         let mut code: &[Instruction] = &func.code;
 
         // Macro to refetch frame after Call/Return - only called when frame actually changes
@@ -994,7 +1144,14 @@ impl Vm {
                 };
                 func_id = unsafe { (*frame_ptr).func_id };
                 bp = unsafe { (*frame_ptr).bp };
-                func = &module.functions[func_id as usize];
+                func = match module.functions.get(func_id as usize) {
+                    Some(func) => func,
+                    None => {
+                        return ExecResult::JitError(format!(
+                            "active frame references missing function id {func_id}"
+                        ));
+                    }
+                };
                 code = &func.code;
             }};
         }
@@ -1030,9 +1187,11 @@ impl Vm {
                         #[cfg(feature = "std")]
                         jit::OsrResult::WaitIo => {
                             let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                            let token = fiber
-                                .resume_io_token
-                                .expect("OsrResult::WaitIo but resume_io_token is None");
+                            let Some(token) = fiber.resume_io_token else {
+                                return ExecResult::JitError(
+                                    "OsrResult::WaitIo without resume_io_token".to_string(),
+                                );
+                            };
                             return ExecResult::Block(crate::fiber::BlockReason::Io(token));
                         }
                         jit::OsrResult::WaitQueue => {
@@ -1040,7 +1199,12 @@ impl Vm {
                         }
                         jit::OsrResult::ExitPc(exit_pc) => {
                             let fiber = self.scheduler.get_fiber_mut(fiber_id);
-                            fiber.current_frame_mut().unwrap().pc = exit_pc;
+                            let Some(frame) = fiber.current_frame_mut() else {
+                                return ExecResult::JitError(
+                                    "OsrResult::ExitPc without active frame".to_string(),
+                                );
+                            };
+                            frame.pc = exit_pc;
                             stack = fiber.stack_ptr();
                             refetch!();
                             continue;
@@ -1073,7 +1237,19 @@ impl Vm {
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
                     exec::QueueAction::ReplayThenBlock => {
-                        fiber.current_frame_mut().unwrap().pc -= 1;
+                        let Some(frame) = fiber.current_frame_mut() else {
+                            return ExecResult::JitError(
+                                "Queue ReplayThenBlock without active frame".to_string(),
+                            );
+                        };
+                        frame.pc = match frame.pc.checked_sub(1) {
+                            Some(pc) => pc,
+                            None => {
+                                return ExecResult::JitError(
+                                    "Queue ReplayThenBlock cannot rewind pc 0".to_string(),
+                                );
+                            }
+                        };
                         return ExecResult::Block(crate::fiber::BlockReason::Queue);
                     }
                     exec::QueueAction::Trap(kind) => {
@@ -1084,6 +1260,9 @@ impl Vm {
                             module,
                             kind
                         ));
+                    }
+                    exec::QueueAction::Malformed(msg) => {
+                        return ExecResult::JitError(msg);
                     }
                     exec::QueueAction::Wake(waiter) => {
                         self.state.wake_waiter(&waiter, &mut self.scheduler);
@@ -1118,7 +1297,19 @@ impl Vm {
                         endpoint_id,
                         home_island,
                     } => {
-                        fiber.current_frame_mut().unwrap().pc -= 1;
+                        let Some(frame) = fiber.current_frame_mut() else {
+                            return ExecResult::JitError(
+                                "Queue RemoteRecv without active frame".to_string(),
+                            );
+                        };
+                        frame.pc = match frame.pc.checked_sub(1) {
+                            Some(pc) => pc,
+                            None => {
+                                return ExecResult::JitError(
+                                    "Queue RemoteRecv cannot rewind pc 0".to_string(),
+                                );
+                            }
+                        };
                         self.state.send_endpoint_recv_request(
                             home_island,
                             endpoint_id,
@@ -1191,7 +1382,13 @@ impl Vm {
 
             let frame = unsafe { &mut *frame_ptr };
             let pc = frame.pc;
-            let inst = unsafe { *code.get_unchecked(pc) };
+            let Some(&inst) = code.get(pc) else {
+                return ExecResult::JitError(format!(
+                    "pc {pc} out of bounds for function {} with {} instructions",
+                    func.name,
+                    code.len()
+                ));
+            };
             frame.pc = pc + 1;
 
             match inst.opcode() {
@@ -1206,7 +1403,9 @@ impl Vm {
                     stack_set(stack, bp + inst.a as usize, val);
                 }
                 Opcode::LoadConst => {
-                    exec::exec_load_const(stack, bp, &inst, &module.constants);
+                    if let Err(msg) = exec::exec_load_const(stack, bp, &inst, &module.constants) {
+                        return ExecResult::JitError(msg);
+                    }
                 }
 
                 Opcode::Copy => {
@@ -1230,16 +1429,29 @@ impl Vm {
                 }
 
                 Opcode::GlobalGet => {
-                    exec::exec_global_get(stack, bp, &inst, &self.state.globals);
+                    if let Err(msg) = exec::exec_global_get(stack, bp, &inst, &self.state.globals) {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::GlobalGetN => {
-                    exec::exec_global_get_n(stack, bp, &inst, &self.state.globals);
+                    if let Err(msg) = exec::exec_global_get_n(stack, bp, &inst, &self.state.globals)
+                    {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::GlobalSet => {
-                    exec::exec_global_set(stack, bp, &inst, &mut self.state.globals);
+                    if let Err(msg) =
+                        exec::exec_global_set(stack, bp, &inst, &mut self.state.globals)
+                    {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::GlobalSetN => {
-                    exec::exec_global_set_n(stack, bp, &inst, &mut self.state.globals);
+                    if let Err(msg) =
+                        exec::exec_global_set_n(stack, bp, &inst, &mut self.state.globals)
+                    {
+                        return ExecResult::JitError(msg);
+                    }
                 }
 
                 Opcode::PtrNew => {
@@ -1646,7 +1858,12 @@ impl Vm {
                     {
                         let target_func_id = inst.static_call_func_id();
                         if let Some(jit_mgr) = self.jit_mgr.as_mut() {
-                            let target_func = &module.functions[target_func_id as usize];
+                            let Some(target_func) = module.functions.get(target_func_id as usize)
+                            else {
+                                return ExecResult::JitError(format!(
+                                    "missing call target function id {target_func_id}"
+                                ));
+                            };
                             match jit_mgr.resolve_call(target_func_id, target_func, module) {
                                 Ok(Some(jit_func)) => {
                                     // Execute via JIT
@@ -1696,7 +1913,40 @@ impl Vm {
 
                     let (closure_replay_results, closure_replay_panic_message) =
                         fiber.closure_replay.take_for_extern();
-                    let ret_slots = module.externs[extern_id as usize].ret_slots;
+                    let Some(extern_def) = module.externs.get(extern_id as usize) else {
+                        return ExecResult::JitError(format!(
+                            "CallExtern missing extern id {extern_id}"
+                        ));
+                    };
+                    let arg_slots = inst.flags as u16;
+                    let ret_slots = extern_def.ret_slots;
+                    if extern_def.param_slots != 0 && arg_slots != extern_def.param_slots {
+                        return ExecResult::JitError(format!(
+                            "CallExtern arg slot count {arg_slots} does not match extern {} param_slots {}",
+                            extern_def.name,
+                            extern_def.param_slots
+                        ));
+                    }
+                    if let Err(msg) = check_extern_frame_range(
+                        "arg",
+                        func,
+                        bp,
+                        fiber.stack.len(),
+                        inst.c,
+                        arg_slots,
+                    ) {
+                        return ExecResult::JitError(msg);
+                    }
+                    if let Err(msg) = check_extern_frame_range(
+                        "return",
+                        func,
+                        bp,
+                        fiber.stack.len(),
+                        inst.a,
+                        ret_slots,
+                    ) {
+                        return ExecResult::JitError(msg);
+                    }
                     let invoke = ExternInvoke {
                         extern_id,
                         bp: bp as u32,
@@ -1734,7 +1984,7 @@ impl Vm {
                     );
                     stack = fiber.stack_ptr();
                     #[cfg(debug_assertions)]
-                    debug_validate_extern_returns(
+                    if let Err(msg) = debug_validate_extern_returns(
                         &self.state.gc,
                         module,
                         fiber,
@@ -1743,7 +1993,9 @@ impl Vm {
                         extern_id,
                         bp,
                         &inst,
-                    );
+                    ) {
+                        return ExecResult::JitError(msg);
+                    }
                     match extern_result {
                         ExternResult::Ok => {
                             refetch!();
@@ -1758,7 +2010,7 @@ impl Vm {
                             }
                         }
                         ExternResult::NotRegistered(id) => {
-                            let name = &module.externs[extern_id as usize].name;
+                            let name = &extern_def.name;
                             let msg =
                                 format!("extern function '{}' (id={}) not registered", name, id);
                             let r =
@@ -1792,17 +2044,35 @@ impl Vm {
                         }
                         ExternResult::CallClosure { closure_ref, args } => {
                             // Undo PC pre-increment so extern replays on return
-                            let frame = fiber.current_frame_mut().unwrap();
+                            let Some(frame) = fiber.current_frame_mut() else {
+                                return ExecResult::JitError(
+                                    "CallExtern closure replay requested without active frame"
+                                        .to_string(),
+                                );
+                            };
                             frame.pc -= 1;
 
                             // Push closure frame on current fiber using same layout as exec_call_closure
                             let closure_func_id =
                                 vo_runtime::objects::closure::func_id(closure_ref);
-                            let func_def = &module.functions[closure_func_id as usize];
+                            let Some(func_def) = module.functions.get(closure_func_id as usize)
+                            else {
+                                return ExecResult::JitError(format!(
+                                    "CallExtern closure replay missing function id {closure_func_id}"
+                                ));
+                            };
 
                             let new_bp = fiber.sp;
                             let local_slots = func_def.local_slots as usize;
-                            fiber.reserve_slots_at(new_bp, local_slots);
+                            if fiber.try_reserve_slots_at(new_bp, local_slots).is_err() {
+                                handle_panic_result!(runtime_trap(
+                                    &mut self.state.gc,
+                                    fiber,
+                                    stack,
+                                    module,
+                                    RuntimeTrapKind::StackOverflow,
+                                ));
+                            }
 
                             // Use call_layout for correct slot placement (matches exec_call_closure)
                             let layout = vo_runtime::objects::closure::call_layout(
@@ -1877,7 +2147,6 @@ impl Vm {
                     let result = if fiber.is_direct_defer_context() {
                         exec::handle_panic_unwind(&mut self.state.gc, fiber, module)
                     } else {
-                        let func = &module.functions[func_id as usize];
                         let is_error_return = (inst.flags & 1) != 0;
                         exec::handle_return(
                             &mut self.state.gc,
@@ -1897,7 +2166,11 @@ impl Vm {
 
                 // String operations
                 Opcode::StrNew => {
-                    exec::exec_str_new(stack, bp, &inst, &module.constants, &mut self.state.gc);
+                    if let Err(msg) =
+                        exec::exec_str_new(stack, bp, &inst, &module.constants, &mut self.state.gc)
+                    {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::StrLen => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -2471,16 +2744,22 @@ impl Vm {
                     exec::exec_select_begin(fiber, inst.a as usize, (inst.flags & 1) != 0);
                 }
                 Opcode::SelectSend => {
-                    exec::exec_select_send(&mut fiber.select_state, inst.a, inst.b, inst.flags);
+                    if let Err(msg) =
+                        exec::exec_select_send(&mut fiber.select_state, inst.a, inst.b, inst.flags)
+                    {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::SelectRecv => {
-                    exec::exec_select_recv(
+                    if let Err(msg) = exec::exec_select_recv(
                         &mut fiber.select_state,
                         inst.a,
                         inst.b,
                         inst.recv_elem_slots() as u8,
                         inst.recv_has_ok(),
-                    );
+                    ) {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::SelectExec => {
                     let fiber_id = fiber.id;
@@ -2521,6 +2800,9 @@ impl Vm {
                             self.state.wake_waiter(&waiter, &mut self.scheduler);
                             return ExecResult::TimesliceExpired;
                         }
+                        exec::SelectResult::Malformed(msg) => {
+                            return ExecResult::JitError(msg);
+                        }
                     }
                 }
 
@@ -2548,37 +2830,55 @@ impl Vm {
                         }
                     }
                     let next_id = self.scheduler.fibers.len() as u32;
-                    let go_result =
-                        exec::exec_go_start(stack, bp, &inst, &module.functions, next_id);
-                    self.scheduler.spawn(go_result.new_fiber);
+                    match exec::exec_go_start(stack, bp, &inst, &module.functions, next_id) {
+                        Ok(go_result) => {
+                            self.scheduler.spawn(go_result.new_fiber);
+                        }
+                        Err(exec::GoStartError::Trap(kind)) => {
+                            handle_panic_result!(runtime_trap(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                kind
+                            ));
+                        }
+                        Err(exec::GoStartError::Malformed(msg)) => {
+                            return ExecResult::JitError(msg);
+                        }
+                    }
                 }
 
                 // Defer and error handling
                 Opcode::DeferPush => {
                     let generation = fiber.effective_defer_generation();
-                    exec::exec_defer_push(
+                    if let Err(msg) = exec::exec_defer_push(
                         stack,
                         bp,
                         &fiber.frames,
-                        &module.functions[func_id as usize],
+                        func,
                         &mut fiber.defer_stack,
                         &inst,
                         &mut self.state.gc,
                         generation,
-                    );
+                    ) {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::ErrDeferPush => {
                     let generation = fiber.effective_defer_generation();
-                    exec::exec_err_defer_push(
+                    if let Err(msg) = exec::exec_err_defer_push(
                         stack,
                         bp,
                         &fiber.frames,
-                        &module.functions[func_id as usize],
+                        func,
                         &mut fiber.defer_stack,
                         &inst,
                         &mut self.state.gc,
                         generation,
-                    );
+                    ) {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::Panic => {
                     let result = user_panic(&mut self.state.gc, fiber, stack, bp, inst.a, module);
@@ -2594,14 +2894,16 @@ impl Vm {
 
                 // Interface operations
                 Opcode::IfaceAssign => {
-                    exec::exec_iface_assign(
+                    if let Err(msg) = exec::exec_iface_assign(
                         stack,
                         bp,
                         &inst,
                         &mut self.state.gc,
                         &mut self.state.itab_cache,
                         module,
-                    );
+                    ) {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::IfaceAssert => {
                     let result = exec::exec_iface_assert(
@@ -2611,14 +2913,18 @@ impl Vm {
                         &mut self.state.itab_cache,
                         module,
                     );
-                    if matches!(result, ExecResult::Panic) {
-                        handle_panic_result!(runtime_trap(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            RuntimeTrapKind::TypeAssertionFailed
-                        ));
+                    match result {
+                        ExecResult::Panic => {
+                            handle_panic_result!(runtime_trap(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                RuntimeTrapKind::TypeAssertionFailed
+                            ));
+                        }
+                        ExecResult::JitError(msg) => return ExecResult::JitError(msg),
+                        _ => {}
                     }
                 }
                 Opcode::IfaceEq => {
@@ -2689,7 +2995,13 @@ impl Vm {
                 // === ISLAND/CHANNEL: Cross-island operations ===
                 #[cfg(feature = "std")]
                 Opcode::IslandNew => {
-                    let handle = self.create_island();
+                    let handle = match self.create_island() {
+                        Ok(handle) => handle,
+                        Err(VmError::Jit(msg)) => return ExecResult::JitError(msg),
+                        Err(err) => {
+                            return ExecResult::JitError(format!("IslandNew failed: {err:?}"));
+                        }
+                    };
                     stack_set(stack, bp + inst.a as usize, handle as u64);
                 }
                 #[cfg(not(feature = "std"))]
@@ -2714,19 +3026,50 @@ impl Vm {
                     let island_id = vo_runtime::island::id(result.island);
 
                     if island_id == self.state.current_island_id {
-                        let new_fiber = unsafe {
-                            helpers::build_closure_fiber_from_args_ptr(
+                        if module.functions.get(result.func_id as usize).is_none() {
+                            return ExecResult::JitError(format!(
+                                "GoIsland missing closure target function id {}",
+                                result.func_id
+                            ));
+                        }
+                        let new_fiber = match unsafe {
+                            helpers::try_build_closure_fiber_from_args_ptr(
                                 &module.functions,
                                 self.scheduler.fibers.len() as u32,
                                 closure_ref as u64,
                                 stack.add(bp + inst.c as usize),
                                 inst.flags as u32,
                             )
+                        } {
+                            Ok(new_fiber) => new_fiber,
+                            Err(RuntimeTrapKind::StackOverflow) => {
+                                handle_panic_result!(runtime_trap(
+                                    &mut self.state.gc,
+                                    fiber,
+                                    stack,
+                                    module,
+                                    RuntimeTrapKind::StackOverflow
+                                ));
+                            }
+                            Err(_) => {
+                                handle_panic_result!(runtime_trap(
+                                    &mut self.state.gc,
+                                    fiber,
+                                    stack,
+                                    module,
+                                    RuntimeTrapKind::NilFuncCall
+                                ));
+                            }
                         };
                         self.scheduler.spawn(new_fiber);
                     } else {
-                        let func_def = &module.functions[result.func_id as usize];
-                        exec::prepare_queue_handles_for_transfer(
+                        let Some(func_def) = module.functions.get(result.func_id as usize) else {
+                            return ExecResult::JitError(format!(
+                                "GoIsland missing closure target function id {}",
+                                result.func_id
+                            ));
+                        };
+                        if let Err(msg) = exec::prepare_queue_handles_for_transfer(
                             &result,
                             island_id,
                             &func_def.capture_types,
@@ -2734,7 +3077,11 @@ impl Vm {
                             &module.struct_metas,
                             &module.runtime_types,
                             &mut self.state,
-                        );
+                        ) {
+                            return ExecResult::JitError(format!(
+                                "GoIsland queue-transfer metadata contract error: {msg}"
+                            ));
+                        }
                         let data = exec::pack_closure_for_island(
                             &self.state.gc,
                             &result,
@@ -2761,22 +3108,53 @@ impl Vm {
     /// Spawn a new fiber that calls a function with the given arguments.
     /// The fiber is added to the ready queue and will be executed by run_scheduled().
     /// Reuses a dead fiber's stack allocation when available to avoid repeated 64KB allocs.
-    pub fn spawn_call(&mut self, func_id: u32, args: &[u64]) {
-        let module = self.module.as_ref().expect("spawn_call: module not set");
-        let func_def = &module.functions[func_id as usize];
+    pub fn spawn_call(&mut self, func_id: u32, args: &[u64]) -> Result<(), VmError> {
+        let module = self.module.as_ref().ok_or(VmError::NoEntryFunction)?;
+        let func_def = module
+            .functions
+            .get(func_id as usize)
+            .ok_or(VmError::InvalidFunctionId(func_id))?;
+        let param_slots = func_def.param_slots as usize;
+        let local_slots = func_def.local_slots as usize;
+        let gc_scan_slots = func_def.gc_scan_slots as usize;
+        if param_slots > local_slots {
+            return Err(VmError::Jit(format!(
+                "spawn_call function {} metadata invalid: param_slots {} exceed local_slots {}",
+                func_id, func_def.param_slots, func_def.local_slots
+            )));
+        }
+        if gc_scan_slots > local_slots {
+            return Err(VmError::Jit(format!(
+                "spawn_call function {} metadata invalid: gc_scan_slots {} exceed local_slots {}",
+                func_id, func_def.gc_scan_slots, func_def.local_slots
+            )));
+        }
+        if args.len() != param_slots {
+            return Err(VmError::Jit(format!(
+                "spawn_call arg slot count mismatch for function {}: expected {} slots, got {}",
+                func_id,
+                func_def.param_slots,
+                args.len()
+            )));
+        }
+        let ret_slots = func_def.ret_slots;
+        let gc_scan_slots_u16 = func_def.gc_scan_slots;
 
         let fiber_id = self.scheduler.reuse_or_spawn();
         let fiber = self.scheduler.get_fiber_mut(fiber_id);
 
         let bp = fiber.sp;
-        let local_slots = func_def.local_slots as usize;
-        fiber.reserve_slots_at(bp, local_slots);
+        fiber
+            .try_reserve_slots_at(bp, local_slots)
+            .map_err(fiber_capacity_error_to_vm_error)?;
 
-        let n = (func_def.param_slots as usize).min(args.len());
-        fiber.zero_slots_tail_at(bp, func_def.gc_scan_slots as usize, n);
-        fiber.copy_slots_from_slice(bp, &args[..n]);
+        fiber.zero_slots_tail_at(bp, gc_scan_slots, args.len());
+        fiber.copy_slots_from_slice(bp, args);
 
-        fiber.push_call_frame(func_id, bp, 0, func_def.ret_slots, func_def.gc_scan_slots);
+        fiber
+            .try_push_call_frame(func_id, bp, 0, ret_slots, gc_scan_slots_u16)
+            .map_err(fiber_capacity_error_to_vm_error)?;
+        Ok(())
     }
 }
 
@@ -2794,7 +3172,8 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     #[cfg(feature = "std")]
     use std::sync::Arc;
-    use vo_runtime::bytecode::FunctionDef;
+    use vo_runtime::bytecode::{Constant, ExternDef, FunctionDef, InterfaceMeta, StructMeta};
+    use vo_runtime::ffi::{ExternCallContext, ExternResult};
     use vo_runtime::island::{EndpointResponseKind, IslandCommand};
     use vo_runtime::{SlotType, ValueKind, ValueMeta};
 
@@ -2804,6 +3183,16 @@ mod tests {
 
     fn gc_test_module_with_root_slots(root_slots: u16) -> Module {
         let mut module = Module::new("gc-test".to_string());
+        module.struct_metas.push(StructMeta {
+            slot_types: Vec::new(),
+            fields: Vec::new(),
+            field_index: Default::default(),
+        });
+        module.struct_metas.push(StructMeta {
+            slot_types: Vec::new(),
+            fields: Vec::new(),
+            field_index: Default::default(),
+        });
         module.functions.push(FunctionDef {
             name: "root_frame".to_string(),
             param_count: 0,
@@ -2832,6 +3221,831 @@ mod tests {
             param_types: Vec::new(),
         });
         module
+    }
+
+    fn malformed_single_instruction_module(
+        name: &str,
+        code: Vec<Instruction>,
+        constants: Vec<Constant>,
+    ) -> Module {
+        let mut module = Module::new(name.to_string());
+        module.constants = constants;
+        module.functions.push(FunctionDef {
+            name: "main".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 4,
+            gc_scan_slots: 0,
+            ret_slots: 0,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            jit_metadata: vec![vo_runtime::bytecode::JitInstructionMetadata::None; code.len()],
+            code,
+            slot_types: vec![SlotType::Value; 4],
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+            ]),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        });
+        module
+    }
+
+    #[test]
+    fn malformed_load_const_index_is_vm_error_instead_of_index_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-load-const",
+            vec![Instruction::new(Opcode::LoadConst, 0, 0, 0)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("LoadConst constant index 0 out of bounds"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("malformed LoadConst should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed LoadConst must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_str_new_missing_constant_is_vm_error_instead_of_index_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-str-new-missing",
+            vec![Instruction::new(Opcode::StrNew, 0, 0, 0)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("StrNew constant index 0 out of bounds"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("malformed StrNew should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed StrNew missing constant must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_str_new_non_string_constant_is_vm_error_instead_of_nil_fill() {
+        let module = malformed_single_instruction_module(
+            "malformed-str-new-non-string",
+            vec![Instruction::new(Opcode::StrNew, 0, 0, 0)],
+            vec![Constant::Int(7)],
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("StrNew constant 0 expected string"), "{msg}");
+            }
+            Ok(other) => panic!("malformed StrNew should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed StrNew non-string constant must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_pc_fallthrough_is_vm_error_instead_of_unsafe_fetch_abort() {
+        let module = malformed_single_instruction_module(
+            "malformed-pc-fallthrough",
+            vec![Instruction::new(Opcode::Hint, 0, 0, 0)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("pc 1 out of bounds"), "{msg}");
+            }
+            Ok(other) => panic!("pc fallthrough should be a VM error, got {other:?}"),
+            Err(_) => panic!("pc fallthrough must not panic or abort"),
+        }
+    }
+
+    #[test]
+    fn malformed_global_index_is_vm_error_instead_of_index_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-global-get",
+            vec![Instruction::new(Opcode::GlobalGet, 0, 0, 0)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("GlobalGet global range 0..1 out of bounds"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("malformed GlobalGet should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed GlobalGet must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_go_start_function_id_is_vm_error_instead_of_index_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-go-start",
+            vec![Instruction::with_flags(Opcode::GoStart, 0, 7, 0, 0)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("GoStart missing function id 7"), "{msg}");
+            }
+            Ok(other) => panic!("malformed GoStart should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed GoStart must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_go_start_closure_target_is_vm_error_instead_of_nil_call_trap() {
+        let module = malformed_single_instruction_module(
+            "malformed-go-start-closure",
+            vec![Instruction::with_flags(Opcode::GoStart, 1, 0, 0, 0)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+        let closure_ref = vo_runtime::objects::closure::create(&mut vm.state.gc, 7, 0);
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, 4, 0, 0, 0);
+            fiber.stack[0] = closure_ref as u64;
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_scheduled()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("GoStart missing closure target function id 7"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("malformed closure GoStart should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed closure GoStart must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_iface_assign_constant_is_vm_error_instead_of_index_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-iface-assign",
+            vec![Instruction::with_flags(
+                Opcode::IfaceAssign,
+                ValueKind::Int as u8,
+                0,
+                1,
+                0,
+            )],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("IfaceAssign constant index 0 out of bounds"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("malformed IfaceAssign should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed IfaceAssign must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_select_without_begin_is_vm_error_instead_of_state_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-select-send",
+            vec![Instruction::with_flags(Opcode::SelectSend, 1, 0, 1, 0)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("SelectSend without active SelectBegin"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("malformed SelectSend should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed SelectSend must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_iface_assert_metadata_is_vm_error_instead_of_panic() {
+        let mut module = malformed_single_instruction_module(
+            "malformed-iface-assert",
+            vec![Instruction::with_flags(Opcode::IfaceAssert, 1, 2, 0, 1)],
+            Vec::new(),
+        );
+        module.interface_metas = vec![
+            InterfaceMeta {
+                name: "unused".to_string(),
+                method_names: Vec::new(),
+                methods: Vec::new(),
+            },
+            InterfaceMeta {
+                name: "empty".to_string(),
+                method_names: Vec::new(),
+                methods: Vec::new(),
+            },
+        ];
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, 4, 0, 0, 0);
+            fiber.stack[0] = vo_runtime::objects::interface::pack_slot0(0, 0, ValueKind::Int64);
+            fiber.stack[1] = 123;
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_scheduled()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("IfaceAssert metadata missing"), "{msg}");
+            }
+            Ok(other) => panic!("malformed IfaceAssert should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed IfaceAssert metadata must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_defer_arg_layout_is_vm_error_instead_of_metadata_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-defer-push",
+            vec![Instruction::new(Opcode::DeferPush, 0, 3, 2)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("DeferArgLayout metadata missing"), "{msg}");
+            }
+            Ok(other) => panic!("malformed DeferPush should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed DeferPush must not panic"),
+        }
+    }
+
+    #[test]
+    fn corrupted_frame_function_id_is_vm_error_instead_of_index_panic() {
+        let module =
+            malformed_single_instruction_module("corrupted-frame-func-id", Vec::new(), Vec::new());
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        vm.scheduler.get_fiber_mut(fid).push_frame(7, 0, 0, 0, 0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_scheduled()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("active frame references missing function id 7"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("corrupted frame should be a VM error, got {other:?}"),
+            Err(_) => panic!("corrupted frame func_id must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_call_extern_id_is_vm_error_instead_of_index_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-call-extern",
+            vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("CallExtern missing extern id 0"), "{msg}");
+            }
+            Ok(other) => panic!("malformed CallExtern should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed CallExtern extern id must not panic"),
+        }
+    }
+
+    #[test]
+    fn malformed_go_island_closure_target_is_vm_error_instead_of_helper_panic() {
+        let module = malformed_single_instruction_module(
+            "malformed-go-island",
+            vec![Instruction::with_flags(Opcode::GoIsland, 0, 0, 1, 2)],
+            Vec::new(),
+        );
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+        let island = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
+        let closure_ref = vo_runtime::objects::closure::create(&mut vm.state.gc, 7, 0);
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, 4, 0, 0, 0);
+            fiber.stack[0] = island as u64;
+            fiber.stack[1] = closure_ref as u64;
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_scheduled()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("GoIsland missing closure target function id 7"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("malformed GoIsland should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed GoIsland closure target must not panic"),
+        }
+    }
+
+    fn extern_returns_missing_closure(ctx: &mut ExternCallContext<'_>) -> ExternResult {
+        let closure_ref = vo_runtime::objects::closure::create(ctx.gc(), 7, 0);
+        ExternResult::CallClosure {
+            closure_ref,
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extern_call_closure_missing_target_is_vm_error_instead_of_index_panic() {
+        let mut module = malformed_single_instruction_module(
+            "malformed-extern-call-closure",
+            vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
+            Vec::new(),
+        );
+        module.externs.push(ExternDef {
+            name: "missing_closure".to_string(),
+            param_slots: 0,
+            ret_slots: 0,
+            is_blocking: false,
+            param_kinds: Vec::new(),
+        });
+        let mut vm = Vm::new();
+        vm.finish_load(module);
+        vm.state
+            .extern_registry
+            .register(0, extern_returns_missing_closure);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("CallExtern closure replay missing function id 7"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("malformed extern CallClosure should be a VM error, got {other:?}"),
+            Err(_) => panic!("malformed extern CallClosure target must not panic"),
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn extern_returns_invalid_gcref(ctx: &mut ExternCallContext<'_>) -> ExternResult {
+        ctx.set_slot(ctx.ret_start(), 0xdead_beef);
+        ExternResult::Ok
+    }
+
+    fn extern_reads_first_arg(ctx: &mut ExternCallContext<'_>) -> ExternResult {
+        let _ = ctx.slot(ctx.arg_start());
+        ExternResult::Ok
+    }
+
+    fn extern_writes_return_start(ctx: &mut ExternCallContext<'_>) -> ExternResult {
+        ctx.set_slot(ctx.ret_start(), 123);
+        ExternResult::Ok
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn extern_invalid_gcref_return_is_vm_error_instead_of_debug_panic() {
+        let mut module = malformed_single_instruction_module(
+            "extern-invalid-gcref-return",
+            vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
+            Vec::new(),
+        );
+        module.functions[0].slot_types = vec![SlotType::GcRef];
+        module.externs.push(ExternDef {
+            name: "invalid_gcref".to_string(),
+            param_slots: 0,
+            ret_slots: 1,
+            is_blocking: false,
+            param_kinds: Vec::new(),
+        });
+        let mut vm = Vm::new();
+        vm.finish_load(module);
+        vm.state
+            .extern_registry
+            .register(0, extern_returns_invalid_gcref);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("CallExtern returned invalid GcRef"), "{msg}");
+            }
+            Ok(other) => panic!("invalid extern GcRef return should be a VM error, got {other:?}"),
+            Err(_) => panic!("invalid extern GcRef return must not panic"),
+        }
+    }
+
+    #[test]
+    fn call_extern_arg_range_outside_frame_is_vm_error_instead_of_silent_read() {
+        let mut module = malformed_single_instruction_module(
+            "extern-arg-out-of-frame",
+            vec![
+                Instruction::with_flags(Opcode::CallExtern, 1, 0, 0, 3),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+            Vec::new(),
+        );
+        module.functions[0].local_slots = 1;
+        module.functions[0].slot_types = vec![SlotType::Value];
+        module.externs.push(ExternDef {
+            name: "reads_arg".to_string(),
+            param_slots: 1,
+            ret_slots: 0,
+            is_blocking: false,
+            param_kinds: Vec::new(),
+        });
+        let mut vm = Vm::new();
+        vm.finish_load(module);
+        vm.state.extern_registry.register(0, extern_reads_first_arg);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("CallExtern arg range 3..4"), "{msg}");
+            }
+            Ok(other) => panic!("out-of-frame extern arg should be a VM error, got {other:?}"),
+            Err(_) => panic!("out-of-frame extern arg must not panic"),
+        }
+    }
+
+    #[test]
+    fn call_extern_return_range_outside_frame_is_vm_error_instead_of_silent_write() {
+        let mut module = malformed_single_instruction_module(
+            "extern-ret-out-of-frame",
+            vec![
+                Instruction::with_flags(Opcode::CallExtern, 0, 3, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+            Vec::new(),
+        );
+        module.functions[0].local_slots = 1;
+        module.functions[0].slot_types = vec![SlotType::Value];
+        module.externs.push(ExternDef {
+            name: "writes_ret".to_string(),
+            param_slots: 0,
+            ret_slots: 1,
+            is_blocking: false,
+            param_kinds: Vec::new(),
+        });
+        let mut vm = Vm::new();
+        vm.finish_load(module);
+        vm.state
+            .extern_registry
+            .register(0, extern_writes_return_start);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("CallExtern return range 3..4"), "{msg}");
+            }
+            Ok(other) => panic!("out-of-frame extern return should be a VM error, got {other:?}"),
+            Err(_) => panic!("out-of-frame extern return must not panic"),
+        }
+    }
+
+    #[test]
+    fn call_extern_arg_slot_count_mismatch_is_vm_error_instead_of_abi_guess() {
+        let mut module = malformed_single_instruction_module(
+            "extern-arg-count-mismatch",
+            vec![
+                Instruction::with_flags(Opcode::CallExtern, 1, 0, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0, 0),
+            ],
+            Vec::new(),
+        );
+        module.functions[0].local_slots = 2;
+        module.functions[0].slot_types = vec![SlotType::Value, SlotType::Value];
+        module.externs.push(ExternDef {
+            name: "reads_arg".to_string(),
+            param_slots: 2,
+            ret_slots: 0,
+            is_blocking: false,
+            param_kinds: Vec::new(),
+        });
+        let mut vm = Vm::new();
+        vm.finish_load(module);
+        vm.state.extern_registry.register(0, extern_reads_first_arg);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains(
+                        "CallExtern arg slot count 1 does not match extern reads_arg param_slots 2"
+                    ),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("extern arg count mismatch should be a VM error, got {other:?}"),
+            Err(_) => panic!("extern arg count mismatch must not panic"),
+        }
+    }
+
+    #[test]
+    fn spawn_call_without_module_returns_error_instead_of_expect_panic() {
+        let mut vm = Vm::new();
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.spawn_call(0, &[])));
+
+        match result {
+            Ok(Err(VmError::NoEntryFunction)) => {}
+            Ok(other) => {
+                panic!("spawn_call without module should return NoEntryFunction, got {other:?}")
+            }
+            Err(_) => panic!("spawn_call without module must not panic"),
+        }
+    }
+
+    #[test]
+    fn spawn_call_missing_function_returns_error_instead_of_index_panic() {
+        let module =
+            malformed_single_instruction_module("spawn-call-missing-func", Vec::new(), Vec::new());
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.spawn_call(7, &[])));
+
+        match result {
+            Ok(Err(VmError::InvalidFunctionId(7))) => {}
+            Ok(other) => {
+                panic!("spawn_call missing function should return InvalidFunctionId, got {other:?}")
+            }
+            Err(_) => panic!("spawn_call missing function must not panic"),
+        }
+    }
+
+    #[test]
+    fn spawn_call_arg_count_mismatch_is_vm_error_instead_of_silent_zero_fill() {
+        let mut module =
+            malformed_single_instruction_module("spawn-call-arg-count", Vec::new(), Vec::new());
+        module.functions[0].param_slots = 1;
+        module.functions[0].local_slots = 1;
+        module.functions[0].slot_types = vec![SlotType::Value];
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.spawn_call(0, &[])));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("spawn_call arg slot count mismatch"), "{msg}");
+            }
+            Ok(other) => panic!("spawn_call arg mismatch should be a VM error, got {other:?}"),
+            Err(_) => panic!("spawn_call arg mismatch must not panic"),
+        }
+    }
+
+    #[test]
+    fn host_event_replay_without_current_fiber_is_vm_error_instead_of_unwrap_panic() {
+        let mut vm = Vm::new();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vm.handle_exec_result(
+                ExecResult::Block(crate::fiber::BlockReason::HostEventReplay(42)),
+                false,
+            )
+        }));
+
+        match result {
+            Ok(Some(Err(VmError::Jit(msg)))) => {
+                assert!(
+                    msg.contains("HostEventReplay requires a current fiber"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("missing current fiber should be a VM error, got {other:?}"),
+            Err(_) => panic!("missing current fiber must not panic"),
+        }
+    }
+
+    #[test]
+    fn host_event_replay_without_frame_is_vm_error_instead_of_unwrap_panic() {
+        let mut vm = Vm::new();
+        vm.scheduler.spawn(Fiber::new(0));
+        vm.scheduler.schedule_next().unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vm.handle_exec_result(
+                ExecResult::Block(crate::fiber::BlockReason::HostEventReplay(42)),
+                false,
+            )
+        }));
+
+        match result {
+            Ok(Some(Err(VmError::Jit(msg)))) => {
+                assert!(
+                    msg.contains("HostEventReplay requires an active frame"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("missing current frame should be a VM error, got {other:?}"),
+            Err(_) => panic!("missing current frame must not panic"),
+        }
+    }
+
+    #[test]
+    fn host_event_replay_at_pc_zero_is_vm_error_instead_of_underflow_panic() {
+        let mut vm = Vm::new();
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, 0, 0, 0, 0);
+            fiber.current_frame_mut().unwrap().pc = 0;
+        }
+        vm.scheduler.schedule_next().unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vm.handle_exec_result(
+                ExecResult::Block(crate::fiber::BlockReason::HostEventReplay(42)),
+                false,
+            )
+        }));
+
+        match result {
+            Ok(Some(Err(VmError::Jit(msg)))) => {
+                assert!(msg.contains("HostEventReplay cannot rewind pc 0"), "{msg}");
+            }
+            Ok(other) => panic!("pc underflow should be a VM error, got {other:?}"),
+            Err(_) => panic!("pc underflow must not panic"),
+        }
+    }
+
+    #[test]
+    fn runtime_trap_without_message_is_vm_error_instead_of_expect_panic() {
+        let mut vm = Vm::new();
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.panic_trap_kind = Some(RuntimeTrapKind::StackOverflow);
+        }
+        vm.scheduler.schedule_next().unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vm.handle_exec_result(ExecResult::Panic, false)
+        }));
+
+        match result {
+            Ok(Some(Err(VmError::Jit(msg)))) => {
+                assert!(
+                    msg.contains("runtime trap StackOverflow missing panic payload"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("missing runtime trap payload should be a VM error, got {other:?}"),
+            Err(_) => panic!("missing runtime trap payload must not panic"),
+        }
+    }
+
+    #[test]
+    fn deadlock_report_corrupted_frame_is_diagnostic_instead_of_index_panic() {
+        let module =
+            malformed_single_instruction_module("deadlock-corrupted-frame", Vec::new(), Vec::new());
+        let mut vm = Vm::new();
+        vm.load(module).unwrap();
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        vm.scheduler.get_fiber_mut(fid).push_frame(7, 0, 0, 0, 0);
+        vm.scheduler.schedule_next().unwrap();
+        vm.scheduler.block_for_queue();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.deadlock_err()));
+
+        match result {
+            Ok(VmError::Deadlock(msg)) => {
+                assert!(msg.contains("missing function id 7"), "{msg}");
+            }
+            Ok(other) => panic!("deadlock diagnostic should return Deadlock, got {other:?}"),
+            Err(_) => panic!("deadlock diagnostic with corrupt frame must not panic"),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn create_island_without_module_returns_error_instead_of_expect_panic() {
+        let mut vm = Vm::new();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.create_island()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(
+                    msg.contains("create_island requires loaded module"),
+                    "{msg}"
+                );
+            }
+            Ok(other) => panic!("create_island without module should be a VM error, got {other:?}"),
+            Err(_) => panic!("create_island without module must not panic"),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn load_missing_extern_returns_error_instead_of_registration_panic() {
+        let mut module = malformed_single_instruction_module(
+            "load-missing-extern",
+            vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
+            Vec::new(),
+        );
+        module.externs.push(ExternDef {
+            name: "definitely_missing.extern".to_string(),
+            param_slots: 0,
+            ret_slots: 0,
+            is_blocking: false,
+            param_kinds: Vec::new(),
+        });
+        let mut vm = Vm::new();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.load(module)));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("unresolved extern functions"), "{msg}");
+                assert!(msg.contains("definitely_missing.extern"), "{msg}");
+            }
+            Ok(other) => panic!("missing extern load should be a VM error, got {other:?}"),
+            Err(_) => panic!("missing extern load must not panic"),
+        }
     }
 
     fn run_gc_until_pause(vm: &mut Vm) {
@@ -2910,6 +4124,56 @@ mod tests {
             vm.scheduler.get_fiber(fid).state,
             crate::fiber::FiberState::Runnable
         );
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn strict_jit_call_to_missing_function_is_jit_error_instead_of_index_panic() {
+        let mut module = Module::new("missing-call-target-test".to_string());
+        module.functions.push(FunctionDef {
+            name: "main".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 1,
+            gc_scan_slots: 0,
+            ret_slots: 0,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: true,
+            has_call_extern: false,
+            code: vec![Instruction::with_flags(Opcode::Call, 0, 7, 0, 0)],
+            jit_metadata: vec![vo_runtime::bytecode::JitInstructionMetadata::None],
+            slot_types: vec![SlotType::Value],
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
+                SlotType::Value,
+            ]),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        });
+
+        let mut vm = Vm::try_with_jit_config(JitConfig {
+            call_threshold: 1,
+            loop_threshold: 1,
+            debug_ir: false,
+        })
+        .expect("strict JIT VM");
+        vm.load(module).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+
+        match result {
+            Ok(Err(VmError::Jit(msg))) => {
+                assert!(msg.contains("missing call target function id 7"), "{msg}");
+            }
+            Ok(other) => panic!("missing call target should be a JitError, got {other:?}"),
+            Err(_) => panic!("missing call target must not panic in strict JIT mode"),
+        }
     }
 
     #[test]

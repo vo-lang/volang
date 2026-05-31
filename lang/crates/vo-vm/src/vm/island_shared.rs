@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 #[cfg(feature = "std")]
-use std::vec::Vec;
+use std::{string::String, vec::Vec};
 
 use vo_runtime::gc::GcRef;
 use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind};
@@ -104,7 +104,7 @@ pub(crate) fn handle_endpoint_request_command(
     match vm.state.endpoint_registry.entries.get(&endpoint_id) {
         Some(EndpointEntry::Live(ch_ref)) => {
             let ch = *ch_ref;
-            debug_assert!(
+            assert!(
                 vo_runtime::objects::queue_state::backing(ch) == QueueBacking::Local,
                 "EndpointRequest arrived at non-LOCAL channel"
             );
@@ -222,7 +222,10 @@ fn handle_endpoint_request_inner(
                     receiver,
                     payload: value,
                 } => {
-                    let recv_kind = pack_recv_data_for_waiter(ctx, &receiver, &value, vm_state);
+                    let recv_kind = pack_recv_data_for_waiter(ctx, &receiver, &value, vm_state)
+                        .unwrap_or_else(|msg| {
+                            panic!("endpoint recv queue-transfer metadata contract error: {msg}")
+                        });
                     dispatch_response(receiver, home_island, recv_kind, responses, local_wakes);
                     dispatch_response(
                         requester,
@@ -259,7 +262,10 @@ fn handle_endpoint_request_inner(
             match result {
                 vo_runtime::objects::queue_state::RecvResult::Success(woke_sender) => {
                     let value = value.expect("recv_or_block success without payload");
-                    let recv_kind = pack_recv_data_for_waiter(ctx, &requester, &value, vm_state);
+                    let recv_kind = pack_recv_data_for_waiter(ctx, &requester, &value, vm_state)
+                        .unwrap_or_else(|msg| {
+                            panic!("endpoint recv queue-transfer metadata contract error: {msg}")
+                        });
                     dispatch_response(requester, home_island, recv_kind, responses, local_wakes);
                     if let Some(sender) = woke_sender {
                         dispatch_response(
@@ -320,7 +326,7 @@ fn pack_recv_data_for_waiter(
     target: &QueueWaiter,
     value: &[u64],
     vm_state: &mut crate::vm::VmState,
-) -> EndpointResponseKind {
+) -> Result<EndpointResponseKind, String> {
     if target.island_id != ctx.home_island && ctx.elem_meta.value_kind().may_contain_gc_refs() {
         crate::exec::prepare_value_queue_handles_for_transfer(
             value,
@@ -329,7 +335,7 @@ fn pack_recv_data_for_waiter(
             ctx.struct_metas,
             ctx.runtime_types,
             vm_state,
-        );
+        )?;
     }
     let data = crate::exec::pack_transport_message(
         &vm_state.gc,
@@ -338,7 +344,7 @@ fn pack_recv_data_for_waiter(
         ctx.struct_metas,
         ctx.runtime_types,
     );
-    endpoint_recv_data(data)
+    Ok(endpoint_recv_data(data))
 }
 
 fn dispatch_response(
@@ -378,6 +384,26 @@ pub(crate) fn finalize_closed_home_endpoint(
 
     vm.mark_gc_all_roots_dirty();
     vm.state.endpoint_registry.mark_tombstone(endpoint_id);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn endpoint_request_backing_invariant_is_not_debug_only() {
+        let source = include_str!("island_shared.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("island_shared source should contain tests section");
+
+        assert!(
+            !source.contains("debug_assert!"),
+            "EndpointRequest backing invariants must be enforced in release builds"
+        );
+        assert!(
+            source.contains("EndpointRequest arrived at non-LOCAL channel"),
+            "the endpoint backing invariant should stay explicit"
+        );
+    }
 }
 
 fn mark_remote_endpoint_closed(vm: &mut Vm, endpoint_id: u64) {

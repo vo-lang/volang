@@ -1,6 +1,11 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! Goroutine instructions: GoStart
 
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::String};
+#[cfg(feature = "std")]
+use std::string::String;
+
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::closure;
 use vo_runtime::slot::Slot;
@@ -9,9 +14,16 @@ use crate::bytecode::FunctionDef;
 use crate::fiber::Fiber;
 use crate::instruction::Instruction;
 use crate::vm::helpers::stack_get;
+use crate::vm::RuntimeTrapKind;
 
 pub struct GoResult {
     pub new_fiber: Fiber,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoStartError {
+    Trap(RuntimeTrapKind),
+    Malformed(String),
 }
 
 /// GoStart: Start goroutine
@@ -25,14 +37,22 @@ pub fn exec_go_start(
     inst: &Instruction,
     functions: &[FunctionDef],
     next_fiber_id: u32,
-) -> GoResult {
+) -> Result<GoResult, GoStartError> {
     let is_closure_call = inst.call_shape_is_closure();
     let args_start = inst.b;
     let arg_slots = inst.c;
 
     let (func_id, closure_ref) = if is_closure_call {
         let closure_ref = stack_get(stack, bp + inst.a as usize) as GcRef;
+        if closure_ref.is_null() {
+            return Err(GoStartError::Trap(RuntimeTrapKind::NilFuncCall));
+        }
         let func_id = closure::func_id(closure_ref);
+        if functions.get(func_id as usize).is_none() {
+            return Err(GoStartError::Malformed(format!(
+                "GoStart missing closure target function id {func_id}"
+            )));
+        }
         (func_id, Some(closure_ref))
     } else {
         let func_id = inst.call_shape_static_func_id();
@@ -43,18 +63,25 @@ pub fn exec_go_start(
     let src_start = bp + args_start as usize;
     let new_fiber = if let Some(closure_gcref) = closure_ref {
         unsafe {
-            crate::vm::helpers::build_closure_fiber_from_args_ptr(
+            crate::vm::helpers::try_build_closure_fiber_from_args_ptr(
                 functions,
                 next_fiber_id,
                 closure_gcref as u64,
                 stack.add(src_start),
                 arg_slots as u32,
             )
+            .map_err(GoStartError::Trap)?
         }
     } else {
-        let func = &functions[func_id as usize];
+        let Some(func) = functions.get(func_id as usize) else {
+            return Err(GoStartError::Malformed(format!(
+                "GoStart missing function id {func_id}"
+            )));
+        };
         let mut new_fiber = Fiber::new(next_fiber_id);
-        new_fiber.push_frame(func_id, func.local_slots, func.gc_scan_slots, 0, 0);
+        new_fiber
+            .try_push_frame(func_id, func.local_slots, func.gc_scan_slots, 0, 0)
+            .map_err(|_| GoStartError::Trap(RuntimeTrapKind::StackOverflow))?;
         let new_stack = new_fiber.stack_ptr();
         for i in 0..arg_count {
             unsafe { *new_stack.add(i) = stack_get(stack, src_start + i) };
@@ -62,5 +89,5 @@ pub fn exec_go_start(
         new_fiber
     };
 
-    GoResult { new_fiber }
+    Ok(GoResult { new_fiber })
 }

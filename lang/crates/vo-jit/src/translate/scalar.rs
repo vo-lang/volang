@@ -21,32 +21,54 @@ pub(super) fn load_int<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.set_reg_const(inst.a, inst.imm32() as i64);
 }
 
-pub(super) fn load_const<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn load_const<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let const_idx = inst.b as usize;
-    // Clone the constant to avoid borrow conflict
-    let constant = e.vo_module().constants[const_idx].clone();
-    match &constant {
+    let constant = e
+        .vo_module()
+        .constants
+        .get(const_idx)
+        .cloned()
+        .ok_or_else(|| {
+            JitError::Internal(format!(
+                "LoadConst constant index {const_idx} missing at pc {}",
+                e.current_pc()
+            ))
+        })?;
+    match constant {
         Constant::Float(f) => {
             // Float constant: load as F64 directly, no bitcast needed
-            let v = e.builder().ins().f64const(*f);
+            let v = e.builder().ins().f64const(f);
             e.write_var_f64(inst.a, v);
             e.set_reg_const(inst.a, f.to_bits() as i64);
         }
-        constant => {
-            let (val, reg_const) = match constant {
-                Constant::Nil => (0i64, Some(0i64)),
-                Constant::Bool(b) => (*b as i64, Some(*b as i64)),
-                Constant::Int(i) => (*i, Some(*i)),
-                Constant::String(_) => (0, None),
-                Constant::Float(_) => unreachable!(),
-            };
+        Constant::String(_) => {
+            return Err(JitError::Internal(format!(
+                "LoadConst at pc {} cannot load String constants; use StrNew",
+                e.current_pc()
+            )));
+        }
+        Constant::Nil => {
+            let v = e.builder().ins().iconst(types::I64, 0);
+            e.write_var(inst.a, v);
+            e.set_reg_const(inst.a, 0);
+        }
+        Constant::Bool(b) => {
+            let val = b as i64;
             let v = e.builder().ins().iconst(types::I64, val);
             e.write_var(inst.a, v);
-            if let Some(c) = reg_const {
-                e.set_reg_const(inst.a, c);
-            }
+            e.set_reg_const(inst.a, val);
+        }
+        Constant::Int(i) => {
+            let val = i;
+            let v = e.builder().ins().iconst(types::I64, val);
+            e.write_var(inst.a, v);
+            e.set_reg_const(inst.a, val);
         }
     }
+    Ok(())
 }
 
 pub(super) fn copy<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -395,7 +417,8 @@ pub(super) fn shl<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         return;
     }
     let (zero, is_large) = shift_precheck(e, b);
-    let shifted = e.builder().ins().ishl(a, b);
+    let safe_shift = e.builder().ins().select(is_large, zero, b);
+    let shifted = e.builder().ins().ishl(a, safe_shift);
     let r = e.builder().ins().select(is_large, zero, shifted);
     e.write_var(inst.a, r);
 }
@@ -426,7 +449,8 @@ pub(super) fn shr_s<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         return;
     }
     let (zero, is_large) = shift_precheck(e, b);
-    let shifted = e.builder().ins().sshr(a, b);
+    let safe_shift = e.builder().ins().select(is_large, zero, b);
+    let shifted = e.builder().ins().sshr(a, safe_shift);
     let is_a_negative = e.builder().ins().icmp(IntCC::SignedLessThan, a, zero);
     let minus_one = e.builder().ins().iconst(types::I64, -1i64);
     let large_result = e.builder().ins().select(is_a_negative, minus_one, zero);
@@ -456,7 +480,8 @@ pub(super) fn shr_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         return;
     }
     let (zero, is_large) = shift_precheck(e, b);
-    let shifted = e.builder().ins().ushr(a, b);
+    let safe_shift = e.builder().ins().select(is_large, zero, b);
+    let shifted = e.builder().ins().ushr(a, safe_shift);
     let r = e.builder().ins().select(is_large, zero, shifted);
     e.write_var(inst.a, r);
 }

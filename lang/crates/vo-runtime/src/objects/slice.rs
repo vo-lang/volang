@@ -351,13 +351,24 @@ pub fn append(
     val: &[u64],
     module: Option<&vo_common_core::bytecode::Module>,
 ) -> GcRef {
+    try_append(gc, em, elem_bytes, s, val, module).unwrap_or_else(|err| panic!("{err}"))
+}
+
+pub fn try_append(
+    gc: &mut Gc,
+    em: ValueMeta,
+    elem_bytes: usize,
+    s: GcRef,
+    val: &[u64],
+    module: Option<&vo_common_core::bytecode::Module>,
+) -> Result<GcRef, crate::gc_types::TypedWriteBarrierByMetaError> {
     if s.is_null() {
         let new_arr = array::create(gc, em, elem_bytes, 4);
         array::set_n(new_arr, 0, val, elem_bytes);
         if em.value_kind().may_contain_gc_refs() {
             gc.mark_allocated_for_scan(new_arr);
         }
-        return from_array_range(gc, new_arr, 0, 1);
+        return Ok(from_array_range(gc, new_arr, 0, 1));
     }
     let data = SliceData::as_ref(s);
     let cur_len = slot_to_usize(data.len);
@@ -380,11 +391,11 @@ pub fn append(
         if em.value_kind().may_contain_gc_refs() {
             let arr_ref = slot_to_ptr::<u64>(data.array) as GcRef;
             if !arr_ref.is_null() {
-                crate::gc_types::typed_write_barrier_by_meta(gc, arr_ref, val, em, module);
+                crate::gc_types::try_typed_write_barrier_by_meta(gc, arr_ref, val, em, module)?;
             }
         }
         // Go semantics: append never modifies original slice header
-        with_new_len(gc, s, cur_len + 1)
+        Ok(with_new_len(gc, s, cur_len + 1))
     } else {
         let new_cap = if cur_cap == 0 { 4 } else { cur_cap * 2 };
         let aem = elem_meta(s);
@@ -397,6 +408,6 @@ pub fn append(
         if aem.value_kind().may_contain_gc_refs() {
             gc.mark_allocated_for_scan(new_arr);
         }
-        from_array_range(gc, new_arr, 0, cur_len + 1)
+        Ok(from_array_range(gc, new_arr, 0, cur_len + 1))
     }
 }

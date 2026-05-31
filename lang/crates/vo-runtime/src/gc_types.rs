@@ -10,6 +10,43 @@ use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::types::{SlotType, ValueKind, ValueMeta};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypedWriteBarrierByMetaError {
+    MissingModuleMetadata,
+    MissingStructMeta { meta_id: usize },
+    SlotWidthMismatch { vals: usize, slot_types: usize },
+    InterfacePairTruncated { slot: usize },
+    InterfacePairMalformed { slot: usize },
+}
+
+impl core::fmt::Display for TypedWriteBarrierByMetaError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MissingModuleMetadata => {
+                write!(f, "typed_write_barrier_by_meta: missing module metadata")
+            }
+            Self::MissingStructMeta { meta_id } => {
+                write!(
+                    f,
+                    "typed_write_barrier_by_meta: missing StructMeta id {meta_id}"
+                )
+            }
+            Self::SlotWidthMismatch { vals, slot_types } => write!(
+                f,
+                "typed_write_barrier: vals length {vals} != slot_types length {slot_types}"
+            ),
+            Self::InterfacePairTruncated { slot } => write!(
+                f,
+                "typed_write_barrier: Interface0 at slot {slot} missing Interface1 data slot"
+            ),
+            Self::InterfacePairMalformed { slot } => write!(
+                f,
+                "typed_write_barrier: Interface0 at slot {slot} must be followed by Interface1"
+            ),
+        }
+    }
+}
+
 /// GC layout metadata needed to scan closure captures for a function.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ClosureScanLayout<'a> {
@@ -41,8 +78,24 @@ impl<'a> ClosureScanLayout<'a> {
 ///
 /// Used by MapSet, ChanSend, and any operation writing mixed-type values into heap objects.
 pub fn typed_write_barrier(gc: &mut Gc, parent: GcRef, vals: &[u64], slot_types: &[SlotType]) {
+    try_typed_write_barrier(gc, parent, vals, slot_types).unwrap_or_else(|err| panic!("{err}"));
+}
+
+pub fn try_typed_write_barrier(
+    gc: &mut Gc,
+    parent: GcRef,
+    vals: &[u64],
+    slot_types: &[SlotType],
+) -> Result<(), TypedWriteBarrierByMetaError> {
+    if vals.len() != slot_types.len() {
+        return Err(TypedWriteBarrierByMetaError::SlotWidthMismatch {
+            vals: vals.len(),
+            slot_types: slot_types.len(),
+        });
+    }
+
     let mut i = 0;
-    while i < slot_types.len() && i < vals.len() {
+    while i < slot_types.len() {
         match slot_types[i] {
             SlotType::GcRef => {
                 if vals[i] != 0 {
@@ -50,7 +103,13 @@ pub fn typed_write_barrier(gc: &mut Gc, parent: GcRef, vals: &[u64], slot_types:
                 }
             }
             SlotType::Interface0 => {
-                if i + 1 < vals.len() && interface::data_is_gc_ref(vals[i]) && vals[i + 1] != 0 {
+                if i + 1 >= vals.len() {
+                    return Err(TypedWriteBarrierByMetaError::InterfacePairTruncated { slot: i });
+                }
+                if slot_types[i + 1] != SlotType::Interface1 {
+                    return Err(TypedWriteBarrierByMetaError::InterfacePairMalformed { slot: i });
+                }
+                if interface::data_is_gc_ref(vals[i]) && vals[i + 1] != 0 {
                     gc.write_barrier(parent, vals[i + 1] as GcRef);
                 }
                 i += 1; // skip data slot (Interface1)
@@ -59,6 +118,14 @@ pub fn typed_write_barrier(gc: &mut Gc, parent: GcRef, vals: &[u64], slot_types:
         }
         i += 1;
     }
+    Ok(())
+}
+
+#[inline]
+fn slot_types_may_contain_gc_refs(slot_types: &[SlotType]) -> bool {
+    slot_types
+        .iter()
+        .any(|slot_type| matches!(slot_type, SlotType::GcRef | SlotType::Interface0))
 }
 
 /// Type-safe write barrier driven by ValueMeta (for JIT paths that don't have slot_types directly).
@@ -70,6 +137,17 @@ pub fn typed_write_barrier_by_meta(
     meta: vo_common_core::types::ValueMeta,
     module: Option<&vo_common_core::bytecode::Module>,
 ) {
+    try_typed_write_barrier_by_meta(gc, parent, vals, meta, module)
+        .unwrap_or_else(|err| panic!("{err}"));
+}
+
+pub fn try_typed_write_barrier_by_meta(
+    gc: &mut Gc,
+    parent: GcRef,
+    vals: &[u64],
+    meta: vo_common_core::types::ValueMeta,
+    module: Option<&vo_common_core::bytecode::Module>,
+) -> Result<(), TypedWriteBarrierByMetaError> {
     use vo_common_core::types::ValueKind;
     let vk = meta.value_kind();
     match vk {
@@ -88,22 +166,16 @@ pub fn typed_write_barrier_by_meta(
         }
         // Struct with mixed slots: need slot_types from struct_metas.
         ValueKind::Struct => {
-            if let Some(module) = module {
-                let meta_id = meta.meta_id() as usize;
-                if meta_id < module.struct_metas.len() {
-                    typed_write_barrier(gc, parent, vals, &module.struct_metas[meta_id].slot_types);
-                }
-            } else {
-                // Missing module metadata is a caller bug for precise barriers,
-                // but the GC invariant is more important than precision. Be
-                // conservative so JIT/native helper drift cannot silently skip
-                // barriers for struct values.
-                for &slot in vals {
-                    if slot != 0 {
-                        gc.write_barrier(parent, slot as GcRef);
-                    }
-                }
+            let module = module.ok_or(TypedWriteBarrierByMetaError::MissingModuleMetadata)?;
+            let meta_id = meta.meta_id() as usize;
+            let struct_meta = module
+                .struct_metas
+                .get(meta_id)
+                .ok_or(TypedWriteBarrierByMetaError::MissingStructMeta { meta_id })?;
+            if !slot_types_may_contain_gc_refs(&struct_meta.slot_types) {
+                return Ok(());
             }
+            try_typed_write_barrier(gc, parent, vals, &struct_meta.slot_types)?;
         }
         // Fixed arrays are flattened in value storage. ValueMeta does not carry the
         // array element layout, so use write_barrier's child validation instead of
@@ -124,6 +196,7 @@ pub fn typed_write_barrier_by_meta(
         // Primitive types: no GcRefs
         _ => {}
     }
+    Ok(())
 }
 
 /// Apply typed write barriers for a contiguous range of elements just written
@@ -171,15 +244,12 @@ pub fn scan_object<'a, F>(
     // Any other ValueKind::Array object with slots < HEADER_SLOTS is a codegen bug.
     match gc_header.kind() {
         ValueKind::Array => {
-            debug_assert!(
+            assert!(
                 gc_header.slots == 0 || gc_header.slots >= array::HEADER_SLOTS as u16,
                 "scan_object: Array object {:p} has invalid slots={} (expected 0 for large array or >= HEADER_SLOTS={}) — codegen bug (PtrNew box should use Struct)",
                 obj, gc_header.slots, array::HEADER_SLOTS
             );
-            if gc_header.slots == 0 || gc_header.slots >= array::HEADER_SLOTS as u16 {
-                scan_array(gc, obj, struct_metas);
-            }
-            // Other slots < HEADER_SLOTS: skip scanning (should not happen; debug_assert catches it)
+            scan_array(gc, obj, struct_metas);
         }
         ValueKind::String => {
             let arr = slice::array_ref(obj);
@@ -207,29 +277,25 @@ pub fn scan_object<'a, F>(
             // Real maps: created by map::create with DATA_SLOTS=3 (MapData layout).
             // PtrNew heap-boxed map variables: kind=Struct (fixed by get_boxing_meta),
             // so they never reach this branch. Any Map with wrong slots is a bug.
-            debug_assert!(
+            assert!(
                 gc_header.slots == map::DATA_SLOTS,
                 "scan_object: Map object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
                 obj,
                 gc_header.slots,
                 map::DATA_SLOTS
             );
-            if gc_header.slots == map::DATA_SLOTS {
-                scan_map(gc, obj, struct_metas);
-            }
+            scan_map(gc, obj, struct_metas);
         }
 
         kind if kind.is_queue() => {
-            debug_assert!(
+            assert!(
                 gc_header.slots == queue_state::DATA_SLOTS,
                 "scan_object: Queue object {:p} has slots={} != DATA_SLOTS={} — codegen bug",
                 obj,
                 gc_header.slots,
                 queue_state::DATA_SLOTS
             );
-            if gc_header.slots == queue_state::DATA_SLOTS {
-                scan_queue(gc, obj, struct_metas);
-            }
+            scan_queue(gc, obj, struct_metas);
         }
 
         // Remote channel proxy: state lives on home island, not locally.
@@ -274,30 +340,18 @@ where
             scan_slots_by_types(gc, capture_slots, runtime_capture_types);
             return;
         }
-        debug_assert_eq!(
-            runtime_capture_types.len(),
-            cap_count,
+        panic!(
             "scan_closure: func_id={} has {} captures but runtime capture layout has {} slots",
             func_id,
             cap_count,
             runtime_capture_types.len()
         );
-        return;
     }
 
-    debug_assert!(
-        false,
+    panic!(
         "scan_closure: func_id={} has {} captures but empty capture_slot_types — codegen must set capture_slot_types for all closures with captures",
         func_id, cap_count
     );
-
-    // Compatibility fallback for old bytecode: regular closure captures used to be
-    // heap-boxed variables, so a missing layout was equivalent to all-GcRef.
-    for &slot in capture_slots {
-        if slot != 0 {
-            gc.mark_gray(slot_to_ptr(slot));
-        }
-    }
 }
 
 fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
@@ -318,15 +372,13 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     // array slots and past the array end, causing mark_gray to be called on invalid addresses.
     if elem_kind == ValueKind::Struct {
         let meta_id = elem_meta.meta_id() as usize;
-        if meta_id < struct_metas.len() {
-            let slot_types = &struct_metas[meta_id].slot_types;
-            for idx in 0..len {
-                scan_array_struct_elem(gc, obj, idx, elem_bytes, slot_types);
-            }
+        let slot_types = &struct_metas
+            .get(meta_id)
+            .unwrap_or_else(|| panic!("scan_array: missing StructMeta id {meta_id}"))
+            .slot_types;
+        for idx in 0..len {
+            scan_array_struct_elem(gc, obj, idx, elem_bytes, slot_types);
         }
-        // No struct_meta available — skip scanning (matches scan_struct behavior).
-        // Falling through to the generic "all GcRef" path would be wrong for structs
-        // with mixed Value/GcRef fields.
         return;
     }
 
@@ -411,7 +463,7 @@ fn scan_queue(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
     }
 
     let elem_scan = resolve_elem_scan(elem_kind, elem_meta, true, struct_metas);
-    if matches!(elem_scan, ElemScan::Skip) {
+    if matches!(elem_scan, ElemScan::NoRefs) {
         return;
     }
 
@@ -426,7 +478,7 @@ fn scan_queue(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
 
 /// Strategy for scanning a composite element (map key/value, channel element).
 enum ElemScan<'a> {
-    Skip,
+    NoRefs,
     GcRefs,
     Interface,
     Typed(&'a [SlotType]),
@@ -439,16 +491,17 @@ fn resolve_elem_scan<'a>(
     struct_metas: &'a [StructMeta],
 ) -> ElemScan<'a> {
     if !should_scan {
-        return ElemScan::Skip;
+        return ElemScan::NoRefs;
     }
     match kind {
         ValueKind::Struct => {
             let meta_id = meta.meta_id() as usize;
-            if meta_id < struct_metas.len() {
-                ElemScan::Typed(&struct_metas[meta_id].slot_types)
-            } else {
-                ElemScan::Skip
-            }
+            ElemScan::Typed(
+                &struct_metas
+                    .get(meta_id)
+                    .unwrap_or_else(|| panic!("resolve_elem_scan: missing StructMeta id {meta_id}"))
+                    .slot_types,
+            )
         }
         // Pointer is a single GcRef slot (address of heap struct), NOT an inline struct.
         // Using Typed(struct_slot_types) here would interpret the pointer address bytes
@@ -461,7 +514,7 @@ fn resolve_elem_scan<'a>(
 
 fn scan_elem(gc: &mut Gc, slots: &[u64], scan: &ElemScan) {
     match scan {
-        ElemScan::Skip => {}
+        ElemScan::NoRefs => {}
         ElemScan::GcRefs => {
             for &slot in slots {
                 if slot != 0 {
@@ -503,7 +556,7 @@ fn scan_map(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
         struct_metas,
     );
 
-    if matches!(key_scan, ElemScan::Skip) && matches!(val_scan, ElemScan::Skip) {
+    if matches!(key_scan, ElemScan::NoRefs) && matches!(val_scan, ElemScan::NoRefs) {
         return;
     }
 
@@ -515,11 +568,9 @@ fn scan_map(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
 }
 
 fn scan_struct(gc: &mut Gc, obj: GcRef, meta_id: usize, struct_metas: &[StructMeta]) {
-    if meta_id >= struct_metas.len() {
-        return;
-    }
-
-    let meta = &struct_metas[meta_id];
+    let meta = struct_metas
+        .get(meta_id)
+        .unwrap_or_else(|| panic!("scan_struct: missing StructMeta id {meta_id}"));
     let mut i = 0;
     while i < meta.slot_types.len() {
         let st = meta.slot_types[i];
@@ -565,5 +616,128 @@ pub fn finalize_object(obj: GcRef) {
         }
         // Island has no native resources to finalize (channels managed by VM)
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let start = src.find(start).expect("section start");
+        let end = src[start..]
+            .find(end)
+            .map(|offset| start + offset)
+            .expect("section end");
+        &src[start..end]
+    }
+
+    #[test]
+    fn gc_layout_metadata_drift_has_no_release_skip_or_legacy_fallback() {
+        let src = include_str!("gc_types.rs");
+
+        let barrier = section(
+            src,
+            "pub fn typed_write_barrier_by_meta",
+            "/// Apply typed write barriers",
+        );
+        assert!(
+            !barrier.contains("conservative"),
+            "typed write barriers must not conservatively continue when struct metadata is missing"
+        );
+
+        let scan_object = section(src, "pub fn scan_object", "/// Scan closure captures");
+        assert!(
+            !scan_object.contains("debug_assert"),
+            "GC object layout validation must run in release builds"
+        );
+        assert!(
+            !scan_object.contains("skip scanning"),
+            "invalid GC object layouts must fail fast instead of skipping scans"
+        );
+
+        let scan_closure = section(src, "fn scan_closure", "fn scan_array");
+        assert!(
+            !scan_closure.contains("debug_assert"),
+            "closure capture layout validation must run in release builds"
+        );
+        assert!(
+            !scan_closure.contains("Compatibility fallback"),
+            "closure capture layout drift must not use legacy all-GcRef fallback"
+        );
+
+        let scan_array = section(src, "fn scan_array", "fn scan_array_struct_elem");
+        assert!(
+            !scan_array.contains("No struct_meta available"),
+            "array struct-element metadata drift must fail fast instead of skipping scans"
+        );
+
+        let elem_scan = section(src, "fn resolve_elem_scan", "fn scan_elem");
+        assert!(
+            !elem_scan.contains("ElemScan::Skip"),
+            "container element scan resolution must not use missing-metadata skip"
+        );
+
+        let scan_struct = section(src, "fn scan_struct", "/// Finalize");
+        assert!(
+            !scan_struct.contains("return;"),
+            "struct metadata drift must fail fast instead of returning without scanning"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "typed_write_barrier: vals length 1 != slot_types length 2")]
+    fn typed_write_barrier_rejects_non_exact_width() {
+        let mut gc = Gc::new();
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        typed_write_barrier(&mut gc, parent, &[0], &[SlotType::GcRef, SlotType::Value]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "typed_write_barrier: Interface0 at slot 0 missing Interface1 data slot"
+    )]
+    fn typed_write_barrier_rejects_truncated_interface_pair() {
+        let mut gc = Gc::new();
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+        typed_write_barrier(&mut gc, parent, &[0], &[SlotType::Interface0]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "typed_write_barrier: Interface0 at slot 0 must be followed by Interface1"
+    )]
+    fn typed_write_barrier_rejects_malformed_interface_pair() {
+        let mut gc = Gc::new();
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 2);
+        typed_write_barrier(
+            &mut gc,
+            parent,
+            &[0, 0],
+            &[SlotType::Interface0, SlotType::Value],
+        );
+    }
+
+    #[test]
+    fn typed_write_barrier_by_meta_accepts_zero_width_no_ref_struct() {
+        let mut module = vo_common_core::bytecode::Module::new("test".to_string());
+        module
+            .struct_metas
+            .push(vo_common_core::bytecode::StructMeta {
+                slot_types: vec![SlotType::Value],
+                fields: Vec::new(),
+                field_index: std::collections::HashMap::new(),
+            });
+        let mut gc = Gc::new();
+        let parent = gc.alloc(ValueMeta::new(0, ValueKind::Struct), 1);
+
+        try_typed_write_barrier_by_meta(
+            &mut gc,
+            parent,
+            &[],
+            ValueMeta::new(0, ValueKind::Struct),
+            Some(&module),
+        )
+        .expect("zero-width no-ref struct barrier should be a no-op");
     }
 }

@@ -5,9 +5,18 @@
 //!
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 #[cfg(feature = "std")]
-use std::{boxed::Box, string::String, vec::Vec};
+use std::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use vo_common_core::bytecode::StructMeta;
 use vo_common_core::instruction::QUEUE_KIND_PORT_FLAG;
@@ -22,12 +31,14 @@ use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 use crate::vm::RuntimeTrapKind;
 
+#[derive(Debug)]
 pub enum QueueAction {
     Continue,
     Block,
     ReplayThenBlock,
     Wake(QueueWaiter),
     Trap(RuntimeTrapKind),
+    Malformed(String),
     Close {
         waiters: Vec<QueueWaiter>,
         endpoint_id: Option<u64>,
@@ -55,6 +66,7 @@ pub enum QueueAction {
 
 pub type QueueExecResult = QueueAction;
 
+#[derive(Debug)]
 pub enum QueueRecvCoreResult {
     Success {
         data: Box<[u64]>,
@@ -67,6 +79,7 @@ pub enum QueueRecvCoreResult {
         home_island: u32,
     },
     Trap(RuntimeTrapKind),
+    Malformed(String),
 }
 
 pub fn complete_queue_recv<F>(
@@ -230,7 +243,11 @@ pub fn queue_send_core(
         if proxy.closed {
             return QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel);
         }
-        super::prepare_remote_send_value_if_needed(ch, src, struct_metas, runtime_types, state);
+        if let Err(msg) =
+            super::prepare_remote_send_value_if_needed(ch, src, struct_metas, runtime_types, state)
+        {
+            return QueueExecResult::Malformed(msg);
+        }
         let elem_meta = queue_state::elem_meta(ch);
         let result = QueueExecResult::RemoteSend {
             endpoint_id: proxy.endpoint_id,
@@ -253,7 +270,15 @@ pub fn queue_send_core(
     // Must be done before send_or_block because the value is moved into the buffer.
     let em = queue_state::elem_meta(ch);
     if em.value_kind().may_contain_gc_refs() {
-        vo_runtime::gc_types::typed_write_barrier_by_meta(&mut state.gc, ch, &value, em, module);
+        if let Err(err) = vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+            &mut state.gc,
+            ch,
+            &value,
+            em,
+            module,
+        ) {
+            return QueueExecResult::Malformed(err.to_string());
+        }
     }
 
     let waiter = QueueWaiter::simple(island_id, fiber_id);
@@ -264,18 +289,24 @@ pub fn queue_send_core(
             payload: value,
         } => {
             if em.value_kind().may_contain_gc_refs() {
-                super::prepare_value_queue_handles_for_transfer(
+                if let Err(msg) = super::prepare_value_queue_handles_for_transfer(
                     value.as_ref(),
                     em,
                     receiver.island_id,
                     struct_metas,
                     runtime_types,
                     state,
-                );
+                ) {
+                    return QueueExecResult::Malformed(msg);
+                }
             }
-            let endpoint_id = queue::home_info(ch)
-                .expect("DirectSend to remote waiter requires HomeInfo")
-                .endpoint_id;
+            let Some(home_info) = queue::home_info(ch) else {
+                return QueueExecResult::Malformed(format!(
+                    "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_fiber={}",
+                    receiver.island_id, receiver.fiber_id
+                ));
+            };
+            let endpoint_id = home_info.endpoint_id;
             let data = super::transport::pack_transport_message(
                 &state.gc,
                 value.as_ref(),
@@ -320,14 +351,18 @@ pub fn queue_recv_core(ch: GcRef, island_id: u32, fiber_id: u64) -> QueueRecvCor
 
     match result {
         RecvResult::Success(woke_sender) => {
-            let data = value_opt.expect("channel recv: success without payload");
-            QueueRecvCoreResult::Success {
-                data,
-                wake_sender: woke_sender,
+            if let Some(data) = value_opt {
+                QueueRecvCoreResult::Success {
+                    data,
+                    wake_sender: woke_sender,
+                }
+            } else {
+                QueueRecvCoreResult::Malformed(
+                    "queue recv success returned without payload".to_string(),
+                )
             }
         }
-        RecvResult::Blocked => QueueRecvCoreResult::WouldBlock,
-        RecvResult::WouldBlock => unreachable!("recv_or_block never returns WouldBlock"),
+        RecvResult::Blocked | RecvResult::WouldBlock => QueueRecvCoreResult::WouldBlock,
         RecvResult::Closed => QueueRecvCoreResult::Closed,
     }
 }
@@ -361,8 +396,11 @@ pub fn exec_queue_recv(
             home_island,
         },
         Err(QueueRecvCoreResult::Trap(kind)) => QueueExecResult::Trap(kind),
+        Err(QueueRecvCoreResult::Malformed(msg)) => QueueExecResult::Malformed(msg),
         Err(QueueRecvCoreResult::Success { .. } | QueueRecvCoreResult::Closed) => {
-            unreachable!("complete_queue_recv returned terminal recv result as Err")
+            QueueExecResult::Malformed(
+                "complete_queue_recv returned terminal recv result as Err".to_string(),
+            )
         }
     }
 }
@@ -433,6 +471,7 @@ mod tests {
     use super::*;
     use crate::fiber::RemoteRecvResponse;
     use crate::vm::{EndpointRegistry, VmState};
+    use vo_common_core::bytecode::Module;
     use vo_runtime::objects::slice;
     use vo_runtime::ValueKind;
 
@@ -479,6 +518,108 @@ mod tests {
     fn nil_queue_recv_blocks() {
         let result = queue_recv_core(core::ptr::null_mut(), 0, 1);
         assert!(matches!(result, QueueRecvCoreResult::WouldBlock));
+    }
+
+    #[test]
+    fn remote_direct_send_without_home_info_is_malformed_instead_of_expect_panic() {
+        let mut state = VmState::new();
+        let ch = queue::create(
+            &mut state.gc,
+            QueueKind::Port,
+            ValueMeta::new(0, ValueKind::Int64),
+            ValueRttid::new(0, ValueKind::Int64),
+            1,
+            1,
+        );
+        queue::register_receiver(ch, QueueWaiter::simple(7, 99));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            queue_send_core(ch, &[123], 0, 1, &mut state, &[], &[], None)
+        }));
+
+        match result {
+            Ok(QueueExecResult::Malformed(msg)) => {
+                assert!(msg.contains("RemoteDirect send missing HomeInfo"), "{msg}");
+            }
+            Ok(other) => {
+                panic!("missing HomeInfo should be a malformed queue action, got {other:?}")
+            }
+            Err(_) => panic!("missing HomeInfo must not panic"),
+        }
+    }
+
+    #[test]
+    fn queue_send_core_reports_typed_barrier_metadata_errors_without_unwinding() {
+        let mut state = VmState::new();
+        let module = Module::new("queue-barrier-contract".to_string());
+        let ch = queue::create(
+            &mut state.gc,
+            QueueKind::Chan,
+            ValueMeta::new(99, ValueKind::Struct),
+            ValueRttid::new(999, ValueKind::Struct),
+            1,
+            1,
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            queue_send_core(ch, &[0], 0, 1, &mut state, &[], &[], Some(&module))
+        }));
+
+        match result {
+            Ok(QueueExecResult::Malformed(msg)) => {
+                assert!(msg.contains("typed_write_barrier_by_meta"), "{msg}");
+                assert!(msg.contains("missing StructMeta"), "{msg}");
+            }
+            Ok(other) => panic!("invalid typed barrier metadata must be malformed, got {other:?}"),
+            Err(_) => panic!("JIT-reachable queue_send_core must not unwind on metadata errors"),
+        }
+    }
+
+    #[test]
+    fn remote_queue_send_rejects_non_sendable_metadata_before_pack() {
+        let mut state = VmState::new();
+        let ch = queue::create_remote_proxy(
+            &mut state.gc,
+            QueueKind::Port,
+            77,
+            8,
+            1,
+            ValueMeta::new(0, ValueKind::Interface),
+            ValueRttid::new(0, ValueKind::Interface),
+            2,
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            queue_send_core(ch, &[0, 0], 0, 1, &mut state, &[], &[], None)
+        }));
+
+        match result {
+            Ok(QueueExecResult::Malformed(msg)) => {
+                assert!(msg.contains("non-sendable"), "{msg}");
+                assert!(msg.contains("Interface"), "{msg}");
+            }
+            Ok(other) => {
+                panic!("non-sendable remote queue metadata must be malformed, got {other:?}")
+            }
+            Err(_) => panic!("non-sendable remote queue metadata must not panic in pack"),
+        }
+    }
+
+    #[test]
+    fn queue_send_core_uses_result_typed_barrier_for_jit_callback_path() {
+        let source = include_str!("queue.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("queue source should contain tests section");
+
+        assert!(
+            source.contains("try_typed_write_barrier_by_meta"),
+            "queue_send_core must use the Result-returning typed barrier helper"
+        );
+        assert!(
+            !source.contains("typed_write_barrier_by_meta(&mut state.gc"),
+            "queue_send_core is called from JIT callbacks and must not call the panic barrier"
+        );
     }
 
     #[test]

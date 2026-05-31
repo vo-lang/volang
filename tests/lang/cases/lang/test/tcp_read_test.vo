@@ -1,12 +1,33 @@
 package main
 
 import "net"
+import "strings"
 
 func main() {
 	println("Testing TCP read...")
 	
-	// Dial
-	conn, err := net.Dial("tcp", "httpbin.org:80")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		println("Listen failed:", err.Error())
+		return
+	}
+	defer listener.Close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		server, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer server.Close()
+
+		_, writeErr := server.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
+		serverDone <- writeErr
+	}()
+
+	// Dial local server.
+	conn, err := net.Dial("tcp", listener.Addr().String())
 	if err != nil {
 		println("Dial failed:", err.Error())
 		return
@@ -14,7 +35,7 @@ func main() {
 	println("Connected!")
 	
 	// Write HTTP request
-	req := "GET /get HTTP/1.1\r\nHost: httpbin.org\r\n\r\n"
+	req := "GET /get HTTP/1.1\r\nHost: localhost\r\n\r\n"
 	n, err := conn.Write([]byte(req))
 	if err != nil {
 		println("Write failed:", err.Error())
@@ -27,14 +48,21 @@ func main() {
 	println("Reading response...")
 	buf := make([]byte, 1024)
 	n, err = conn.Read(buf)
-	println("Read returned: n=", n)
 	if err != nil {
 		println("Read error:", err.Error())
 	} else {
-		println("Read", n, "bytes:")
-		println(string(buf[:n]))
+		resp := string(buf[:n])
+		if strings.HasPrefix(resp, "HTTP/") {
+			println("Read HTTP response")
+		} else {
+			println("Read response")
+		}
 	}
 	
 	conn.Close()
+	if err := <-serverDone; err != nil {
+		println("Server error:", err.Error())
+		return
+	}
 	println("Done")
 }

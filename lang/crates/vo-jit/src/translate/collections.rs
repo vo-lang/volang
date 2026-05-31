@@ -6,14 +6,15 @@ use cranelift_codegen::ir::{
 };
 use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
-use vo_runtime::jit_api::JitRuntimeTrapKind;
+use vo_runtime::jit_api::{JitResult, JitRuntimeTrapKind, JIT_HELPER_U64_ERROR};
 
+use crate::call_helpers::emit_checked_jit_result_helper_call;
 use crate::translator::{
     emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter,
 };
 use crate::JitError;
 
-use super::emit_runtime_trap_if;
+use super::{emit_runtime_trap_if, require_helper};
 
 // =============================================================================
 // Slice/Array element size helpers
@@ -113,22 +114,14 @@ pub(super) fn store_element<'a>(
     }
 }
 
-pub(super) fn emit_elem_bytes_i32<'a>(e: &mut impl IrEmitter<'a>, flags: u8, eb_reg: u16) -> Value {
-    if let Some(layout) = e.elem_layout(flags, eb_reg) {
-        return e.builder().ins().iconst(types::I32, layout.bytes as i64);
-    }
-    if flags == 0 {
-        let eb_raw = e.read_var(eb_reg);
-        e.builder().ins().ireduce(types::I32, eb_raw)
-    } else {
-        let bytes = match flags {
-            0x81 => 1,
-            0x82 => 2,
-            0x84 | 0x44 => 4,
-            f => f as i64,
-        };
-        e.builder().ins().iconst(types::I32, bytes)
-    }
+pub(super) fn emit_elem_bytes_i32<'a>(
+    e: &mut impl IrEmitter<'a>,
+    opcode: Opcode,
+    flags: u8,
+    eb_reg: u16,
+) -> Result<Value, JitError> {
+    let (elem_bytes, _) = resolve_elem_bytes(e, opcode, flags, eb_reg)?;
+    Ok(e.builder().ins().iconst(types::I32, elem_bytes as i64))
 }
 
 // =============================================================================
@@ -169,12 +162,12 @@ pub(super) fn emit_slice_bounds_check<'a>(
         .load(types::I64, MemFlags::trusted(), s, SLICE_FIELD_DATA_PTR)
 }
 
-pub(super) fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .slice_new_checked
-        .expect("slice_new_checked helper not registered");
-    let elem_bytes_val = emit_elem_bytes_i32(e, inst.flags, inst.c + 2);
+pub(super) fn slice_new<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().slice_new_checked, "slice_new_checked")?;
+    let elem_bytes_val = emit_elem_bytes_i32(e, inst.opcode(), inst.flags, inst.c + 2)?;
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
@@ -210,6 +203,7 @@ pub(super) fn slice_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Load result from output slot
     let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
     e.write_var(inst.a, result);
+    Ok(())
 }
 
 pub(super) fn slice_get<'a>(
@@ -272,7 +266,7 @@ pub(super) fn slice_set<'a>(
                 .builder()
                 .ins()
                 .load(types::I64, MemFlags::trusted(), s, 0);
-            emit_array_write_barrier(e, arr, val);
+            emit_array_write_barrier(e, arr, val)?;
         }
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
@@ -287,7 +281,7 @@ pub(super) fn slice_set<'a>(
             .builder()
             .ins()
             .load(types::I64, MemFlags::trusted(), s, 0);
-        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots);
+        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots)?;
     }
     Ok(())
 }
@@ -341,7 +335,10 @@ pub(super) fn slice_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, result);
 }
 
-pub(super) fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn slice_slice<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
     let gc_ptr = e.gc_ptr();
     let src = e.read_var(inst.b);
     let lo = e.read_var(inst.c);
@@ -354,33 +351,21 @@ pub(super) fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let result = if has_max {
         let max = e.read_var(inst.c + 2);
         if is_array {
-            let func = e
-                .helpers()
-                .slice_from_array3
-                .expect("slice_from_array3 helper not registered");
+            let func = require_helper(e.helpers().slice_from_array3, "slice_from_array3")?;
             let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi, max]);
             e.builder().inst_results(call)[0]
         } else {
-            let func = e
-                .helpers()
-                .slice_slice3
-                .expect("slice_slice3 helper not registered");
+            let func = require_helper(e.helpers().slice_slice3, "slice_slice3")?;
             let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi, max]);
             e.builder().inst_results(call)[0]
         }
     } else {
         if is_array {
-            let func = e
-                .helpers()
-                .slice_from_array
-                .expect("slice_from_array helper not registered");
+            let func = require_helper(e.helpers().slice_from_array, "slice_from_array")?;
             let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi]);
             e.builder().inst_results(call)[0]
         } else {
-            let func = e
-                .helpers()
-                .slice_slice
-                .expect("slice_slice helper not registered");
+            let func = require_helper(e.helpers().slice_slice, "slice_slice")?;
             let call = emit_funcref_call(e, func, &[gc_ptr, src, lo, hi]);
             e.builder().inst_results(call)[0]
         }
@@ -398,13 +383,14 @@ pub(super) fn slice_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     );
 
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let slice_append_func = e
-        .helpers()
-        .slice_append
-        .expect("slice_append helper not registered");
+pub(super) fn slice_append<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let slice_append_func = require_helper(e.helpers().slice_append, "slice_append")?;
     let ctx = e.ctx_param();
     let s = e.read_var(inst.b);
 
@@ -418,7 +404,7 @@ pub(super) fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let elem_meta = e.builder().ins().ireduce(types::I32, elem_meta_raw);
 
     // elem_bytes (as i32)
-    let elem_bytes = emit_elem_bytes_i32(e, inst.flags, inst.c + 1);
+    let elem_bytes = emit_elem_bytes_i32(e, inst.opcode(), inst.flags, inst.c + 1)?;
 
     // val_ptr: pointer to element value in stack
     let elem_slot = inst.c + if inst.flags == 0 { 2 } else { 1 };
@@ -431,7 +417,9 @@ pub(super) fn slice_append<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         &[ctx, elem_meta, elem_bytes, s, val_ptr],
     );
     let result = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, result);
     e.write_var(inst.a, result);
+    Ok(())
 }
 
 pub(super) fn slice_addr<'a>(
@@ -455,32 +443,10 @@ pub(super) fn slice_addr<'a>(
 
 pub(super) const ARRAY_HEADER_BYTES: i64 = 16; // 2 slots
 
-pub(super) fn array_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let array_new_func = e
-        .helpers()
-        .array_new
-        .expect("array_new helper not registered");
-    let gc_ptr = e.gc_ptr();
-    let meta_raw = e.read_var(inst.b);
-    let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
-    let elem_bytes_i32 = emit_elem_bytes_i32(e, inst.flags, inst.c + 1);
-    let len = e.read_var(inst.c);
-    let call = emit_funcref_call(e, array_new_func, &[gc_ptr, meta_i32, elem_bytes_i32, len]);
-    let result = e.builder().inst_results(call)[0];
-    e.write_var(inst.a, result);
-}
-
-pub(super) fn array_get<'a>(
-    e: &mut impl IrEmitter<'a>,
-    inst: &Instruction,
-) -> Result<(), JitError> {
-    let arr = e.read_var(inst.b);
-    let idx = e.read_var(inst.c);
-    // Bounds check: load len from ArrayHeader (offset 0)
-    let len = e
-        .builder()
-        .ins()
-        .load(types::I64, MemFlags::trusted(), arr, 0);
+/// Emit VM-equivalent array bounds checks. A nil array has length 0, so any
+/// access traps as IndexOutOfBounds before touching the ArrayHeader.
+pub(super) fn emit_array_bounds_check<'a>(e: &mut impl IrEmitter<'a>, arr: Value, idx: Value) {
+    let len = emit_nil_guarded_load(e, arr, 0);
     let out_of_bounds = e
         .builder()
         .ins()
@@ -492,6 +458,31 @@ pub(super) fn array_get<'a>(
         Some(idx),
         Some(len),
     );
+}
+
+pub(super) fn array_new<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let array_new_func = require_helper(e.helpers().array_new, "array_new")?;
+    let gc_ptr = e.gc_ptr();
+    let meta_raw = e.read_var(inst.b);
+    let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
+    let elem_bytes_i32 = emit_elem_bytes_i32(e, inst.opcode(), inst.flags, inst.c + 1)?;
+    let len = e.read_var(inst.c);
+    let call = emit_funcref_call(e, array_new_func, &[gc_ptr, meta_i32, elem_bytes_i32, len]);
+    let result = e.builder().inst_results(call)[0];
+    e.write_var(inst.a, result);
+    Ok(())
+}
+
+pub(super) fn array_get<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let arr = e.read_var(inst.b);
+    let idx = e.read_var(inst.c);
+    emit_array_bounds_check(e, arr, idx);
 
     let (elem_bytes, needs_sext) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
     if elem_bytes == 0 {
@@ -526,22 +517,7 @@ pub(super) fn array_set<'a>(
 ) -> Result<(), JitError> {
     let arr = e.read_var(inst.a);
     let idx = e.read_var(inst.b);
-    // Bounds check: load len from ArrayHeader (offset 0)
-    let len = e
-        .builder()
-        .ins()
-        .load(types::I64, MemFlags::trusted(), arr, 0);
-    let out_of_bounds = e
-        .builder()
-        .ins()
-        .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_runtime_trap_if(
-        e,
-        out_of_bounds,
-        JitRuntimeTrapKind::IndexOutOfBounds,
-        Some(idx),
-        Some(len),
-    );
+    emit_array_bounds_check(e, arr, idx);
 
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.b + 1)?;
     if elem_bytes == 0 {
@@ -559,7 +535,7 @@ pub(super) fn array_set<'a>(
         // Read elem_meta from ArrayHeader (offset 8, low byte is value_kind).
         // may_contain_gc_refs iff value_kind >= ValueKind::Array (14).
         if elem_bytes == 8 {
-            emit_array_write_barrier(e, arr, val);
+            emit_array_write_barrier(e, arr, val)?;
         }
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
@@ -569,18 +545,19 @@ pub(super) fn array_set<'a>(
             let addr = e.builder().ins().iadd(arr, slot_off);
             e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
         }
-        // Write barrier for multi-slot elements: barrier each slot that could be a GcRef.
-        // Conservative: barrier all slots. write_barrier is a no-op for non-GcRef values
-        // when parent is not black or child is not white, so false positives are safe.
-        // For correctness, only barrier when elem may contain GcRefs.
-        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots);
+        // Use elem_meta from the array header so struct/interface barriers match the VM.
+        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots)?;
     }
     Ok(())
 }
 
 /// Emit write barrier for a single-slot array/slice element write.
 /// Checks elem_meta.value_kind >= Array (14) at runtime to skip non-GcRef elements.
-pub(super) fn emit_array_write_barrier<'a>(e: &mut impl IrEmitter<'a>, arr: Value, val: Value) {
+pub(super) fn emit_array_write_barrier<'a>(
+    e: &mut impl IrEmitter<'a>,
+    arr: Value,
+    val: Value,
+) -> Result<(), JitError> {
     // ArrayHeader layout: [len:8][elem_meta:4 (low byte = value_kind)][elem_bytes:4]
     // elem_meta is at offset 8 from arr (which points to data after GcHeader).
     // Read the low byte (value_kind) of elem_meta.
@@ -606,10 +583,7 @@ pub(super) fn emit_array_write_barrier<'a>(e: &mut impl IrEmitter<'a>, arr: Valu
 
     e.builder().switch_to_block(barrier_block);
     e.builder().seal_block(barrier_block);
-    let wb_ref = e
-        .helpers()
-        .write_barrier
-        .expect("write_barrier helper not registered");
+    let wb_ref = require_helper(e.helpers().write_barrier, "write_barrier")?;
     let gc = e.gc_ptr();
     let zero_offset = e.builder().ins().iconst(types::I32, 0);
     emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, val]);
@@ -617,54 +591,43 @@ pub(super) fn emit_array_write_barrier<'a>(e: &mut impl IrEmitter<'a>, arr: Valu
 
     e.builder().switch_to_block(continue_block);
     e.builder().seal_block(continue_block);
+    Ok(())
 }
 
-/// Emit write barrier for multi-slot array/slice element write.
-/// Only emits barrier if elem_meta indicates GcRef-containing type.
+/// Emit a typed write barrier for multi-slot array/slice element writes.
 pub(super) fn emit_array_write_barrier_multi<'a>(
     e: &mut impl IrEmitter<'a>,
     arr: Value,
     src_start: u16,
     elem_slots: usize,
-) {
+) -> Result<(), JitError> {
     let elem_meta_raw = e
         .builder()
         .ins()
         .load(types::I32, MemFlags::trusted(), arr, 8);
-    let vk = e.builder().ins().band_imm(elem_meta_raw, 0xFF);
-    let gc_ref_threshold = e
-        .builder()
-        .ins()
-        .iconst(types::I32, vo_runtime::ValueKind::Array as i64);
-    let needs_barrier =
-        e.builder()
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, vk, gc_ref_threshold);
-
-    let barrier_block = e.builder().create_block();
-    let continue_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(needs_barrier, barrier_block, &[], continue_block, &[]);
-
-    e.builder().switch_to_block(barrier_block);
-    e.builder().seal_block(barrier_block);
-    let wb_ref = e
-        .helpers()
-        .write_barrier
-        .expect("write_barrier helper not registered");
-    let gc = e.gc_ptr();
-    let zero_offset = e.builder().ins().iconst(types::I32, 0);
-    // Barrier each slot - write_barrier checks colors so non-GcRef slots are harmless
-    // when the parent-child color check fails (which it will for non-pointer values).
+    let typed_barrier = require_helper(
+        e.helpers().typed_write_barrier_by_meta,
+        "typed_write_barrier_by_meta",
+    )?;
+    let vals_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (elem_slots * 8) as u32,
+        8,
+    ));
+    let vals_ptr = e.builder().ins().stack_addr(types::I64, vals_slot, 0);
     for i in 0..elem_slots {
         let v = e.read_var(src_start + i as u16);
-        emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, v]);
+        e.builder().ins().stack_store(v, vals_slot, (i * 8) as i32);
     }
-    e.builder().ins().jump(continue_block, &[]);
-
-    e.builder().switch_to_block(continue_block);
-    e.builder().seal_block(continue_block);
+    let ctx = e.ctx_param();
+    let val_slots = e.builder().ins().iconst(types::I32, elem_slots as i64);
+    emit_checked_jit_result_helper_call(
+        e,
+        typed_barrier,
+        &[ctx, arr, vals_ptr, val_slots, elem_meta_raw],
+        true,
+    );
+    Ok(())
 }
 
 pub(super) fn array_addr<'a>(
@@ -673,22 +636,7 @@ pub(super) fn array_addr<'a>(
 ) -> Result<(), JitError> {
     let arr = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
-    // Bounds check: load len from ArrayHeader (offset 0)
-    let len = e
-        .builder()
-        .ins()
-        .load(types::I64, MemFlags::trusted(), arr, 0);
-    let out_of_bounds = e
-        .builder()
-        .ins()
-        .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-    emit_runtime_trap_if(
-        e,
-        out_of_bounds,
-        JitRuntimeTrapKind::IndexOutOfBounds,
-        Some(idx),
-        Some(len),
-    );
+    emit_array_bounds_check(e, arr, idx);
 
     let (elem_bytes, _) = resolve_elem_bytes(e, inst.opcode(), inst.flags, inst.c + 1)?;
     let eb = e.builder().ins().iconst(types::I64, elem_bytes as i64);
@@ -711,11 +659,11 @@ pub(super) fn str_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, result);
 }
 
-pub(super) fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let str_index_func = e
-        .helpers()
-        .str_index
-        .expect("str_index helper not registered");
+pub(super) fn str_index<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let str_index_func = require_helper(e.helpers().str_index, "str_index")?;
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
     // Bounds check: inline len (String uses SliceData layout) instead of calling vo_str_len
@@ -739,26 +687,28 @@ pub(super) fn str_index<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     );
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn str_concat<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .str_concat
-        .expect("str_concat helper not registered");
+pub(super) fn str_concat<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().str_concat, "str_concat")?;
     let gc_ptr = e.gc_ptr();
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let call = emit_funcref_call(e, func, &[gc_ptr, a, b]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn str_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .str_slice
-        .expect("str_slice helper not registered");
+pub(super) fn str_slice<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().str_slice, "str_slice")?;
     let gc_ptr = e.gc_ptr();
     let s = e.read_var(inst.b);
     let lo = e.read_var(inst.c);
@@ -766,19 +716,21 @@ pub(super) fn str_slice<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let call = emit_funcref_call(e, func, &[gc_ptr, s, lo, hi]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn str_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().str_eq.expect("str_eq helper not registered");
+pub(super) fn str_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().str_eq, "str_eq")?;
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn str_ne<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().str_eq.expect("str_eq helper not registered");
+pub(super) fn str_ne<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().str_eq, "str_eq")?;
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
@@ -787,10 +739,15 @@ pub(super) fn str_ne<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let cmp = e.builder().ins().icmp(IntCC::Equal, eq_result, zero);
     let result = e.builder().ins().uextend(types::I64, cmp);
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn str_cmp<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
-    let func = e.helpers().str_cmp.expect("str_cmp helper not registered");
+pub(super) fn str_cmp<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+    cc: IntCC,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().str_cmp, "str_cmp")?;
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let call = emit_funcref_call_with_effect(e, func, &[a, b], HelperCallEffect::FrameIndependent);
@@ -799,13 +756,14 @@ pub(super) fn str_cmp<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: In
     let cmp = e.builder().ins().icmp(cc, cmp_result, zero);
     let result = e.builder().ins().uextend(types::I64, cmp);
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .str_decode_rune
-        .expect("str_decode_rune helper not registered");
+pub(super) fn str_decode_rune<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().str_decode_rune, "str_decode_rune")?;
     let s = e.read_var(inst.b);
     let idx = e.read_var(inst.c);
     let call =
@@ -816,14 +774,15 @@ pub(super) fn str_decode_rune<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction
     let width = e.builder().ins().band_imm(packed, 0xFFFFFFFF);
     e.write_var(inst.a, rune);
     e.write_var(inst.a + 1, width);
+    Ok(())
 }
 
 // =============================================================================
 // Map operations
 // =============================================================================
 
-pub(super) fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().map_new.expect("map_new helper not registered");
+pub(super) fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().map_new, "map_new")?;
     let gc_ptr = e.gc_ptr();
     // b = packed_meta, b+1 = key_rttid
     let packed_meta = e.read_var(inst.b);
@@ -854,14 +813,16 @@ pub(super) fn map_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     );
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn map_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().map_len.expect("map_len helper not registered");
+pub(super) fn map_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().map_len, "map_len")?;
     let m = e.read_var(inst.b);
     let call = emit_funcref_call_with_effect(e, func, &[m], HelperCallEffect::FrameIndependent);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
 /// Helper: create stack slot and store values from consecutive registers
@@ -887,8 +848,33 @@ pub(super) fn store_to_stack<'a>(
     (stack_slot, ptr, slots_i32)
 }
 
+fn emit_return_if_u64_jit_error<'a>(e: &mut impl IrEmitter<'a>, result: Value) {
+    let sentinel = e
+        .builder()
+        .ins()
+        .iconst(types::I64, JIT_HELPER_U64_ERROR as i64);
+    let is_error = e.builder().ins().icmp(IntCC::Equal, result, sentinel);
+    let error_block = e.builder().create_block();
+    let ok_block = e.builder().create_block();
+    e.builder()
+        .ins()
+        .brif(is_error, error_block, &[], ok_block, &[]);
+
+    e.builder().switch_to_block(error_block);
+    e.builder().seal_block(error_block);
+    e.spill_all_vars();
+    let jit_error = e
+        .builder()
+        .ins()
+        .iconst(types::I32, JitResult::JitError as i64);
+    e.builder().ins().return_(&[jit_error]);
+
+    e.builder().switch_to_block(ok_block);
+    e.builder().seal_block(ok_block);
+}
+
 pub(super) fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
-    let func = e.helpers().map_get.expect("map_get helper not registered");
+    let func = require_helper(e.helpers().map_get, "map_get")?;
     // MapGet: a=dst, b=map, c=meta_slot, key at c+1
     // meta: key_slots<<16 | val_slots<<1 | has_ok
     let layout = e.map_get_layout(inst).ok_or(JitError::MissingJitLayout {
@@ -922,6 +908,7 @@ pub(super) fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32],
     );
     let found = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, found);
 
     // Load results to dst registers
     for i in 0..val_slots {
@@ -938,7 +925,7 @@ pub(super) fn map_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
 }
 
 pub(super) fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
-    let func = e.helpers().map_set.expect("map_set helper not registered");
+    let func = require_helper(e.helpers().map_set, "map_set")?;
     // MapSet: a=map, b=meta_slot, c=val_start, key at b+1
     // meta: key_slots<<8 | val_slots
     let layout = e.map_set_layout(inst).ok_or(JitError::MissingJitLayout {
@@ -966,6 +953,7 @@ pub(super) fn map_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Res
         &[ctx, m, key_ptr, key_slots_i32, val_ptr, val_slots_i32],
     );
     let result = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, result);
 
     // Check if vo_map_set returned panic (unhashable interface key)
     let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
@@ -977,10 +965,7 @@ pub(super) fn map_delete<'a>(
     e: &mut impl IrEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = e
-        .helpers()
-        .map_delete
-        .expect("map_delete helper not registered");
+    let func = require_helper(e.helpers().map_delete, "map_delete")?;
     // MapDelete: a=map, b=meta_slot (=key_slots), key at b+1
     let key_slots = e
         .map_delete_key_slots(inst)
@@ -994,18 +979,20 @@ pub(super) fn map_delete<'a>(
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
 
     let ctx = e.ctx_param();
-    emit_funcref_call(e, func, &[ctx, m, key_ptr, key_slots_i32]);
+    let call = emit_funcref_call(e, func, &[ctx, m, key_ptr, key_slots_i32]);
+    let result = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, result);
     Ok(())
 }
 
 pub(super) const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;
 pub(super) const MAP_ITER_BYTES: u32 = (MAP_ITER_SLOTS * 8) as u32;
 
-pub(super) fn map_iter_init<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .map_iter_init
-        .expect("map_iter_init helper not registered");
+pub(super) fn map_iter_init<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().map_iter_init, "map_iter_init")?;
     let m = e.read_var(inst.b);
     let iter_slot = e
         .builder()
@@ -1023,13 +1010,14 @@ pub(super) fn map_iter_init<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) 
             .stack_load(types::I64, iter_slot, (i * 8) as i32);
         e.write_var(inst.a + i as u16, val);
     }
+    Ok(())
 }
 
-pub(super) fn map_iter_next<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .map_iter_next
-        .expect("map_iter_next helper not registered");
+pub(super) fn map_iter_next<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().map_iter_next, "map_iter_next")?;
     let key_slots = inst.map_iter_key_slots() as usize;
     let val_slots = inst.map_iter_val_slots() as usize;
 
@@ -1067,13 +1055,22 @@ pub(super) fn map_iter_next<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) 
     let val_ptr = e.builder().ins().stack_addr(types::I64, val_slot, 0);
     let key_slots_i32 = e.builder().ins().iconst(types::I32, key_slots as i64);
     let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
+    let ctx = e.ctx_param();
 
     let call = emit_funcref_call(
         e,
         func,
-        &[iter_ptr, key_ptr, key_slots_i32, val_ptr, val_slots_i32],
+        &[
+            ctx,
+            iter_ptr,
+            key_ptr,
+            key_slots_i32,
+            val_ptr,
+            val_slots_i32,
+        ],
     );
     let ok = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, ok);
 
     for i in 0..MAP_ITER_SLOTS {
         let val = e
@@ -1101,4 +1098,5 @@ pub(super) fn map_iter_next<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) 
     }
     // Write ok flag to inst.c
     e.write_var(inst.c, ok);
+    Ok(())
 }

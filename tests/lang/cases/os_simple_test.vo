@@ -8,17 +8,17 @@ import (
 func main() {
 	// Simple test - just get PID
 	pid := os.Getpid()
-	fmt.Println("PID:", pid)
 	assert(pid > 0, "PID should be positive")
+	fmt.Println("PID ok")
 	
 	// Get temp dir
 	tmpDir := os.TempDir()
-	fmt.Println("TempDir:", tmpDir)
 	assert(len(tmpDir) > 0, "TempDir should not be empty")
+	fmt.Println("TempDir ok")
 	
 	// Write file
-	testFile := tmpDir + "/vo_simple_test.txt"
-	fmt.Println("Writing to:", testFile)
+	testFile := tmpDir + "/vo_simple_test_" + fmt.Sprint(pid) + ".txt"
+	fmt.Println("Writing file")
 	
 	err := os.WriteFile(testFile, []byte("hello"), 0644)
 	if err != nil {

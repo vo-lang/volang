@@ -161,13 +161,7 @@ fn compile_builtin_call_impl(
             let extern_id = ctx.get_or_register_extern(extern_name);
             let (args_start, actual_count) =
                 compile_args_as_interfaces(&call.args, ctx, func, info)?;
-            func.emit_with_flags(
-                Opcode::CallExtern,
-                (actual_count * 2) as u8,
-                dst,
-                extern_id as u16,
-                args_start,
-            );
+            func.emit_call_extern(dst, extern_id, args_start, actual_count * 2);
         }
         "panic" => {
             // panic(x interface{}) - argument must be converted to interface{}
@@ -318,7 +312,7 @@ fn compile_builtin_call_impl(
                 func.emit_op(Opcode::Copy, args_reg, slice_reg, 0);
                 func.emit_op(Opcode::Copy, args_reg + 1, other_reg, 0);
                 func.emit_op(Opcode::LoadConst, args_reg + 2, elem_meta_idx, 0);
-                func.emit_with_flags(Opcode::CallExtern, 3, dst, extern_id as u16, args_reg);
+                func.emit_call_extern(dst, extern_id, args_reg, 3);
             } else {
                 let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
                 // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
@@ -382,7 +376,7 @@ fn compile_builtin_call_impl(
             let args_start = func.alloc_slots(&[SlotType::GcRef, SlotType::GcRef]);
             compile_expr_to(&call.args[0], args_start, ctx, func, info)?;
             compile_expr_to(&call.args[1], args_start + 1, ctx, func, info)?;
-            func.emit_with_flags(Opcode::CallExtern, 2, dst, extern_id as u16, args_start);
+            func.emit_call_extern(dst, extern_id, args_start, 2);
         }
         "delete" => {
             // delete(map, key)
@@ -437,13 +431,7 @@ fn compile_builtin_call_impl(
             let pc = func.current_pc() as u32;
             ctx.record_debug_loc(pc, expr.span, &info.project.source_map);
 
-            func.emit_with_flags(
-                Opcode::CallExtern,
-                (actual_count * 2) as u8,
-                dst,
-                extern_id as u16,
-                args_start,
-            );
+            func.emit_call_extern(dst, extern_id, args_start, actual_count * 2);
         }
         _ => {
             return Err(CodegenError::UnsupportedExpr(format!("builtin {}", name)));

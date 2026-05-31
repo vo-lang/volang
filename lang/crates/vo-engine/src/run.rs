@@ -226,7 +226,8 @@ pub fn run_with_output_interruptible_observed(
     if let Some(interrupt_flag) = interrupt_flag {
         vm.set_interrupt_flag(interrupt_flag);
     }
-    vm.load_with_extensions(module, ext_loader);
+    vm.load_with_extensions(module, ext_loader)
+        .map_err(|e| vm_err_to_run_err(&vm, &e))?;
 
     let outcome = vm.run().map_err(|e| vm_err_to_run_err(&vm, &e))?;
     if outcome == SchedulingOutcome::Blocked {
@@ -278,7 +279,8 @@ pub fn build_gui_vm(compiled: CompileOutput) -> Result<Vm, String> {
     let ext_loader = load_extensions(&compiled.extensions).map_err(|e| e.to_string())?;
     let mut vm = Vm::new();
     vm.enable_external_island_transport();
-    vm.load_with_extensions(compiled.module, ext_loader);
+    vm.load_with_extensions(compiled.module, ext_loader)
+        .map_err(|e| format!("{:?}", e))?;
     Ok(vm)
 }
 
@@ -318,7 +320,7 @@ mod tests {
             .expect("JIT should initialize"),
         };
         vm.state.output = CaptureSink::new();
-        vm.load(compiled.module);
+        vm.load(compiled.module).unwrap();
         match vm.run() {
             Err(err) => err,
             Ok(outcome) => panic!("expected runtime error, VM returned {outcome:?}"),
@@ -328,11 +330,33 @@ mod tests {
     fn vm_error_for_compiled(compiled: CompileOutput, config: vo_vm::JitConfig) -> VmError {
         let mut vm = Vm::try_with_jit_config(config).expect("JIT should initialize");
         vm.state.output = CaptureSink::new();
-        vm.load(compiled.module);
+        vm.load(compiled.module).unwrap();
         match vm.run() {
             Err(err) => err,
             Ok(outcome) => panic!("expected runtime error, VM returned {outcome:?}"),
         }
+    }
+
+    fn output_for(
+        source: &str,
+        mode: RunMode,
+        config: vo_vm::JitConfig,
+    ) -> (String, RunObservation) {
+        let compiled = crate::compile_string(source).expect("source should compile");
+        let mut vm = match mode {
+            RunMode::Vm => Vm::new(),
+            RunMode::Jit => Vm::try_with_jit_config(config).expect("JIT should initialize"),
+        };
+        let sink = CaptureSink::new();
+        vm.state.output = sink.clone();
+        vm.load(compiled.module).unwrap();
+        let outcome = vm.run().expect("program should run");
+        assert_ne!(
+            outcome,
+            SchedulingOutcome::Blocked,
+            "program should not block"
+        );
+        (sink.take(), run_observation(&vm))
     }
 
     fn assert_jit_runtime_trap_matches_vm(
@@ -677,6 +701,42 @@ func main() {
     }
 
     #[test]
+    fn jit_float_to_int_edges_match_vm_output() {
+        let source = r#"
+package main
+
+import "math"
+
+func conv(x float64) int {
+	return int(x)
+}
+
+func main() {
+	println(conv(math.NaN()))
+	println(conv(math.Inf(1)))
+	println(conv(math.Inf(-1)))
+	println(conv(1e300))
+	println(conv(-1e300))
+	println(conv(3.9))
+	println(conv(-3.9))
+}
+"#;
+        let config = vo_vm::JitConfig {
+            call_threshold: 1,
+            loop_threshold: 1_000_000,
+            debug_ir: false,
+        };
+        let (vm_out, _) = output_for(source, RunMode::Vm, config.clone());
+        let (jit_out, observation) = output_for(source, RunMode::Jit, config);
+
+        assert_eq!(jit_out, vm_out);
+        assert!(
+            observation.jit_function_entries > 0,
+            "test must execute full-function JIT code"
+        );
+    }
+
+    #[test]
     fn strict_jit_extern_not_registered_fails_fast() {
         let compiled = crate::compile_string(
             r#"
@@ -701,7 +761,7 @@ func main() {
         })
         .expect("JIT should initialize");
         vm.state.output = CaptureSink::new();
-        vm.load(compiled.module);
+        vm.load(compiled.module).unwrap();
         vm.state.extern_registry = vo_runtime::ExternRegistry::new();
 
         let err = match vm.run() {

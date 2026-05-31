@@ -47,7 +47,10 @@ fn main() {
     let program_args: Vec<String> = args.into_iter().skip(2).collect();
     vm.set_program_args(program_args);
 
-    vm.load(module);
+    if let Err(e) = vm.load(module) {
+        eprintln!("Runtime error: {:?}", e);
+        process::exit(1);
+    }
 
     match vm.run() {
         Err(e) => {

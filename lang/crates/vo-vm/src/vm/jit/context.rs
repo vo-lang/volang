@@ -62,10 +62,16 @@ impl JitContextWrapper {
     }
 }
 
-pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> JitContextWrapper {
+pub fn build_jit_context(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+) -> Result<JitContextWrapper, String> {
     // Extract jit_mgr values first to avoid borrow conflicts
     let (jit_func_table, jit_func_count, direct_call_table, direct_call_count) = {
-        let jit_mgr = vm.jit_mgr.as_ref().unwrap();
+        let jit_mgr = vm.jit_mgr.as_ref().ok_or_else(|| {
+            "JIT context requested without an initialized JIT manager".to_string()
+        })?;
         (
             jit_mgr.func_table_ptr(),
             jit_mgr.func_table_len() as u32,
@@ -156,5 +162,9 @@ pub fn build_jit_context(vm: &mut Vm, fiber: &mut Fiber, module: &Module) -> Jit
         ic_table,
     };
 
-    JitContextWrapper { ctx }
+    ctx.validate_required_callbacks().map_err(|field| {
+        format!("JIT context missing required callback or ABI pointer: {field}")
+    })?;
+
+    Ok(JitContextWrapper { ctx })
 }

@@ -1,7 +1,12 @@
 //! Defer instructions: DeferPush, ErrDeferPush, Recover
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+#[cfg(feature = "std")]
+use std::string::{String, ToString};
 
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::slot::Slot;
@@ -28,7 +33,7 @@ pub fn exec_defer_push(
     inst: &Instruction,
     gc: &mut Gc,
     panic_generation: u64,
-) {
+) -> Result<(), String> {
     push_defer_entry(
         stack,
         bp,
@@ -39,7 +44,7 @@ pub fn exec_defer_push(
         gc,
         false,
         panic_generation,
-    );
+    )
 }
 
 #[inline]
@@ -53,7 +58,7 @@ pub fn exec_err_defer_push(
     inst: &Instruction,
     gc: &mut Gc,
     panic_generation: u64,
-) {
+) -> Result<(), String> {
     push_defer_entry(
         stack,
         bp,
@@ -64,7 +69,7 @@ pub fn exec_err_defer_push(
         gc,
         true,
         panic_generation,
-    );
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -78,19 +83,20 @@ fn push_defer_entry(
     gc: &mut Gc,
     is_errdefer: bool,
     panic_generation: u64,
-) {
+) -> Result<(), String> {
     let is_closure = inst.call_shape_is_closure();
     let arg_start = inst.b;
     let arg_slots = inst.c;
-    let caller_frame = frames.last().expect("DeferPush: missing caller frame");
+    let Some(caller_frame) = frames.last() else {
+        return Err("DeferPush missing caller frame".to_string());
+    };
     let arg_layout = DeferArgLayout::try_from_caller_slot_types(
         &caller_func.slot_types,
         caller_frame.func_id,
         caller_frame.pc.saturating_sub(1) as u32,
         arg_start,
         arg_slots,
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
+    )?;
     let frame_depth = frames.len();
 
     let (func_id, closure) = if is_closure {
@@ -122,6 +128,7 @@ fn push_defer_entry(
         is_errdefer,
         registered_at_generation: panic_generation,
     });
+    Ok(())
 }
 
 /// recover() - only catches recoverable panics.

@@ -125,7 +125,7 @@ pub fn emit_error_return(error_slot: u16, func: &mut FuncBuilder, info: &TypeInf
             if is_last && !ret_types.is_empty() && info.is_error_type(ret_types[i]) {
                 // This is the error return - store the propagated error
                 let slot_types = info.type_slot_types(ret_types[i]);
-                debug_assert_eq!(slots as usize, slot_types.len());
+                assert_eq!(slots as usize, slot_types.len());
                 emit_write_named_return(func, gcref_slot, error_slot, &slot_types, escaped);
             }
             // Non-error returns: keep their current heap values (already set by user code)
@@ -260,7 +260,7 @@ pub(super) fn compile_return(
                     compile_expr_to(result, temp, ctx, func, info)?;
                 }
 
-                debug_assert_eq!(slots as usize, temp_slot_types.len());
+                assert_eq!(slots as usize, temp_slot_types.len());
                 func.emit_ptr_set_with_slot_types(gcref_slot, 0, temp, &temp_slot_types);
             }
 

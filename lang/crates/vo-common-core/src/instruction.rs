@@ -16,6 +16,112 @@ pub const LOOP_FLAG_HAS_LABELED_BREAK: u8 = 0x02;
 /// Loop flag: has labeled continue to outer loop
 pub const LOOP_FLAG_HAS_LABELED_CONTINUE: u8 = 0x04;
 pub const QUEUE_KIND_PORT_FLAG: u8 = 0x80;
+pub const QUEUE_NEW_MAX_ELEM_SLOTS: u16 = 0x7F;
+pub const QUEUE_SEND_MAX_ELEM_SLOTS: u16 = 0xFF;
+pub const QUEUE_RECV_MAX_ELEM_SLOTS: u16 = 0x7F;
+pub const CALL_SHAPE_MAX_ARG_RET_SLOTS: u16 = 0xFF;
+pub const MAP_NEW_MAX_KEY_VAL_SLOTS: u16 = 0xFF;
+pub const MAP_ITER_MAX_KEY_VAL_SLOTS: u16 = 0x0F;
+pub const IFACE_ASSERT_MAX_TARGET_SLOTS: u16 = 0x1F;
+
+#[inline]
+pub const fn pack_u8_slot_count(slots: u16) -> Option<u8> {
+    if slots <= u8::MAX as u16 {
+        Some(slots as u8)
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn copy_n_mirror_flags(count: u16) -> u8 {
+    if count <= u8::MAX as u16 {
+        count as u8
+    } else {
+        0
+    }
+}
+
+#[inline]
+pub const fn pack_queue_new_flags(elem_slots: u16, is_port: bool) -> Option<u8> {
+    if elem_slots <= QUEUE_NEW_MAX_ELEM_SLOTS {
+        let slots = elem_slots as u8;
+        if is_port {
+            Some(slots | QUEUE_KIND_PORT_FLAG)
+        } else {
+            Some(slots)
+        }
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn pack_queue_abi_elem_slots(elem_slots: u16) -> Option<u8> {
+    if elem_slots <= QUEUE_NEW_MAX_ELEM_SLOTS {
+        Some(elem_slots as u8)
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn pack_queue_send_flags(elem_slots: u16) -> Option<u8> {
+    if elem_slots <= QUEUE_SEND_MAX_ELEM_SLOTS {
+        Some(elem_slots as u8)
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn pack_queue_recv_flags(elem_slots: u16, has_ok: bool) -> Option<u8> {
+    if elem_slots <= QUEUE_RECV_MAX_ELEM_SLOTS {
+        Some(((elem_slots as u8) << 1) | has_ok as u8)
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn pack_map_iter_next_flags(key_slots: u16, val_slots: u16) -> Option<u8> {
+    if key_slots <= MAP_ITER_MAX_KEY_VAL_SLOTS && val_slots <= MAP_ITER_MAX_KEY_VAL_SLOTS {
+        Some((key_slots as u8) | ((val_slots as u8) << 4))
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn pack_map_new_slots(key_slots: u16, val_slots: u16) -> Option<u16> {
+    if key_slots <= MAP_NEW_MAX_KEY_VAL_SLOTS && val_slots <= MAP_NEW_MAX_KEY_VAL_SLOTS {
+        Some((key_slots << 8) | val_slots)
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn pack_call_shape(arg_slots: u16, ret_slots: u16) -> Option<u16> {
+    if arg_slots <= CALL_SHAPE_MAX_ARG_RET_SLOTS && ret_slots <= CALL_SHAPE_MAX_ARG_RET_SLOTS {
+        Some((arg_slots << 8) | ret_slots)
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn pack_iface_assert_flags(
+    assert_kind: u8,
+    has_ok: bool,
+    target_slots: u16,
+) -> Option<u8> {
+    if assert_kind <= 0x03 && target_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS {
+        Some(assert_kind | ((has_ok as u8) << 2) | ((target_slots as u8) << 3))
+    } else {
+        None
+    }
+}
 
 // =============================================================================
 // Instruction format
@@ -493,5 +599,38 @@ mod tests {
         let iter = Instruction::with_flags(Opcode::MapIterNext, (5 << 4) | 2, 1, 2, 3);
         assert_eq!(iter.map_iter_key_slots(), 2);
         assert_eq!(iter.map_iter_val_slots(), 5);
+    }
+
+    #[test]
+    fn packed_operand_helpers_reject_truncating_slot_counts() {
+        assert_eq!(pack_queue_new_flags(127, false), Some(127));
+        assert_eq!(
+            pack_queue_new_flags(127, true),
+            Some(QUEUE_KIND_PORT_FLAG | 127)
+        );
+        assert_eq!(pack_queue_new_flags(128, false), None);
+        assert_eq!(pack_queue_send_flags(255), Some(255));
+        assert_eq!(pack_queue_send_flags(256), None);
+        assert_eq!(pack_queue_recv_flags(127, true), Some((127 << 1) | 1));
+        assert_eq!(pack_queue_recv_flags(128, false), None);
+        assert_eq!(pack_call_shape(255, 255), Some(0xFFFF));
+        assert_eq!(pack_call_shape(256, 1), None);
+        assert_eq!(pack_call_shape(1, 256), None);
+        assert_eq!(pack_map_new_slots(255, 255), Some(0xFFFF));
+        assert_eq!(pack_map_new_slots(256, 1), None);
+        assert_eq!(pack_map_new_slots(1, 256), None);
+        assert_eq!(pack_map_iter_next_flags(15, 15), Some(0xFF));
+        assert_eq!(pack_map_iter_next_flags(16, 1), None);
+        assert_eq!(pack_map_iter_next_flags(1, 16), None);
+        assert_eq!(
+            pack_iface_assert_flags(1, true, 31),
+            Some(1 | (1 << 2) | (31 << 3))
+        );
+        assert_eq!(pack_iface_assert_flags(4, false, 1), None);
+        assert_eq!(pack_iface_assert_flags(1, false, 32), None);
+        assert_eq!(pack_u8_slot_count(255), Some(255));
+        assert_eq!(pack_u8_slot_count(256), None);
+        assert_eq!(copy_n_mirror_flags(255), 255);
+        assert_eq!(copy_n_mirror_flags(256), 0);
     }
 }

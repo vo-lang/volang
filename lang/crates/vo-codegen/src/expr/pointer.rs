@@ -219,13 +219,13 @@ pub fn compile_addr_of(
                     func,
                     info,
                 )?;
-                debug_assert_eq!(field_slots as usize, field_slot_types.len());
+                assert_eq!(field_slots as usize, field_slot_types.len());
                 func.emit_ptr_set_with_slot_types(dst, offset, tmp, &field_slot_types);
             } else {
                 let field_slot_types = info.type_slot_types(field_type);
                 let tmp = func.alloc_slots(&field_slot_types);
                 compile_expr_to(&elem.value, tmp, ctx, func, info)?;
-                debug_assert_eq!(field_slots as usize, field_slot_types.len());
+                assert_eq!(field_slots as usize, field_slot_types.len());
                 func.emit_ptr_set_with_slot_types(dst, offset, tmp, &field_slot_types);
             }
         }

@@ -352,7 +352,7 @@ fn analyze_loop_liveness(
 /// Get registers read by an instruction.
 #[cfg(test)]
 fn get_read_regs(inst: &Instruction) -> Vec<u16> {
-    effects::read_regs(inst)
+    effects::try_read_regs(inst).unwrap()
 }
 
 /// Get the register written by an instruction (single destination).
@@ -364,12 +364,23 @@ fn get_write_reg(inst: &Instruction) -> Option<u16> {
 /// Get registers written by multi-slot instructions (e.g., Call return values).
 #[cfg(test)]
 fn get_write_regs_multi(inst: &Instruction) -> Vec<u16> {
-    effects::multi_write_regs(inst)
+    effects::try_multi_write_regs(inst).unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vo_common_core::instruction::copy_n_mirror_flags;
+
+    #[test]
+    fn loop_analysis_test_fixtures_use_checked_packed_operands() {
+        let src = include_str!("loop_analysis.rs");
+        let forbidden = ["n.min", "(u8::MAX as u16) as u8"].concat();
+        assert!(
+            !src.contains(&forbidden),
+            "loop-analysis fixtures must use checked packed-operand encoders instead of saturating u8 flags"
+        );
+    }
 
     fn make_func(code: Vec<Instruction>) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
@@ -705,7 +716,7 @@ mod tests {
     fn copy_n(dst: u16, src: u16, n: u16) -> Instruction {
         Instruction {
             op: Opcode::CopyN as u8,
-            flags: n.min(u8::MAX as u16) as u8,
+            flags: copy_n_mirror_flags(n),
             a: dst,
             b: src,
             c: n,
@@ -969,7 +980,13 @@ mod tests {
 
     #[test]
     fn test_get_write_regs_multi_copy_n_large_canonical_count() {
-        let inst = copy_n(10, 5, 300);
+        let inst = Instruction {
+            op: Opcode::CopyN as u8,
+            flags: 0,
+            a: 10,
+            b: 5,
+            c: 300,
+        };
         let regs = get_write_regs_multi(&inst);
         assert_eq!(regs.len(), 300, "CopyN should not truncate counts to flags");
         assert_eq!(regs[0], 10);

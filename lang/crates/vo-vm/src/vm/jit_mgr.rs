@@ -332,7 +332,7 @@ impl JitManager {
             return Ok(Some(jit_func));
         }
 
-        if self.is_unsupported(func_id) {
+        if self.is_unsupported(func_id)? {
             let msg = self
                 .funcs
                 .get(func_id as usize)
@@ -345,7 +345,7 @@ impl JitManager {
         }
 
         // 2. Record call, compile if hot
-        if self.record_call(func_id) {
+        if self.record_call(func_id)? {
             match self.compile_full(func_id, func_def, module) {
                 Ok(()) => {
                     if let Some(entry) = self.get_entry(func_id) {
@@ -366,24 +366,34 @@ impl JitManager {
     // =========================================================================
 
     /// Record a function call. Returns true if the function should be compiled.
-    pub fn record_call(&mut self, func_id: u32) -> bool {
+    pub fn record_call(&mut self, func_id: u32) -> Result<bool, JitError> {
         let id = func_id as usize;
         let info = self
             .funcs
             .get_mut(id)
-            .expect("JIT: func_id out of range (JitManager not initialized for module?)");
+            .ok_or(JitError::FunctionNotFound(func_id))?;
         info.call_count += 1;
-        info.call_count >= self.config.call_threshold && info.state == CompileState::Interpreted
+        Ok(
+            info.call_count >= self.config.call_threshold
+                && info.state == CompileState::Interpreted,
+        )
     }
 
     /// Record a loop backedge hit. Returns true if loop OSR should be triggered.
-    pub fn record_backedge(&mut self, func_id: u32, loop_begin_pc: usize) -> bool {
+    pub fn record_backedge(
+        &mut self,
+        func_id: u32,
+        loop_begin_pc: usize,
+    ) -> Result<bool, JitError> {
         let id = func_id as usize;
-        let info = &mut self.funcs[id]; // Panic if out of range - same as record_call
+        let info = self
+            .funcs
+            .get_mut(id)
+            .ok_or(JitError::FunctionNotFound(func_id))?;
 
         let count = info.loop_counts.entry(loop_begin_pc).or_insert(0);
         *count += 1;
-        *count >= self.config.loop_threshold
+        Ok(*count >= self.config.loop_threshold)
     }
 
     /// Get or analyze loops for a function.
@@ -394,7 +404,10 @@ impl JitManager {
         module: &VoModule,
     ) -> Result<&[LoopInfo], JitError> {
         let id = func_id as usize;
-        let info = &mut self.funcs[id];
+        let info = self
+            .funcs
+            .get_mut(id)
+            .ok_or(JitError::FunctionNotFound(func_id))?;
 
         if info.loops.is_none() {
             match try_analyze_loops_with_module(func_def, module) {
@@ -409,7 +422,9 @@ impl JitManager {
             }
         }
 
-        Ok(info.loops.as_ref().unwrap())
+        info.loops.as_deref().ok_or_else(|| {
+            JitError::Internal(format!("loop analysis missing for function {func_id}"))
+        })
     }
 
     /// Find loop info by begin_pc.
@@ -494,29 +509,30 @@ impl JitManager {
     }
 
     /// Check if function is already compiled.
-    pub fn is_compiled(&self, func_id: u32) -> bool {
+    pub fn is_compiled(&self, func_id: u32) -> Result<bool, JitError> {
         self.funcs
             .get(func_id as usize)
             .map(|info| info.state == CompileState::FullyCompiled)
-            .expect("JIT: func_id out of range in is_compiled")
+            .ok_or(JitError::FunctionNotFound(func_id))
     }
 
     /// Check if function is marked as unsupported.
-    pub fn is_unsupported(&self, func_id: u32) -> bool {
+    pub fn is_unsupported(&self, func_id: u32) -> Result<bool, JitError> {
         self.funcs
             .get(func_id as usize)
             .map(|info| info.state == CompileState::Unsupported)
-            .expect("JIT: func_id out of range in is_unsupported")
+            .ok_or(JitError::FunctionNotFound(func_id))
     }
 
     /// Mark function as unsupported.
-    pub fn mark_unsupported(&mut self, func_id: u32) {
+    pub fn mark_unsupported(&mut self, func_id: u32) -> Result<(), JitError> {
         let info = self
             .funcs
             .get_mut(func_id as usize)
-            .expect("JIT: func_id out of range in mark_unsupported");
+            .ok_or(JitError::FunctionNotFound(func_id))?;
         info.state = CompileState::Unsupported;
         info.compile_error = Some("function marked unsupported".to_string());
+        Ok(())
     }
 
     /// Compile function (alias for compile_full).
@@ -530,20 +546,21 @@ impl JitManager {
     }
 
     /// Check if a loop has failed compilation.
-    pub fn is_loop_failed(&self, func_id: u32, begin_pc: usize) -> bool {
+    pub fn is_loop_failed(&self, func_id: u32, begin_pc: usize) -> Result<bool, JitError> {
         self.funcs
             .get(func_id as usize)
             .map(|info| info.failed_loops.contains(&begin_pc))
-            .expect("JIT: func_id out of range in is_loop_failed")
+            .ok_or(JitError::FunctionNotFound(func_id))
     }
 
     /// Mark a loop as failed (never retry).
-    pub fn mark_loop_failed(&mut self, func_id: u32, begin_pc: usize) {
+    pub fn mark_loop_failed(&mut self, func_id: u32, begin_pc: usize) -> Result<(), JitError> {
         let info = self
             .funcs
             .get_mut(func_id as usize)
-            .expect("JIT: func_id out of range in mark_loop_failed");
+            .ok_or(JitError::FunctionNotFound(func_id))?;
         info.failed_loops.insert(begin_pc);
+        Ok(())
     }
 
     /// Compile a loop for OSR.
@@ -554,6 +571,9 @@ impl JitManager {
         module: &VoModule,
         loop_info: &LoopInfo,
     ) -> Result<(), JitError> {
+        if self.funcs.get(func_id as usize).is_none() {
+            return Err(JitError::FunctionNotFound(func_id));
+        }
         let mut available_direct_callees = std::mem::take(&mut self.available_direct_callees_buf);
         self.rebuild_available_direct_callees(&mut available_direct_callees);
         let compile_result = self.compiler.compile_loop(
@@ -636,7 +656,7 @@ mod tests {
         module.functions.push(func.clone());
         let mut manager = JitManager::new().expect("jit manager");
         manager.init(1);
-        manager.mark_unsupported(0);
+        manager.mark_unsupported(0).expect("mark unsupported");
 
         let err = manager
             .resolve_call(0, &func, &module)
@@ -647,5 +667,31 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(manager.execution_stats().fallback_reasons.total(), 0);
+    }
+
+    #[test]
+    fn manager_rejects_out_of_range_func_ids_without_panicking() {
+        let func = empty_func();
+        let mut module = VoModule::new("m".to_string());
+        module.functions.push(func.clone());
+        let mut manager = JitManager::new().expect("jit manager");
+        manager.init(1);
+
+        assert!(matches!(
+            manager.resolve_call(7, &func, &module),
+            Err(JitError::FunctionNotFound(7))
+        ));
+        assert!(matches!(
+            manager.record_backedge(7, 0),
+            Err(JitError::FunctionNotFound(7))
+        ));
+        assert!(matches!(
+            manager.mark_unsupported(7),
+            Err(JitError::FunctionNotFound(7))
+        ));
+        assert!(matches!(
+            manager.is_loop_failed(7, 0),
+            Err(JitError::FunctionNotFound(7))
+        ));
     }
 }

@@ -180,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     vo_stdlib::register_externs(&mut vm.state.extern_registry, &module.externs);
     register_externs(&mut vm.state.extern_registry, &module.externs);
 
-    vm.load(module);
+    vm.load(module).map_err(|e| format!("{:?}", e))?;
 
     let outcome = vm.run().map_err(|e| format!("{:?}", e))?;
     assert_eq!(outcome, SchedulingOutcome::Done);
@@ -232,7 +232,7 @@ let bytecode: &[u8] = include_bytes!("../app.vob");
 let module = Module::deserialize(bytecode).expect("invalid bytecode");
 
 let mut vm = Vm::new();
-vm.load(module);
+vm.load(module).expect("VM load failed");
 
 match vm.run() {
     Ok(SchedulingOutcome::Done) => { /* success */ }

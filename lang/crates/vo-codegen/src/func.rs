@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use vo_common::symbol::Symbol;
 use vo_common_core::instruction::{
-    HINT_LOOP, LOOP_FLAG_HAS_DEFER, LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
+    copy_n_mirror_flags, pack_u8_slot_count, HINT_LOOP, LOOP_FLAG_HAS_DEFER,
+    LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
 };
 use vo_common_core::{JitInstructionMetadata, TransferType};
 use vo_runtime::SlotType;
@@ -375,7 +376,7 @@ impl FuncBuilder {
         let meta_reg = self.alloc_slots(&[SlotType::Value]);
         self.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         self.emit_ptr_new(gcref_slot, meta_reg, value_slots);
-        debug_assert_eq!(value_slots as usize, slot_types.len());
+        assert_eq!(value_slots as usize, slot_types.len());
         self.emit_ptr_set_with_slot_types(gcref_slot, 0, param_slot, slot_types);
     }
 
@@ -417,7 +418,7 @@ impl FuncBuilder {
         types: &[SlotType],
     ) -> u16 {
         let base_slot = self.alloc_slots(types);
-        debug_assert_eq!(types.len() as u16, total_slots);
+        assert_eq!(types.len() as u16, total_slots);
         self.bind_local(
             sym,
             StorageKind::StackArray {
@@ -497,17 +498,17 @@ impl FuncBuilder {
     /// Used by bare return to extract correct GC slot types for named return variables.
     pub fn get_slot_types(&self, start: u16, count: usize) -> Vec<SlotType> {
         let s = start as usize;
-        let end = (s + count).min(self.slot_types.len());
-        if s >= self.slot_types.len() {
-            vec![SlotType::Value; count]
-        } else {
-            let mut result = self.slot_types[s..end].to_vec();
-            // Pad with Value if slot_types is shorter than requested
-            while result.len() < count {
-                result.push(SlotType::Value);
-            }
-            result
-        }
+        let end = s
+            .checked_add(count)
+            .expect("slot type range overflow during codegen");
+        assert!(
+            end <= self.slot_types.len(),
+            "slot type range {}..{} exceeds function slot layout length {}",
+            s,
+            end,
+            self.slot_types.len()
+        );
+        self.slot_types[s..end].to_vec()
     }
 
     // === Scope management for variable shadowing ===
@@ -624,6 +625,24 @@ impl FuncBuilder {
         self.next_slot
     }
 
+    fn checked_u8_count(slots: usize, context: &str) -> u8 {
+        if slots <= u8::MAX as usize {
+            return slots as u8;
+        }
+        panic!("{context} exceeds u8 packed operand width: {slots} slots")
+    }
+
+    fn checked_u8_slot_count(slots: u16, context: &str) -> u8 {
+        pack_u8_slot_count(slots)
+            .unwrap_or_else(|| panic!("{context} exceeds u8 packed operand width: {slots} slots"))
+    }
+
+    pub(crate) fn checked_call_iface_method_idx(method_idx: u32) -> u8 {
+        u8::try_from(method_idx).unwrap_or_else(|_| {
+            panic!("CallIface method index exceeds u8 operand width: {method_idx}")
+        })
+    }
+
     // === Instruction emission ===
 
     pub fn emit(&mut self, inst: Instruction) {
@@ -638,6 +657,68 @@ impl FuncBuilder {
         self.emit_with_metadata(
             Instruction::with_flags(op, flags, a, b, c),
             JitInstructionMetadata::None,
+        );
+    }
+
+    pub fn emit_global_get(&mut self, dst: u16, index: u16, slots: u16) {
+        if slots == 1 {
+            self.emit_op(Opcode::GlobalGet, dst, index, 0);
+        } else {
+            self.emit_with_flags(
+                Opcode::GlobalGetN,
+                Self::checked_u8_slot_count(slots, "GlobalGetN slot count"),
+                dst,
+                index,
+                0,
+            );
+        }
+    }
+
+    pub fn emit_global_set(&mut self, index: u16, src: u16, slots: u16) {
+        if slots == 1 {
+            self.emit_op(Opcode::GlobalSet, index, src, 0);
+        } else {
+            self.emit_with_flags(
+                Opcode::GlobalSetN,
+                Self::checked_u8_slot_count(slots, "GlobalSetN slot count"),
+                index,
+                src,
+                0,
+            );
+        }
+    }
+
+    pub fn emit_call_extern(
+        &mut self,
+        dst: u16,
+        extern_id: u32,
+        args_start: u16,
+        arg_slots: usize,
+    ) {
+        let extern_id = u16::try_from(extern_id)
+            .unwrap_or_else(|_| panic!("CallExtern extern id exceeds u16 operand: {extern_id}"));
+        self.emit_with_flags(
+            Opcode::CallExtern,
+            Self::checked_u8_count(arg_slots, "CallExtern arg slot count"),
+            dst,
+            extern_id,
+            args_start,
+        );
+    }
+
+    pub fn emit_go_island(
+        &mut self,
+        island_reg: u16,
+        closure_reg: u16,
+        args_start: u16,
+        arg_slots: u16,
+    ) {
+        self.emit_with_flags(
+            Opcode::GoIsland,
+            Self::checked_u8_slot_count(arg_slots, "GoIsland arg slot count"),
+            island_reg,
+            closure_reg,
+            args_start,
         );
     }
 
@@ -701,7 +782,7 @@ impl FuncBuilder {
         if slots == 1 {
             self.emit_op(Opcode::Copy, dst, src, 0);
         } else {
-            self.emit_with_flags(Opcode::CopyN, slots as u8, dst, src, slots);
+            self.emit_with_flags(Opcode::CopyN, copy_n_mirror_flags(slots), dst, src, slots);
         }
     }
 
@@ -843,11 +924,7 @@ impl FuncBuilder {
                 self.emit_op(Opcode::Copy, dst, slot, 0);
             }
             StorageKind::Global { index, slots } => {
-                if slots == 1 {
-                    self.emit_op(Opcode::GlobalGet, dst, index, 0);
-                } else {
-                    self.emit_with_flags(Opcode::GlobalGetN, slots as u8, dst, index, 0);
-                }
+                self.emit_global_get(dst, index, slots);
             }
         }
     }
@@ -888,11 +965,7 @@ impl FuncBuilder {
             }
             StorageKind::Global { index, slots } => {
                 // Globals are roots - always scanned at GC start, no barrier needed
-                if slots == 1 {
-                    self.emit_op(Opcode::GlobalSet, index, src, 0);
-                } else {
-                    self.emit_with_flags(Opcode::GlobalSetN, slots as u8, index, src, 0);
-                }
+                self.emit_global_set(index, src, slots);
             }
         }
     }
@@ -904,7 +977,13 @@ impl FuncBuilder {
         if elem_slots == 1 {
             self.emit_op(Opcode::SlotGet, dst, base, index);
         } else {
-            self.emit_with_flags(Opcode::SlotGetN, elem_slots as u8, dst, base, index);
+            self.emit_with_flags(
+                Opcode::SlotGetN,
+                Self::checked_u8_slot_count(elem_slots, "SlotGetN element slot count"),
+                dst,
+                base,
+                index,
+            );
         }
     }
 
@@ -913,7 +992,13 @@ impl FuncBuilder {
         if elem_slots == 1 {
             self.emit_op(Opcode::SlotSet, base, index, src);
         } else {
-            self.emit_with_flags(Opcode::SlotSetN, elem_slots as u8, base, index, src);
+            self.emit_with_flags(
+                Opcode::SlotSetN,
+                Self::checked_u8_slot_count(elem_slots, "SlotSetN element slot count"),
+                base,
+                index,
+                src,
+            );
         }
     }
 
@@ -1670,7 +1755,7 @@ impl FuncBuilder {
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&self.slot_types);
         let borrowed_scan_slots_prefix =
             FunctionDef::compute_borrowed_scan_slots_prefix(&self.slot_types);
-        debug_assert_eq!(self.code.len(), self.jit_metadata.len());
+        assert_eq!(self.code.len(), self.jit_metadata.len());
 
         FunctionDef {
             name: self.name,
@@ -1788,5 +1873,56 @@ mod tests {
     #[should_panic(expected = "element byte width exceeds JIT metadata encoding")]
     fn elem_layout_metadata_overflow_is_not_silently_dropped() {
         let _ = FuncBuilder::elem_metadata(u32::MAX as usize + 1, ValueKind::Struct);
+    }
+
+    #[test]
+    fn packed_operand_slot_counts_use_checked_encoders() {
+        let audited_sources = [
+            ("stmt/for_range.rs", include_str!("stmt/for_range.rs")),
+            ("stmt/mod.rs", include_str!("stmt/mod.rs")),
+            ("stmt/select.rs", include_str!("stmt/select.rs")),
+            ("stmt/switch.rs", include_str!("stmt/switch.rs")),
+            ("stmt/defer_go.rs", include_str!("stmt/defer_go.rs")),
+            ("stmt/dyn_assign.rs", include_str!("stmt/dyn_assign.rs")),
+            ("expr/builtin.rs", include_str!("expr/builtin.rs")),
+            ("expr/call.rs", include_str!("expr/call.rs")),
+            ("expr/conversion.rs", include_str!("expr/conversion.rs")),
+            ("expr/dyn_access.rs", include_str!("expr/dyn_access.rs")),
+            ("expr/mod.rs", include_str!("expr/mod.rs")),
+            ("expr/selector.rs", include_str!("expr/selector.rs")),
+            ("lvalue.rs", include_str!("lvalue.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("wrapper.rs", include_str!("wrapper.rs")),
+        ];
+        let forbidden = [
+            "(kn as u8) | ((vn as u8) << 4)",
+            "((elem_slots as u8) << 1)",
+            "info.queue_elem_slots(queue_type) as u8",
+            "info.queue_elem_slots(target_type) as u8",
+            "info.type_slot_count(target_type) as u8",
+            "info.type_slot_count(type_key) as u8",
+            "slots as u8) << 3",
+            "Opcode::GlobalGetN, slots as u8",
+            "Opcode::GlobalSetN, slots as u8",
+            "(2 + arg_count * 2) as u8",
+            "(actual_count * 2) as u8",
+            "call_arg_count as u8",
+            "total_arg_slots as u8",
+            "arg_slots as u8",
+            "emit_with_flags(Opcode::CallExtern",
+            "emit_with_flags(\n        Opcode::CallExtern",
+            "emit_with_flags(\n            Opcode::CallExtern",
+            "emit_with_flags(\n                Opcode::CallExtern",
+            "emit_with_flags(\n            Opcode::GoIsland",
+        ];
+
+        for (path, source) in audited_sources {
+            for needle in forbidden {
+                assert!(
+                    !source.contains(needle),
+                    "{path} must use checked packed-operand encoders instead of `{needle}`"
+                );
+            }
+        }
     }
 }

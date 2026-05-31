@@ -8,7 +8,10 @@ use vo_analysis::objects::PackageKey;
 use vo_analysis::objects::{ObjKey, TCObjects, TypeKey};
 use vo_analysis::typ::{self, Type};
 use vo_analysis::Project;
-use vo_runtime::instruction::QUEUE_KIND_PORT_FLAG;
+use vo_common_core::instruction::{
+    pack_call_shape, pack_map_new_slots, pack_queue_abi_elem_slots, pack_queue_new_flags,
+    pack_queue_send_flags,
+};
 use vo_runtime::SlotType;
 use vo_syntax::ast::ExprId;
 use vo_syntax::ast::Ident;
@@ -164,6 +167,8 @@ impl<'a> TypeInfoWrapper<'a> {
     pub fn get_dyn_access_ret_types(&self, type_key: TypeKey) -> Vec<TypeKey> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
         let Type::Tuple(tuple) = &self.tc_objs().types[underlying] else {
+            // Dynamic call statements and no-result dynamic calls are typed as the
+            // error-only result shape by the checker, not as an explicit tuple.
             return vec![];
         };
         let vars = tuple.vars();
@@ -173,7 +178,11 @@ impl<'a> TypeInfoWrapper<'a> {
         // All elements except last (which is error)
         vars[..vars.len() - 1]
             .iter()
-            .filter_map(|&var| self.tc_objs().lobjs[var].typ())
+            .map(|&var| {
+                self.tc_objs().lobjs[var]
+                    .typ()
+                    .expect("dynamic access result tuple object must have type")
+            })
             .collect()
     }
 
@@ -304,11 +313,7 @@ impl<'a> TypeInfoWrapper<'a> {
                             variadic: sig.variadic(),
                         }
                     } else {
-                        RuntimeType::Func {
-                            params: Vec::new(),
-                            results: Vec::new(),
-                            variadic: false,
-                        }
+                        panic!("closure runtime type must reference signature metadata")
                     }
                 }
                 ValueKind::Island => RuntimeType::Island,
@@ -339,22 +344,22 @@ impl<'a> TypeInfoWrapper<'a> {
     ) -> Vec<vo_runtime::ValueRttid> {
         use vo_runtime::ValueRttid;
         let tc_objs = self.tc_objs();
-        if let Type::Tuple(tuple) = &tc_objs.types[tuple_key] {
-            tuple
-                .vars()
-                .iter()
-                .filter_map(|&v| {
-                    let obj = &tc_objs.lobjs[v];
-                    obj.typ().map(|t| {
-                        let rttid = ctx.intern_type_key(t, self);
-                        let vk = self.type_value_kind(t);
-                        ValueRttid::new(rttid, vk)
-                    })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
+        let Type::Tuple(tuple) = &tc_objs.types[tuple_key] else {
+            panic!("function signature metadata must reference tuple type metadata");
+        };
+        tuple
+            .vars()
+            .iter()
+            .map(|&v| {
+                let obj = &tc_objs.lobjs[v];
+                let t = obj
+                    .typ()
+                    .expect("function signature tuple object must have type metadata");
+                let rttid = ctx.intern_type_key(t, self);
+                let vk = self.type_value_kind(t);
+                ValueRttid::new(rttid, vk)
+            })
+            .collect()
     }
 
     /// Get or create interface meta ID (simplified API - no need to pass tc_objs/interner).
@@ -651,7 +656,10 @@ impl<'a> TypeInfoWrapper<'a> {
             Type::Array(arr) => {
                 let elem_vk = self.type_value_kind(arr.elem());
                 let elem_slots = self.type_slot_count(arr.elem());
-                let len = arr.len().unwrap_or(0) as usize;
+                let len = arr
+                    .len()
+                    .expect("array length must be resolved during codegen")
+                    as usize;
                 let mut result = Vec::with_capacity(len * elem_slots as usize);
                 for _ in 0..len {
                     for _ in 0..elem_slots {
@@ -1059,20 +1067,24 @@ impl<'a> TypeInfoWrapper<'a> {
 
     pub fn queue_abi_elem_slots(&self, type_key: TypeKey) -> u8 {
         let slots = self.queue_elem_slots(type_key);
-        assert!(
-            slots <= 0x7F,
-            "queue ABI supports at most 127 element slots, got {}",
-            slots
-        );
-        slots as u8
+        pack_queue_abi_elem_slots(slots).unwrap_or_else(|| {
+            panic!("queue receive ABI supports at most 127 element slots, got {slots}")
+        })
+    }
+
+    pub fn queue_send_elem_slots(&self, type_key: TypeKey) -> u8 {
+        let slots = self.queue_elem_slots(type_key);
+        pack_queue_send_flags(slots).unwrap_or_else(|| {
+            panic!("queue send ABI supports at most 255 element slots, got {slots}")
+        })
     }
 
     pub fn queue_new_flags(&self, type_key: TypeKey) -> u8 {
-        let elem_slots = self.queue_abi_elem_slots(type_key);
-        match self.queue_flavor(type_key) {
-            QueueFlavor::Chan => elem_slots,
-            QueueFlavor::Port => elem_slots | QUEUE_KIND_PORT_FLAG,
-        }
+        let is_port = matches!(self.queue_flavor(type_key), QueueFlavor::Port);
+        let slots = self.queue_elem_slots(type_key);
+        pack_queue_new_flags(slots, is_port).unwrap_or_else(|| {
+            panic!("queue new ABI supports at most 127 element slots, got {slots}")
+        })
     }
 
     pub fn queue_elem_type(&self, type_key: TypeKey) -> TypeKey {
@@ -1362,38 +1374,42 @@ impl<'a> TypeInfoWrapper<'a> {
     /// Get parameter types for a function signature
     pub fn func_param_types(&self, type_key: TypeKey) -> Vec<TypeKey> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
-            let params_key = sig.params();
-            if let Type::Tuple(tuple) = &self.tc_objs().types[params_key] {
-                tuple
-                    .vars()
-                    .iter()
-                    .filter_map(|&var_key| self.tc_objs().lobjs[var_key].typ())
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        }
+        let Type::Signature(sig) = &self.tc_objs().types[underlying] else {
+            panic!("func_param_types requires signature type metadata");
+        };
+        let params_key = sig.params();
+        let Type::Tuple(tuple) = &self.tc_objs().types[params_key] else {
+            panic!("function parameter metadata must be a tuple");
+        };
+        tuple
+            .vars()
+            .iter()
+            .map(|&var_key| {
+                self.tc_objs().lobjs[var_key]
+                    .typ()
+                    .expect("function parameter object must have type metadata")
+            })
+            .collect()
     }
 
     pub fn func_result_types(&self, type_key: TypeKey) -> Vec<TypeKey> {
         let underlying = typ::underlying_type(type_key, self.tc_objs());
-        if let Type::Signature(sig) = &self.tc_objs().types[underlying] {
-            let results_key = sig.results();
-            if let Type::Tuple(tuple) = &self.tc_objs().types[results_key] {
-                tuple
-                    .vars()
-                    .iter()
-                    .filter_map(|&var_key| self.tc_objs().lobjs[var_key].typ())
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        }
+        let Type::Signature(sig) = &self.tc_objs().types[underlying] else {
+            panic!("func_result_types requires signature type metadata");
+        };
+        let results_key = sig.results();
+        let Type::Tuple(tuple) = &self.tc_objs().types[results_key] else {
+            panic!("function result metadata must be a tuple");
+        };
+        tuple
+            .vars()
+            .iter()
+            .map(|&var_key| {
+                self.tc_objs().lobjs[var_key]
+                    .typ()
+                    .expect("function result object must have type metadata")
+            })
+            .collect()
     }
 
     /// Get variadic element type from the last parameter of a variadic function.
@@ -1504,7 +1520,12 @@ pub fn encode_map_get_meta(key_slots: u16, val_slots: u16, has_ok: bool) -> u32 
 /// Encode MapNew slots: (key_slots << 8) | val_slots
 #[inline]
 pub fn encode_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
-    (key_slots << 8) | val_slots
+    pack_map_new_slots(key_slots, val_slots).unwrap_or_else(|| {
+        if key_slots > vo_common_core::instruction::MAP_NEW_MAX_KEY_VAL_SLOTS {
+            panic!("MapNew key slot count exceeds u8 packed operand width: {key_slots} slots");
+        }
+        panic!("MapNew value slot count exceeds u8 packed operand width: {val_slots} slots");
+    })
 }
 
 /// Encode Call args: (arg_slots << 8) | ret_slots_low8.
@@ -1513,7 +1534,27 @@ pub fn encode_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
 /// as the source of truth; this legacy packed field only preserves 8 bits per side.
 #[inline]
 pub fn encode_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
-    (arg_slots << 8) | ret_slots
+    pack_call_shape(arg_slots, ret_slots).unwrap_or_else(|| {
+        if arg_slots > vo_common_core::instruction::CALL_SHAPE_MAX_ARG_RET_SLOTS {
+            panic!("Call arg slot count exceeds u8 packed operand width: {arg_slots} slots");
+        }
+        panic!("Call return slot count exceeds u8 packed operand width: {ret_slots} slots");
+    })
+}
+
+/// Encode the legacy static Call shape mirror.
+///
+/// Static Call verifier/lowering use the callee FunctionDef param_slots/ret_slots
+/// as authority. When either side exceeds the legacy 8-bit mirror, encode zero
+/// instead of a truncated count so consumers cannot accidentally treat it as
+/// authoritative.
+#[inline]
+pub fn encode_static_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
+    if let Some(shape) = pack_call_shape(arg_slots, ret_slots) {
+        shape
+    } else {
+        0
+    }
 }
 
 /// Encode func_id for Call instruction
@@ -1522,4 +1563,40 @@ pub fn encode_func_id(func_idx: u32) -> (u16, u8) {
     let low = (func_idx & 0xFFFF) as u16;
     let high = ((func_idx >> 16) & 0xFF) as u8;
     (low, high)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "MapNew key slot count exceeds u8 packed operand width: 256 slots")]
+    fn map_new_slots_rejects_key_truncation() {
+        let _ = encode_map_new_slots(256, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "MapNew value slot count exceeds u8 packed operand width: 256 slots")]
+    fn map_new_slots_rejects_value_truncation() {
+        let _ = encode_map_new_slots(1, 256);
+    }
+
+    #[test]
+    #[should_panic(expected = "Call arg slot count exceeds u8 packed operand width: 256 slots")]
+    fn call_args_rejects_arg_truncation() {
+        let _ = encode_call_args(256, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Call return slot count exceeds u8 packed operand width: 256 slots")]
+    fn call_args_rejects_return_truncation() {
+        let _ = encode_call_args(1, 256);
+    }
+
+    #[test]
+    fn static_call_args_do_not_encode_truncated_legacy_shape() {
+        assert_eq!(encode_static_call_args(2, 3), (2 << 8) | 3);
+        assert_eq!(encode_static_call_args(1, 301), 0);
+        assert_eq!(encode_static_call_args(301, 1), 0);
+    }
 }

@@ -78,18 +78,17 @@ fn flatten_param_layouts(param_layouts: &[Vec<SlotType>]) -> Vec<SlotType> {
 
 /// Compute total slot count for a tuple type (params or results).
 fn tuple_slot_count(tuple_key: TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> u16 {
-    tc_objs.types[tuple_key]
+    let tuple = tc_objs.types[tuple_key]
         .try_as_tuple()
-        .map(|t| {
-            t.vars()
-                .iter()
-                .map(|v| {
-                    let typ = tc_objs.lobjs[*v].typ().unwrap();
-                    vo_analysis::check::type_info::type_slot_count(typ, tc_objs)
-                })
-                .sum()
+        .expect("signature params/results must be tuple types during wrapper generation");
+    tuple
+        .vars()
+        .iter()
+        .map(|v| {
+            let typ = tc_objs.lobjs[*v].typ().unwrap();
+            vo_analysis::check::type_info::type_slot_count(typ, tc_objs)
         })
-        .unwrap_or(0)
+        .sum()
 }
 
 /// Emit a function call instruction.
@@ -100,7 +99,7 @@ fn emit_call(
     arg_slots: u16,
     ret_slots: u16,
 ) {
-    let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
+    let c = crate::type_info::encode_static_call_args(arg_slots, ret_slots);
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
     builder.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
 }
@@ -508,6 +507,9 @@ fn generate_embedded_iface_wrapper_impl(
         .iter()
         .position(|n| n == method_name)
         .expect("method must exist in embedded interface");
+    let method_idx = u32::try_from(method_idx).unwrap_or_else(|_| {
+        panic!("CallIface method index exceeds u32 operand width: {method_idx}")
+    });
 
     // Get method signature
     let method_type = tc_objs.lobjs[method_obj]
@@ -597,7 +599,7 @@ fn generate_embedded_iface_wrapper_impl(
     let c = crate::type_info::encode_call_args(param_slots, ret_slots);
     builder.emit_with_flags(
         Opcode::CallIface,
-        method_idx as u8,
+        FuncBuilder::checked_call_iface_method_idx(method_idx),
         iface_slot,
         args_start,
         c,
@@ -650,7 +652,7 @@ fn generate_iface_call_wrapper(
     let c = crate::type_info::encode_call_args(param_slots, ret_slots);
     builder.emit_with_flags(
         Opcode::CallIface,
-        method_idx as u8,
+        FuncBuilder::checked_call_iface_method_idx(method_idx),
         iface_slot,
         args_start,
         c,
@@ -702,8 +704,8 @@ pub fn generate_method_expr_iface_wrapper(
 
     let computed_param_slots = flatten_param_layouts(&param_slot_types).len() as u16;
     let computed_ret_slots = ret_slot_types.len() as u16;
-    debug_assert_eq!(param_slots, computed_param_slots);
-    debug_assert_eq!(ret_slots, computed_ret_slots);
+    assert_eq!(param_slots, computed_param_slots);
+    assert_eq!(ret_slots, computed_ret_slots);
     let args_start = builder.alloc_dynamic_call_buffer(
         &[SlotType::Value],
         &flatten_param_layouts(&param_slot_types),
@@ -716,7 +718,7 @@ pub fn generate_method_expr_iface_wrapper(
     let c = crate::type_info::encode_call_args(computed_param_slots, computed_ret_slots);
     builder.emit_with_flags(
         Opcode::CallIface,
-        method_idx as u8,
+        FuncBuilder::checked_call_iface_method_idx(method_idx),
         iface_slot,
         args_start,
         c,
@@ -805,7 +807,9 @@ pub fn generate_defer_extern_wrapper(
         return id;
     }
 
-    let arg_slots = (arg_count * 2) as u16; // each arg is interface (2 slots)
+    let arg_slots = arg_count
+        .checked_mul(2)
+        .expect("defer extern wrapper argument slot count overflowed usize");
 
     let mut builder = FuncBuilder::new(&wrapper_name);
     for _ in 0..arg_count {
@@ -815,7 +819,7 @@ pub fn generate_defer_extern_wrapper(
 
     let extern_id = ctx.get_or_register_extern_with_ret_slots(extern_name, ret_slots);
     // CallExtern: flags=arg_count*2, a=dst, b=extern_id, c=args_start
-    builder.emit_with_flags(Opcode::CallExtern, arg_slots as u8, 0, extern_id as u16, 0);
+    builder.emit_call_extern(0, extern_id, 0, arg_slots);
     builder.emit_op(Opcode::Return, 0, 0, 0);
 
     ctx.register_wrapper_from_builder(&wrapper_name, builder)
@@ -830,12 +834,27 @@ pub fn generate_defer_iface_wrapper(
     param_slot_types: Vec<Vec<SlotType>>,
 ) -> u32 {
     let wrapper_name = format!("{}$defer_iface_{}", method_name, method_idx);
+    let method_idx = u32::try_from(method_idx).unwrap_or_else(|_| {
+        panic!("CallIface method index exceeds u32 operand width: {method_idx}")
+    });
     generate_iface_call_wrapper(
         ctx,
-        method_idx as u32,
+        method_idx,
         param_slot_types,
         Vec::new(),
         &wrapper_name,
         false,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "CallIface method index exceeds u8 operand width")]
+    fn defer_iface_wrapper_rejects_method_index_truncation() {
+        let mut ctx = CodegenContext::new("call-iface-method-idx-width");
+        let _ = generate_defer_iface_wrapper(&mut ctx, "wide", 256, Vec::new());
+    }
 }

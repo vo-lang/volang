@@ -116,7 +116,7 @@ pub fn create_loaded_vm_from_module(
     // caller
     register_externs(reg, exts);
 
-    vm.load(module);
+    vm.load(module).map_err(|e| format!("{:?}", e))?;
     Ok(vm)
 }
 
@@ -128,8 +128,11 @@ pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), Str
 
     use vo_runtime::objects::closure;
     let func_id = closure::func_id(closure);
-    let module = vm.module().expect("module not set");
-    let func_def = &module.functions[func_id as usize];
+    let module = vm.module().ok_or_else(|| "module not set".to_string())?;
+    let func_def = module
+        .functions
+        .get(func_id as usize)
+        .ok_or_else(|| format!("closure target function id {} out of bounds", func_id))?;
 
     let full_args = vo_vm::vm::helpers::build_closure_args(
         closure as u64,
@@ -139,7 +142,8 @@ pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), Str
         args.len() as u32,
     );
 
-    vm.spawn_call(func_id, &full_args);
+    vm.spawn_call(func_id, &full_args)
+        .map_err(|e| format!("{:?}", e))?;
     let outcome = vm.run_scheduled().map_err(|e| format!("{:?}", e))?;
     validate_sync_outcome(vm, outcome)?;
 

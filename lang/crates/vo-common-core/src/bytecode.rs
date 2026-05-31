@@ -171,7 +171,13 @@ impl FunctionDef {
 
     #[inline]
     pub fn scan_slots_before_borrowed_start(&self, borrowed_start: u16) -> u16 {
-        let end = (borrowed_start as usize).min(self.slot_types.len());
+        let end = borrowed_start as usize;
+        assert!(
+            end <= self.slot_types.len(),
+            "scan_slots_before_borrowed_start: borrowed_start {} exceeds slot layout length {}",
+            borrowed_start,
+            self.slot_types.len()
+        );
         self.borrowed_scan_slots_prefix[end]
     }
 }
@@ -355,5 +361,48 @@ impl Module {
             island_init_func: 0,
             debug_info: DebugInfo::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn function_with_slot_types(slot_types: Vec<SlotType>) -> FunctionDef {
+        FunctionDef {
+            name: "test".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: slot_types.len() as u16,
+            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
+            ret_slots: 0,
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code: Vec::new(),
+            jit_metadata: Vec::new(),
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
+                &slot_types,
+            ),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+            slot_types,
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "scan_slots_before_borrowed_start: borrowed_start 2 exceeds slot layout length 1"
+    )]
+    fn scan_slots_before_borrowed_start_rejects_out_of_layout_start() {
+        let func = function_with_slot_types(vec![SlotType::Value]);
+        let _ = func.scan_slots_before_borrowed_start(2);
     }
 }

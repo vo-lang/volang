@@ -10,7 +10,10 @@ use vo_runtime::bytecode::{
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
-use crate::effects::{self, MemorySyncEffect};
+use crate::{
+    effects::{self, MemorySyncEffect},
+    JitError,
+};
 
 /// Translation result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,7 @@ pub enum TranslateResult {
 pub struct HelperFuncs {
     pub gc_alloc: Option<FuncRef>,
     pub write_barrier: Option<FuncRef>,
+    pub typed_write_barrier_by_meta: Option<FuncRef>,
     pub panic: Option<FuncRef>,
     pub runtime_trap: Option<FuncRef>,
     pub call_extern: Option<FuncRef>,
@@ -240,10 +244,11 @@ pub trait IrEmitter<'a> {
     /// Called before returning non-Ok JitResult so VM can see/restore state.
     fn spill_all_vars(&mut self);
 
-    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) {
+    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
         let _ = start_slot;
         let _ = slot_count;
         self.spill_all_vars();
+        Ok(())
     }
 
     /// Get the number of local variable slots.
@@ -251,9 +256,6 @@ pub trait IrEmitter<'a> {
 
     /// Get the function ID being compiled.
     fn func_id(&self) -> u32;
-
-    /// Get slot type for a variable.
-    fn slot_type(&self, slot: u16) -> SlotType;
 
     /// Read variable as F64. Load F64 directly from memory.
     fn read_var_f64(&mut self, slot: u16) -> Value;
@@ -276,12 +278,14 @@ pub trait IrEmitter<'a> {
     fn record_select_recv_case(&mut self, _dst_reg: u16, _elem_slots: u8, _has_ok: bool) {}
 
     /// Synchronize only the slots that SelectExec may have written.
-    fn sync_select_exec_state(&mut self, _result_reg: u16) {
+    fn sync_select_exec_state(&mut self, _result_reg: u16) -> Result<(), JitError> {
         self.reload_all_vars_from_memory();
+        Ok(())
     }
 
-    fn sync_written_slots(&mut self, _start_slot: u16, _slot_count: u16) {
+    fn sync_written_slots(&mut self, _start_slot: u16, _slot_count: u16) -> Result<(), JitError> {
         self.reload_all_vars_from_memory();
+        Ok(())
     }
 
     /// Check if a slot has been verified non-nil in the current basic block.
@@ -306,11 +310,6 @@ pub trait IrEmitter<'a> {
 /// Scan instructions to find the minimum base register accessed via memory pointers.
 /// Slots below this value are pure SSA — never accessed through memory by callbacks
 /// or dynamic indexing, so store_local can skip memory writes for them.
-#[allow(dead_code)]
-pub fn compute_memory_only_start(code: &[Instruction]) -> u16 {
-    try_compute_memory_only_start(code).expect("invalid memory-sync effects")
-}
-
 #[allow(dead_code)]
 pub fn try_compute_memory_only_start(code: &[Instruction]) -> Result<u16, effects::SlotRangeError> {
     let mut min_base = u16::MAX;
@@ -603,9 +602,9 @@ fn reg_const_effect(
             }
         }
         Opcode::Call => {
-            let callee = functions
-                .get(inst.static_call_func_id() as usize)
-                .expect("static call callee metadata missing");
+            let Some(callee) = functions.get(inst.static_call_func_id() as usize) else {
+                return RegConstEffect::Clear;
+            };
             let (arg_slots, ret_slots) = (callee.param_slots, callee.ret_slots);
             let Some(ret_start) = inst.b.checked_add(arg_slots) else {
                 return RegConstEffect::Clear;

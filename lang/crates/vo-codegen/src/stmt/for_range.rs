@@ -4,6 +4,7 @@
 //! Handles compilation of for-range loops over arrays, slices, strings, maps, channels, and integers.
 
 use vo_analysis::objects::TypeKey;
+use vo_common_core::instruction::{pack_map_iter_next_flags, pack_queue_recv_flags};
 use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
 use vo_vm::instruction::Opcode;
@@ -321,13 +322,8 @@ pub(crate) fn compile_for_range(
         if value.is_some() {
             // Stack array uses elem_slots, heap array uses elem_bytes
             if stk {
-                sc.func.emit_with_flags(
-                    Opcode::SlotGetN,
-                    es as u8,
-                    val_info.slot,
-                    base,
-                    lp.idx_slot(),
-                );
+                sc.func
+                    .emit_slot_get(val_info.slot, base, lp.idx_slot(), es);
             } else {
                 sc.func
                     .emit_array_get(val_info.slot, reg, lp.idx_slot(), eb, evk, sc.ctx);
@@ -463,9 +459,14 @@ pub(crate) fn compile_for_range(
         sc.func.set_loop_start(loop_start);
 
         // MapIterNext: a=iter_kv_slot, b=iter_slot, c=ok_slot, flags=kn|(vn<<4)
+        let iter_flags = pack_map_iter_next_flags(kn, vn).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "MapIterNext ABI supports at most 15 key/value slots, got key={kn} value={vn}"
+            ))
+        })?;
         sc.func.emit_with_flags(
             Opcode::MapIterNext,
-            (kn as u8) | ((vn as u8) << 4),
+            iter_flags,
             iter_kv_slot,
             iter_slot,
             ok_slot,
@@ -481,18 +482,7 @@ pub(crate) fn compile_for_range(
         // Copy key from buffer to key variable slot
         if key.is_some() {
             if key_info.slot != iter_kv_slot {
-                if kn == 1 {
-                    sc.func
-                        .emit_op(Opcode::Copy, key_info.slot, iter_kv_slot, 0);
-                } else {
-                    sc.func.emit_with_flags(
-                        Opcode::CopyN,
-                        kn as u8,
-                        key_info.slot,
-                        iter_kv_slot,
-                        kn,
-                    );
-                }
+                sc.func.emit_copy(key_info.slot, iter_kv_slot, kn);
             }
             emit_range_var_store(sc.ctx, sc.func, sc.info, &key_info)?;
         }
@@ -500,18 +490,7 @@ pub(crate) fn compile_for_range(
         // Copy value from buffer to value variable slot
         if value.is_some() {
             if val_info.slot != iter_kv_slot + kn {
-                if vn == 1 {
-                    sc.func
-                        .emit_op(Opcode::Copy, val_info.slot, iter_kv_slot + kn, 0);
-                } else {
-                    sc.func.emit_with_flags(
-                        Opcode::CopyN,
-                        vn as u8,
-                        val_info.slot,
-                        iter_kv_slot + kn,
-                        vn,
-                    );
-                }
+                sc.func.emit_copy(val_info.slot, iter_kv_slot + kn, vn);
             }
             emit_range_var_store(sc.ctx, sc.func, sc.info, &val_info)?;
         }
@@ -567,7 +546,11 @@ pub(crate) fn compile_for_range(
         // v, ok := <-ch
         // ChanRecv: a=val_slot, b=chan_reg, c=ok_slot
         // flags format: (elem_slots << 1) | has_ok
-        let recv_flags = ((elem_slots as u8) << 1) | 1;
+        let recv_flags = pack_queue_recv_flags(elem_slots, true).ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "QueueRecv ABI supports at most 127 element slots, got {elem_slots}"
+            ))
+        })?;
         sc.func
             .emit_with_flags(Opcode::QueueRecv, recv_flags, recv_slot, queue_reg, 0);
 
@@ -580,17 +563,7 @@ pub(crate) fn compile_for_range(
         // Store to escaped variable if needed
         if var_expr.is_some() {
             if val_info.slot != recv_slot {
-                if elem_slots == 1 {
-                    sc.func.emit_op(Opcode::Copy, val_info.slot, recv_slot, 0);
-                } else {
-                    sc.func.emit_with_flags(
-                        Opcode::CopyN,
-                        elem_slots as u8,
-                        val_info.slot,
-                        recv_slot,
-                        elem_slots,
-                    );
-                }
+                sc.func.emit_copy(val_info.slot, recv_slot, elem_slots);
             }
             emit_range_var_store(sc.ctx, sc.func, sc.info, &val_info)?;
         }

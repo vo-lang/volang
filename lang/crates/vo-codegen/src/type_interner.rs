@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_analysis::typ::Type;
 use vo_runtime::{ChanDir, InterfaceMethod, RuntimeType, StructField, ValueKind, ValueRttid};
+use vo_vm::bytecode::{InterfaceMeta, InterfaceMethodMeta};
 
 /// A type interner that assigns unique runtime type IDs to types.
 ///
@@ -94,7 +95,8 @@ pub struct InternContext<'a> {
     pub named_type_metas: &'a mut Vec<vo_common_core::bytecode::NamedTypeMeta>,
     pub struct_meta_ids: &'a mut std::collections::HashMap<vo_analysis::objects::TypeKey, u32>,
     pub struct_metas: &'a mut Vec<vo_common_core::bytecode::StructMeta>,
-    pub interface_meta_ids: &'a std::collections::HashMap<vo_analysis::objects::TypeKey, u32>,
+    pub interface_meta_ids: &'a mut std::collections::HashMap<vo_analysis::objects::TypeKey, u32>,
+    pub interface_metas: &'a mut Vec<vo_common_core::bytecode::InterfaceMeta>,
 }
 
 /// Converts a type-checked TypeKey to a RuntimeType and interns it, returning ValueRttid.
@@ -110,6 +112,31 @@ pub fn intern_type_key(
     let (rt, vk) = type_key_to_runtime_type(interner, type_key, tc_objs, str_interner, ctx);
     let rttid = interner.intern(rt);
     ValueRttid::new(rttid, vk)
+}
+
+fn tuple_value_rttids(
+    interner: &mut TypeInterner,
+    tuple_key: TypeKey,
+    tc_objs: &vo_analysis::objects::TCObjects,
+    str_interner: &vo_common::SymbolInterner,
+    ctx: &mut InternContext,
+    context: &str,
+) -> Vec<ValueRttid> {
+    let Type::Tuple(tuple) = &tc_objs.types[tuple_key] else {
+        panic!("{context}: signature metadata must reference a tuple type");
+    };
+    tuple
+        .vars()
+        .iter()
+        .map(|&obj_key| {
+            let typ = tc_objs.lobjs[obj_key]
+                .typ()
+                .unwrap_or_else(|| panic!("{context}: tuple object is missing type metadata"));
+            let (rt, vk) = type_key_to_runtime_type(interner, typ, tc_objs, str_interner, ctx);
+            let rttid = interner.intern(rt);
+            ValueRttid::new(rttid, vk)
+        })
+        .collect()
 }
 
 /// Helper: converts a type_key to (RuntimeType, ValueKind).
@@ -171,7 +198,9 @@ fn type_key_to_runtime_type(
                 intern_type_key(interner, arr.elem(), tc_objs, str_interner, ctx);
             (
                 RuntimeType::Array {
-                    len: arr.len().unwrap_or(0),
+                    len: arr
+                        .len()
+                        .expect("array length must be resolved before runtime type interning"),
                     elem: elem_value_rttid,
                 },
                 ValueKind::Array,
@@ -226,42 +255,22 @@ fn type_key_to_runtime_type(
             )
         }
         Type::Signature(sig) => {
-            let params_tuple = &tc_objs.types[sig.params()];
-            let params: Vec<ValueRttid> = if let Type::Tuple(tuple) = params_tuple {
-                tuple
-                    .vars()
-                    .iter()
-                    .filter_map(|&p| {
-                        let obj = &tc_objs.lobjs[p];
-                        obj.typ().map(|t| {
-                            let (rt, vk) =
-                                type_key_to_runtime_type(interner, t, tc_objs, str_interner, ctx);
-                            let rttid = interner.intern(rt);
-                            ValueRttid::new(rttid, vk)
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let results_tuple = &tc_objs.types[sig.results()];
-            let results: Vec<ValueRttid> = if let Type::Tuple(tuple) = results_tuple {
-                tuple
-                    .vars()
-                    .iter()
-                    .filter_map(|&r| {
-                        let obj = &tc_objs.lobjs[r];
-                        obj.typ().map(|t| {
-                            let (rt, vk) =
-                                type_key_to_runtime_type(interner, t, tc_objs, str_interner, ctx);
-                            let rttid = interner.intern(rt);
-                            ValueRttid::new(rttid, vk)
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let params = tuple_value_rttids(
+                interner,
+                sig.params(),
+                tc_objs,
+                str_interner,
+                ctx,
+                "function parameter runtime type",
+            );
+            let results = tuple_value_rttids(
+                interner,
+                sig.results(),
+                tc_objs,
+                str_interner,
+                ctx,
+                "function result runtime type",
+            );
             (
                 RuntimeType::Func {
                     params,
@@ -381,27 +390,24 @@ fn type_key_to_runtime_type(
                 .map(|&m| {
                     let obj = &tc_objs.lobjs[m];
                     let name = obj.name().to_string();
-                    let sig_value_rttid = obj
-                        .typ()
-                        .map(|t| {
-                            let (rt, _vk) =
-                                type_key_to_runtime_type(interner, t, tc_objs, str_interner, ctx);
-                            let rttid = interner.intern(rt);
-                            ValueRttid::new(rttid, ValueKind::Closure)
-                        })
-                        .unwrap_or_else(|| {
-                            let rttid = interner.intern(RuntimeType::Func {
-                                params: Vec::new(),
-                                results: Vec::new(),
-                                variadic: false,
-                            });
-                            ValueRttid::new(rttid, ValueKind::Closure)
-                        });
+                    let typ = obj.typ().unwrap_or_else(|| {
+                        panic!("interface method {name} is missing type metadata")
+                    });
+                    let (rt, _vk) =
+                        type_key_to_runtime_type(interner, typ, tc_objs, str_interner, ctx);
+                    let rttid = interner.intern(rt);
+                    let sig_value_rttid = ValueRttid::new(rttid, ValueKind::Closure);
                     InterfaceMethod::new(name, sig_value_rttid)
                 })
                 .collect();
-            // Get meta_id from interface_meta_ids mapping
-            let meta_id = ctx.interface_meta_ids.get(&type_key).copied().unwrap_or(0);
+            let meta_id = get_or_create_interface_meta_id(
+                interner,
+                type_key,
+                iface,
+                tc_objs,
+                str_interner,
+                ctx,
+            );
             (
                 RuntimeType::Interface { methods, meta_id },
                 ValueKind::Interface,
@@ -411,20 +417,75 @@ fn type_key_to_runtime_type(
             let elems: Vec<ValueRttid> = tuple
                 .vars()
                 .iter()
-                .filter_map(|&v| {
+                .map(|&v| {
                     let obj = &tc_objs.lobjs[v];
-                    obj.typ().map(|t| {
-                        let (rt, vk) =
-                            type_key_to_runtime_type(interner, t, tc_objs, str_interner, ctx);
-                        let rttid = interner.intern(rt);
-                        ValueRttid::new(rttid, vk)
-                    })
+                    let typ = obj
+                        .typ()
+                        .expect("tuple runtime type element is missing type metadata");
+                    let (rt, vk) =
+                        type_key_to_runtime_type(interner, typ, tc_objs, str_interner, ctx);
+                    let rttid = interner.intern(rt);
+                    ValueRttid::new(rttid, vk)
                 })
                 .collect();
             (RuntimeType::Tuple(elems), ValueKind::Void)
         }
         Type::Island => (RuntimeType::Island, ValueKind::Island),
     }
+}
+
+fn get_or_create_interface_meta_id(
+    interner: &mut TypeInterner,
+    type_key: TypeKey,
+    iface: &vo_analysis::typ::InterfaceDetail,
+    tc_objs: &vo_analysis::objects::TCObjects,
+    str_interner: &vo_common::SymbolInterner,
+    ctx: &mut InternContext,
+) -> u32 {
+    let all_methods = iface.all_methods();
+    let method_keys: &[vo_analysis::objects::ObjKey] = all_methods
+        .as_ref()
+        .map(|v| v.as_slice())
+        .unwrap_or_else(|| iface.methods());
+    if method_keys.is_empty() {
+        ctx.interface_meta_ids.insert(type_key, 0);
+        return 0;
+    }
+    if let Some(id) = ctx.interface_meta_ids.get(&type_key).copied() {
+        return id;
+    }
+
+    let id = ctx.interface_metas.len() as u32;
+    ctx.interface_meta_ids.insert(type_key, id);
+    ctx.interface_metas.push(InterfaceMeta {
+        name: String::new(),
+        method_names: Vec::new(),
+        methods: Vec::new(),
+    });
+
+    let mut method_names = Vec::with_capacity(method_keys.len());
+    let mut methods = Vec::with_capacity(method_keys.len());
+    for &method_key in method_keys {
+        let obj = &tc_objs.lobjs[method_key];
+        let name = obj.name().to_string();
+        let sig_type = obj
+            .typ()
+            .unwrap_or_else(|| panic!("interface method {name} is missing signature type"));
+        let signature_rttid =
+            intern_type_key(interner, sig_type, tc_objs, str_interner, ctx).rttid();
+        method_names.push(name.clone());
+        methods.push(InterfaceMethodMeta {
+            name,
+            signature_rttid,
+        });
+    }
+
+    ctx.interface_metas[id as usize] = InterfaceMeta {
+        name: String::new(),
+        method_names,
+        methods,
+    };
+    id
 }
 
 #[cfg(test)]

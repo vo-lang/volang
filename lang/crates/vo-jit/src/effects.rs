@@ -69,29 +69,6 @@ pub struct InstructionEffects {
 }
 
 #[allow(dead_code)]
-pub(crate) fn instruction_effects(inst: &Instruction) -> InstructionEffects {
-    try_instruction_effects_with_facts(inst, EffectFacts::none())
-        .expect("invalid instruction effects")
-}
-
-#[allow(dead_code)]
-pub(crate) fn instruction_effects_with_facts(
-    inst: &Instruction,
-    facts: EffectFacts<'_>,
-) -> InstructionEffects {
-    try_instruction_effects_with_facts(inst, facts).expect("invalid instruction effects")
-}
-
-#[allow(dead_code)]
-pub(crate) fn instruction_effects_with_context(
-    inst: &Instruction,
-    facts: EffectFacts<'_>,
-    externs: &[ExternDef],
-) -> InstructionEffects {
-    try_instruction_effects_with_context(inst, facts, externs).expect("invalid instruction effects")
-}
-
-#[allow(dead_code)]
 pub fn try_instruction_effects_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -128,11 +105,6 @@ pub fn may_call(inst: &Instruction) -> bool {
     )
 }
 
-#[allow(dead_code)]
-pub(crate) fn memory_sync_effect(inst: &Instruction) -> MemorySyncEffect {
-    try_memory_sync_effect(inst).expect("invalid memory sync effect")
-}
-
 pub fn try_memory_sync_effect(inst: &Instruction) -> Result<MemorySyncEffect, SlotRangeError> {
     match inst.opcode() {
         Opcode::SlotSet | Opcode::SlotSetN => Ok(MemorySyncEffect::From(inst.a)),
@@ -150,11 +122,6 @@ pub fn try_memory_sync_effect(inst: &Instruction) -> Result<MemorySyncEffect, Sl
         Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => Ok(MemorySyncEffect::All),
         _ => Ok(MemorySyncEffect::None),
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn push_slot_range(regs: &mut Vec<u16>, start: u16, slots: u16) {
-    try_push_slot_range(regs, start, slots, "unknown").expect("slot range overflow");
 }
 
 fn checked_slot_offset(
@@ -187,7 +154,7 @@ pub fn try_push_slot_range(
 }
 
 pub fn slice_elem_slots_from_flags(flags: u8) -> u16 {
-    debug_assert_ne!(
+    assert_ne!(
         flags, 0,
         "dynamic element layouts must use per-instruction metadata"
     );
@@ -281,11 +248,6 @@ fn try_push_recv_result_slots(
 ) -> Result<(), SlotRangeError> {
     let count = recv_result_slots(flags, normalize_zero);
     try_push_slot_range(regs, dst_start, count, "write")
-}
-
-#[allow(dead_code)]
-pub(crate) fn read_regs(inst: &Instruction) -> Vec<u16> {
-    try_read_regs(inst).expect("invalid read effects")
 }
 
 pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
@@ -388,16 +350,10 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
         Opcode::ArrayNew => {
             regs.push(inst.b);
             regs.push(inst.c);
-            if inst.flags == 0 {
-                regs.push(checked_slot_offset(inst.c, 1, "read")?);
-            }
         }
         Opcode::ArrayGet | Opcode::ArrayAddr => {
             regs.push(inst.b);
             regs.push(inst.c);
-            if inst.flags == 0 {
-                regs.push(checked_slot_offset(inst.c, 1, "read")?);
-            }
         }
         Opcode::ArraySet => {
             regs.push(inst.a);
@@ -416,16 +372,10 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
             regs.push(inst.b);
             regs.push(inst.c);
             regs.push(checked_slot_offset(inst.c, 1, "read")?);
-            if inst.flags == 0 {
-                regs.push(checked_slot_offset(inst.c, 2, "read")?);
-            }
         }
         Opcode::SliceGet | Opcode::SliceAddr => {
             regs.push(inst.b);
             regs.push(inst.c);
-            if inst.flags == 0 {
-                regs.push(checked_slot_offset(inst.c, 1, "read")?);
-            }
         }
         Opcode::SliceSet => {
             regs.push(inst.a);
@@ -607,10 +557,6 @@ pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
 }
 
 #[allow(dead_code)]
-pub(crate) fn read_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    try_read_regs_with_facts(inst, facts).expect("invalid read effects")
-}
-
 pub fn try_read_regs_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -650,7 +596,6 @@ pub fn try_read_regs_with_module_context(
             regs.push(inst.b);
             regs.push(inst.c);
             if inst.flags == 0 {
-                regs.push(checked_slot_offset(inst.c, 1, "read")?);
                 try_push_slot_range(
                     &mut regs,
                     checked_slot_offset(inst.c, 2, "read")?,
@@ -799,11 +744,6 @@ pub fn single_write_reg(inst: &Instruction) -> Option<u16> {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn multi_write_regs(inst: &Instruction) -> Vec<u16> {
-    try_multi_write_regs(inst).expect("invalid multi-write effects")
-}
-
 pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
 
@@ -882,19 +822,6 @@ pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError>
 }
 
 #[allow(dead_code)]
-pub(crate) fn multi_write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    try_multi_write_regs_with_context(inst, facts, &[]).expect("invalid multi-write effects")
-}
-
-#[allow(dead_code)]
-pub(crate) fn multi_write_regs_with_context(
-    inst: &Instruction,
-    facts: EffectFacts<'_>,
-    externs: &[ExternDef],
-) -> Vec<u16> {
-    try_multi_write_regs_with_context(inst, facts, externs).expect("invalid multi-write effects")
-}
-
 pub fn try_multi_write_regs_with_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -946,11 +873,6 @@ pub fn try_multi_write_regs_with_module_context(
     try_multi_write_regs(inst)
 }
 
-#[allow(dead_code)]
-pub(crate) fn write_regs(inst: &Instruction) -> Vec<u16> {
-    try_write_regs(inst).expect("invalid write effects")
-}
-
 pub fn try_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
     if let Some(reg) = single_write_reg(inst) {
@@ -961,19 +883,6 @@ pub fn try_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
 }
 
 #[allow(dead_code)]
-pub(crate) fn write_regs_with_facts(inst: &Instruction, facts: EffectFacts<'_>) -> Vec<u16> {
-    try_write_regs_with_context(inst, facts, &[]).expect("invalid write effects")
-}
-
-#[allow(dead_code)]
-pub(crate) fn write_regs_with_context(
-    inst: &Instruction,
-    facts: EffectFacts<'_>,
-    externs: &[ExternDef],
-) -> Vec<u16> {
-    try_write_regs_with_context(inst, facts, externs).expect("invalid write effects")
-}
-
 pub fn try_write_regs_with_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -1107,7 +1016,8 @@ mod tests {
             has_ok: true,
         };
         let effects =
-            instruction_effects_with_facts(&inst, EffectFacts::from_instruction(Some(&meta)));
+            try_instruction_effects_with_facts(&inst, EffectFacts::from_instruction(Some(&meta)))
+                .unwrap();
 
         assert_eq!(effects.reads, vec![2, 5, 6, 7, 8]);
         assert_eq!(effects.writes, vec![10, 11, 12]);
@@ -1122,7 +1032,7 @@ mod tests {
         };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
             vec![1, 4, 5, 6, 9, 10, 11]
         );
     }
@@ -1133,7 +1043,7 @@ mod tests {
         let meta = JitInstructionMetadata::MapDelete { key_slots: 3 };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
             vec![1, 4, 5, 6, 7]
         );
     }
@@ -1147,7 +1057,12 @@ mod tests {
         };
 
         assert_eq!(
-            multi_write_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            try_multi_write_regs_with_context(
+                &inst,
+                EffectFacts::from_instruction(Some(&meta)),
+                &[]
+            )
+            .unwrap(),
             vec![20, 21, 22]
         );
     }
@@ -1161,17 +1076,44 @@ mod tests {
         };
 
         assert_eq!(
-            write_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            try_write_regs_with_context(&inst, EffectFacts::from_instruction(Some(&meta)), &[])
+                .unwrap(),
             Vec::<u16>::new()
         );
     }
 
     #[test]
-    fn array_addr_reads_dynamic_elem_bytes_register() {
+    fn indexed_access_effects_do_not_read_dynamic_elem_bytes_register() {
         let inst = Instruction::with_flags(Opcode::ArrayAddr, 0, 9, 2, 7);
+        let meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 24,
+            needs_sign_extend: false,
+        };
 
-        assert_eq!(try_read_regs(&inst).unwrap(), vec![2, 7, 8]);
+        assert_eq!(
+            try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
+            vec![2, 7]
+        );
         assert_eq!(try_write_regs(&inst).unwrap(), vec![9]);
+    }
+
+    #[test]
+    fn collection_constructor_effects_do_not_read_dynamic_elem_bytes_register() {
+        let array = Instruction::with_flags(Opcode::ArrayNew, 0, 1, 2, 7);
+        let slice = Instruction::with_flags(Opcode::SliceNew, 0, 3, 4, 9);
+        let meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 24,
+            needs_sign_extend: false,
+        };
+
+        assert_eq!(
+            try_read_regs_with_facts(&array, EffectFacts::from_instruction(Some(&meta))).unwrap(),
+            vec![2, 7]
+        );
+        assert_eq!(
+            try_read_regs_with_facts(&slice, EffectFacts::from_instruction(Some(&meta))).unwrap(),
+            vec![4, 9, 10]
+        );
     }
 
     #[test]
@@ -1186,31 +1128,17 @@ mod tests {
     }
 
     #[test]
-    fn array_addr_dynamic_elem_bytes_reports_operand_overflow() {
+    fn array_addr_dynamic_elem_bytes_register_is_not_an_effect_operand() {
         let inst = Instruction::with_flags(Opcode::ArrayAddr, 0, 1, 2, u16::MAX);
 
-        assert!(matches!(
-            try_read_regs(&inst),
-            Err(EffectError::SlotRange(SlotRangeError {
-                access: "read",
-                start: u16::MAX,
-                count: 2
-            }))
-        ));
+        assert_eq!(try_read_regs(&inst).unwrap(), vec![2, u16::MAX]);
     }
 
     #[test]
-    fn slice_addr_dynamic_elem_bytes_reports_operand_overflow() {
+    fn slice_addr_dynamic_elem_bytes_register_is_not_an_effect_operand() {
         let inst = Instruction::with_flags(Opcode::SliceAddr, 0, 1, 2, u16::MAX);
 
-        assert!(matches!(
-            try_read_regs(&inst),
-            Err(EffectError::SlotRange(SlotRangeError {
-                access: "read",
-                start: u16::MAX,
-                count: 2
-            }))
-        ));
+        assert_eq!(try_read_regs(&inst).unwrap(), vec![2, u16::MAX]);
     }
 
     #[test]
@@ -1222,7 +1150,7 @@ mod tests {
         };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
             vec![1, 4, 20, 21, 22]
         );
     }
@@ -1236,7 +1164,7 @@ mod tests {
         };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
             vec![1, 4]
         );
     }
@@ -1250,8 +1178,8 @@ mod tests {
         };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
-            vec![2, 10, 11, 12, 13, 14]
+            try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
+            vec![2, 10, 12, 13, 14]
         );
     }
 
@@ -1264,14 +1192,14 @@ mod tests {
         };
 
         assert_eq!(
-            read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))),
+            try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
             vec![1, 4, 5, 6, 9, 10, 11]
         );
     }
 
     #[test]
     fn effects_report_operand_offset_overflow() {
-        let inst = Instruction::new(Opcode::ArrayNew, 0, 1, u16::MAX);
+        let inst = Instruction::new(Opcode::SliceNew, 0, 1, u16::MAX);
 
         assert!(matches!(
             try_read_regs(&inst),
@@ -1338,7 +1266,7 @@ mod tests {
         }];
 
         assert_eq!(
-            write_regs_with_context(&inst, EffectFacts::none(), &externs),
+            try_write_regs_with_context(&inst, EffectFacts::none(), &externs).unwrap(),
             vec![10, 11, 12]
         );
     }

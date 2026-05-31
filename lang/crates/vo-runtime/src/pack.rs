@@ -205,6 +205,10 @@ fn pack_value(
     // Write type tag
     packed.data.push(vk as u8);
 
+    if vk == ValueKind::Channel {
+        panic!("Cannot pack non-sendable type: {:?}", vk);
+    }
+
     if vk.is_queue() {
         let chan_ref = src[0] as GcRef;
         pack_queue_handle(packed, chan_ref);
@@ -304,6 +308,7 @@ fn pack_slice(
     let elem_meta = slice::elem_meta(slice_ref);
     let arr_ref = slice::array_ref(slice_ref);
     let elem_bytes = array::elem_bytes(arr_ref);
+    validate_sequence_elem_layout(elem_meta, elem_bytes, struct_metas);
 
     packed
         .data
@@ -326,17 +331,8 @@ fn pack_slice(
     }
     packed.data.push(SEQUENCE_ENCODING_ELEMENTS);
 
-    // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
-    let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
-        let meta_id = elem_meta.meta_id() as usize;
-        if meta_id < struct_metas.len() {
-            struct_metas[meta_id].slot_types.len()
-        } else {
-            elem_bytes.div_ceil(SLOT_BYTES)
-        }
-    } else {
-        elem_bytes.div_ceil(SLOT_BYTES)
-    };
+    // For struct elements, exact StructMeta is the layout authority.
+    let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, struct_metas);
     let mut elem_buf = vec![0u64; elem_slots];
     let data_ptr = slice::data_ptr(slice_ref);
 
@@ -370,6 +366,7 @@ fn pack_array(
     let length = array::len(arr_ref);
     let elem_meta = array::elem_meta(arr_ref);
     let elem_bytes = array::elem_bytes(arr_ref);
+    validate_sequence_elem_layout(elem_meta, elem_bytes, struct_metas);
 
     packed
         .data
@@ -392,17 +389,8 @@ fn pack_array(
     }
     packed.data.push(SEQUENCE_ENCODING_ELEMENTS);
 
-    // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
-    let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
-        let meta_id = elem_meta.meta_id() as usize;
-        if meta_id < struct_metas.len() {
-            struct_metas[meta_id].slot_types.len()
-        } else {
-            elem_bytes.div_ceil(SLOT_BYTES)
-        }
-    } else {
-        elem_bytes.div_ceil(SLOT_BYTES)
-    };
+    // For struct elements, exact StructMeta is the layout authority.
+    let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, struct_metas);
     let mut elem_buf = vec![0u64; elem_slots];
     let data_ptr = array::data_ptr_bytes(arr_ref);
 
@@ -703,6 +691,7 @@ where
     let length = read_u64(data, cursor) as usize;
     let elem_meta = ValueMeta::from_raw(read_u32(data, cursor));
     let elem_bytes = read_u32(data, cursor) as usize;
+    validate_sequence_elem_layout(elem_meta, elem_bytes, struct_metas);
 
     // Create slice with capacity = length
     let new_slice = slice::create(gc, elem_meta, elem_bytes, length, length);
@@ -722,19 +711,13 @@ where
         unpack_raw_sequence_bytes(data, cursor, data_ptr, byte_len);
         return new_slice;
     }
-    debug_assert_eq!(encoding, SEQUENCE_ENCODING_ELEMENTS);
+    assert_eq!(
+        encoding, SEQUENCE_ENCODING_ELEMENTS,
+        "pack: invalid slice sequence encoding {encoding}"
+    );
 
-    // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
-    let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
-        let meta_id = elem_meta.meta_id() as usize;
-        if meta_id < struct_metas.len() {
-            struct_metas[meta_id].slot_types.len()
-        } else {
-            elem_bytes.div_ceil(SLOT_BYTES)
-        }
-    } else {
-        elem_bytes.div_ceil(SLOT_BYTES)
-    };
+    // For struct elements, exact StructMeta is the layout authority.
+    let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, struct_metas);
     let mut elem_buf = vec![0u64; elem_slots];
 
     for i in 0..length {
@@ -779,6 +762,7 @@ where
     let length = read_u64(data, cursor) as usize;
     let elem_meta = ValueMeta::from_raw(read_u32(data, cursor));
     let elem_bytes = read_u32(data, cursor) as usize;
+    validate_sequence_elem_layout(elem_meta, elem_bytes, struct_metas);
 
     let new_arr = array::create(gc, elem_meta, elem_bytes, length);
 
@@ -797,19 +781,13 @@ where
         unpack_raw_sequence_bytes(data, cursor, data_ptr, byte_len);
         return new_arr;
     }
-    debug_assert_eq!(encoding, SEQUENCE_ENCODING_ELEMENTS);
+    assert_eq!(
+        encoding, SEQUENCE_ENCODING_ELEMENTS,
+        "pack: invalid array sequence encoding {encoding}"
+    );
 
-    // For struct elements, use actual slot_count from metadata (may be > elem_bytes/8 for packed structs)
-    let elem_slots = if elem_meta.value_kind() == ValueKind::Struct {
-        let meta_id = elem_meta.meta_id() as usize;
-        if meta_id < struct_metas.len() {
-            struct_metas[meta_id].slot_types.len()
-        } else {
-            elem_bytes.div_ceil(SLOT_BYTES)
-        }
-    } else {
-        elem_bytes.div_ceil(SLOT_BYTES)
-    };
+    // For struct elements, exact StructMeta is the layout authority.
+    let elem_slots = sequence_elem_slots(elem_meta, elem_bytes, struct_metas);
     let mut elem_buf = vec![0u64; elem_slots];
 
     for i in 0..length {
@@ -998,6 +976,9 @@ fn pack_queue_handle(packed: &mut PackedValue, chan_ref: GcRef) {
 
 fn pack_queue_handle_inner(packed: &mut PackedValue, chan_ref: GcRef) {
     let (kind, cap, elem_meta, elem_rttid, elem_slots) = queue::get_metadata(chan_ref);
+    if kind != QueueKind::Port {
+        panic!("pack_queue_handle: {:?} cannot cross islands", kind);
+    }
 
     let (endpoint_id, home_island, closed) = if queue::is_remote(chan_ref) {
         let proxy = queue::remote_proxy(chan_ref);
@@ -1096,6 +1077,41 @@ fn can_pack_sequence_as_raw_bytes(elem_meta: ValueMeta, elem_bytes: usize) -> bo
         elem_meta.value_kind(),
         ValueKind::Bool | ValueKind::Int8 | ValueKind::Uint8
     )
+}
+
+fn sequence_elem_slots(
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    struct_metas: &[StructMeta],
+) -> usize {
+    if elem_meta.value_kind() == ValueKind::Struct {
+        let meta_id = elem_meta.meta_id() as usize;
+        return struct_metas
+            .get(meta_id)
+            .unwrap_or_else(|| panic!("pack: invalid struct sequence elem meta_id {meta_id}"))
+            .slot_types
+            .len();
+    }
+    elem_bytes.div_ceil(SLOT_BYTES)
+}
+
+fn validate_sequence_elem_layout(
+    elem_meta: ValueMeta,
+    elem_bytes: usize,
+    struct_metas: &[StructMeta],
+) {
+    if elem_meta.value_kind() != ValueKind::Struct {
+        return;
+    }
+    let meta_id = elem_meta.meta_id() as usize;
+    let slot_count = struct_metas
+        .get(meta_id)
+        .unwrap_or_else(|| panic!("pack: invalid struct sequence elem meta_id {meta_id}"))
+        .fields
+        .len();
+    if elem_bytes == 0 && slot_count != 0 {
+        panic!("pack: struct sequence elem meta_id {meta_id} has fields but zero bytes");
+    }
 }
 
 fn pack_raw_sequence_bytes(
@@ -1212,7 +1228,7 @@ fn write_element(base_ptr: *mut u8, idx: usize, elem_bytes: usize, src: &[u64]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::objects::{queue, queue_state::QueueKind, slice};
+    use crate::objects::{array, queue, queue_state::QueueKind, slice};
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn make_byte_slice(gc: &mut Gc, bytes: &[u8]) -> GcRef {
@@ -1398,6 +1414,63 @@ mod tests {
     }
 
     #[test]
+    fn empty_struct_sequences_validate_exact_metadata() {
+        let mut gc = Gc::new();
+        let struct_metas = vec![];
+        let runtime_types = vec![];
+
+        let arr_ref = array::create(&mut gc, ValueMeta::new(99, ValueKind::Struct), 8, 0);
+        let arr_result = catch_unwind(AssertUnwindSafe(|| {
+            pack_slots(
+                &gc,
+                &[arr_ref as u64],
+                ValueMeta::new(0, ValueKind::Array),
+                &struct_metas,
+                &runtime_types,
+            )
+        }));
+        assert!(
+            arr_result.is_err(),
+            "empty struct arrays must validate elem_meta against exact StructMeta"
+        );
+
+        let slice_ref = slice::create(&mut gc, ValueMeta::new(99, ValueKind::Struct), 8, 0, 0);
+        let slice_result = catch_unwind(AssertUnwindSafe(|| {
+            pack_slots(
+                &gc,
+                &[slice_ref as u64],
+                ValueMeta::new(0, ValueKind::Slice),
+                &struct_metas,
+                &runtime_types,
+            )
+        }));
+        assert!(
+            slice_result.is_err(),
+            "empty struct slices must validate elem_meta against exact StructMeta"
+        );
+    }
+
+    #[test]
+    fn sequence_layout_contracts_do_not_fall_back_or_debug_assert_only() {
+        let source = include_str!("pack.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("pack source should contain tests section");
+        let normalized = source.split_whitespace().collect::<String>();
+
+        assert!(
+            !normalized.contains(
+                "ifmeta_id<struct_metas.len(){struct_metas[meta_id].slot_types.len()}else{elem_bytes.div_ceil(SLOT_BYTES)}"
+            ),
+            "struct sequence slot layout must come from exact StructMeta metadata"
+        );
+        assert!(
+            !source.contains("debug_assert_eq!(encoding, SEQUENCE_ENCODING_ELEMENTS)"),
+            "packed sequence encoding validation must be active in release builds"
+        );
+    }
+
+    #[test]
     fn test_pack_queue_handle_rejects_chan() {
         let mut gc = Gc::new();
         let struct_metas = vec![];
@@ -1423,5 +1496,26 @@ mod tests {
             )
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pack_queue_handle_rejects_nil_chan_metadata() {
+        let gc = Gc::new();
+        let struct_metas = vec![];
+        let runtime_types = vec![];
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            pack_slots(
+                &gc,
+                &[0],
+                ValueMeta::new(0, ValueKind::Channel),
+                &struct_metas,
+                &runtime_types,
+            )
+        }));
+        assert!(
+            result.is_err(),
+            "chan must not be encoded into island payloads"
+        );
     }
 }

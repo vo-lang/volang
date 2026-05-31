@@ -5,6 +5,7 @@ mod analysis;
 mod call_helpers;
 mod capability;
 mod contract;
+mod contract_graph;
 mod effects;
 mod func_compiler;
 mod helpers;
@@ -12,14 +13,17 @@ mod intrinsics;
 pub mod loop_analysis;
 mod loop_compiler;
 mod metadata;
+mod semantics;
 mod translate;
 mod translator;
 mod verifier;
 
 pub use capability::{capability_matrix, opcode_capability, BackendStatus, FallbackPolicy};
+pub use contract_graph::{jit_contract_graph, ContractEdge};
 pub use func_compiler::FunctionCompiler;
 pub use loop_analysis::LoopInfo;
 pub use loop_compiler::{CompiledLoop, LoopCompiler, LoopFunc};
+pub use semantics::{opcode_semantic_matrix, opcode_semantics, OpcodeSemantics};
 pub use translator::{HelperFuncs, IrEmitter, TranslateResult};
 pub use verifier::{verify_jit_metadata, JitMetadataError};
 
@@ -195,7 +199,9 @@ impl JitCompiler {
 
     pub fn with_debug(debug_ir: bool) -> Result<Self, JitError> {
         let mut flag_builder = settings::builder();
-        flag_builder.set("opt_level", "speed").unwrap();
+        flag_builder
+            .set("opt_level", "speed")
+            .map_err(|e| JitError::Internal(e.to_string()))?;
 
         let isa_builder =
             cranelift_native::builder().map_err(|e| JitError::Internal(e.to_string()))?;
@@ -263,22 +269,16 @@ impl JitCompiler {
     fn finalize_function(
         &mut self,
         func_id_cl: cranelift_module::FuncId,
-        #[cfg_attr(not(debug_assertions), allow(unused))] name: &str,
+        name: &str,
     ) -> Result<*const u8, JitError> {
-        #[cfg(debug_assertions)]
-        {
-            let flags = settings::Flags::new(settings::builder());
-            match cranelift_codegen::verifier::verify_function(&self.ctx.func, &flags) {
-                Ok(()) => {
-                    if self.debug_ir {
-                        eprintln!("[JIT VERIFY OK] {}", name);
-                    }
-                }
-                Err(errors) => {
-                    eprintln!("=== IR Verification FAILED for {} ===", name);
-                    eprintln!("Errors: {}", errors);
-                }
-            }
+        let flags = settings::Flags::new(settings::builder());
+        cranelift_codegen::verifier::verify_function(&self.ctx.func, &flags).map_err(|errors| {
+            JitError::Internal(format!(
+                "Cranelift IR verification failed for {name}: {errors}"
+            ))
+        })?;
+        if self.debug_ir {
+            eprintln!("[JIT VERIFY OK] {}", name);
         }
 
         self.module.define_function(func_id_cl, &mut self.ctx)?;
@@ -373,6 +373,7 @@ impl JitCompiler {
         loop_info: &LoopInfo,
         available_direct_callees: &[u32],
     ) -> Result<(), JitError> {
+        validate_loop_info(func, loop_info)?;
         let begin_pc = loop_info.begin_pc;
         if self.cache.contains_loop(func_id, begin_pc) {
             return Ok(());
@@ -453,10 +454,23 @@ impl JitCompiler {
     }
 }
 
-impl Default for JitCompiler {
-    fn default() -> Self {
-        Self::new().expect("failed to create JIT compiler")
+fn validate_loop_info(func: &FunctionDef, loop_info: &LoopInfo) -> Result<(), JitError> {
+    if loop_info.begin_pc > loop_info.end_pc || loop_info.end_pc >= func.code.len() {
+        return Err(JitError::InvalidOsrTarget(loop_info.begin_pc));
     }
+    let local_slots = func.local_slots as usize;
+    if let Some(slot) = loop_info
+        .live_in
+        .iter()
+        .chain(loop_info.live_out.iter())
+        .copied()
+        .find(|slot| *slot as usize >= local_slots)
+    {
+        return Err(JitError::Internal(format!(
+            "loop OSR live slot {slot} exceeds local slot count {local_slots}"
+        )));
+    }
+    Ok(())
 }
 
 /// Check if a function may use the native-stack direct JIT path that elides a
@@ -508,8 +522,28 @@ mod tests {
         local_slots: u16,
         ret_slots: u16,
     ) -> FunctionDef {
+        make_func_with_slot_types_and_sig(
+            code,
+            vec![SlotType::Value; local_slots as usize],
+            param_count,
+            param_slots,
+            ret_slots,
+        )
+    }
+
+    fn make_func_with_slot_types(code: Vec<Instruction>, slot_types: Vec<SlotType>) -> FunctionDef {
+        make_func_with_slot_types_and_sig(code, slot_types, 0, 0, 0)
+    }
+
+    fn make_func_with_slot_types_and_sig(
+        code: Vec<Instruction>,
+        slot_types: Vec<SlotType>,
+        param_count: u16,
+        param_slots: u16,
+        ret_slots: u16,
+    ) -> FunctionDef {
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
-        let slot_types = vec![SlotType::Value; local_slots as usize];
+        let local_slots = slot_types.len() as u16;
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
         let borrowed_scan_slots_prefix =
             FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
@@ -629,6 +663,39 @@ mod tests {
         assert!(callback.touches_interface);
     }
 
+    #[test]
+    fn gc_write_barrier_contract_matches_vm_and_lowering_matrix() {
+        let expected_barrier_ops = [
+            Opcode::PtrSet,
+            Opcode::ArraySet,
+            Opcode::SliceSet,
+            Opcode::MapSet,
+        ];
+        for opcode in opcode_semantic_matrix()
+            .iter()
+            .map(|row| row.opcode)
+            .filter(|opcode| *opcode != Opcode::Invalid)
+        {
+            let expected = expected_barrier_ops.contains(&opcode);
+            assert_eq!(
+                crate::contract::opcode_contract(opcode).needs_write_barrier,
+                expected,
+                "{opcode:?} write-barrier contract must match VM/JIT heap-store semantics"
+            );
+        }
+
+        let memory_lowering = include_str!("translate/memory.rs");
+        let collection_lowering = include_str!("translate/collections.rs");
+        assert!(
+            memory_lowering.contains("require_helper(e.helpers().write_barrier"),
+            "PtrSet lowering must use the write-barrier helper when flags require it"
+        );
+        assert!(
+            collection_lowering.contains("emit_array_write_barrier"),
+            "Array/Slice element writes must route through write-barrier lowering"
+        );
+    }
+
     struct JitContextParts {
         safepoint_flag: bool,
         panic_flag: bool,
@@ -730,14 +797,14 @@ mod tests {
 
     #[test]
     fn compile_supports_port_select_recv_opcode() {
-        let func = make_func(
+        let func = make_func_with_slot_types(
             vec![
-                Instruction::with_flags(Opcode::SelectBegin, 0, 1, 0, 0),
+                Instruction::with_flags(Opcode::SelectBegin, 1, 0, 0, 0),
                 Instruction::with_flags(Opcode::SelectRecv, 2, 0, 0, 0),
-                Instruction::new(Opcode::SelectExec, 0, 0, 0),
+                Instruction::new(Opcode::SelectExec, 1, 0, 0),
                 Instruction::new(Opcode::Return, 0, 0, 0),
             ],
-            1,
+            vec![SlotType::GcRef, SlotType::Value, SlotType::Value],
         );
         let mut module = VoModule::new("test".into());
         module.functions.push(func);
@@ -754,7 +821,7 @@ mod tests {
 
     #[test]
     fn compile_supports_port_queue_opcodes() {
-        let func = make_func(
+        let func = make_func_with_slot_types(
             vec![
                 Instruction::with_flags(
                     Opcode::QueueNew,
@@ -770,7 +837,13 @@ mod tests {
                 Instruction::new(Opcode::QueueClose, 0, 0, 0),
                 Instruction::new(Opcode::Return, 0, 0, 0),
             ],
-            5,
+            vec![
+                SlotType::GcRef,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+            ],
         );
         let mut module = VoModule::new("test".into());
         module.functions.push(func);
@@ -851,6 +924,243 @@ mod tests {
         );
     }
 
+    fn run_const_float_to_int(value: f64) -> i64 {
+        let func = make_func_with_slot_types_and_sig(
+            vec![
+                Instruction::new(Opcode::LoadConst, 0, 0, 0),
+                Instruction::new(Opcode::ConvF2I, 1, 0, 0),
+                Instruction::new(Opcode::Return, 1, 1, 0),
+            ],
+            vec![SlotType::Float, SlotType::Value],
+            0,
+            0,
+            1,
+        );
+        let mut module = VoModule::new("test".into());
+        module.constants.push(Constant::Float(value));
+        module.functions.push(func);
+
+        let mut jit = JitCompiler::new().expect("create jit compiler");
+        jit.compile(0, &module.functions[0], &module, &[])
+            .expect("compile float-to-int repro");
+        let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
+
+        let mut args = [0_u64; 2];
+        let mut ret = [0_u64; 1];
+        let mut parts = JitContextParts::new();
+        let mut ctx = parts.context(&module, &mut args);
+
+        let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+        assert_eq!(result, JitResult::Ok);
+        ret[0] as i64
+    }
+
+    #[test]
+    fn jit_float_to_int_matches_vm_saturating_cast_edges() {
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            (i64::MAX as f64) * 2.0,
+            (i64::MIN as f64) * 2.0,
+            3.9,
+            -3.9,
+        ] {
+            assert_eq!(
+                run_const_float_to_int(value),
+                value as i64,
+                "ConvF2I must match VM/Rust cast semantics for {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_trap_denylist_for_float_to_int_uses_saturating_lowering() {
+        let src = include_str!("translate/conversions.rs");
+        assert!(
+            !src.contains(".fcvt_to_sint("),
+            "ConvF2I must not use host-trapping fcvt_to_sint"
+        );
+        assert!(
+            src.contains(".fcvt_to_sint_sat("),
+            "ConvF2I must use saturating lowering to match VM semantics"
+        );
+    }
+
+    #[test]
+    fn host_trap_denylist_for_array_bounds_checks_uses_nil_guarded_len() {
+        let src = include_str!("translate/collections.rs");
+        assert_eq!(
+            src.matches("emit_array_bounds_check(e, arr, idx);").count(),
+            3,
+            "ArrayGet/ArraySet/ArrayAddr must all use the nil-aware array bounds helper"
+        );
+        assert!(
+            !src.contains("load(types::I64, MemFlags::trusted(), arr, 0)"),
+            "array lowering must not load ArrayHeader.len before converting nil arrays into a recoverable bounds trap"
+        );
+    }
+
+    #[test]
+    fn host_trap_denylist_for_large_dynamic_shift_masks_before_shift() {
+        let src = include_str!("translate/scalar.rs");
+        assert!(
+            src.contains("let safe_shift = e.builder().ins().select(is_large, zero, b);"),
+            "dynamic shifts must select a safe shift amount before emitting shift IR"
+        );
+        for raw_shift in [
+            "let shifted = e.builder().ins().ishl(a, b);",
+            "let shifted = e.builder().ins().sshr(a, b);",
+            "let shifted = e.builder().ins().ushr(a, b);",
+        ] {
+            assert!(
+                !src.contains(raw_shift),
+                "dynamic shift lowering must not emit unchecked large-shift IR: {raw_shift}"
+            );
+        }
+    }
+
+    #[test]
+    fn elem_bytes_lowering_has_no_dynamic_register_fallback() {
+        let src = include_str!("translate/collections.rs");
+        assert!(
+            !src.contains("e.read_var(eb_reg)"),
+            "dynamic elem_bytes must come from verified JIT metadata, not from a runtime register fallback"
+        );
+    }
+
+    #[test]
+    fn array_slice_multi_slot_barriers_use_typed_metadata_helper() {
+        let lowering = include_str!("translate/collections.rs");
+        let runtime = include_str!("../../vo-runtime/src/jit_api.rs");
+        assert!(
+            lowering.contains("typed_write_barrier_by_meta"),
+            "Array/Slice multi-slot writes must use the typed metadata barrier helper"
+        );
+        assert!(
+            lowering.contains("emit_checked_jit_result_helper_call"),
+            "typed metadata barrier helper returns JitResult and lowering must check it"
+        );
+        let typed_barrier_abi = vo_runtime::jit_api::runtime_helper_abi_fields()
+            .iter()
+            .find(|field| field.name == "vo_gc_typed_write_barrier_by_meta")
+            .expect("typed metadata barrier ABI manifest row");
+        assert_eq!(
+            typed_barrier_abi.ret,
+            vo_runtime::jit_api::JitAbiType::JitResult,
+            "typed metadata barrier helper import must be generated with a JitResult return"
+        );
+        assert!(
+            runtime.contains("vo_gc_typed_write_barrier_by_meta"),
+            "runtime ABI must expose a typed metadata barrier helper for JIT lowering"
+        );
+        assert!(
+            runtime.contains(") -> JitResult") && runtime.contains("try_typed_write_barrier_by_meta"),
+            "runtime typed metadata barrier helper must return JitResult instead of panicking across extern C"
+        );
+        assert!(
+            !lowering.contains("Barrier each slot")
+                && !lowering.contains("Conservative: barrier all slots"),
+            "multi-slot Array/Slice barriers must not rely on conservative raw per-slot barriers"
+        );
+    }
+
+    fn collect_jit_context_offsets(src: &str, out: &mut std::collections::BTreeSet<String>) {
+        let needle = "JitContext::OFFSET_";
+        let mut rest = src;
+        while let Some(pos) = rest.find(needle) {
+            let after = &rest[pos + needle.len()..];
+            let len = after
+                .bytes()
+                .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
+                .count();
+            if len > 0 {
+                out.insert(after[..len].to_ascii_lowercase());
+            }
+            rest = &after[len..];
+        }
+    }
+
+    #[test]
+    fn runtime_abi_manifest_covers_all_generated_jit_context_offsets() {
+        let mut used = std::collections::BTreeSet::new();
+        for src in [
+            include_str!("call_helpers.rs"),
+            include_str!("contract.rs"),
+            include_str!("func_compiler.rs"),
+            include_str!("loop_compiler.rs"),
+            include_str!("translate/runtime_ops.rs"),
+        ] {
+            collect_jit_context_offsets(src, &mut used);
+        }
+
+        let manifest: std::collections::BTreeSet<_> = vo_runtime::jit_api::jit_context_abi_fields()
+            .iter()
+            .map(|field| field.name)
+            .collect();
+
+        let missing: Vec<_> = used
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !manifest.contains(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "JIT uses JitContext offsets missing from runtime ABI manifest: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn lowering_paths_do_not_raw_expect_registered_helpers() {
+        for (path, src) in [
+            ("contract.rs", include_str!("contract.rs")),
+            ("call_helpers.rs", include_str!("call_helpers.rs")),
+            ("translate/memory.rs", include_str!("translate/memory.rs")),
+            (
+                "translate/collections.rs",
+                include_str!("translate/collections.rs"),
+            ),
+            (
+                "translate/runtime_ops.rs",
+                include_str!("translate/runtime_ops.rs"),
+            ),
+        ] {
+            for needle in [
+                ".expect(\"",
+                "helper not registered",
+                "helper must be registered",
+                "must be available",
+            ] {
+                assert!(
+                    !src.contains(needle),
+                    "{path} must return JitError/JitResult::JitError for missing helpers; found {needle:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cranelift_ir_verifier_is_fail_fast_in_all_builds() {
+        let src = include_str!("lib.rs");
+        let finalize = src
+            .split("fn finalize_function")
+            .nth(1)
+            .expect("finalize_function body");
+        let verifier_prefix = finalize
+            .split("verify_function")
+            .next()
+            .expect("verifier prefix");
+
+        assert!(
+            !verifier_prefix.contains("debug_assertions"),
+            "Cranelift IR verification must not be debug-only"
+        );
+        assert!(
+            finalize.contains("JitError::Internal(format!"),
+            "Cranelift IR verifier errors must fail the JIT compile boundary"
+        );
+    }
+
     #[test]
     fn jit_copy_n_overlap_matches_memmove_semantics() {
         let func = make_func_with_sig(
@@ -926,5 +1236,31 @@ mod tests {
             "normal OSR exits must publish the resume pc through ctx.loop_exit_pc"
         );
         assert_eq!(locals[0], 123);
+    }
+
+    #[test]
+    fn compile_loop_rejects_out_of_range_loop_info_instead_of_panicking() {
+        let func = make_func(vec![Instruction::new(Opcode::LoadInt, 0, 123, 0)], 1);
+        let mut module = VoModule::new("test".into());
+        module.functions.push(func);
+        let loop_info = LoopInfo {
+            depth: 0,
+            begin_pc: 0,
+            end_pc: 7,
+            exit_pc: 1,
+            has_defer: false,
+            has_labeled_break: false,
+            has_labeled_continue: false,
+            live_in: Vec::new(),
+            live_out: vec![0],
+            has_calls: false,
+        };
+
+        let mut jit = JitCompiler::new().expect("create jit compiler");
+        let err = jit
+            .compile_loop(0, &module.functions[0], &module, &loop_info, &[])
+            .expect_err("malformed LoopInfo must fail fast");
+
+        assert!(matches!(err, JitError::InvalidOsrTarget(0)));
     }
 }

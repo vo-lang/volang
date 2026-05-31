@@ -229,7 +229,7 @@ fn emit_concrete_to_iface_from_slot(
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_ptr_new(gcref_slot, meta_reg, src_slots);
-        debug_assert_eq!(src_slots as usize, src_slot_types.len());
+        assert_eq!(src_slots as usize, src_slot_types.len());
         func.emit_ptr_set_with_slot_types(gcref_slot, 0, src_slot, &src_slot_types);
 
         func.emit_with_flags(
@@ -323,7 +323,7 @@ fn compile_iface_assign_internal(
                 let meta_reg = func.alloc_slots(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
                 func.emit_ptr_new(gcref_slot, meta_reg, src_slots);
-                debug_assert_eq!(src_slots as usize, src_slot_types.len());
+                assert_eq!(src_slots as usize, src_slot_types.len());
                 func.emit_ptr_set_with_slot_types(gcref_slot, 0, tmp_data, &src_slot_types);
 
                 func.emit_with_flags(

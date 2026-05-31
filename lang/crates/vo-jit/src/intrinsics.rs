@@ -19,7 +19,10 @@ use crate::translator::IrEmitter;
 /// so the string match cost is negligible.
 pub fn try_emit_for_extern<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> bool {
     let extern_id = inst.b as usize;
-    let name = e.vo_module().externs[extern_id].name.as_str();
+    let Some(extern_def) = e.vo_module().externs.get(extern_id) else {
+        return false;
+    };
+    let name = extern_def.name.as_str();
 
     match name {
         "math_Sqrt" => emit_unary(e, inst, |b, v| b.ins().sqrt(v)),

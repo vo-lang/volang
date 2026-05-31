@@ -18,7 +18,8 @@ func main() {
 	// First test: get method without calling
 	method, err := obj~>Add
 	assert(err == nil, "Error getting method")
-	fmt.Println("Got method:", method)
+	assert(method != nil, "method should not be nil")
+	fmt.Println("Got method")
 	
 	// Test calling the method closure directly via type assertion
 	// This should work if dyn_get_attr returns a proper closure

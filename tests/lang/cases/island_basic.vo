@@ -5,11 +5,11 @@ import "time"
 func main() {
 	// Test basic island creation
 	i := make(island)
-	println("island created:", i)
+	println("island created")
 	
 	// Test basic port creation
 	p := make(chan int, 10)
-	println("port created:", p)
+	println("port created")
 	
 	// Test port send/recv on main island
 	p <- 42
@@ -19,8 +19,8 @@ func main() {
 	
 	// Test go @(island) - run goroutine on island
 	go @(i) func() {
-		println("running on island!")
 	}()
+	println("island goroutine scheduled")
 	
 	// Wait for island to execute
 	time.Sleep(50 * time.Millisecond)

@@ -221,7 +221,7 @@ fn emit_direct_func_call(
 
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
+    let c = crate::type_info::encode_static_call_args(total_arg_slots, ret_slots);
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
     func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
 
@@ -798,7 +798,7 @@ fn emit_static_method_call(
         info,
     )?;
 
-    let c = crate::type_info::encode_call_args(total_slots, ret_slots);
+    let c = crate::type_info::encode_static_call_args(total_slots, ret_slots);
     let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
     func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
 
@@ -846,7 +846,7 @@ fn emit_interface_call_with_args(
     let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
     func.emit_with_flags(
         Opcode::CallIface,
-        method_idx as u8,
+        FuncBuilder::checked_call_iface_method_idx(method_idx),
         iface_slot,
         args_start,
         c,
@@ -986,13 +986,7 @@ pub fn compile_extern_call(
     let args_start = func.alloc_slots(&vec![SlotType::Value; total_slots.max(1) as usize]);
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    func.emit_with_flags(
-        Opcode::CallExtern,
-        total_slots as u8,
-        dst,
-        extern_id as u16,
-        args_start,
-    );
+    func.emit_call_extern(dst, extern_id, args_start, usize::from(total_slots));
     Ok(())
 }
 

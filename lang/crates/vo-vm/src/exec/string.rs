@@ -1,5 +1,10 @@
 //! String instructions: StrNew, StrConcat, StrSlice
 
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::String};
+#[cfg(feature = "std")]
+use std::string::String;
+
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::string;
 use vo_runtime::slot::Slot;
@@ -15,13 +20,23 @@ pub fn exec_str_new(
     inst: &Instruction,
     constants: &[Constant],
     gc: &mut Gc,
-) {
-    if let Constant::String(s) = &constants[inst.b as usize] {
-        let str_ref = string::from_rust_str(gc, s);
-        stack_set(stack, bp + inst.a as usize, str_ref as u64);
-    } else {
-        stack_set(stack, bp + inst.a as usize, 0);
-    }
+) -> Result<(), String> {
+    let constant = constants.get(inst.b as usize).ok_or_else(|| {
+        format!(
+            "StrNew constant index {} out of bounds for {} constants",
+            inst.b,
+            constants.len()
+        )
+    })?;
+    let Constant::String(s) = constant else {
+        return Err(format!(
+            "StrNew constant {} expected string, got {constant:?}",
+            inst.b
+        ));
+    };
+    let str_ref = string::from_rust_str(gc, s);
+    stack_set(stack, bp + inst.a as usize, str_ref as u64);
+    Ok(())
 }
 
 #[inline]

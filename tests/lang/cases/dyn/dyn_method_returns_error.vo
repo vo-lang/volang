@@ -156,6 +156,12 @@ func main() {
     result, _, dynErr6 := obj~>ParseInt()
     assert(dynErr6 == nil, "dyn call should succeed")
     val := result.(int)
+    assert(val == 42, "chained result should be 42")
+    var anyVal any = val
+    assert(anyVal.(int) == 42, "interface chained result should be 42")
+    boxed := []any{val}
+    assert(boxed[0].(int) == 42, "boxed chained result should be 42")
+    assert(fmt.Sprint(val) == "42", "chained result should format as 42")
     fmt.Println("Test 6: chained result =", val)
     
     fmt.Println("dyn_method_returns_error: ok")

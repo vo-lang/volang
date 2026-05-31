@@ -88,7 +88,10 @@ fn run_island_vm(
                 .unwrap_or_else(|e| panic!("failed to load island extensions: {}", e)),
         )
     };
-    vm.load_with_extensions((*module).clone(), ext_loader);
+    if let Err(e) = vm.load_with_extensions((*module).clone(), ext_loader) {
+        eprintln!("island {}: load failed: {:?}", island_id, e);
+        return;
+    }
     vm.state.island_registry = Some(island_registry);
     vm.state.current_island_id = island_id;
     // Initialize global variables (including interface values) before processing commands.

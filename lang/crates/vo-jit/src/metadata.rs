@@ -13,6 +13,7 @@ pub struct MetadataFacts<'a> {
 }
 
 impl<'a> MetadataFacts<'a> {
+    #[allow(dead_code)]
     pub fn none() -> Self {
         Self { instruction: None }
     }
@@ -80,7 +81,11 @@ pub fn elem_layout_from_flags(flags: u8) -> ElemLayout {
         0x44 => (4, false),
         f => (f as usize, false),
     };
-    elem_layout_from_bytes(bytes, needs_sign_extend).expect("valid elem layout")
+    ElemLayout {
+        bytes,
+        slots: bytes.div_ceil(8) as u16,
+        needs_sign_extend,
+    }
 }
 
 pub fn elem_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<ElemLayout> {

@@ -5,12 +5,18 @@
 //! and waking of fibers.
 
 use vo_runtime::gc::GcRef;
-use vo_runtime::jit_api::{JitContext, JitResult};
+use vo_runtime::jit_api::{
+    set_jit_infra_error, JitContext, JitResult, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+};
 
 use crate::vm::helpers;
 use crate::vm::RuntimeTrapKind;
 
 use super::helpers::{extract_context, set_jit_trap};
+
+const JIT_QUEUE_CLOSE_UNEXPECTED_ACTION: u64 = 1;
+const JIT_QUEUE_SEND_UNEXPECTED_ACTION: u64 = 2;
+const JIT_QUEUE_RECV_UNEXPECTED_RESULT: u64 = 3;
 
 fn set_queue_trap(
     gc: &mut vo_runtime::gc::Gc,
@@ -51,13 +57,26 @@ pub extern "C" fn jit_queue_close(ctx: *mut JitContext, chan: u64) -> JitResult 
             JitResult::Ok
         }
         QueueAction::Trap(kind) => set_queue_trap(&mut vm.state.gc, fiber, kind),
+        QueueAction::Malformed(_) => set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_QUEUE_CLOSE_UNEXPECTED_ACTION,
+        ),
         // channel_close_core never produces these variants
         QueueAction::Block | QueueAction::ReplayThenBlock | QueueAction::Wake(_) => {
-            unreachable!("close")
+            set_jit_infra_error(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                JIT_QUEUE_CLOSE_UNEXPECTED_ACTION,
+            )
         }
         QueueAction::RemoteSend { .. }
         | QueueAction::RemoteRecv { .. }
-        | QueueAction::RemoteRecvData { .. } => unreachable!("close"),
+        | QueueAction::RemoteRecvData { .. } => set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_QUEUE_CLOSE_UNEXPECTED_ACTION,
+        ),
     }
 }
 
@@ -111,6 +130,11 @@ pub extern "C" fn jit_queue_send(
             JitResult::WaitQueue
         }
         QueueAction::Trap(kind) => set_queue_trap(&mut vm.state.gc, fiber, kind),
+        QueueAction::Malformed(_) => set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_QUEUE_SEND_UNEXPECTED_ACTION,
+        ),
         QueueAction::RemoteRecvData {
             endpoint_id,
             target_island,
@@ -122,8 +146,16 @@ pub extern "C" fn jit_queue_send(
             JitResult::Ok
         }
         // channel_send_core never produces these variants
-        QueueAction::ReplayThenBlock | QueueAction::Close { .. } => unreachable!("send"),
-        QueueAction::RemoteRecv { .. } | QueueAction::RemoteClose { .. } => unreachable!("send"),
+        QueueAction::ReplayThenBlock | QueueAction::Close { .. } => set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_QUEUE_SEND_UNEXPECTED_ACTION,
+        ),
+        QueueAction::RemoteRecv { .. } | QueueAction::RemoteClose { .. } => set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_QUEUE_SEND_UNEXPECTED_ACTION,
+        ),
     }
 }
 
@@ -178,8 +210,17 @@ pub extern "C" fn jit_queue_recv(
             JitResult::WaitQueue
         }
         Err(QueueRecvCoreResult::Trap(kind)) => set_queue_trap(&mut vm.state.gc, fiber, kind),
+        Err(QueueRecvCoreResult::Malformed(_)) => set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_QUEUE_RECV_UNEXPECTED_RESULT,
+        ),
         Err(QueueRecvCoreResult::Success { .. } | QueueRecvCoreResult::Closed) => {
-            unreachable!("complete_queue_recv returned terminal recv result as Err")
+            set_jit_infra_error(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                JIT_QUEUE_RECV_UNEXPECTED_RESULT,
+            )
         }
     }
 }

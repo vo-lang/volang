@@ -6,6 +6,7 @@ use vo_analysis::importer::NullImporter;
 use vo_analysis::{AnalysisError, Checker, Project};
 use vo_codegen::compile_project;
 use vo_common::SourceMap;
+use vo_runtime::{ValueKind, ValueMeta};
 use vo_syntax::parser;
 use vo_vm::bytecode::JitInstructionMetadata;
 use vo_vm::instruction::Opcode;
@@ -66,10 +67,191 @@ fn compile_and_run(source: &str) {
     }
 
     let mut vm = Vm::new();
-    vm.load(module);
+    vm.load(module).unwrap();
     vm.run().expect("VM execution failed");
 
     println!("✓ VM execution completed");
+}
+
+#[test]
+fn global_array_expression_loads_into_gcref_slot() {
+    let source = r#"
+package main
+
+var first = [2]int{10, 20}
+
+func pick(i int) int {
+    return first[i]
+}
+
+func main() int {
+    return pick(1)
+}
+"#;
+
+    let module = compile_source(source);
+    let pick = module
+        .functions
+        .iter()
+        .find(|func| func.name == "pick")
+        .expect("pick function should be compiled");
+    let global_get = pick
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::GlobalGet)
+        .expect("global array expression should load the global array reference");
+
+    assert_eq!(
+        pick.slot_types[global_get.a as usize],
+        vo_runtime::SlotType::GcRef,
+        "global arrays are stored as GcRef roots, so GlobalGet destinations must be GcRef locals"
+    );
+}
+
+#[test]
+fn global_named_struct_array_elem_meta_uses_struct_meta_id_not_rttid() {
+    let source = r#"
+package main
+
+type Pair struct {
+    name string
+    next *Pair
+}
+
+var pairs = [1]Pair{{name: "root"}}
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    let pair_meta = module
+        .named_type_metas
+        .iter()
+        .find(|meta| meta.name == "main.Pair")
+        .expect("Pair named type metadata");
+    let expected_meta_id = pair_meta.underlying_meta.meta_id();
+
+    let init = module
+        .functions
+        .iter()
+        .find(|func| func.name == "__init__")
+        .expect("__init__ function");
+    let (array_new_pc, array_new) = init
+        .code
+        .iter()
+        .enumerate()
+        .find(|(_, inst)| inst.opcode() == Opcode::ArrayNew)
+        .expect("global array initializer should allocate an array");
+    let meta_reg = array_new.b;
+    let meta_const = init.code[..array_new_pc]
+        .iter()
+        .rev()
+        .find(|inst| inst.opcode() == Opcode::LoadConst && inst.a == meta_reg)
+        .expect("ArrayNew metadata register must be loaded from a constant");
+    let raw = match module.constants.get(meta_const.b as usize) {
+        Some(vo_vm::bytecode::Constant::Int(raw)) => *raw as u32,
+        other => panic!("ArrayNew metadata constant must be int, got {other:?}"),
+    };
+    let actual = ValueMeta::from_raw(raw);
+
+    assert_eq!(actual.value_kind(), ValueKind::Struct);
+    assert_eq!(
+        actual.meta_id(),
+        expected_meta_id,
+        "global array element ValueMeta must store StructMeta id, not RTTID"
+    );
+    assert!(
+        (actual.meta_id() as usize) < module.struct_metas.len(),
+        "global array element StructMeta id must be in range"
+    );
+}
+
+#[test]
+fn anonymous_interface_runtime_type_uses_exact_interface_meta_id() {
+    let source = r#"
+package main
+
+type Holder struct {
+    r interface {
+        Read() int
+    }
+}
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    let (meta_id, methods) = module
+        .runtime_types
+        .iter()
+        .find_map(|rt| match rt {
+            vo_runtime::RuntimeType::Interface { methods, meta_id }
+                if methods.iter().any(|m| m.name == "Read") =>
+            {
+                Some((*meta_id, methods))
+            }
+            _ => None,
+        })
+        .expect("anonymous interface runtime type");
+
+    let meta = module
+        .interface_metas
+        .get(meta_id as usize)
+        .expect("anonymous interface runtime type must reference an InterfaceMeta");
+    assert_eq!(meta.method_names, vec!["Read".to_string()]);
+    assert_eq!(
+        methods.len(),
+        meta.methods.len(),
+        "RuntimeType::Interface must stay aligned with exact InterfaceMeta"
+    );
+}
+
+#[test]
+fn runtime_interface_types_do_not_fallback_to_meta_zero() {
+    let source = include_str!("../src/type_interner.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap_or_else(|| include_str!("../src/type_interner.rs"));
+
+    assert!(
+        !source.contains("ctx.interface_meta_ids.get(&type_key).copied().unwrap_or(0)"),
+        "non-empty interface runtime metadata must not silently fallback to meta 0"
+    );
+}
+
+#[test]
+fn codegen_layout_metadata_does_not_default_unresolved_shapes_to_zero() {
+    let sources = [
+        ("type_interner.rs", include_str!("../src/type_interner.rs")),
+        ("type_info.rs", include_str!("../src/type_info.rs")),
+        ("wrapper.rs", include_str!("../src/wrapper.rs")),
+        ("lib.rs", include_str!("../src/lib.rs")),
+    ];
+    let forbidden = [
+        "len: arr.len().unwrap_or(0)",
+        "let len = arr.len().unwrap_or(0) as usize",
+        ".try_as_tuple() .map(|t|",
+        ".typ() .map(|sig_type|",
+        ".filter_map(|&p|",
+        ".filter_map(|&r|",
+        ".filter_map(|&v|",
+        "RuntimeType::Func { params: Vec::new(), results: Vec::new(), variadic: false, }",
+        "debug_assert!",
+        "debug_assert_eq!",
+        ".min(self.slot_types.len())",
+        "vec![SlotType::Value; count]",
+    ];
+
+    for (name, source) in sources {
+        let source = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        for pattern in forbidden {
+            assert!(
+                !normalized.contains(pattern),
+                "{name} must fail fast on unresolved codegen layout metadata instead of defaulting to zero"
+            );
+        }
+    }
 }
 
 #[test]

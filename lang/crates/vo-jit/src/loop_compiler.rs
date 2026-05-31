@@ -38,7 +38,7 @@ pub struct LoopCompiler<'a> {
     entry_block: Block,
     exit_block: Block,
     current_pc: usize,
-    locals_ptr_var: Option<Variable>,
+    locals_ptr_var: Variable,
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
@@ -66,6 +66,8 @@ impl<'a> LoopCompiler<'a> {
         let exit_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
 
+        let local_slots = func_def.local_slots as u32;
+
         Self {
             builder,
             func_id,
@@ -77,7 +79,7 @@ impl<'a> LoopCompiler<'a> {
             entry_block,
             exit_block,
             current_pc: 0,
-            locals_ptr_var: None,
+            locals_ptr_var: Variable::from_u32(local_slots + 1000),
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
@@ -98,7 +100,7 @@ impl<'a> LoopCompiler<'a> {
         self.memory_only_start = analysis.memory_only_start;
         self.reg_const_facts = analysis.reg_const_facts;
         self.declare_variables();
-        self.scan_jump_targets();
+        self.scan_jump_targets()?;
 
         // Exactly like func_compiler: entry_block -> prologue -> sequential compile
         self.builder.switch_to_block(self.entry_block);
@@ -125,8 +127,12 @@ impl<'a> LoopCompiler<'a> {
                 block_terminated = false;
             }
 
-            self.apply_reg_const_facts(pc);
-            let inst = &self.func_def.code[pc];
+            self.apply_reg_const_facts(pc)?;
+            let inst = self
+                .func_def
+                .code
+                .get(pc)
+                .ok_or(JitError::InvalidOsrTarget(pc))?;
             if inst.opcode() == Opcode::Hint {
                 continue;
             }
@@ -164,25 +170,28 @@ impl<'a> LoopCompiler<'a> {
         crate::translator::is_float_slot(&self.func_def.slot_types, slot)
     }
 
-    fn scan_jump_targets(&mut self) {
+    fn scan_jump_targets(&mut self) -> Result<(), JitError> {
         let loop_end = self.loop_info.end_pc + 1;
 
         // Always create block for loop header (begin_pc = loop_start)
         self.ensure_block(self.loop_info.begin_pc);
 
         for pc in self.loop_info.begin_pc..loop_end {
-            let inst = &self.func_def.code[pc];
+            let inst = self
+                .func_def
+                .code
+                .get(pc)
+                .ok_or(JitError::InvalidOsrTarget(pc))?;
             match inst.opcode() {
                 Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
-                    let offset = inst.imm32();
-                    let raw_target = (pc as i32 + offset) as usize;
+                    let raw_target = self.checked_branch_target(pc, inst.imm32(), inst.opcode())?;
                     // Create block for targets within loop body
                     if raw_target >= self.loop_info.begin_pc && raw_target < loop_end {
                         self.ensure_block(raw_target);
                     }
                 }
                 Opcode::ForLoop => {
-                    let target = inst.forloop_target(pc);
+                    let target = self.checked_forloop_target(pc, inst)?;
                     if target >= self.loop_info.begin_pc && target < loop_end {
                         self.ensure_block(target);
                     }
@@ -190,6 +199,7 @@ impl<'a> LoopCompiler<'a> {
                 _ => {}
             }
         }
+        Ok(())
     }
 
     fn ensure_block(&mut self, pc: usize) -> Block {
@@ -202,17 +212,53 @@ impl<'a> LoopCompiler<'a> {
         }
     }
 
+    fn block_for_pc(&self, pc: usize, context: &'static str) -> Result<Block, JitError> {
+        self.blocks.get(&pc).copied().ok_or_else(|| {
+            JitError::Internal(format!(
+                "missing OSR JIT basic block for {context} target pc {pc}"
+            ))
+        })
+    }
+
+    fn checked_branch_target(
+        &self,
+        pc: usize,
+        offset: i32,
+        opcode: Opcode,
+    ) -> Result<usize, JitError> {
+        let target = pc as i64 + offset as i64;
+        if target >= 0 && (target as usize) < self.func_def.code.len() {
+            Ok(target as usize)
+        } else {
+            Err(JitError::Internal(format!(
+                "{opcode:?} at pc {pc} targets invalid pc {target} (code_len={})",
+                self.func_def.code.len()
+            )))
+        }
+    }
+
+    fn checked_forloop_target(&self, pc: usize, inst: &Instruction) -> Result<usize, JitError> {
+        let target = pc as i64 + 1 + i64::from(inst.c as i16);
+        if target >= 0 && (target as usize) < self.func_def.code.len() {
+            Ok(target as usize)
+        } else {
+            Err(JitError::Internal(format!(
+                "ForLoop at pc {pc} targets invalid pc {target} (code_len={})",
+                self.func_def.code.len()
+            )))
+        }
+    }
+
     fn clear_flow_facts(&mut self) {
         self.checked_non_nil.clear();
         self.reg_consts.clear();
     }
 
-    fn apply_reg_const_facts(&mut self, pc: usize) {
-        self.reg_consts = self
-            .reg_const_facts
-            .get(pc)
-            .cloned()
-            .expect("missing per-PC register-constant facts");
+    fn apply_reg_const_facts(&mut self, pc: usize) -> Result<(), JitError> {
+        self.reg_consts = self.reg_const_facts.get(pc).cloned().ok_or_else(|| {
+            JitError::Internal(format!("missing per-PC register-constant facts at pc {pc}"))
+        })?;
+        Ok(())
     }
 
     fn emit_prologue(&mut self) {
@@ -225,10 +271,8 @@ impl<'a> LoopCompiler<'a> {
 
         // Wrap locals_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
         // it after any call that may have triggered fiber.stack reallocation.
-        let locals_ptr_var = Variable::from_u32((self.vars.len() + 1000) as u32);
-        self.builder.declare_var(locals_ptr_var, types::I64);
-        self.builder.def_var(locals_ptr_var, locals_ptr_init);
-        self.locals_ptr_var = Some(locals_ptr_var);
+        self.builder.declare_var(self.locals_ptr_var, types::I64);
+        self.builder.def_var(self.locals_ptr_var, locals_ptr_init);
 
         // Normal entry: load all variables from memory
         for i in 0..self.vars.len() {
@@ -246,7 +290,7 @@ impl<'a> LoopCompiler<'a> {
         // Spill SSA-only slots (< memory_only_start) to locals_ptr.
         // Memory-aliased slots (>= memory_only_start) are already up-to-date in memory.
         let spill_count = (self.memory_only_start as usize).min(self.vars.len());
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
         for i in 0..spill_count {
             let offset = (i * 8) as i32;
             let val = self.builder.use_var(self.vars[i]);
@@ -258,7 +302,7 @@ impl<'a> LoopCompiler<'a> {
 
     fn load_var_from_memory(&mut self, slot: u16) -> Value {
         let offset = (slot as i32) * 8;
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
         self.builder
             .ins()
             .load(types::I64, MemFlags::trusted(), locals_ptr, offset)
@@ -273,18 +317,18 @@ impl<'a> LoopCompiler<'a> {
 
         match inst.opcode() {
             Opcode::Jump => {
-                self.jump(inst);
+                self.jump(inst)?;
                 Ok(true)
             }
             Opcode::JumpIf => {
-                self.jump_if(inst);
+                self.jump_if(inst)?;
                 Ok(false)
             }
             Opcode::JumpIfNot => {
-                self.jump_if_not(inst);
+                self.jump_if_not(inst)?;
                 Ok(false)
             }
-            Opcode::ForLoop => Ok(self.forloop(inst)),
+            Opcode::ForLoop => self.forloop(inst),
             Opcode::Return => {
                 self.ret(inst);
                 Ok(true)
@@ -293,7 +337,7 @@ impl<'a> LoopCompiler<'a> {
                 self.panic(inst);
                 Ok(true)
             }
-            Opcode::Call => Ok(self.call(inst)),
+            Opcode::Call => self.call(inst),
             Opcode::CallExtern => {
                 crate::call_helpers::emit_call_extern(
                     self,
@@ -301,29 +345,29 @@ impl<'a> LoopCompiler<'a> {
                     crate::call_helpers::CallExternConfig {
                         current_pc: self.current_pc,
                     },
-                );
+                )?;
                 Ok(false)
             }
             Opcode::CallClosure => {
-                crate::call_helpers::emit_call_closure(self, inst);
+                crate::call_helpers::emit_call_closure(self, inst)?;
                 Ok(false)
             }
             Opcode::CallIface => {
-                crate::call_helpers::emit_call_iface(self, inst);
+                crate::call_helpers::emit_call_iface(self, inst)?;
                 Ok(false)
             }
             other => Err(JitError::UnsupportedOpcode(other)),
         }
     }
 
-    fn jump(&mut self, inst: &Instruction) {
-        let offset = inst.imm32();
-        let raw_target = (self.current_pc as i32 + offset) as usize;
+    fn jump(&mut self, inst: &Instruction) -> Result<(), JitError> {
+        let raw_target =
+            self.checked_branch_target(self.current_pc, inst.imm32(), inst.opcode())?;
         let loop_end = self.loop_info.end_pc + 1;
 
         // Back-edge: jump to loop header (begin_pc = loop_start)
         if raw_target == self.loop_info.begin_pc {
-            let loop_header = self.blocks[&self.loop_info.begin_pc];
+            let loop_header = self.block_for_pc(self.loop_info.begin_pc, "loop header")?;
             self.builder.ins().jump(loop_header, &[]);
         } else if raw_target < self.loop_info.begin_pc || raw_target >= loop_end {
             // Jump outside loop - exit to VM
@@ -331,22 +375,23 @@ impl<'a> LoopCompiler<'a> {
             self.emit_loop_exit(raw_target as u32);
         } else {
             // Jump within loop body
-            let block = self.blocks[&raw_target];
+            let block = self.block_for_pc(raw_target, "jump")?;
             self.builder.ins().jump(block, &[]);
         }
+        Ok(())
     }
 
-    fn jump_if(&mut self, inst: &Instruction) {
-        self.conditional_jump(inst, IntCC::NotEqual);
+    fn jump_if(&mut self, inst: &Instruction) -> Result<(), JitError> {
+        self.conditional_jump(inst, IntCC::NotEqual)
     }
 
-    fn jump_if_not(&mut self, inst: &Instruction) {
-        self.conditional_jump(inst, IntCC::Equal);
+    fn jump_if_not(&mut self, inst: &Instruction) -> Result<(), JitError> {
+        self.conditional_jump(inst, IntCC::Equal)
     }
 
-    fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) {
+    fn conditional_jump(&mut self, inst: &Instruction, cmp_cond: IntCC) -> Result<(), JitError> {
         let cond = self.read_var(inst.a);
-        let target = (self.current_pc as i32 + inst.imm32()) as usize;
+        let target = self.checked_branch_target(self.current_pc, inst.imm32(), inst.opcode())?;
 
         let fall_through = self.builder.create_block();
         let zero = self.builder.ins().iconst(types::I64, 0);
@@ -364,7 +409,7 @@ impl<'a> LoopCompiler<'a> {
             self.emit_loop_exit(target as u32);
         } else {
             // Target within loop - stay in JIT
-            let target_block = self.blocks[&target];
+            let target_block = self.block_for_pc(target, "conditional jump")?;
             self.builder
                 .ins()
                 .brif(cmp, target_block, &[], fall_through, &[]);
@@ -373,10 +418,11 @@ impl<'a> LoopCompiler<'a> {
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
         self.clear_flow_facts();
+        Ok(())
     }
 
     /// Returns true if block is terminated (exit to VM), false if fall-through continues in JIT
-    fn forloop(&mut self, inst: &Instruction) -> bool {
+    fn forloop(&mut self, inst: &Instruction) -> Result<bool, JitError> {
         let idx = self.read_var(inst.a);
         let limit = self.read_var(inst.b);
         let (is_decrement, is_unsigned, is_inclusive) = inst.forloop_flags();
@@ -391,7 +437,8 @@ impl<'a> LoopCompiler<'a> {
         );
         self.write_var(inst.a, next_idx);
 
-        let target_block = self.blocks[&inst.forloop_target(self.current_pc)];
+        let target = self.checked_forloop_target(self.current_pc, inst)?;
+        let target_block = self.block_for_pc(target, "forloop")?;
         let exit_pc = self.current_pc + 1;
 
         // Check if exit_pc is within JIT compilation range
@@ -404,7 +451,7 @@ impl<'a> LoopCompiler<'a> {
             self.builder.switch_to_block(fall_through);
             self.builder.seal_block(fall_through);
             self.clear_flow_facts();
-            false
+            Ok(false)
         } else {
             // Exit outside loop - return to VM
             let exit_block = self.builder.create_block();
@@ -415,7 +462,7 @@ impl<'a> LoopCompiler<'a> {
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
             self.emit_loop_exit(exit_pc as u32);
-            true
+            Ok(true)
         }
     }
 
@@ -446,11 +493,15 @@ impl<'a> LoopCompiler<'a> {
 
     /// Returns true if block is terminated.
     /// JIT-to-JIT direct calls with fallback to VM.
-    fn call(&mut self, inst: &Instruction) -> bool {
+    fn call(&mut self, inst: &Instruction) -> Result<bool, JitError> {
         let func_id = inst.static_call_func_id();
         let arg_start = inst.b as usize;
 
-        let target_func = &self.vo_module.functions[func_id as usize];
+        let target_func = self
+            .vo_module
+            .functions
+            .get(func_id as usize)
+            .ok_or(JitError::FunctionNotFound(func_id))?;
         let callee_func_ref = self
             .callee_func_refs
             .get(func_id as usize)
@@ -462,17 +513,19 @@ impl<'a> LoopCompiler<'a> {
         match call_plan.route_for_loop() {
             crate::call_helpers::CallRoute::KnownDirectJit
             | crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_fallback(self, call_plan.jit_config());
-                false
+                crate::call_helpers::emit_jit_call_with_fallback(self, call_plan.jit_config())?;
+                Ok(false)
             }
             crate::call_helpers::CallRoute::VmFallback => {
                 crate::call_helpers::emit_call_via_vm(
                     self,
                     call_plan.vm_config(self.current_pc + 1),
-                );
-                true
+                )?;
+                Ok(true)
             }
-            crate::call_helpers::CallRoute::DynamicInlineCache => unreachable!(),
+            crate::call_helpers::CallRoute::DynamicInlineCache => Err(JitError::Internal(
+                "static loop call selected dynamic inline-cache route".into(),
+            )),
         }
     }
 
@@ -508,7 +561,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         }
         if slot >= self.memory_only_start {
             let offset = (slot as i32) * 8;
-            let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+            let locals_ptr = self.builder.use_var(self.locals_ptr_var);
             self.builder
                 .ins()
                 .store(MemFlags::trusted(), val, locals_ptr, offset);
@@ -558,26 +611,28 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     }
     fn var_addr(&mut self, slot: u16) -> Value {
         let offset = (slot as i64) * 8;
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
         self.builder.ins().iadd_imm(locals_ptr, offset)
     }
     fn spill_all_vars(&mut self) {
         self.emit_variable_spill();
     }
-    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) {
+    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
         if slot_count == 0 {
-            return;
+            return Ok(());
         }
         let local_count = self.vars.len() as u16;
-        let end_slot = start_slot
-            .checked_add(slot_count)
-            .expect("memory sync slot range overflow");
+        let end_slot = start_slot.checked_add(slot_count).ok_or_else(|| {
+            JitError::Internal(format!(
+                "memory sync slot range overflow at slot {start_slot} count {slot_count}"
+            ))
+        })?;
         let end_slot = end_slot.min(local_count);
         let spill_end = end_slot.min(self.memory_only_start);
         if start_slot >= spill_end {
-            return;
+            return Ok(());
         }
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
         for slot in start_slot..spill_end {
             let offset = (slot as i32) * 8;
             let val = self.builder.use_var(self.vars[slot as usize]);
@@ -585,19 +640,13 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
                 .ins()
                 .store(MemFlags::trusted(), val, locals_ptr, offset);
         }
+        Ok(())
     }
     fn local_slot_count(&self) -> usize {
         self.vars.len()
     }
     fn func_id(&self) -> u32 {
         self.func_id
-    }
-    fn slot_type(&self, slot: u16) -> vo_runtime::SlotType {
-        self.func_def
-            .slot_types
-            .get(slot as usize)
-            .copied()
-            .expect("slot type missing for JIT slot")
     }
     fn read_var_f64(&mut self, slot: u16) -> Value {
         if slot < self.memory_only_start {
@@ -609,7 +658,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
             }
         } else {
             let offset = (slot as i32) * 8;
-            let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+            let locals_ptr = self.builder.use_var(self.locals_ptr_var);
             self.builder
                 .ins()
                 .load(types::F64, MemFlags::trusted(), locals_ptr, offset)
@@ -624,7 +673,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         }
         if slot >= self.memory_only_start {
             let offset = (slot as i32) * 8;
-            let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+            let locals_ptr = self.builder.use_var(self.locals_ptr_var);
             self.builder
                 .ins()
                 .store(MemFlags::trusted(), val, locals_ptr, offset);
@@ -633,7 +682,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         self.reg_consts.remove(&slot);
     }
     fn reload_all_vars_from_memory(&mut self) {
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
         for i in 0..self.vars.len() {
             let offset = (i * 8) as i32;
             let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
@@ -645,18 +694,20 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         }
         self.clear_flow_facts();
     }
-    fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) {
+    fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
         if slot_count == 0 {
-            return;
+            return Ok(());
         }
-        let end_slot = start_slot
-            .checked_add(slot_count)
-            .expect("select sync slot range overflow");
+        let end_slot = start_slot.checked_add(slot_count).ok_or_else(|| {
+            JitError::Internal(format!(
+                "select sync slot range overflow at slot {start_slot} count {slot_count}"
+            ))
+        })?;
         let end_slot = end_slot.min(self.vars.len() as u16);
         if start_slot >= end_slot {
-            return;
+            return Ok(());
         }
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var.unwrap());
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
         for slot in start_slot..end_slot {
             let offset = (slot as i32) * 8;
             if self.is_float_slot(slot) {
@@ -673,6 +724,7 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
                 self.write_var(slot, val);
             }
         }
+        Ok(())
     }
     fn is_checked_non_nil(&self, slot: u16) -> bool {
         self.checked_non_nil.contains(&slot)
@@ -712,7 +764,6 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
         let jit_bp_i64 = self.builder.ins().uextend(types::I64, jit_bp_i32);
         let bp_offset = self.builder.ins().imul_imm(jit_bp_i64, 8);
         let refreshed = self.builder.ins().iadd(stack_ptr, bp_offset);
-        self.builder
-            .def_var(self.locals_ptr_var.unwrap(), refreshed);
+        self.builder.def_var(self.locals_ptr_var, refreshed);
     }
 }

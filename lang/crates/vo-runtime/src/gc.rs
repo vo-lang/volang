@@ -2021,7 +2021,12 @@ mod tests {
     #[test]
     fn test_sweep_allocated_clone_scans_copied_old_child() {
         let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
+        let struct_metas = vec![vo_common_core::bytecode::StructMeta {
+            slot_types: vec![vo_common_core::types::SlotType::GcRef],
+            fields: vec![],
+            field_index: std::collections::HashMap::new(),
+        }];
+        let meta = ValueMeta::new(0, ValueKind::Struct);
         let source = gc.alloc(meta, 1);
         let child = crate::objects::string::create(&mut gc, b"child");
         let child_array = crate::objects::slice::array_ref(child);
@@ -2045,13 +2050,7 @@ mod tests {
         let work = gc.step(
             |gc| gc.mark_gray(cloned_root.get()),
             |gc, obj| {
-                if obj == source || obj == clone {
-                    let raw_child = unsafe { Gc::read_slot(obj, 0) };
-                    if raw_child != 0 {
-                        gc.mark_gray(raw_child as GcRef);
-                    }
-                }
-                crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout);
+                crate::gc_types::scan_object(gc, obj, &struct_metas, &empty_closure_scan_layout);
             },
             |dead| finalized.push(dead),
         );
@@ -2110,21 +2109,13 @@ mod tests {
     }
 
     #[test]
-    fn test_struct_barrier_without_module_is_conservative() {
+    #[should_panic(expected = "typed_write_barrier_by_meta: missing module metadata")]
+    fn test_struct_barrier_without_module_fails_fast() {
         let mut gc = Gc::new();
         let parent_meta = ValueMeta::new(1, ValueKind::Struct);
         let struct_meta = ValueMeta::new(123, ValueKind::Struct);
         let parent = gc.alloc(parent_meta, 1);
         let child = crate::objects::string::create(&mut gc, b"struct-child");
-        let child_array = crate::objects::slice::array_ref(child);
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        gc.sweep_budget = usize::MAX;
-        Gc::header_mut(parent).set_black();
 
         unsafe {
             Gc::write_slot(parent, 0, child as u64);
@@ -2136,19 +2127,6 @@ mod tests {
             struct_meta,
             None,
         );
-        assert!(Gc::header(child).is_gray());
-
-        let work = gc.step(
-            |gc| gc.mark_gray(parent),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
-            |dead| finalized.push(dead),
-        );
-
-        assert!(work > 0);
-        assert!(!finalized.contains(&child));
-        assert!(!finalized.contains(&child_array));
-        assert_eq!(gc.canonicalize_ref(child), Some(child));
-        assert_eq!(gc.canonicalize_ref(child_array), Some(child_array));
     }
 
     #[test]
@@ -2265,6 +2243,39 @@ mod tests {
         assert_eq!(gc.state(), GcState::Pause);
         assert_eq!(gc.canonicalize_ref(late_root), Some(late_root));
     }
+
+    #[test]
+    #[should_panic(expected = "scan_slots_by_types: slots length 1 != slot_types length 2")]
+    fn scan_slots_by_types_rejects_non_exact_width() {
+        let mut gc = Gc::new();
+        scan_slots_by_types(
+            &mut gc,
+            &[0],
+            &[crate::SlotType::GcRef, crate::SlotType::Value],
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "scan_slots_by_types: Interface0 at slot 0 missing Interface1 data slot"
+    )]
+    fn scan_slots_by_types_rejects_truncated_interface_pair() {
+        let mut gc = Gc::new();
+        scan_slots_by_types(&mut gc, &[0], &[crate::SlotType::Interface0]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "scan_slots_by_types: Interface0 at slot 0 must be followed by Interface1"
+    )]
+    fn scan_slots_by_types_rejects_malformed_interface_pair() {
+        let mut gc = Gc::new();
+        scan_slots_by_types(
+            &mut gc,
+            &[0, 0],
+            &[crate::SlotType::Interface0, crate::SlotType::Value],
+        );
+    }
 }
 
 /// Scan a slice of values using SlotTypes for GC marking.
@@ -2276,8 +2287,16 @@ pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::Slot
     use crate::objects::interface;
     use crate::SlotType;
 
+    assert_eq!(
+        slots.len(),
+        slot_types.len(),
+        "scan_slots_by_types: slots length {} != slot_types length {}",
+        slots.len(),
+        slot_types.len()
+    );
+
     let mut i = 0;
-    while i < slot_types.len() && i < slots.len() {
+    while i < slot_types.len() {
         match slot_types[i] {
             SlotType::GcRef => {
                 if slots[i] != 0 {
@@ -2285,8 +2304,16 @@ pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::Slot
                 }
             }
             SlotType::Interface0 => {
+                assert!(
+                    i + 1 < slots.len(),
+                    "scan_slots_by_types: Interface0 at slot {i} missing Interface1 data slot"
+                );
+                assert!(
+                    slot_types[i + 1] == SlotType::Interface1,
+                    "scan_slots_by_types: Interface0 at slot {i} must be followed by Interface1"
+                );
                 // Interface header slot - check if data slot contains GcRef
-                if i + 1 < slots.len() && interface::data_is_gc_ref(slots[i]) && slots[i + 1] != 0 {
+                if interface::data_is_gc_ref(slots[i]) && slots[i + 1] != 0 {
                     gc.mark_gray(slots[i + 1] as GcRef);
                 }
                 i += 1; // Skip data slot (Interface1)

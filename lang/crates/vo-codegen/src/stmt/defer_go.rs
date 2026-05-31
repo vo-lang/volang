@@ -1085,18 +1085,8 @@ pub(crate) fn compile_go(
         let sig = CallSigInfo::from_call(call_expr, info);
         let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
 
-        // GoIsland: a=island, b=closure, c=args_start, flags=arg_slots (max 255)
-        assert!(
-            total_arg_slots <= 255,
-            "go @(island) call has too many argument slots (max 255)"
-        );
-        func.emit_with_flags(
-            Opcode::GoIsland,
-            total_arg_slots as u8,
-            island_reg,
-            closure_reg,
-            args_start,
-        );
+        // GoIsland: a=island, b=closure, c=args_start, flags=arg_slots.
+        func.emit_go_island(island_reg, closure_reg, args_start, total_arg_slots);
         return Ok(());
     }
 

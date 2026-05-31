@@ -3,6 +3,11 @@
 //! slot0 format: [itab_id:32 | rttid:24 | value_kind:8]
 //! slot1: data (immediate value or GcRef)
 
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::String};
+#[cfg(feature = "std")]
+use std::string::String;
+
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::itab::{self, ItabCache};
 use vo_runtime::objects::interface;
@@ -38,14 +43,26 @@ pub fn exec_iface_assign(
     gc: &mut Gc,
     itab_cache: &mut ItabCache,
     module: &Module,
-) {
+) -> Result<(), String> {
     let vk = ValueKind::from_u8(inst.flags);
     let src = stack_get(stack, bp + inst.b as usize);
 
     // Unpack metadata from constant pool
-    let packed = match &module.constants[inst.c as usize] {
-        Constant::Int(v) => *v,
-        _ => panic!("IfaceAssign: expected Int64 constant"),
+    let constant = module.constants.get(inst.c as usize).ok_or_else(|| {
+        format!(
+            "IfaceAssign constant index {} out of bounds for {} constants",
+            inst.c,
+            module.constants.len()
+        )
+    })?;
+    let packed = match constant.clone() {
+        Constant::Int(v) => v,
+        _ => {
+            return Err(format!(
+                "IfaceAssign constant index {} must be Int metadata",
+                inst.c
+            ));
+        }
     };
     let rttid = (packed >> 32) as u32;
     let low = (packed & 0xFFFFFFFF) as u32;
@@ -56,7 +73,7 @@ pub fn exec_iface_assign(
         if src_slot0 == 0 {
             stack_set(stack, bp + inst.a as usize, 0);
             stack_set(stack, bp + inst.a as usize + 1, 0);
-            return;
+            return Ok(());
         }
         let src_rttid = interface::unpack_rttid(src_slot0);
         let src_vk = interface::unpack_value_kind(src_slot0);
@@ -125,6 +142,7 @@ pub fn exec_iface_assign(
 
     stack_set(stack, bp + inst.a as usize, slot0);
     stack_set(stack, bp + inst.a as usize + 1, slot1);
+    Ok(())
 }
 
 /// IfaceAssert: a=dst, b=src_iface (2 slots), c=target_id
@@ -168,32 +186,38 @@ pub fn exec_iface_assert(
     };
 
     // Helper to write successful result
-    let write_success = |stack: *mut Slot, itab_cache: &mut ItabCache| {
+    let write_success = |stack: *mut Slot, itab_cache: &mut ItabCache| -> Result<(), String> {
         if assert_kind == 1 {
             // Interface assertion: return new interface with itab for target interface
             // Use extract_named_type_id to handle Pointer(Named(id)) case
             let new_itab_id = if target_id == 0 {
                 0
             } else {
-                let named_type_id = module
+                let Some(named_type_id) = module
                     .runtime_types
                     .get(src_rttid as usize)
                     .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "IfaceAssert metadata missing: target_id={} src_rttid={} src_vk={:?}",
-                            target_id, src_rttid, src_vk
-                        )
-                    });
+                else {
+                    return Err(format!(
+                        "IfaceAssert metadata missing: target_id={} src_rttid={} src_vk={:?}",
+                        target_id, src_rttid, src_vk
+                    ));
+                };
                 // Value types (non-pointer) cannot use pointer receiver methods
                 let src_is_pointer = src_vk == ValueKind::Pointer;
-                itab_cache.get_or_create(
+                let Some(itab_id) = itab_cache.try_get_or_create(
                     named_type_id,
                     target_id,
                     src_is_pointer,
                     &module.named_type_metas,
                     &module.interface_metas,
-                )
+                ) else {
+                    return Err(format!(
+                        "IfaceAssert itab metadata missing: target_id={} named_type_id={} src_vk={:?}",
+                        target_id, named_type_id, src_vk
+                    ));
+                };
+                itab_id
             };
             let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
             stack_set(stack, bp + inst.a as usize, new_slot0);
@@ -234,6 +258,7 @@ pub fn exec_iface_assert(
             // Concrete type assertion for other types: slot1 is the value
             stack_set(stack, bp + inst.a as usize, slot1);
         }
+        Ok(())
     };
 
     if has_ok {
@@ -246,7 +271,9 @@ pub fn exec_iface_assert(
         };
         stack_set(stack, bp + ok_slot as usize, matches as u64);
         if matches {
-            write_success(stack, itab_cache);
+            if let Err(msg) = write_success(stack, itab_cache) {
+                return ExecResult::JitError(msg);
+            }
         } else {
             // Zero out destination on failure
             let dst_slots = if assert_kind == 1 {
@@ -260,7 +287,9 @@ pub fn exec_iface_assert(
         }
         ExecResult::FrameChanged
     } else if matches {
-        write_success(stack, itab_cache);
+        if let Err(msg) = write_success(stack, itab_cache) {
+            return ExecResult::JitError(msg);
+        }
         ExecResult::FrameChanged
     } else {
         ExecResult::Panic

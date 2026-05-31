@@ -3,7 +3,7 @@
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    types, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, Value,
+    types, FuncRef, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, Value,
 };
 use vo_runtime::jit_api::{JitContext, JitRuntimeTrapKind};
 
@@ -27,6 +27,13 @@ use self::memory::*;
 use self::runtime_ops::*;
 use self::scalar::*;
 
+pub(crate) fn require_helper(
+    helper: Option<FuncRef>,
+    name: &'static str,
+) -> Result<FuncRef, JitError> {
+    helper.ok_or_else(|| JitError::Internal(format!("JIT helper {name} is not registered")))
+}
+
 /// Translate a single instruction.
 pub fn translate_inst<'a>(
     e: &mut impl IrEmitter<'a>,
@@ -42,7 +49,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         LoadConst => {
-            load_const(e, inst);
+            load_const(e, inst)?;
             Ok(Completed)
         }
         Copy => {
@@ -226,7 +233,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         PtrSet => {
-            ptr_set(e, inst);
+            ptr_set(e, inst)?;
             Ok(Completed)
         }
         PtrGetN => {
@@ -283,7 +290,7 @@ pub fn translate_inst<'a>(
         }
         // Slice operations
         SliceNew => {
-            slice_new(e, inst);
+            slice_new(e, inst)?;
             Ok(Completed)
         }
         SliceGet => {
@@ -303,11 +310,11 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         SliceSlice => {
-            slice_slice(e, inst);
+            slice_slice(e, inst)?;
             Ok(Completed)
         }
         SliceAppend => {
-            slice_append(e, inst);
+            slice_append(e, inst)?;
             Ok(Completed)
         }
         SliceAddr => {
@@ -316,7 +323,7 @@ pub fn translate_inst<'a>(
         }
         // Array operations
         ArrayNew => {
-            array_new(e, inst);
+            array_new(e, inst)?;
             Ok(Completed)
         }
         ArrayGet => {
@@ -337,52 +344,52 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         StrIndex => {
-            str_index(e, inst);
+            str_index(e, inst)?;
             Ok(Completed)
         }
         StrConcat => {
-            str_concat(e, inst);
+            str_concat(e, inst)?;
             Ok(Completed)
         }
         StrSlice => {
-            str_slice(e, inst);
+            str_slice(e, inst)?;
             Ok(Completed)
         }
         StrEq => {
-            str_eq(e, inst);
+            str_eq(e, inst)?;
             Ok(Completed)
         }
         StrNe => {
-            str_ne(e, inst);
+            str_ne(e, inst)?;
             Ok(Completed)
         }
         StrLt => {
-            str_cmp(e, inst, IntCC::SignedLessThan);
+            str_cmp(e, inst, IntCC::SignedLessThan)?;
             Ok(Completed)
         }
         StrLe => {
-            str_cmp(e, inst, IntCC::SignedLessThanOrEqual);
+            str_cmp(e, inst, IntCC::SignedLessThanOrEqual)?;
             Ok(Completed)
         }
         StrGt => {
-            str_cmp(e, inst, IntCC::SignedGreaterThan);
+            str_cmp(e, inst, IntCC::SignedGreaterThan)?;
             Ok(Completed)
         }
         StrGe => {
-            str_cmp(e, inst, IntCC::SignedGreaterThanOrEqual);
+            str_cmp(e, inst, IntCC::SignedGreaterThanOrEqual)?;
             Ok(Completed)
         }
         StrDecodeRune => {
-            str_decode_rune(e, inst);
+            str_decode_rune(e, inst)?;
             Ok(Completed)
         }
         // Map operations
         MapNew => {
-            map_new(e, inst);
+            map_new(e, inst)?;
             Ok(Completed)
         }
         MapLen => {
-            map_len(e, inst);
+            map_len(e, inst)?;
             Ok(Completed)
         }
         MapGet => {
@@ -398,16 +405,16 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         MapIterInit => {
-            map_iter_init(e, inst);
+            map_iter_init(e, inst)?;
             Ok(Completed)
         }
         MapIterNext => {
-            map_iter_next(e, inst);
+            map_iter_next(e, inst)?;
             Ok(Completed)
         }
         // Closure operations
         ClosureNew => {
-            closure_new(e, inst);
+            closure_new(e, inst)?;
             Ok(Completed)
         }
         ClosureGet => {
@@ -416,24 +423,24 @@ pub fn translate_inst<'a>(
         }
         // Allocation
         PtrNew => {
-            ptr_new(e, inst);
+            ptr_new(e, inst)?;
             Ok(Completed)
         }
         QueueNew => {
-            queue_new(e, inst);
+            queue_new(e, inst)?;
             Ok(Completed)
         }
         QueueLen => {
-            queue_len(e, inst);
+            queue_len(e, inst)?;
             Ok(Completed)
         }
         QueueCap => {
-            queue_cap(e, inst);
+            queue_cap(e, inst)?;
             Ok(Completed)
         }
         // Island/Channel
         IslandNew => {
-            island_new(e, inst);
+            island_new(e, inst)?;
             Ok(Completed)
         }
         QueueClose => {
@@ -450,24 +457,24 @@ pub fn translate_inst<'a>(
         }
         // Goroutine Start
         GoStart => {
-            go_start(e, inst);
+            go_start(e, inst)?;
             Ok(Completed)
         }
         GoIsland => {
-            go_island(e, inst);
+            go_island(e, inst)?;
             Ok(Completed)
         }
         // Defer/Recover
         DeferPush => {
-            defer_push(e, inst, false);
+            defer_push(e, inst, false)?;
             Ok(Completed)
         }
         ErrDeferPush => {
-            defer_push(e, inst, true);
+            defer_push(e, inst, true)?;
             Ok(Completed)
         }
         Recover => {
-            recover(e, inst);
+            recover(e, inst)?;
             Ok(Completed)
         }
         // Select Statement
@@ -476,11 +483,11 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         SelectSend => {
-            select_send(e, inst);
+            select_send(e, inst)?;
             Ok(Completed)
         }
         SelectRecv => {
-            select_recv(e, inst);
+            select_recv(e, inst)?;
             Ok(Completed)
         }
         SelectExec => {
@@ -489,11 +496,11 @@ pub fn translate_inst<'a>(
         }
         // Interface
         IfaceAssert => {
-            iface_assert(e, inst);
+            iface_assert(e, inst)?;
             Ok(Completed)
         }
         StrNew => {
-            str_new(e, inst);
+            str_new(e, inst)?;
             Ok(Completed)
         }
         IfaceAssign => {
@@ -501,7 +508,7 @@ pub fn translate_inst<'a>(
             Ok(Completed)
         }
         IfaceEq => {
-            iface_eq(e, inst);
+            iface_eq(e, inst)?;
             Ok(Completed)
         }
         // ForLoop - handled by loop compiler

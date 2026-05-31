@@ -616,6 +616,15 @@ pub struct JitContext {
 /// JitContext field offsets for JIT compiler.
 /// These must match the actual struct layout.
 impl JitContext {
+    pub fn validate_required_callbacks(&self) -> Result<(), &'static str> {
+        for field in jit_callback_abi_fields() {
+            if field.kind.is_missing(self) {
+                return Err(field.name);
+            }
+        }
+        Ok(())
+    }
+
     pub const OFFSET_JIT_FUNC_TABLE: i32 = std::mem::offset_of!(JitContext, jit_func_table) as i32;
     pub const OFFSET_JIT_FUNC_COUNT: i32 = std::mem::offset_of!(JitContext, jit_func_count) as i32;
     pub const OFFSET_DIRECT_CALL_TABLE: i32 =
@@ -684,6 +693,14 @@ impl JitContext {
     // Defer/Recover
     pub const OFFSET_DEFER_PUSH_FN: i32 = std::mem::offset_of!(JitContext, defer_push_fn) as i32;
     pub const OFFSET_RECOVER_FN: i32 = std::mem::offset_of!(JitContext, recover_fn) as i32;
+
+    // Select
+    pub const OFFSET_SELECT_BEGIN_FN: i32 =
+        std::mem::offset_of!(JitContext, select_begin_fn) as i32;
+    pub const OFFSET_SELECT_SEND_FN: i32 = std::mem::offset_of!(JitContext, select_send_fn) as i32;
+    pub const OFFSET_SELECT_RECV_FN: i32 = std::mem::offset_of!(JitContext, select_recv_fn) as i32;
+    pub const OFFSET_SELECT_EXEC_FN: i32 = std::mem::offset_of!(JitContext, select_exec_fn) as i32;
+
     pub const OFFSET_IS_ERROR_RETURN: i32 =
         std::mem::offset_of!(JitContext, is_error_return) as i32;
     pub const OFFSET_RET_GCREF_START: i32 =
@@ -718,20 +735,52 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
             offset: JitContext::OFFSET_JIT_FUNC_TABLE,
         },
         JitContextAbiField {
+            name: "jit_func_count",
+            offset: JitContext::OFFSET_JIT_FUNC_COUNT,
+        },
+        JitContextAbiField {
             name: "direct_call_table",
             offset: JitContext::OFFSET_DIRECT_CALL_TABLE,
+        },
+        JitContextAbiField {
+            name: "direct_call_count",
+            offset: JitContext::OFFSET_DIRECT_CALL_COUNT,
         },
         JitContextAbiField {
             name: "call_func_id",
             offset: JitContext::OFFSET_CALL_FUNC_ID,
         },
         JitContextAbiField {
+            name: "call_arg_start",
+            offset: JitContext::OFFSET_CALL_ARG_START,
+        },
+        JitContextAbiField {
             name: "call_resume_pc",
             offset: JitContext::OFFSET_CALL_RESUME_PC,
         },
         JitContextAbiField {
+            name: "call_ret_slots",
+            offset: JitContext::OFFSET_CALL_RET_SLOTS,
+        },
+        JitContextAbiField {
+            name: "call_ret_reg",
+            offset: JitContext::OFFSET_CALL_RET_REG,
+        },
+        JitContextAbiField {
+            name: "call_kind",
+            offset: JitContext::OFFSET_CALL_KIND,
+        },
+        JitContextAbiField {
             name: "runtime_trap_kind",
             offset: JitContext::OFFSET_RUNTIME_TRAP_KIND,
+        },
+        JitContextAbiField {
+            name: "runtime_trap_arg0",
+            offset: JitContext::OFFSET_RUNTIME_TRAP_ARG0,
+        },
+        JitContextAbiField {
+            name: "runtime_trap_arg1",
+            offset: JitContext::OFFSET_RUNTIME_TRAP_ARG1,
         },
         JitContextAbiField {
             name: "runtime_trap_pc",
@@ -741,6 +790,15 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
             name: "user_panic_pc",
             offset: JitContext::OFFSET_USER_PANIC_PC,
         },
+        #[cfg(feature = "std")]
+        JitContextAbiField {
+            name: "wait_io_token",
+            offset: JitContext::OFFSET_WAIT_IO_TOKEN,
+        },
+        JitContextAbiField {
+            name: "loop_exit_pc",
+            offset: JitContext::OFFSET_LOOP_EXIT_PC,
+        },
         JitContextAbiField {
             name: "stack_ptr",
             offset: JitContext::OFFSET_STACK_PTR,
@@ -748,6 +806,18 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
         JitContextAbiField {
             name: "stack_cap",
             offset: JitContext::OFFSET_STACK_CAP,
+        },
+        JitContextAbiField {
+            name: "stack_limit",
+            offset: JitContext::OFFSET_STACK_LIMIT,
+        },
+        JitContextAbiField {
+            name: "call_depth",
+            offset: JitContext::OFFSET_CALL_DEPTH,
+        },
+        JitContextAbiField {
+            name: "call_depth_limit",
+            offset: JitContext::OFFSET_CALL_DEPTH_LIMIT,
         },
         JitContextAbiField {
             name: "jit_bp",
@@ -762,8 +832,80 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
             offset: JitContext::OFFSET_PUSH_FRAME_FN,
         },
         JitContextAbiField {
+            name: "pop_frame_fn",
+            offset: JitContext::OFFSET_POP_FRAME_FN,
+        },
+        JitContextAbiField {
+            name: "stack_overflow_fn",
+            offset: JitContext::OFFSET_STACK_OVERFLOW_FN,
+        },
+        JitContextAbiField {
             name: "push_resume_point_fn",
             offset: JitContext::OFFSET_PUSH_RESUME_POINT_FN,
+        },
+        JitContextAbiField {
+            name: "create_island_fn",
+            offset: JitContext::OFFSET_CREATE_ISLAND_FN,
+        },
+        JitContextAbiField {
+            name: "queue_close_fn",
+            offset: JitContext::OFFSET_QUEUE_CLOSE_FN,
+        },
+        JitContextAbiField {
+            name: "queue_send_fn",
+            offset: JitContext::OFFSET_QUEUE_SEND_FN,
+        },
+        JitContextAbiField {
+            name: "queue_recv_fn",
+            offset: JitContext::OFFSET_QUEUE_RECV_FN,
+        },
+        JitContextAbiField {
+            name: "go_start_fn",
+            offset: JitContext::OFFSET_GO_START_FN,
+        },
+        JitContextAbiField {
+            name: "go_island_fn",
+            offset: JitContext::OFFSET_GO_ISLAND_FN,
+        },
+        JitContextAbiField {
+            name: "defer_push_fn",
+            offset: JitContext::OFFSET_DEFER_PUSH_FN,
+        },
+        JitContextAbiField {
+            name: "recover_fn",
+            offset: JitContext::OFFSET_RECOVER_FN,
+        },
+        JitContextAbiField {
+            name: "select_begin_fn",
+            offset: JitContext::OFFSET_SELECT_BEGIN_FN,
+        },
+        JitContextAbiField {
+            name: "select_send_fn",
+            offset: JitContext::OFFSET_SELECT_SEND_FN,
+        },
+        JitContextAbiField {
+            name: "select_recv_fn",
+            offset: JitContext::OFFSET_SELECT_RECV_FN,
+        },
+        JitContextAbiField {
+            name: "select_exec_fn",
+            offset: JitContext::OFFSET_SELECT_EXEC_FN,
+        },
+        JitContextAbiField {
+            name: "is_error_return",
+            offset: JitContext::OFFSET_IS_ERROR_RETURN,
+        },
+        JitContextAbiField {
+            name: "ret_gcref_start",
+            offset: JitContext::OFFSET_RET_GCREF_START,
+        },
+        JitContextAbiField {
+            name: "ret_is_heap",
+            offset: JitContext::OFFSET_RET_IS_HEAP,
+        },
+        JitContextAbiField {
+            name: "ret_start",
+            offset: JitContext::OFFSET_RET_START,
         },
         JitContextAbiField {
             name: "prepare_closure_call_fn",
@@ -817,6 +959,12 @@ pub const JIT_INFRA_ERROR_SENTINEL: u64 = u64::MAX;
 pub const JIT_INFRA_ERROR_MISSING_CALLBACK: u64 = 1;
 pub const JIT_INFRA_ERROR_INVALID_CALLBACK_STATE: u64 = 2;
 pub const JIT_INFRA_ERROR_INVALID_METADATA: u64 = 3;
+pub const JIT_HELPER_U64_ERROR: u64 = u64::MAX;
+pub const JIT_HELPER_MAP_GET_LAYOUT: u64 = 101;
+pub const JIT_HELPER_MAP_SET_LAYOUT: u64 = 102;
+pub const JIT_HELPER_MAP_DELETE_LAYOUT: u64 = 103;
+pub const JIT_HELPER_MAP_ITER_NEXT_LAYOUT: u64 = 104;
+pub const JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT: u64 = 105;
 pub const JIT_CALLBACK_DEFER_PUSH: u64 = 1;
 pub const JIT_CALLBACK_RECOVER: u64 = 2;
 pub const JIT_CALLBACK_GO_START: u64 = 3;
@@ -830,6 +978,397 @@ pub const JIT_CALLBACK_SELECT_RECV: u64 = 10;
 pub const JIT_CALLBACK_SELECT_EXEC: u64 = 11;
 pub const JIT_CALLBACK_CREATE_ISLAND: u64 = 12;
 pub const JIT_CALLBACK_IFACE_ASSERT: u64 = 13;
+pub const JIT_CALLBACK_CALL_EXTERN: u64 = 14;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitContextDependencyKind {
+    CallExternFn,
+    PushFrameFn,
+    PopFrameFn,
+    StackOverflowFn,
+    PushResumePointFn,
+    CreateIslandFn,
+    QueueCloseFn,
+    QueueSendFn,
+    QueueRecvFn,
+    GoStartFn,
+    GoIslandFn,
+    DeferPushFn,
+    RecoverFn,
+    SelectBeginFn,
+    SelectSendFn,
+    SelectRecvFn,
+    SelectExecFn,
+    PrepareClosureCallFn,
+    PrepareIfaceCallFn,
+    InlineCacheTable,
+}
+
+impl JitContextDependencyKind {
+    fn is_missing(self, ctx: &JitContext) -> bool {
+        match self {
+            Self::CallExternFn => ctx.call_extern_fn.is_none(),
+            Self::PushFrameFn => ctx.push_frame_fn.is_none(),
+            Self::PopFrameFn => ctx.pop_frame_fn.is_none(),
+            Self::StackOverflowFn => ctx.stack_overflow_fn.is_none(),
+            Self::PushResumePointFn => ctx.push_resume_point_fn.is_none(),
+            Self::CreateIslandFn => ctx.create_island_fn.is_none(),
+            Self::QueueCloseFn => ctx.queue_close_fn.is_none(),
+            Self::QueueSendFn => ctx.queue_send_fn.is_none(),
+            Self::QueueRecvFn => ctx.queue_recv_fn.is_none(),
+            Self::GoStartFn => ctx.go_start_fn.is_none(),
+            Self::GoIslandFn => ctx.go_island_fn.is_none(),
+            Self::DeferPushFn => ctx.defer_push_fn.is_none(),
+            Self::RecoverFn => ctx.recover_fn.is_none(),
+            Self::SelectBeginFn => ctx.select_begin_fn.is_none(),
+            Self::SelectSendFn => ctx.select_send_fn.is_none(),
+            Self::SelectRecvFn => ctx.select_recv_fn.is_none(),
+            Self::SelectExecFn => ctx.select_exec_fn.is_none(),
+            Self::PrepareClosureCallFn => ctx.prepare_closure_call_fn.is_none(),
+            Self::PrepareIfaceCallFn => ctx.prepare_iface_call_fn.is_none(),
+            Self::InlineCacheTable => ctx.ic_table.is_null(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitCallbackReturnPolicy {
+    RawPointer,
+    RawVoid,
+    RawHandle,
+    JitResult,
+    JitResultWithOutPointer,
+    PreparedCallOutPointer,
+    TablePointer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum JitAbiType {
+    Void,
+    Ptr,
+    U8,
+    U16,
+    U32,
+    I32,
+    U64,
+    I64,
+    JitResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitRuntimeHelperReturnPolicy {
+    Void,
+    RawI32,
+    RawU64,
+    JitResult,
+    I32StatusOutPointer,
+    U64ErrorSentinel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitRuntimeHelperPanicPolicy {
+    MustNotPanicAcrossAbi,
+    ReturnsJitResult,
+    ReturnsStatusOrSentinel,
+    RecordsRuntimeTrap,
+    RecordsUserPanic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitRuntimeHelperAbi {
+    pub name: &'static str,
+    pub params: &'static [JitAbiType],
+    pub ret: JitAbiType,
+    pub return_policy: JitRuntimeHelperReturnPolicy,
+    pub panic_policy: JitRuntimeHelperPanicPolicy,
+    pub may_gc: bool,
+    pub may_schedule: bool,
+    pub observes_frame: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitCallbackAbiField {
+    pub kind: JitContextDependencyKind,
+    pub name: &'static str,
+    pub params: &'static [JitAbiType],
+    pub ret: JitAbiType,
+    pub infra_error_id: Option<u64>,
+    pub return_policy: JitCallbackReturnPolicy,
+    pub may_gc: bool,
+    pub may_schedule: bool,
+    pub observes_frame: bool,
+}
+
+pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
+    use JitAbiType as T;
+    use JitCallbackReturnPolicy as Ret;
+    use JitContextDependencyKind as Kind;
+
+    &[
+        #[cfg(feature = "std")]
+        JitCallbackAbiField {
+            kind: Kind::CallExternFn,
+            name: "call_extern_fn",
+            params: &[
+                T::Ptr,
+                T::Ptr,
+                T::Ptr,
+                T::Ptr,
+                T::U32,
+                T::Ptr,
+                T::U32,
+                T::Ptr,
+                T::U32,
+            ],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_CALL_EXTERN),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::PushFrameFn,
+            name: "push_frame_fn",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32, T::U32],
+            ret: T::Ptr,
+            infra_error_id: None,
+            return_policy: Ret::RawPointer,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::PopFrameFn,
+            name: "pop_frame_fn",
+            params: &[T::Ptr, T::U32],
+            ret: T::Void,
+            infra_error_id: None,
+            return_policy: Ret::RawVoid,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitCallbackAbiField {
+            kind: Kind::StackOverflowFn,
+            name: "stack_overflow_fn",
+            params: &[T::Ptr],
+            ret: T::JitResult,
+            infra_error_id: None,
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::PushResumePointFn,
+            name: "push_resume_point_fn",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32, T::U32, T::U32],
+            ret: T::JitResult,
+            infra_error_id: None,
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::CreateIslandFn,
+            name: "create_island_fn",
+            params: &[T::Ptr],
+            ret: T::U64,
+            infra_error_id: Some(JIT_CALLBACK_CREATE_ISLAND),
+            return_policy: Ret::RawHandle,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::QueueCloseFn,
+            name: "queue_close_fn",
+            params: &[T::Ptr, T::U64],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_QUEUE_CLOSE),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::QueueSendFn,
+            name: "queue_send_fn",
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_QUEUE_SEND),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::QueueRecvFn,
+            name: "queue_recv_fn",
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_QUEUE_RECV),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::GoStartFn,
+            name: "go_start_fn",
+            params: &[T::Ptr, T::U32, T::U32, T::U64, T::Ptr, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_GO_START),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::GoIslandFn,
+            name: "go_island_fn",
+            params: &[T::Ptr, T::U64, T::U64, T::Ptr, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_GO_ISLAND),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::DeferPushFn,
+            name: "defer_push_fn",
+            params: &[
+                T::Ptr,
+                T::U32,
+                T::U32,
+                T::U64,
+                T::U32,
+                T::Ptr,
+                T::U32,
+                T::U32,
+            ],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_DEFER_PUSH),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::RecoverFn,
+            name: "recover_fn",
+            params: &[T::Ptr, T::Ptr],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_RECOVER),
+            return_policy: Ret::JitResultWithOutPointer,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::SelectBeginFn,
+            name: "select_begin_fn",
+            params: &[T::Ptr, T::U32, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_SELECT_BEGIN),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::SelectSendFn,
+            name: "select_send_fn",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_SELECT_SEND),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::SelectRecvFn,
+            name: "select_recv_fn",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_SELECT_RECV),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::SelectExecFn,
+            name: "select_exec_fn",
+            params: &[T::Ptr, T::U32],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_SELECT_EXEC),
+            return_policy: Ret::JitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::PrepareClosureCallFn,
+            name: "prepare_closure_call_fn",
+            params: &[
+                T::Ptr,
+                T::U64,
+                T::U32,
+                T::U32,
+                T::U32,
+                T::Ptr,
+                T::U32,
+                T::Ptr,
+                T::Ptr,
+            ],
+            ret: T::JitResult,
+            infra_error_id: None,
+            return_policy: Ret::PreparedCallOutPointer,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::PrepareIfaceCallFn,
+            name: "prepare_iface_call_fn",
+            params: &[
+                T::Ptr,
+                T::U64,
+                T::U64,
+                T::U32,
+                T::U32,
+                T::U32,
+                T::U32,
+                T::Ptr,
+                T::U32,
+                T::Ptr,
+                T::Ptr,
+            ],
+            ret: T::JitResult,
+            infra_error_id: None,
+            return_policy: Ret::PreparedCallOutPointer,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::InlineCacheTable,
+            name: "ic_table",
+            params: &[],
+            ret: T::Ptr,
+            infra_error_id: None,
+            return_policy: Ret::TablePointer,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+    ]
+}
 
 #[inline]
 pub fn set_jit_infra_error(ctx: *mut JitContext, code: u64, detail: u64) -> JitResult {
@@ -848,6 +1387,12 @@ pub fn set_jit_infra_error(ctx: *mut JitContext, code: u64, detail: u64) -> JitR
 #[inline]
 fn missing_callback(ctx: *mut JitContext, callback_id: u64) -> JitResult {
     set_jit_infra_error(ctx, JIT_INFRA_ERROR_MISSING_CALLBACK, callback_id)
+}
+
+#[inline]
+fn set_invalid_metadata_u64(ctx: *mut JitContext, detail: u64) -> u64 {
+    let _ = set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_METADATA, detail);
+    JIT_HELPER_U64_ERROR
 }
 
 // =============================================================================
@@ -893,10 +1438,9 @@ pub extern "C" fn vo_gc_alloc(gc: *mut Gc, meta: u32, slots: u32) -> u64 {
 /// - `obj` must be a valid GcRef (parent object being written to)
 /// - `val` must be a valid GcRef or 0 (child value being written)
 ///
-/// Note: JIT multi-slot array writes conservatively call write_barrier for every slot,
-/// including non-GcRef integer/float slots. Misaligned values are not valid GcRefs
-/// (GcRefs are always at least 4-byte aligned for GcHeader access), so they are
-/// skipped here rather than crashing in Gc::write_barrier during GC propagation.
+/// Raw write barrier for one known-reference value. Multi-slot typed writes
+/// should use `vo_gc_typed_write_barrier_by_meta` so struct/interface layouts
+/// are interpreted with the same metadata as VM helpers.
 #[no_mangle]
 pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: u64) {
     if gc.is_null() || obj == 0 {
@@ -911,6 +1455,56 @@ pub extern "C" fn vo_gc_write_barrier(gc: *mut Gc, obj: u64, _offset: u32, val: 
     let parent = obj as GcRef;
     let child = val as GcRef;
     gc.write_barrier(parent, child);
+}
+
+/// Type-safe write barrier for JIT writes whose element metadata is known only
+/// at runtime from an array/slice/map header.
+#[no_mangle]
+pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
+    ctx: *mut JitContext,
+    parent: u64,
+    vals: *const u64,
+    val_slots: u32,
+    elem_meta_raw: u32,
+) -> JitResult {
+    if ctx.is_null() {
+        return JitResult::JitError;
+    }
+    if parent == 0 || val_slots == 0 {
+        return JitResult::Ok;
+    }
+    if vals.is_null() {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT,
+        );
+    }
+    let ctx = unsafe { &mut *ctx };
+    if ctx.gc.is_null() {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT,
+        );
+    }
+    let gc = unsafe { &mut *ctx.gc };
+    let vals = unsafe { std::slice::from_raw_parts(vals, val_slots as usize) };
+    let module = unsafe { ctx.module.as_ref() };
+    match crate::gc_types::try_typed_write_barrier_by_meta(
+        gc,
+        parent as GcRef,
+        vals,
+        crate::ValueMeta::from_raw(elem_meta_raw),
+        module,
+    ) {
+        Ok(()) => JitResult::Ok,
+        Err(_) => set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_METADATA,
+            JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT,
+        ),
+    }
 }
 
 /// GC safepoint - intentionally a no-op.
@@ -1004,10 +1598,6 @@ pub extern "C" fn vo_defer_push(
 pub extern "C" fn vo_recover(ctx: *mut JitContext, result_ptr: *mut u64) -> JitResult {
     let ctx_ref = unsafe { &*ctx };
     let Some(f) = ctx_ref.recover_fn else {
-        unsafe {
-            *result_ptr = 0;
-            *result_ptr.add(1) = 0;
-        }
         return missing_callback(ctx, JIT_CALLBACK_RECOVER);
     };
     f(ctx, result_ptr)
@@ -1087,12 +1677,7 @@ pub extern "C" fn vo_call_extern(
 
     let call_fn = match ctx_ref.call_extern_fn {
         Some(f) => f,
-        None => unsafe {
-            let ctx = &mut *ctx;
-            ctx.runtime_trap_arg0 = extern_id as u64;
-            ctx.runtime_trap_arg1 = extern_id as u64;
-            return JitResult::JitError;
-        },
+        None => return missing_callback(ctx, JIT_CALLBACK_CALL_EXTERN),
     };
 
     call_fn(
@@ -1169,14 +1754,21 @@ pub extern "C" fn vo_map_get(
         return 0;
     }
 
+    let m_ref = m as crate::gc::GcRef;
+    if map::key_slots(m_ref) as u32 != key_slots || map::val_slots(m_ref) as u32 != val_slots {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
+    }
+
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    let (val_opt, ok) = map::get_with_ok(m as crate::gc::GcRef, key, module);
+    let (val_opt, ok) = map::get_with_ok(m_ref, key, module);
 
     if let Some(val) = val_opt {
-        let copy_len = (val_slots as usize).min(val.len());
+        if val.len() != val_slots as usize {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
+        }
         unsafe {
-            core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, copy_len);
+            core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val_slots as usize);
         }
     } else {
         // Zero out val_ptr buffer for non-existent keys
@@ -1204,13 +1796,18 @@ pub extern "C" fn vo_map_set(
         return 0;
     }
 
+    let m_ref = m as crate::gc::GcRef;
+    if map::key_slots(m_ref) as u32 != key_slots || map::val_slots(m_ref) as u32 != val_slots {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+    }
+
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
     let val = unsafe { core::slice::from_raw_parts(val_ptr, val_slots as usize) };
 
     // Check if key is interface (2 slots) with uncomparable underlying type
     if key_slots == 2 {
-        let key_vk = map::key_kind(m as crate::gc::GcRef);
+        let key_vk = map::key_kind(m_ref);
         if key_vk == ValueKind::Interface {
             let slot0 = key[0];
             let inner_vk = interface::unpack_value_kind(slot0);
@@ -1223,7 +1820,6 @@ pub extern "C" fn vo_map_set(
         }
     }
 
-    let m_ref = m as crate::gc::GcRef;
     map::set(m_ref, key, val, module);
 
     // Write barrier: use map's stored metadata to barrier only actual GcRef slots.
@@ -1231,25 +1827,40 @@ pub extern "C" fn vo_map_set(
     let km = map::key_meta(m_ref);
     let vm = map::val_meta(m_ref);
     if km.value_kind().may_contain_gc_refs() {
-        crate::gc_types::typed_write_barrier_by_meta(gc, m_ref, key, km, module);
+        if crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, key, km, module).is_err() {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+        }
     }
     if vm.value_kind().may_contain_gc_refs() {
-        crate::gc_types::typed_write_barrier_by_meta(gc, m_ref, val, vm, module);
+        if crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, val, vm, module).is_err() {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+        }
     }
     0
 }
 
 /// Delete key from map.
 #[no_mangle]
-pub extern "C" fn vo_map_delete(ctx: *mut JitContext, m: u64, key_ptr: *const u64, key_slots: u32) {
+pub extern "C" fn vo_map_delete(
+    ctx: *mut JitContext,
+    m: u64,
+    key_ptr: *const u64,
+    key_slots: u32,
+) -> u64 {
     use crate::objects::map;
     if m == 0 {
-        return;
+        return 0;
+    }
+
+    let m_ref = m as crate::gc::GcRef;
+    if map::key_slots(m_ref) as u32 != key_slots {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT);
     }
 
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    map::delete(m as crate::gc::GcRef, key, module);
+    map::delete(m_ref, key, module);
+    0
 }
 
 /// Initialize a map iterator. Writes MAP_ITER_SLOTS * SLOT_BYTES bytes to iter_ptr.
@@ -1271,6 +1882,7 @@ pub extern "C" fn vo_map_iter_init(m: u64, iter_ptr: *mut u64) {
 /// Returns 1 if valid entry exists, 0 if exhausted.
 #[no_mangle]
 pub extern "C" fn vo_map_iter_next(
+    ctx: *mut JitContext,
     iter_ptr: *mut u64,
     key_ptr: *mut u64,
     key_slots: u32,
@@ -1281,6 +1893,14 @@ pub extern "C" fn vo_map_iter_next(
     let iter = unsafe { &mut *(iter_ptr as *mut map::MapIterator) };
     let key_slots = key_slots as usize;
     let val_slots = val_slots as usize;
+    let map_ref = iter.map_ref as crate::gc::GcRef;
+
+    if !map_ref.is_null()
+        && (map::key_slots(map_ref) as usize != key_slots
+            || map::val_slots(map_ref) as usize != val_slots)
+    {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT);
+    }
 
     unsafe {
         if key_slots > 0 {
@@ -1293,11 +1913,12 @@ pub extern "C" fn vo_map_iter_next(
 
     match map::iter_next(iter) {
         Some((key, val)) => {
-            let key_copy = key_slots.min(key.len());
-            let val_copy = val_slots.min(val.len());
+            if key.len() != key_slots || val.len() != val_slots {
+                return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT);
+            }
             unsafe {
-                core::ptr::copy_nonoverlapping(key.as_ptr(), key_ptr, key_copy);
-                core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val_copy);
+                core::ptr::copy_nonoverlapping(key.as_ptr(), key_ptr, key_slots);
+                core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val_slots);
             }
             1
         }
@@ -1675,20 +2296,45 @@ pub extern "C" fn vo_slice_append(
 ) -> u64 {
     use crate::objects::slice;
     use crate::ValueMeta;
+
+    if ctx.is_null() || val_ptr.is_null() {
+        return JIT_HELPER_U64_ERROR;
+    }
+
     unsafe {
-        let ctx = &mut *ctx;
-        let gc = &mut *ctx.gc;
-        let module = &*ctx.module;
+        let ctx_ref = &mut *ctx;
+        if ctx_ref.gc.is_null() {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT);
+        }
+        let gc = &mut *ctx_ref.gc;
+        let module = ctx_ref.module.as_ref();
+        let elem_meta = ValueMeta::from_raw(elem_meta);
+        if elem_meta.value_kind() == ValueKind::Struct {
+            let missing = module
+                .and_then(|module| module.struct_metas.get(elem_meta.meta_id() as usize))
+                .is_none();
+            if missing {
+                return set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT);
+            }
+        }
+        let s_ref = s as crate::gc::GcRef;
+        if !s_ref.is_null() {
+            let actual_meta = slice::elem_meta(s_ref);
+            if actual_meta.value_kind() == ValueKind::Struct {
+                let missing = module
+                    .and_then(|module| module.struct_metas.get(actual_meta.meta_id() as usize))
+                    .is_none();
+                if missing {
+                    return set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT);
+                }
+            }
+        }
         let val_slots = slots_for_bytes(elem_bytes as usize);
         let val = core::slice::from_raw_parts(val_ptr, val_slots);
-        slice::append(
-            gc,
-            ValueMeta::from_raw(elem_meta),
-            elem_bytes as usize,
-            s as crate::gc::GcRef,
-            val,
-            Some(module),
-        ) as u64
+        match slice::try_append(gc, elem_meta, elem_bytes as usize, s_ref, val, module) {
+            Ok(result) => result as u64,
+            Err(_) => set_invalid_metadata_u64(ctx, JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT),
+        }
     }
 }
 
@@ -2023,7 +2669,7 @@ pub extern "C" fn vo_copy(dst: u64, src: u64) -> u64 {
     let dst_ptr = slice::data_ptr(dst_ref);
     let src_ptr = slice::data_ptr(src_ref);
 
-    unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, copy_len * elem_bytes) };
+    unsafe { core::ptr::copy(src_ptr, dst_ptr, copy_len * elem_bytes) };
 
     copy_len as u64
 }
@@ -2040,6 +2686,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
     &[
         ("vo_gc_alloc", vo_gc_alloc as *const u8),
         ("vo_gc_write_barrier", vo_gc_write_barrier as *const u8),
+        (
+            "vo_gc_typed_write_barrier_by_meta",
+            vo_gc_typed_write_barrier_by_meta as *const u8,
+        ),
         ("vo_gc_safepoint", vo_gc_safepoint as *const u8),
         ("vo_panic", vo_panic as *const u8),
         ("vo_runtime_trap", vo_runtime_trap as *const u8),
@@ -2103,6 +2753,7 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
     &[
         "vo_gc_alloc",
         "vo_gc_write_barrier",
+        "vo_gc_typed_write_barrier_by_meta",
         "vo_gc_safepoint",
         "vo_panic",
         "vo_runtime_trap",
@@ -2162,6 +2813,614 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
     ]
 }
 
+pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
+    use JitAbiType as T;
+    use JitRuntimeHelperPanicPolicy as Panic;
+    use JitRuntimeHelperReturnPolicy as Ret;
+
+    &[
+        JitRuntimeHelperAbi {
+            name: "vo_gc_alloc",
+            params: &[T::Ptr, T::U32, T::U32],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_gc_write_barrier",
+            params: &[T::Ptr, T::U64, T::U32, T::U64],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_gc_typed_write_barrier_by_meta",
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_gc_safepoint",
+            params: &[T::Ptr],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_panic",
+            params: &[T::Ptr, T::U64, T::U64],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::RecordsUserPanic,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_runtime_trap",
+            params: &[T::Ptr, T::U32, T::U64, T::U64, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::RecordsRuntimeTrap,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_call_extern",
+            params: &[T::Ptr, T::U32, T::Ptr, T::U32, T::Ptr, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_new",
+            params: &[T::Ptr, T::Ptr, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_len",
+            params: &[T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_index",
+            params: &[T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_concat",
+            params: &[T::Ptr, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_slice",
+            params: &[T::Ptr, T::U64, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_eq",
+            params: &[T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_cmp",
+            params: &[T::U64, T::U64],
+            ret: T::I32,
+            return_policy: Ret::RawI32,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_str_decode_rune",
+            params: &[T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_closure_new",
+            params: &[T::Ptr, T::U32, T::U32],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_queue_new_checked",
+            params: &[T::Ptr, T::U32, T::U64, T::U32, T::I64, T::Ptr],
+            ret: T::I32,
+            return_policy: Ret::I32StatusOutPointer,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_chan_len",
+            params: &[T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_chan_cap",
+            params: &[T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_array_new",
+            params: &[T::Ptr, T::U32, T::U32, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_array_get",
+            params: &[T::U64, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_array_set",
+            params: &[T::U64, T::U64, T::U64, T::U64],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_array_len",
+            params: &[T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_new_checked",
+            params: &[T::Ptr, T::U32, T::U32, T::I64, T::I64, T::Ptr],
+            ret: T::I32,
+            return_policy: Ret::I32StatusOutPointer,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_len",
+            params: &[T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_cap",
+            params: &[T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_get",
+            params: &[T::U64, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_set",
+            params: &[T::U64, T::U64, T::U64, T::U64],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_slice",
+            params: &[T::Ptr, T::U64, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_slice3",
+            params: &[T::Ptr, T::U64, T::U64, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_append",
+            params: &[T::Ptr, T::U32, T::U32, T::U64, T::Ptr],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_from_array",
+            params: &[T::Ptr, T::U64, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_slice_from_array3",
+            params: &[T::Ptr, T::U64, T::U64, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_iface_pack_slot0",
+            params: &[T::U32, T::U32, T::U8],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_iface_to_iface",
+            params: &[T::Ptr, T::U64, T::U32],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_iface_eq",
+            params: &[T::Ptr, T::U64, T::U64, T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::RecordsRuntimeTrap,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_iface_assert",
+            params: &[T::Ptr, T::U64, T::U64, T::U32, T::U16, T::Ptr],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_set_call_request",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32, T::U32, T::U32],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_ptr_clone",
+            params: &[T::Ptr, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_new",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32, T::U32],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_len",
+            params: &[T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_get",
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::Ptr, T::U32],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_set",
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::Ptr, T::U32],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_delete",
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_iter_init",
+            params: &[T::U64, T::Ptr],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_map_iter_next",
+            params: &[T::Ptr, T::Ptr, T::Ptr, T::U32, T::Ptr, T::U32],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_copy",
+            params: &[T::U64, T::U64],
+            ret: T::U64,
+            return_policy: Ret::RawU64,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_island_new",
+            params: &[T::Ptr, T::Ptr],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_chan_close",
+            params: &[T::Ptr, T::U64],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_chan_send",
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_chan_recv",
+            params: &[T::Ptr, T::U64, T::Ptr, T::U32, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_go_start",
+            params: &[T::Ptr, T::U32, T::U32, T::U64, T::Ptr, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_go_island",
+            params: &[T::Ptr, T::U64, T::U64, T::Ptr, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_defer_push",
+            params: &[
+                T::Ptr,
+                T::U32,
+                T::U32,
+                T::U64,
+                T::U32,
+                T::Ptr,
+                T::U32,
+                T::U32,
+            ],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_recover",
+            params: &[T::Ptr, T::Ptr],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_select_begin",
+            params: &[T::Ptr, T::U32, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_select_send",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_select_recv",
+            params: &[T::Ptr, T::U32, T::U32, T::U32, T::U32, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+        JitRuntimeHelperAbi {
+            name: "vo_select_exec",
+            params: &[T::Ptr, T::U32],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
+            may_gc: true,
+            may_schedule: true,
+            observes_frame: true,
+        },
+    ]
+}
+
 // =============================================================================
 // Island/Channel JIT Helpers
 // =============================================================================
@@ -2175,7 +3434,11 @@ pub extern "C" fn vo_island_new(ctx: *mut JitContext, out: *mut u64) -> JitResul
         return missing_callback(ctx, JIT_CALLBACK_CREATE_ISLAND);
     };
     unsafe {
-        *out = create_fn(ctx);
+        let handle = create_fn(ctx);
+        if (*ctx).runtime_trap_arg0 == JIT_INFRA_ERROR_SENTINEL {
+            return JitResult::JitError;
+        }
+        *out = handle;
     }
     JitResult::Ok
 }
@@ -2361,6 +3624,262 @@ mod tests {
             !wrappers.contains("JIT ABI violation"),
             "JIT ABI wrappers must use the machine-readable infra-error path"
         );
+        assert!(
+            !wrappers.contains("*result_ptr = 0"),
+            "JIT ABI wrappers must not write default zero values before surfacing missing callbacks"
+        );
+        let recover_start = src
+            .find("pub extern \"C\" fn vo_recover")
+            .expect("vo_recover wrapper");
+        let recover_end = src[recover_start..]
+            .find("/// Trigger a user panic")
+            .map(|offset| recover_start + offset)
+            .expect("vo_recover end marker");
+        let recover_wrapper = &src[recover_start..recover_end];
+        assert!(
+            !recover_wrapper.contains("*result_ptr = 0"),
+            "vo_recover must not write a default nil interface before surfacing a missing callback"
+        );
+    }
+
+    #[test]
+    fn jit_map_helpers_do_not_min_copy_layout_mismatches() {
+        let src = include_str!("jit_api.rs");
+        let start = src
+            .find("pub extern \"C\" fn vo_map_get")
+            .expect("vo_map_get helper");
+        let end = src[start..]
+            .find("// =============================================================================\n// String Helpers")
+            .map(|offset| start + offset)
+            .expect("string helper section");
+        let map_helpers = &src[start..end];
+
+        assert!(
+            !map_helpers.contains(".min(") && !map_helpers.contains("copy_len"),
+            "JIT map helpers must treat key/value slot counts as exact ABI metadata, not silently min-copy layout mismatches"
+        );
+    }
+
+    #[test]
+    fn jit_copy_helper_uses_overlap_safe_memmove_semantics() {
+        let src = include_str!("jit_api.rs");
+        let start = src
+            .find("pub extern \"C\" fn vo_copy")
+            .expect("vo_copy helper");
+        let end = src[start..]
+            .find("// =============================================================================\n// Symbol Registration")
+            .map(|offset| start + offset)
+            .expect("symbol registration section");
+        let copy_helper = &src[start..end];
+
+        assert!(
+            copy_helper.contains("core::ptr::copy("),
+            "JIT copy helper must use overlap-safe memmove semantics for slice copy"
+        );
+        assert!(
+            !copy_helper.contains("copy_nonoverlapping"),
+            "JIT copy helper must not use non-overlap copy; source and destination slices can alias"
+        );
+    }
+
+    #[test]
+    fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let mut is_user_panic = false;
+        let mut panic_msg = InterfaceSlot::nil();
+        let output = crate::output::CaptureSink::new();
+        let program_args = Vec::new();
+        let mut sentinel_errors = crate::ffi::SentinelErrorCache::new();
+        let mut host_output = None;
+        let mut module = Module::new("test".to_string());
+        module.struct_metas.clear();
+        let mut gc = Gc::new();
+        let parent = gc.alloc(crate::ValueMeta::new(0, ValueKind::Array), 1);
+        let vals = [0_u64];
+        let mut ctx = JitContext {
+            gc: &mut gc,
+            globals: core::ptr::null_mut(),
+            safepoint_flag: &safepoint_flag,
+            panic_flag: &mut panic_flag,
+            is_user_panic: &mut is_user_panic,
+            panic_msg: &mut panic_msg,
+            user_panic_pc: u32::MAX,
+            runtime_trap_kind: JitRuntimeTrapKind::None as u8,
+            runtime_trap_arg0: 0,
+            runtime_trap_arg1: 0,
+            runtime_trap_pc: u32::MAX,
+            vm: core::ptr::null_mut(),
+            fiber: core::ptr::null_mut(),
+            itab_cache: core::ptr::null_mut(),
+            extern_registry: core::ptr::null(),
+            call_extern_fn: None,
+            module: &module,
+            jit_func_table: core::ptr::null(),
+            jit_func_count: 0,
+            direct_call_table: core::ptr::null(),
+            direct_call_count: 0,
+            program_args: &program_args,
+            sentinel_errors: &mut sentinel_errors,
+            output: &*output as *const dyn crate::output::OutputSink,
+            host_output: &mut host_output,
+            #[cfg(feature = "std")]
+            io: core::ptr::null_mut(),
+            call_func_id: 0,
+            call_arg_start: 0,
+            call_resume_pc: 0,
+            call_ret_slots: 0,
+            call_ret_reg: 0,
+            call_kind: 0,
+            #[cfg(feature = "std")]
+            wait_io_token: 0,
+            loop_exit_pc: 0,
+            stack_ptr: core::ptr::null_mut(),
+            stack_cap: 0,
+            stack_limit: 0,
+            call_depth: 0,
+            call_depth_limit: 0,
+            jit_bp: 0,
+            fiber_sp: 0,
+            push_frame_fn: None,
+            pop_frame_fn: None,
+            stack_overflow_fn: None,
+            push_resume_point_fn: None,
+            create_island_fn: None,
+            queue_close_fn: None,
+            queue_send_fn: None,
+            queue_recv_fn: None,
+            go_start_fn: None,
+            go_island_fn: None,
+            defer_push_fn: None,
+            recover_fn: None,
+            select_begin_fn: None,
+            select_send_fn: None,
+            select_recv_fn: None,
+            select_exec_fn: None,
+            is_error_return: 0,
+            ret_gcref_start: 0,
+            ret_is_heap: 0,
+            ret_start: 0,
+            prepare_closure_call_fn: None,
+            prepare_iface_call_fn: None,
+            ic_table: core::ptr::null_mut(),
+        };
+
+        let result = vo_gc_typed_write_barrier_by_meta(
+            &mut ctx,
+            parent as u64,
+            vals.as_ptr(),
+            vals.len() as u32,
+            crate::ValueMeta::new(123, ValueKind::Struct).to_raw(),
+        );
+
+        assert_eq!(result, JitResult::JitError);
+        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
+        assert_eq!(ctx.runtime_trap_arg1, JIT_INFRA_ERROR_INVALID_METADATA);
+        assert_eq!(
+            ctx.runtime_trap_pc,
+            JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT as u32
+        );
+    }
+
+    #[test]
+    fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let mut is_user_panic = false;
+        let mut panic_msg = InterfaceSlot::nil();
+        let output = crate::output::CaptureSink::new();
+        let program_args = Vec::new();
+        let mut sentinel_errors = crate::ffi::SentinelErrorCache::new();
+        let mut host_output = None;
+        let mut module = Module::new("test".to_string());
+        module.struct_metas.clear();
+        let mut gc = Gc::new();
+        let elem_meta = crate::ValueMeta::new(123, ValueKind::Struct);
+        let slice = crate::objects::slice::create(&mut gc, elem_meta, 8, 1, 2);
+        let vals = [0_u64];
+        let mut ctx = JitContext {
+            gc: &mut gc,
+            globals: core::ptr::null_mut(),
+            safepoint_flag: &safepoint_flag,
+            panic_flag: &mut panic_flag,
+            is_user_panic: &mut is_user_panic,
+            panic_msg: &mut panic_msg,
+            user_panic_pc: u32::MAX,
+            runtime_trap_kind: JitRuntimeTrapKind::None as u8,
+            runtime_trap_arg0: 0,
+            runtime_trap_arg1: 0,
+            runtime_trap_pc: u32::MAX,
+            vm: core::ptr::null_mut(),
+            fiber: core::ptr::null_mut(),
+            itab_cache: core::ptr::null_mut(),
+            extern_registry: core::ptr::null(),
+            call_extern_fn: None,
+            module: &module,
+            jit_func_table: core::ptr::null(),
+            jit_func_count: 0,
+            direct_call_table: core::ptr::null(),
+            direct_call_count: 0,
+            program_args: &program_args,
+            sentinel_errors: &mut sentinel_errors,
+            output: &*output as *const dyn crate::output::OutputSink,
+            host_output: &mut host_output,
+            #[cfg(feature = "std")]
+            io: core::ptr::null_mut(),
+            call_func_id: 0,
+            call_arg_start: 0,
+            call_resume_pc: 0,
+            call_ret_slots: 0,
+            call_ret_reg: 0,
+            call_kind: 0,
+            #[cfg(feature = "std")]
+            wait_io_token: 0,
+            loop_exit_pc: 0,
+            stack_ptr: core::ptr::null_mut(),
+            stack_cap: 0,
+            stack_limit: 0,
+            call_depth: 0,
+            call_depth_limit: 0,
+            jit_bp: 0,
+            fiber_sp: 0,
+            push_frame_fn: None,
+            pop_frame_fn: None,
+            stack_overflow_fn: None,
+            push_resume_point_fn: None,
+            create_island_fn: None,
+            queue_close_fn: None,
+            queue_send_fn: None,
+            queue_recv_fn: None,
+            go_start_fn: None,
+            go_island_fn: None,
+            defer_push_fn: None,
+            recover_fn: None,
+            select_begin_fn: None,
+            select_send_fn: None,
+            select_recv_fn: None,
+            select_exec_fn: None,
+            is_error_return: 0,
+            ret_gcref_start: 0,
+            ret_is_heap: 0,
+            ret_start: 0,
+            prepare_closure_call_fn: None,
+            prepare_iface_call_fn: None,
+            ic_table: core::ptr::null_mut(),
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vo_slice_append(&mut ctx, elem_meta.to_raw(), 8, slice as u64, vals.as_ptr())
+        }));
+
+        let result = result.expect("vo_slice_append must not panic across extern C ABI");
+        assert_eq!(result, JIT_HELPER_U64_ERROR);
+        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
+        assert_eq!(ctx.runtime_trap_arg1, JIT_INFRA_ERROR_INVALID_METADATA);
+        assert_eq!(
+            ctx.runtime_trap_pc,
+            JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT as u32
+        );
     }
 
     #[test]
@@ -2370,6 +3889,96 @@ mod tests {
         assert_eq!(symbols.len(), names.len());
         for ((registered, _), manifest) in symbols.iter().zip(names.iter()) {
             assert_eq!(registered, manifest);
+        }
+    }
+
+    #[test]
+    fn runtime_helper_abi_manifest_matches_registered_symbols() {
+        let names = runtime_symbol_names();
+        let abi = runtime_helper_abi_fields();
+        assert_eq!(abi.len(), names.len());
+        for (field, manifest) in abi.iter().zip(names.iter()) {
+            assert_eq!(field.name, *manifest);
+            assert!(
+                !field.params.is_empty()
+                    || matches!(field.return_policy, JitRuntimeHelperReturnPolicy::RawU64),
+                "{} should declare its ABI parameters explicitly",
+                field.name
+            );
+            if field.may_schedule {
+                assert!(
+                    field.observes_frame,
+                    "{} may schedule and must observe/materialize the frame",
+                    field.name
+                );
+            }
+            if field.ret == JitAbiType::JitResult {
+                assert_eq!(
+                    field.return_policy,
+                    JitRuntimeHelperReturnPolicy::JitResult,
+                    "{} returns JitResult and must be checked by lowering",
+                    field.name
+                );
+            }
+            if matches!(
+                field.return_policy,
+                JitRuntimeHelperReturnPolicy::JitResult
+                    | JitRuntimeHelperReturnPolicy::I32StatusOutPointer
+                    | JitRuntimeHelperReturnPolicy::U64ErrorSentinel
+            ) {
+                assert_ne!(
+                    field.panic_policy,
+                    JitRuntimeHelperPanicPolicy::MustNotPanicAcrossAbi,
+                    "{} has a control-flow-significant status but no failure policy",
+                    field.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jit_callback_abi_manifest_is_sorted_unique_and_machine_readable() {
+        let fields = jit_callback_abi_fields();
+        assert!(!fields.is_empty());
+        let mut names = std::collections::BTreeSet::new();
+        let mut ids = std::collections::BTreeSet::new();
+        for field in fields {
+            assert!(
+                names.insert(field.name),
+                "duplicate callback {}",
+                field.name
+            );
+            if let Some(id) = field.infra_error_id {
+                assert!(ids.insert(id), "duplicate JIT callback infra-error id {id}");
+                assert!(id > 0, "callback infra-error id must be non-zero");
+            }
+            if field.may_schedule {
+                assert!(
+                    field.observes_frame,
+                    "{} may schedule and must observe/materialize the frame",
+                    field.name
+                );
+            }
+            if field.kind != JitContextDependencyKind::InlineCacheTable {
+                assert_eq!(
+                    field.params.first(),
+                    Some(&JitAbiType::Ptr),
+                    "{} callback must take JitContext as its first ABI parameter",
+                    field.name
+                );
+            }
+            match field.return_policy {
+                JitCallbackReturnPolicy::RawVoid => assert_eq!(field.ret, JitAbiType::Void),
+                JitCallbackReturnPolicy::RawPointer | JitCallbackReturnPolicy::TablePointer => {
+                    assert_eq!(field.ret, JitAbiType::Ptr)
+                }
+                JitCallbackReturnPolicy::RawHandle => assert_eq!(field.ret, JitAbiType::U64),
+                JitCallbackReturnPolicy::JitResult
+                | JitCallbackReturnPolicy::JitResultWithOutPointer
+                | JitCallbackReturnPolicy::PreparedCallOutPointer => {
+                    assert_eq!(field.ret, JitAbiType::JitResult)
+                }
+            }
         }
     }
 
@@ -2384,6 +3993,94 @@ mod tests {
         assert_eq!(legacy_low, legacy_high, "legacy u32 key collided");
         assert_ne!(low, high, "tagged key must retain high itab_id bits");
         assert_ne!(low, DynCallIC::closure_key(0x0000_0002));
+    }
+
+    #[test]
+    fn call_extern_missing_callback_uses_infra_error_path() {
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let mut is_user_panic = false;
+        let mut panic_msg = InterfaceSlot::nil();
+        let output = crate::output::CaptureSink::new();
+        let program_args = Vec::new();
+        let mut sentinel_errors = crate::ffi::SentinelErrorCache::new();
+        let mut host_output = None;
+        let module = Module::new("test".to_string());
+        let mut ctx = JitContext {
+            gc: core::ptr::null_mut(),
+            globals: core::ptr::null_mut(),
+            safepoint_flag: &safepoint_flag,
+            panic_flag: &mut panic_flag,
+            is_user_panic: &mut is_user_panic,
+            panic_msg: &mut panic_msg,
+            user_panic_pc: u32::MAX,
+            runtime_trap_kind: JitRuntimeTrapKind::None as u8,
+            runtime_trap_arg0: 0,
+            runtime_trap_arg1: 0,
+            runtime_trap_pc: u32::MAX,
+            vm: core::ptr::null_mut(),
+            fiber: core::ptr::null_mut(),
+            itab_cache: core::ptr::null_mut(),
+            extern_registry: core::ptr::null(),
+            call_extern_fn: None,
+            module: &module,
+            jit_func_table: core::ptr::null(),
+            jit_func_count: 0,
+            direct_call_table: core::ptr::null(),
+            direct_call_count: 0,
+            program_args: &program_args,
+            sentinel_errors: &mut sentinel_errors,
+            output: &*output as *const dyn crate::output::OutputSink,
+            host_output: &mut host_output,
+            #[cfg(feature = "std")]
+            io: core::ptr::null_mut(),
+            call_func_id: 0,
+            call_arg_start: 0,
+            call_resume_pc: 0,
+            call_ret_slots: 0,
+            call_ret_reg: 0,
+            call_kind: 0,
+            #[cfg(feature = "std")]
+            wait_io_token: 0,
+            loop_exit_pc: 0,
+            stack_ptr: core::ptr::null_mut(),
+            stack_cap: 0,
+            stack_limit: 0,
+            call_depth: 0,
+            call_depth_limit: 0,
+            jit_bp: 0,
+            fiber_sp: 0,
+            push_frame_fn: None,
+            pop_frame_fn: None,
+            stack_overflow_fn: None,
+            push_resume_point_fn: None,
+            create_island_fn: None,
+            queue_close_fn: None,
+            queue_send_fn: None,
+            queue_recv_fn: None,
+            go_start_fn: None,
+            go_island_fn: None,
+            defer_push_fn: None,
+            recover_fn: None,
+            select_begin_fn: None,
+            select_send_fn: None,
+            select_recv_fn: None,
+            select_exec_fn: None,
+            is_error_return: 0,
+            ret_gcref_start: 0,
+            ret_is_heap: 0,
+            ret_start: 0,
+            prepare_closure_call_fn: None,
+            prepare_iface_call_fn: None,
+            ic_table: core::ptr::null_mut(),
+        };
+
+        let result = vo_call_extern(&mut ctx, 7, core::ptr::null(), 0, core::ptr::null_mut(), 0);
+
+        assert_eq!(result, JitResult::JitError);
+        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
+        assert_eq!(ctx.runtime_trap_arg1, JIT_INFRA_ERROR_MISSING_CALLBACK);
+        assert_eq!(ctx.runtime_trap_pc, JIT_CALLBACK_CALL_EXTERN as u32);
     }
 
     #[test]

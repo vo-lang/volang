@@ -25,7 +25,10 @@ pub(super) fn conv_i2f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 pub(super) fn conv_f2i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Input is F64 (float), output is I64 (int)
     let f = e.read_var_f64(inst.b);
-    let r = e.builder().ins().fcvt_to_sint(types::I64, f);
+    // Rust/VM float-to-int casts saturate out-of-range values and convert NaN
+    // to 0. The non-saturating Cranelift instruction can host-trap or produce
+    // target-specific poison for those inputs, so keep this lowering explicit.
+    let r = e.builder().ins().fcvt_to_sint_sat(types::I64, f);
     e.write_var(inst.a, r);
 }
 

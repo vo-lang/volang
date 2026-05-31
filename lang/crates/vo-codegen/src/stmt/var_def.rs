@@ -39,7 +39,7 @@ impl DeferredHeapAlloc {
     /// Used for Go 1.22 loop variable per-iteration semantics.
     pub fn emit_with_copy(&self, func: &mut FuncBuilder, src_slot: u16) {
         self.emit(func);
-        debug_assert_eq!(self.value_slots as usize, self.slot_types.len());
+        assert_eq!(self.value_slots as usize, self.slot_types.len());
         func.emit_ptr_set_with_slot_types(self.gcref_slot, 0, src_slot, &self.slot_types);
     }
 }

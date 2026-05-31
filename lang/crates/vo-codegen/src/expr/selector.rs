@@ -4,7 +4,6 @@
 //! and indirect selection through embedded pointer fields.
 
 use vo_syntax::ast::{Expr, ExprKind};
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
@@ -226,17 +225,7 @@ fn compile_pkg_qualified_name(
             if let Some(global_idx) = ctx.get_global_index(obj_key) {
                 let type_key = info.expr_type(expr.id);
                 let slots = info.type_slot_count(type_key);
-                if slots == 1 {
-                    func.emit_op(Opcode::GlobalGet, dst, global_idx as u16, 0);
-                } else {
-                    func.emit_with_flags(
-                        Opcode::GlobalGetN,
-                        slots as u8,
-                        dst,
-                        global_idx as u16,
-                        0,
-                    );
-                }
+                func.emit_global_get(dst, global_idx as u16, slots);
                 Ok(())
             } else {
                 Err(CodegenError::Internal(format!(

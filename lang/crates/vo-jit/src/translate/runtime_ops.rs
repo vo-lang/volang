@@ -8,22 +8,23 @@ use vo_runtime::bytecode::Constant;
 use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
+use crate::call_helpers::emit_checked_jit_result_helper_call;
 use crate::translator::{
     emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter,
 };
 use crate::JitError;
 
-use super::{emit_runtime_trap_if, mark_runtime_trap_pc};
+use super::{emit_runtime_trap_if, mark_runtime_trap_pc, require_helper};
 
 // =============================================================================
 // Closure operations
 // =============================================================================
 
-pub(super) fn closure_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .closure_new
-        .expect("closure_new helper not registered");
+pub(super) fn closure_new<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().closure_new, "closure_new")?;
     let gc_ptr = e.gc_ptr();
     let func_id = inst.closure_new_func_id();
     let capture_count = inst.c as u32;
@@ -32,6 +33,7 @@ pub(super) fn closure_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let call = emit_funcref_call(e, func, &[gc_ptr, func_id_i32, capture_count_i32]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
 pub(super) fn closure_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
@@ -50,11 +52,8 @@ pub(super) fn closure_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 // Allocation operations
 // =============================================================================
 
-pub(super) fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .gc_alloc
-        .expect("gc_alloc helper not registered");
+pub(super) fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().gc_alloc, "gc_alloc")?;
     let gc_ptr = e.gc_ptr();
     let meta_raw = e.read_var(inst.b);
     let meta_i32 = e.builder().ins().ireduce(types::I32, meta_raw);
@@ -62,13 +61,14 @@ pub(super) fn ptr_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let call = emit_funcref_call(e, func, &[gc_ptr, meta_i32, slots_i32]);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn queue_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .queue_new_checked
-        .expect("queue_new_checked helper not registered");
+pub(super) fn queue_new<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().queue_new_checked, "queue_new_checked")?;
     let gc_ptr = e.gc_ptr();
     let queue_kind = e
         .builder()
@@ -108,44 +108,55 @@ pub(super) fn queue_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     // Load result from output slot
     let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn queue_len<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .queue_len
-        .expect("queue_len helper not registered");
+pub(super) fn queue_len<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().queue_len, "queue_len")?;
     let ch = e.read_var(inst.b);
     let call = emit_funcref_call_with_effect(e, func, &[ch], HelperCallEffect::FrameIndependent);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
-pub(super) fn queue_cap<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .queue_cap
-        .expect("queue_cap helper not registered");
+pub(super) fn queue_cap<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().queue_cap, "queue_cap")?;
     let ch = e.read_var(inst.b);
     let call = emit_funcref_call_with_effect(e, func, &[ch], HelperCallEffect::FrameIndependent);
     let result = e.builder().inst_results(call)[0];
     e.write_var(inst.a, result);
+    Ok(())
 }
 
 // =============================================================================
 // Interface operations
 // =============================================================================
 
-pub(super) fn str_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn str_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     use vo_runtime::bytecode::Constant;
-    let func = e.helpers().str_new.expect("str_new helper not registered");
+    let func = require_helper(e.helpers().str_new, "str_new")?;
     let const_idx = inst.b as usize;
-    let bytes: Vec<u8> = if let Constant::String(s) = &e.vo_module().constants[const_idx] {
-        s.as_bytes().to_vec()
-    } else {
-        let zero = e.builder().ins().iconst(types::I64, 0);
-        e.write_var(inst.a, zero);
-        return;
+    let bytes: Vec<u8> = match e.vo_module().constants.get(const_idx) {
+        Some(Constant::String(s)) => s.as_bytes().to_vec(),
+        Some(other) => {
+            return Err(JitError::Internal(format!(
+                "StrNew constant at pc {} must be String, got {other:?}",
+                e.current_pc()
+            )));
+        }
+        None => {
+            return Err(JitError::Internal(format!(
+                "StrNew constant index {const_idx} missing at pc {}",
+                e.current_pc()
+            )));
+        }
     };
     let len = bytes.len();
     if len == 0 {
@@ -172,6 +183,7 @@ pub(super) fn str_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
         let result = e.builder().inst_results(call)[0];
         e.write_var(inst.a, result);
     }
+    Ok(())
 }
 
 pub(super) fn iface_assign<'a>(
@@ -204,10 +216,7 @@ pub(super) fn iface_assign<'a>(
             (new_slot0, src_slot1)
         } else {
             // Target is non-empty interface: runtime itab lookup
-            let iface_to_iface_func = e
-                .helpers()
-                .iface_to_iface
-                .expect("iface_to_iface helper not registered");
+            let iface_to_iface_func = require_helper(e.helpers().iface_to_iface, "iface_to_iface")?;
             let ctx = e.ctx_param();
             let iface_meta_id_val = e.builder().ins().iconst(types::I32, iface_meta_id as i64);
             let call =
@@ -227,10 +236,7 @@ pub(super) fn iface_assign<'a>(
 
         let slot1 = if vk == 14 || vk == 15 {
             // Struct or Array: ptr_clone the GcRef
-            let ptr_clone_func = e
-                .helpers()
-                .ptr_clone
-                .expect("ptr_clone helper not registered");
+            let ptr_clone_func = require_helper(e.helpers().ptr_clone, "ptr_clone")?;
             let gc_ptr = e.gc_ptr();
             let call = emit_funcref_call(e, ptr_clone_func, &[gc_ptr, src]);
             e.builder().inst_results(call)[0]
@@ -263,11 +269,11 @@ fn iface_assign_metadata_constant<'a>(
     }
 }
 
-pub(super) fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e
-        .helpers()
-        .iface_assert
-        .expect("iface_assert helper not registered");
+pub(super) fn iface_assert<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().iface_assert, "iface_assert")?;
     let ctx = e.ctx_param();
     let slot0 = e.read_var(inst.b);
     let slot1 = e.read_var(inst.b + 1);
@@ -290,13 +296,12 @@ pub(super) fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             ));
     let dst_ptr = e.builder().ins().stack_addr(types::I64, result_slot, 0);
     mark_runtime_trap_pc(e);
-    let call = emit_funcref_call(
+    emit_checked_jit_result_helper_call(
         e,
         func,
         &[ctx, slot0, slot1, target_id_i32, flags_i16, dst_ptr],
+        true,
     );
-    let result = e.builder().inst_results(call)[0];
-    crate::call_helpers::check_call_result(e, result, true);
     let dst_slots = if assert_kind == 1 {
         2
     } else {
@@ -321,9 +326,10 @@ pub(super) fn iface_assert<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             .stack_load(types::I64, result_slot, (ok_offset * 8) as i32);
         e.write_var(inst.a + ok_offset as u16, ok_val);
     }
+    Ok(())
 }
 
-pub(super) fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     let b0 = e.read_var(inst.b);
     let b1 = e.read_var(inst.b + 1);
     let c0 = e.read_var(inst.c);
@@ -331,10 +337,7 @@ pub(super) fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
     // Call runtime helper for correct comparison (handles string content, struct/array deep eq, etc.)
     // Returns: 0=false, 1=true, 2=panic (uncomparable type)
-    let iface_eq_func = e
-        .helpers()
-        .iface_eq
-        .expect("iface_eq helper must be available");
+    let iface_eq_func = require_helper(e.helpers().iface_eq, "iface_eq")?;
     let ctx = e.ctx_param();
     let call = emit_funcref_call(e, iface_eq_func, &[ctx, b0, b1, c0, c1]);
     let result = e.builder().inst_results(call)[0];
@@ -354,6 +357,7 @@ pub(super) fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let one = e.builder().ins().iconst(types::I64, 1);
     let masked = e.builder().ins().band(result, one);
     e.write_var(inst.a, masked);
+    Ok(())
 }
 
 // =============================================================================
@@ -361,18 +365,17 @@ pub(super) fn iface_eq<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 // =============================================================================
 
 /// IslandNew: a = island_new()
-pub(super) fn island_new<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let island_new_func = e
-        .helpers()
-        .island_new
-        .expect("island_new helper not registered");
+pub(super) fn island_new<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let island_new_func = require_helper(e.helpers().island_new, "island_new")?;
     let ctx = e.ctx_param();
     let out_ptr = e.var_addr(inst.a);
 
-    let call = emit_funcref_call(e, island_new_func, &[ctx, out_ptr]);
-    let result = e.builder().inst_results(call)[0];
-    crate::call_helpers::check_call_result(e, result, true);
-    e.sync_written_slots(inst.a, 1);
+    emit_checked_jit_result_helper_call(e, island_new_func, &[ctx, out_ptr], true);
+    e.sync_written_slots(inst.a, 1)?;
+    Ok(())
 }
 
 /// ChanClose: close(chan[a])
@@ -381,21 +384,20 @@ pub(super) fn queue_close<'a>(
     e: &mut impl IrEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let queue_close_func = e
-        .helpers()
-        .queue_close
-        .expect("queue_close helper not registered");
-    emit_close_with_panic_check(e, queue_close_func, inst.a)
+    let queue_close_func = require_helper(e.helpers().queue_close, "queue_close")?;
+    let ctx = e.ctx_param();
+    let obj = e.read_var(inst.a);
+
+    mark_runtime_trap_pc(e);
+    emit_checked_jit_result_helper_call(e, queue_close_func, &[ctx, obj], true);
+    Ok(())
 }
 
 pub(super) fn queue_send<'a>(
     e: &mut impl IrEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let queue_send_func = e
-        .helpers()
-        .queue_send
-        .expect("queue_send helper not registered");
+    let queue_send_func = require_helper(e.helpers().queue_send, "queue_send")?;
     emit_queue_send(e, inst, queue_send_func)
 }
 
@@ -403,47 +405,8 @@ pub(super) fn queue_recv<'a>(
     e: &mut impl IrEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let queue_recv_func = e
-        .helpers()
-        .queue_recv
-        .expect("queue_recv helper not registered");
+    let queue_recv_func = require_helper(e.helpers().queue_recv, "queue_recv")?;
     emit_queue_recv(e, inst, queue_recv_func)
-}
-
-/// Emit close operation: call helper(ctx, obj), check for Panic result.
-pub(super) fn emit_close_with_panic_check<'a>(
-    e: &mut impl IrEmitter<'a>,
-    close_func: cranelift_codegen::ir::FuncRef,
-    obj_slot: u16,
-) -> Result<(), JitError> {
-    let panic_ret_val = e.panic_return_value();
-    let ctx = e.ctx_param();
-    let obj = e.read_var(obj_slot);
-
-    mark_runtime_trap_pc(e);
-    let call = emit_funcref_call(e, close_func, &[ctx, obj]);
-    let result = e.builder().inst_results(call)[0];
-
-    // Check for Panic
-    let panic_val = e.builder().ins().iconst(types::I32, panic_ret_val as i64);
-    let is_panic = e.builder().ins().icmp(IntCC::Equal, result, panic_val);
-
-    let panic_block = e.builder().create_block();
-    let continue_block = e.builder().create_block();
-
-    e.builder()
-        .ins()
-        .brif(is_panic, panic_block, &[], continue_block, &[]);
-
-    e.builder().switch_to_block(panic_block);
-    e.builder().seal_block(panic_block);
-    e.spill_all_vars();
-    e.builder().ins().return_(&[panic_val]);
-
-    e.builder().switch_to_block(continue_block);
-    e.builder().seal_block(continue_block);
-
-    Ok(())
 }
 
 // =============================================================================
@@ -478,27 +441,7 @@ pub(super) fn emit_queue_send<'a>(
     let val_ptr = e.var_addr(inst.b);
     let val_slots_val = e.builder().ins().iconst(types::I32, val_slots as i64);
 
-    let call = emit_funcref_call(e, send_func, &[ctx, queue, val_ptr, val_slots_val]);
-    let result = e.builder().inst_results(call)[0];
-
-    // Branch on result
-    let ok_val = e.builder().ins().iconst(types::I32, 0);
-    let is_ok = e.builder().ins().icmp(IntCC::Equal, result, ok_val);
-    let ok_block = e.builder().create_block();
-    let not_ok_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(is_ok, ok_block, &[], not_ok_block, &[]);
-
-    // Not-ok: spill and return
-    e.builder().switch_to_block(not_ok_block);
-    e.builder().seal_block(not_ok_block);
-    e.spill_all_vars();
-    e.builder().ins().return_(&[result]);
-
-    // Ok: continue
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
+    emit_checked_jit_result_helper_call(e, send_func, &[ctx, queue, val_ptr, val_slots_val], true);
     Ok(())
 }
 
@@ -533,37 +476,18 @@ pub(super) fn emit_queue_recv<'a>(
     let elem_slots_val = e.builder().ins().iconst(types::I32, elem_slots as i64);
     let has_ok_val = e.builder().ins().iconst(types::I32, has_ok as i64);
 
-    let call = emit_funcref_call(
+    emit_checked_jit_result_helper_call(
         e,
         recv_func,
         &[ctx, queue, dst_ptr, elem_slots_val, has_ok_val],
+        true,
     );
-    let result = e.builder().inst_results(call)[0];
-
-    let ok_val = e.builder().ins().iconst(types::I32, 0);
-    let is_ok = e.builder().ins().icmp(IntCC::Equal, result, ok_val);
-    let ok_block = e.builder().create_block();
-    let not_ok_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(is_ok, ok_block, &[], not_ok_block, &[]);
-
-    e.builder().switch_to_block(not_ok_block);
-    e.builder().seal_block(not_ok_block);
-    e.spill_all_vars();
-    e.builder().ins().return_(&[result]);
-
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
-    e.sync_written_slots(inst.a, written_slots as u16);
+    e.sync_written_slots(inst.a, written_slots as u16)?;
     Ok(())
 }
 
-pub(super) fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let go_start_func = e
-        .helpers()
-        .go_start
-        .expect("go_start helper not registered");
+pub(super) fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let go_start_func = require_helper(e.helpers().go_start, "go_start")?;
     let ctx = e.ctx_param();
     let is_closure_call = inst.call_shape_is_closure();
     let func_id = if is_closure_call {
@@ -586,7 +510,7 @@ pub(super) fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let args_ptr = e.var_addr(inst.b);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.c as i64);
     mark_runtime_trap_pc(e);
-    let call = emit_funcref_call(
+    emit_checked_jit_result_helper_call(
         e,
         go_start_func,
         &[
@@ -597,16 +521,16 @@ pub(super) fn go_start<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
             args_ptr,
             arg_slots,
         ],
+        true,
     );
-    let result = e.builder().inst_results(call)[0];
-    crate::call_helpers::check_call_result(e, result, true);
+    Ok(())
 }
 
-pub(super) fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let go_island_func = e
-        .helpers()
-        .go_island
-        .expect("go_island helper not registered");
+pub(super) fn go_island<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let go_island_func = require_helper(e.helpers().go_island, "go_island")?;
     let ctx = e.ctx_param();
     let island = e.read_var(inst.a);
     let closure_ref = e.read_var(inst.b);
@@ -614,20 +538,21 @@ pub(super) fn go_island<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let args_ptr = e.var_addr(inst.c);
     let arg_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
     mark_runtime_trap_pc(e);
-    let call = emit_funcref_call(
+    emit_checked_jit_result_helper_call(
         e,
         go_island_func,
         &[ctx, island, closure_ref, args_ptr, arg_slots],
+        true,
     );
-    let result = e.builder().inst_results(call)[0];
-    crate::call_helpers::check_call_result(e, result, true);
+    Ok(())
 }
 
-pub(super) fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_errdefer: bool) {
-    let defer_push_func = e
-        .helpers()
-        .defer_push
-        .expect("defer_push helper not registered");
+pub(super) fn defer_push<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+    is_errdefer: bool,
+) -> Result<(), JitError> {
+    let defer_push_func = require_helper(e.helpers().defer_push, "defer_push")?;
     let ctx = e.ctx_param();
     let is_closure_call = inst.call_shape_is_closure();
     let func_id = if is_closure_call {
@@ -652,7 +577,7 @@ pub(super) fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_
         .builder()
         .ins()
         .iconst(types::I32, if is_errdefer { 1 } else { 0 });
-    let call = emit_funcref_call(
+    emit_checked_jit_result_helper_call(
         e,
         defer_push_func,
         &[
@@ -665,19 +590,18 @@ pub(super) fn defer_push<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, is_
             arg_count,
             is_errdefer_val,
         ],
+        true,
     );
-    let result = e.builder().inst_results(call)[0];
-    crate::call_helpers::check_call_result(e, result, true);
+    Ok(())
 }
 
-pub(super) fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let recover_func = e.helpers().recover.expect("recover helper not registered");
+pub(super) fn recover<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
+    let recover_func = require_helper(e.helpers().recover, "recover")?;
     let ctx = e.ctx_param();
     let result_ptr = e.var_addr(inst.a);
-    let call = emit_funcref_call(e, recover_func, &[ctx, result_ptr]);
-    let result = e.builder().inst_results(call)[0];
-    crate::call_helpers::check_call_result(e, result, true);
-    e.sync_written_slots(inst.a, 2);
+    emit_checked_jit_result_helper_call(e, recover_func, &[ctx, result_ptr], true);
+    e.sync_written_slots(inst.a, 2)?;
+    Ok(())
 }
 
 // Select Statement
@@ -690,10 +614,7 @@ pub(super) fn select_begin<'a>(
     e: &mut impl IrEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
-    let func = e
-        .helpers()
-        .select_begin
-        .expect("select_begin not registered");
+    let func = require_helper(e.helpers().select_begin, "select_begin")?;
     let ctx = e.ctx_param();
     let case_count = e.builder().ins().iconst(types::I32, inst.a as i64);
     let has_default = e
@@ -701,7 +622,7 @@ pub(super) fn select_begin<'a>(
         .ins()
         .iconst(types::I32, (inst.flags & 1) as i64);
     e.begin_select_tracking();
-    emit_funcref_call(e, func, &[ctx, case_count, has_default]);
+    emit_checked_jit_result_helper_call(e, func, &[ctx, case_count, has_default], true);
     Ok(())
 }
 
@@ -710,15 +631,24 @@ pub(super) fn select_begin<'a>(
 /// - b: val_reg
 /// - c: case_idx
 /// - flags: elem_slots
-pub(super) fn select_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().select_send.expect("select_send not registered");
+pub(super) fn select_send<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().select_send, "select_send")?;
     let ctx = e.ctx_param();
     let queue_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
     let val_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
     let elem_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
     e.record_select_send_case();
-    emit_funcref_call(e, func, &[ctx, queue_reg, val_reg, elem_slots, case_idx]);
+    emit_checked_jit_result_helper_call(
+        e,
+        func,
+        &[ctx, queue_reg, val_reg, elem_slots, case_idx],
+        true,
+    );
+    Ok(())
 }
 
 /// SelectRecv: Add a recv case to the current select.
@@ -726,8 +656,11 @@ pub(super) fn select_send<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 /// - b: chan_reg
 /// - c: case_idx
 /// - flags: (elem_slots << 1) | has_ok
-pub(super) fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
-    let func = e.helpers().select_recv.expect("select_recv not registered");
+pub(super) fn select_recv<'a>(
+    e: &mut impl IrEmitter<'a>,
+    inst: &Instruction,
+) -> Result<(), JitError> {
+    let func = require_helper(e.helpers().select_recv, "select_recv")?;
     let ctx = e.ctx_param();
 
     let dst_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
@@ -739,12 +672,13 @@ pub(super) fn select_recv<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
     e.record_select_recv_case(inst.a, elem_slots_u32 as u8, has_ok_u32 != 0);
 
-    // Result is always Ok for select_recv
-    emit_funcref_call(
+    emit_checked_jit_result_helper_call(
         e,
         func,
         &[ctx, dst_reg, queue_reg, elem_slots, has_ok, case_idx],
+        true,
     );
+    Ok(())
 }
 
 /// SelectExec: Execute the select statement.
@@ -758,7 +692,7 @@ pub(super) fn select_exec<'a>(
 ) -> Result<(), JitError> {
     use vo_runtime::jit_api::JitContext;
 
-    let func = e.helpers().select_exec.expect("select_exec not registered");
+    let func = require_helper(e.helpers().select_exec, "select_exec")?;
     let ctx = e.ctx_param();
 
     // Set resume_pc for WaitQueue case - RE-EXECUTE select_exec when woken
@@ -774,33 +708,11 @@ pub(super) fn select_exec<'a>(
     mark_runtime_trap_pc(e);
 
     let result_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
-    e.spill_all_vars();
-
-    let call = emit_funcref_call(e, func, &[ctx, result_reg]);
-    let result = e.builder().inst_results(call)[0];
-
-    // Branch on result
-    let ok_val = e.builder().ins().iconst(types::I32, 0);
-    let is_ok = e.builder().ins().icmp(IntCC::Equal, result, ok_val);
-    let ok_block = e.builder().create_block();
-    let not_ok_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(is_ok, ok_block, &[], not_ok_block, &[]);
-
-    // Not-ok (WaitIo or Panic): spill and return
-    e.builder().switch_to_block(not_ok_block);
-    e.builder().seal_block(not_ok_block);
-    e.spill_all_vars();
-    e.builder().ins().return_(&[result]);
-
-    // Ok: reload result from fiber stack (callback wrote it there)
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
+    emit_checked_jit_result_helper_call(e, func, &[ctx, result_reg], true);
 
     // The select callback writes result_reg AND recv dst slots directly to fiber.stack.
     e.refresh_stack_base_after_reallocation();
-    e.sync_select_exec_state(inst.a);
+    e.sync_select_exec_state(inst.a)?;
 
     Ok(())
 }

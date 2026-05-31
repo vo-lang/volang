@@ -329,7 +329,8 @@ impl CodegenContext {
             named_type_metas: &mut self.module.named_type_metas,
             struct_meta_ids: &mut self.struct_meta_ids,
             struct_metas: &mut self.module.struct_metas,
-            interface_meta_ids: &self.interface_meta_ids,
+            interface_meta_ids: &mut self.interface_meta_ids,
+            interface_metas: &mut self.module.interface_metas,
         };
         let value_rttid = crate::type_interner::intern_type_key(
             &mut self.type_interner,
@@ -626,7 +627,8 @@ impl CodegenContext {
                             named_type_metas: &mut self.module.named_type_metas,
                             struct_meta_ids: &mut self.struct_meta_ids,
                             struct_metas: &mut self.module.struct_metas,
-                            interface_meta_ids: &self.interface_meta_ids,
+                            interface_meta_ids: &mut self.interface_meta_ids,
+                            interface_metas: &mut self.module.interface_metas,
                         };
                         let signature_rttid = crate::type_interner::intern_type_key(
                             &mut self.type_interner,
@@ -1324,7 +1326,7 @@ impl CodegenContext {
         }
 
         let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
-        let call_c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
+        let call_c = crate::type_info::encode_static_call_args(total_arg_slots, ret_slots);
         builder.emit_with_flags(
             vo_vm::instruction::Opcode::Call,
             func_id_high,
@@ -1408,7 +1410,7 @@ impl CodegenContext {
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         builder.emit_with_flags(
             vo_vm::instruction::Opcode::CallIface,
-            method_idx as u8,
+            crate::func::FuncBuilder::checked_call_iface_method_idx(method_idx),
             iface_slot,
             args_start,
             call_c,
@@ -1472,7 +1474,7 @@ impl CodegenContext {
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
         code.push(Instruction::with_flags(
             Opcode::CallIface,
-            method_idx as u8,
+            crate::func::FuncBuilder::checked_call_iface_method_idx(method_idx),
             iface_reg,
             args_start,
             call_c,

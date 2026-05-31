@@ -177,7 +177,7 @@ fn apply_element_write_barrier<T: VoElem>(
     child: Option<GcRef>,
 ) {
     if T::NEEDS_GC {
-        debug_assert_eq!(T::ELEM_BYTES, 8);
+        assert_eq!(T::ELEM_BYTES, 8);
         if let Some(child) = child {
             ctx.gc().write_barrier(parent, child);
         }
@@ -629,14 +629,14 @@ impl<T: VoElem, const N: usize> VoArray<T, N> {
     /// Get element at index.
     #[inline]
     pub fn get(&self, idx: usize) -> T::Owned {
-        debug_assert!(idx < N, "array index out of bounds");
+        assert!(idx < N, "array index out of bounds");
         T::read_from_array(self.ptr, idx)
     }
 
     /// Set element at index and apply a GC barrier when `T` is a reference type.
     #[inline]
     pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
-        debug_assert!(idx < N, "array index out of bounds");
+        assert!(idx < N, "array index out of bounds");
         let child = T::gc_ref_for_barrier(&val);
         T::write_to_array(self.ptr, idx, val);
         apply_element_write_barrier::<T>(ctx, self.ptr, child);
@@ -743,5 +743,37 @@ impl VoClosure {
     #[inline]
     pub fn is_null(&self) -> bool {
         self.ptr.is_null()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vo_array_bounds_are_release_checked() {
+        let src = include_str!("containers.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("containers production source");
+        let start = src
+            .find("impl<T: VoElem, const N: usize> VoArray<T, N>")
+            .expect("VoArray impl");
+        let end = src[start..]
+            .find("/// Cursor for iterating over VoArray.")
+            .map(|offset| start + offset)
+            .expect("VoArray cursor marker");
+        let vo_array = &src[start..end];
+
+        assert!(
+            !vo_array.contains(concat!("debug_assert!", "(idx < N")),
+            "VoArray get/set bounds must be checked in release builds before unsafe array access"
+        );
+        assert!(
+            vo_array.matches("assert!(idx < N").count() >= 2,
+            "VoArray get and set must both fail fast on out-of-bounds indices"
+        );
+        assert!(
+            !src.contains("debug_assert_eq!(T::ELEM_BYTES, 8)"),
+            "GC element write-barrier width must be checked in release builds"
+        );
     }
 }

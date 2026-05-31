@@ -189,7 +189,7 @@ fn emit_box_value(
     let boxed = func.alloc_slots(&[SlotType::GcRef]);
     func.emit_ptr_new(boxed, meta_reg, slots);
     let slot_types = info.type_slot_types(value_type);
-    debug_assert_eq!(slots as usize, slot_types.len());
+    assert_eq!(slots as usize, slot_types.len());
     func.emit_ptr_set_with_slot_types(boxed, 0, reg, &slot_types);
     boxed
 }

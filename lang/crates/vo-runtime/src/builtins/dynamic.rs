@@ -102,6 +102,28 @@ impl From<(DynErr, &'static str)> for DynOrSuspend {
 
 type DynSuspendResult<T> = Result<T, DynOrSuspend>;
 
+fn exact_replay_slots<const N: usize>(
+    ret_vec: Vec<u64>,
+    err: DynErr,
+    context: &'static str,
+) -> DynSuspendResult<[u64; N]> {
+    if ret_vec.len() != N {
+        return Err(DynOrSuspend::Dyn(
+            err,
+            Cow::Owned(format!(
+                "{} replay returned {} slot(s), expected {}",
+                context,
+                ret_vec.len(),
+                N
+            )),
+        ));
+    }
+
+    let mut ret = [0u64; N];
+    ret.copy_from_slice(&ret_vec);
+    Ok(ret)
+}
+
 /// Read `count` slots from a GcRef, returning zeros if the ref is null.
 fn read_ref_slots(src_ref: GcRef, count: usize) -> Vec<u64> {
     (0..count)
@@ -192,14 +214,11 @@ fn call_protocol<const N: usize>(
         }
     };
 
-    // Unpack cached result into fixed-size array
-    let mut ret = [0u64; N];
-    let copy_len = ret_vec.len().min(N);
-    ret[..copy_len].copy_from_slice(&ret_vec[..copy_len]);
+    let ret = exact_replay_slots(ret_vec, err, "dynamic protocol")?;
 
     // Error is always in last 2 slots
     let err_start = N.saturating_sub(2);
-    if ret[err_start] != 0 || ret.get(err_start + 1).copied().unwrap_or(0) != 0 {
+    if ret[err_start] != 0 || ret[err_start + 1] != 0 {
         return Err(DynOrSuspend::Dyn(
             err,
             Cow::Borrowed("protocol returned error"),
@@ -610,21 +629,25 @@ fn set_struct_field(
     let val_vk = interface::unpack_value_kind(val_slot0);
     let field_slot_types: Vec<_> = {
         let parent_meta_id = Gc::header(current_ref).meta_id() as usize;
-        call.struct_meta(parent_meta_id)
-            .and_then(|meta| {
-                meta.slot_types
-                    .get(field.offset..field.offset.saturating_add(field_slots))
-            })
-            .map(|types| types.to_vec())
-            .unwrap_or_default()
+        let struct_meta = call
+            .struct_meta(parent_meta_id)
+            .ok_or((DynErr::BadField, "struct metadata missing"))?;
+        let field_end = field
+            .offset
+            .checked_add(field_slots)
+            .ok_or((DynErr::BadField, "field layout overflow"))?;
+        struct_meta
+            .slot_types
+            .get(field.offset..field_end)
+            .ok_or((DynErr::BadField, "field layout exceeds struct metadata"))?
+            .to_vec()
     };
     let written_vals: Vec<u64>;
 
     if field_vk == ValueKind::Interface {
         // Interface field: validate implementation and compute itab
-        let iface_meta_id = call
-            .get_interface_meta_id_from_rttid(field.rttid)
-            .unwrap_or(0);
+        let iface_meta_id =
+            call.require_interface_meta_id_from_rttid(field.rttid, "dynamic interface field set");
         let (stored_slot0, stored_slot1) =
             prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id)?;
         written_vals = vec![stored_slot0, stored_slot1];
@@ -980,6 +1003,49 @@ fn check_int_index(key_slot0: u64, key_slot1: u64, len: usize) -> Result<usize, 
     Ok(idx as usize)
 }
 
+fn boxed_value_raw_slot_count(call: &ExternCallContext, rttid: u32, vk: ValueKind) -> usize {
+    match vk {
+        ValueKind::Interface => 2,
+        ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(rttid) as usize,
+        _ => 1,
+    }
+}
+
+fn sequence_elem_raw_slots<F>(
+    call: &ExternCallContext,
+    elem_rttid: u32,
+    elem_vk: ValueKind,
+    elem_bytes: usize,
+    read_elem: F,
+) -> Vec<u64>
+where
+    F: FnOnce(&mut [u64]),
+{
+    let expected_slots = boxed_value_raw_slot_count(call, elem_rttid, elem_vk);
+    let physical_slots = elem_bytes.div_ceil(8);
+
+    if elem_bytes == 0 {
+        assert!(
+            elem_vk == ValueKind::Struct && expected_slots == 1,
+            "dynamic sequence element RTTID {elem_rttid} {:?} has zero-byte storage but expects {} raw slot(s)",
+            elem_vk,
+            expected_slots
+        );
+    } else {
+        assert_eq!(
+            physical_slots, expected_slots,
+            "dynamic sequence element RTTID {elem_rttid} {:?} stores {} byte(s) but expects {} raw slot(s)",
+            elem_vk, elem_bytes, expected_slots
+        );
+    }
+
+    let mut raw_slots = vec![0u64; expected_slots];
+    if elem_bytes != 0 {
+        read_elem(&mut raw_slots);
+    }
+    raw_slots
+}
+
 fn get_slice_index(
     call: &mut ExternCallContext,
     base_ref: GcRef,
@@ -1000,11 +1066,17 @@ fn get_slice_index(
     let elem_meta = slice::elem_meta(base_ref);
     let elem_vk = elem_meta.value_kind();
     let elem_rttid = call.get_elem_value_rttid_from_base(rttid);
-    let elem_slots = call.get_type_slot_count(elem_rttid.rttid()) as usize;
-
-    let raw_slots: Vec<u64> = (0..elem_slots)
-        .map(|i| slice::get(base_ref, idx * elem_slots + i, 8))
-        .collect();
+    assert_eq!(
+        elem_rttid.value_kind(),
+        elem_vk,
+        "dynamic slice element metadata kind drift: RTTID {:?}, container {:?}",
+        elem_rttid.value_kind(),
+        elem_vk
+    );
+    let elem_bytes = array::elem_bytes(slice::array_ref(base_ref));
+    let raw_slots = sequence_elem_raw_slots(call, elem_rttid.rttid(), elem_vk, elem_bytes, |dst| {
+        slice::get_n(base_ref, idx, dst, elem_bytes);
+    });
 
     let boxed = call.box_to_interface(elem_rttid.rttid(), elem_vk, &raw_slots);
     Ok((boxed.slot0, boxed.slot1))
@@ -1085,10 +1157,16 @@ fn get_array_index(
     let elem_vk = elem_meta.value_kind();
     let elem_bytes = array::elem_bytes(base_ref);
     let elem_rttid = call.get_elem_value_rttid_from_base(rttid);
-    let elem_slots = call.get_type_slot_count(elem_rttid.rttid()) as usize;
-
-    let mut raw_slots = vec![0u64; elem_slots];
-    array::get_n(base_ref, idx, &mut raw_slots, elem_bytes);
+    assert_eq!(
+        elem_rttid.value_kind(),
+        elem_vk,
+        "dynamic array element metadata kind drift: RTTID {:?}, container {:?}",
+        elem_rttid.value_kind(),
+        elem_vk
+    );
+    let raw_slots = sequence_elem_raw_slots(call, elem_rttid.rttid(), elem_vk, elem_bytes, |dst| {
+        array::get_n(base_ref, idx, dst, elem_bytes);
+    });
 
     let boxed = call.box_to_interface(elem_rttid.rttid(), elem_vk, &raw_slots);
     Ok((boxed.slot0, boxed.slot1))
@@ -1299,9 +1377,18 @@ fn do_call(
             return ExternResult::CallClosure { closure_ref, args };
         }
     };
+    let expected_ret_slots = replay_return_slot_count(call, &ret_value_rttids);
+    if ret_buffer.len() != expected_ret_slots {
+        let msg = format!(
+            "closure replay returned {} slot(s), expected {}",
+            ret_buffer.len(),
+            expected_ret_slots
+        );
+        return call_return_error(call, error_offset, DynErr::BadCall, &msg);
+    }
 
     // Pack returns
-    pack_returns(
+    if let Err(msg) = pack_returns(
         call,
         &ret_buffer,
         &ret_value_rttids,
@@ -1309,7 +1396,9 @@ fn do_call(
         metas_start,
         is_any_start,
         error_offset,
-    );
+    ) {
+        return call_return_error(call, error_offset, DynErr::BadCall, &msg);
+    }
     call_return_success(call, error_offset)
 }
 
@@ -1552,6 +1641,27 @@ fn set_slice_elem_from_any(
     }
 }
 
+fn replay_value_slot_width(
+    call: &ExternCallContext,
+    vr: &vo_common_core::types::ValueRttid,
+) -> usize {
+    match vr.value_kind() {
+        ValueKind::Interface => 2,
+        ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(vr.rttid()) as usize,
+        _ => 1,
+    }
+}
+
+fn replay_return_slot_count(
+    call: &ExternCallContext,
+    ret_value_rttids: &[vo_common_core::types::ValueRttid],
+) -> usize {
+    ret_value_rttids
+        .iter()
+        .map(|vr| replay_value_slot_width(call, vr))
+        .sum()
+}
+
 fn pack_returns(
     call: &mut ExternCallContext,
     ret_buffer: &[u64],
@@ -1560,7 +1670,7 @@ fn pack_returns(
     metas_start: u16,
     is_any_start: u16,
     _error_offset: u16,
-) {
+) -> Result<(), Cow<'static, str>> {
     let mut src_off = 0usize;
     let mut dst_off: u16 = 0;
 
@@ -1568,25 +1678,27 @@ fn pack_returns(
         let (_expected_rttid, expected_vk, is_any) =
             get_expected_meta(call, metas_start, is_any_start, i);
 
-        let (actual_rttid, actual_vk, actual_width) = if i < ret_value_rttids.len() {
-            let vr = &ret_value_rttids[i];
-            let rttid = vr.rttid();
-            let vk = vr.value_kind();
-            let width = match vk {
-                ValueKind::Interface => 2,
-                ValueKind::Struct | ValueKind::Array => call.get_type_slot_count(rttid) as usize,
-                _ => 1,
-            };
-            (rttid, vk, width)
-        } else {
-            (0, ValueKind::Int, 1)
-        };
+        let vr = ret_value_rttids.get(i).ok_or_else(|| {
+            Cow::Owned(format!(
+                "missing return metadata for dynamic result {} of {}",
+                i, ret_count
+            ))
+        })?;
+        let actual_rttid = vr.rttid();
+        let actual_vk = vr.value_kind();
+        let actual_width = replay_value_slot_width(call, vr);
 
-        let raw_slots = if src_off + actual_width <= ret_buffer.len() {
-            &ret_buffer[src_off..src_off + actual_width]
-        } else {
-            &[][..]
-        };
+        let raw_slots = ret_buffer
+            .get(src_off..src_off + actual_width)
+            .ok_or_else(|| {
+                Cow::Owned(format!(
+                    "closure replay returned too few slots for dynamic result {}: need slots {}..{}, buffer has {}",
+                    i,
+                    src_off,
+                    src_off + actual_width,
+                    ret_buffer.len()
+                ))
+            })?;
         src_off += actual_width;
 
         let output_slots = output_slot_count(is_any, expected_vk, actual_width);
@@ -1597,21 +1709,29 @@ fn pack_returns(
         } else if (expected_vk == ValueKind::Struct || expected_vk == ValueKind::Array)
             && actual_width > 2
         {
-            let struct_meta_id = call
-                .get_struct_meta_id_from_rttid(actual_rttid)
-                .unwrap_or(0);
-            let new_ref = call.alloc_and_copy_slots(raw_slots, struct_meta_id);
+            let boxed = call.box_to_interface(actual_rttid, actual_vk, raw_slots);
             call.ret_u64(dst_off, 0);
-            call.ret_u64(dst_off + 1, new_ref as u64);
+            call.ret_u64(dst_off + 1, boxed.slot1);
         } else {
-            call.ret_u64(dst_off, raw_slots.first().copied().unwrap_or(0));
+            if output_slots > 0 {
+                call.ret_u64(dst_off, raw_slots[0]);
+            }
             if output_slots > 1 {
-                call.ret_u64(dst_off + 1, raw_slots.get(1).copied().unwrap_or(0));
+                call.ret_u64(dst_off + 1, raw_slots[1]);
             }
         }
 
         dst_off += output_slots;
     }
+
+    if src_off != ret_buffer.len() {
+        return Err(Cow::Owned(format!(
+            "closure replay returned {} extra slot(s)",
+            ret_buffer.len() - src_off
+        )));
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -1862,10 +1982,11 @@ fn do_call_via_protocol(
         }
     };
 
-    // Unpack into fixed-size array
-    let mut ret = [0u64; 4];
-    let copy_len = ret_vec.len().min(4);
-    ret[..copy_len].copy_from_slice(&ret_vec[..copy_len]);
+    let ret = match exact_replay_slots::<4>(ret_vec, DynErr::BadCall, "CallObject protocol") {
+        Ok(ret) => ret,
+        Err(DynOrSuspend::Dyn(e, m)) => return call_return_error(call, error_offset, e, &m),
+        Err(DynOrSuspend::Suspend(r)) => return r,
+    };
 
     // Check error
     if ret[2] != 0 || ret[3] != 0 {
@@ -2260,5 +2381,100 @@ pub fn register_externs(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_replay_slots_accepts_only_exact_width() {
+        let ret = match exact_replay_slots::<4>(vec![11, 22, 0, 0], DynErr::BadCall, "test replay")
+        {
+            Ok(ret) => ret,
+            _ => panic!("exact replay width should be accepted"),
+        };
+        assert_eq!(ret, [11, 22, 0, 0]);
+
+        match exact_replay_slots::<4>(vec![11, 22, 0], DynErr::BadCall, "test replay") {
+            Err(DynOrSuspend::Dyn(DynErr::BadCall, msg)) => {
+                assert!(msg.contains("returned 3 slot(s), expected 4"));
+            }
+            _ => panic!("short replay result must be rejected"),
+        }
+
+        match exact_replay_slots::<4>(vec![11, 22, 0, 0, 99], DynErr::BadCall, "test replay") {
+            Err(DynOrSuspend::Dyn(DynErr::BadCall, msg)) => {
+                assert!(msg.contains("returned 5 slot(s), expected 4"));
+            }
+            _ => panic!("long replay result must be rejected"),
+        }
+    }
+
+    #[test]
+    fn dynamic_replay_contract_has_no_min_copy_or_zero_fill() {
+        let source = include_str!("dynamic.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("dynamic source should contain tests section");
+
+        assert!(
+            !source.contains(".min(N)"),
+            "protocol replay results must be exact-width, not min-copied"
+        );
+        assert!(
+            !source.contains(".min(4)"),
+            "CallObject replay results must be exact-width, not min-copied"
+        );
+        assert!(
+            !source.contains("ret.get(err_start + 1).copied().unwrap_or(0)"),
+            "protocol error slots must not be optional zero-filled slots"
+        );
+        assert!(
+            !source.contains("raw_slots.first().copied().unwrap_or(0)"),
+            "dynamic return packing must not zero-fill a missing first slot"
+        );
+        assert!(
+            !source.contains("raw_slots.get(1).copied().unwrap_or(0)"),
+            "dynamic return packing must not zero-fill a missing second slot"
+        );
+        assert!(
+            source.contains("exact_replay_slots(ret_vec, err, \"dynamic protocol\")"),
+            "protocol calls must use the exact replay-slot helper"
+        );
+        assert!(
+            source.contains("ret_buffer.len() != expected_ret_slots"),
+            "dynamic closure call replay must reject slot-count drift before packing"
+        );
+    }
+
+    #[test]
+    fn dynamic_sequence_indexing_uses_exact_container_element_layout() {
+        let source = include_str!("dynamic.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("dynamic source should contain tests section");
+
+        assert!(
+            source.contains("fn sequence_elem_raw_slots"),
+            "slice/array dynamic indexing must centralize exact element layout checks"
+        );
+        assert!(
+            source.contains("let elem_bytes = array::elem_bytes(slice::array_ref(base_ref));"),
+            "slice dynamic indexing must read using the container element byte width"
+        );
+        assert!(
+            source.contains("let elem_bytes = array::elem_bytes(base_ref);"),
+            "array dynamic indexing must read using the array element byte width"
+        );
+        assert!(
+            !source.contains("let elem_slots = call.get_type_slot_count(elem_rttid.rttid()) as usize;\n\n    let raw_slots"),
+            "sequence indexing must not use RTTID slot count as the copy width"
+        );
+        assert!(
+            source.contains("physical_slots, expected_slots"),
+            "sequence indexing must fail fast when physical and logical element layouts drift"
+        );
     }
 }

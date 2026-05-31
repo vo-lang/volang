@@ -560,7 +560,7 @@ pub fn extract_receiver(
             ..
         }) = expr_source
         {
-            debug_assert!(
+            assert!(
                 !stores_pointer,
                 "HeapBoxed with stores_pointer in non-pointer context"
             );
@@ -591,7 +591,7 @@ pub fn extract_receiver(
             ..
         }) = expr_source
         {
-            debug_assert!(
+            assert!(
                 !stores_pointer,
                 "HeapBoxed with stores_pointer in non-pointer context"
             );
@@ -631,7 +631,7 @@ pub fn extract_receiver(
         ..
     }) = expr_source
     {
-        debug_assert!(
+        assert!(
             !stores_pointer,
             "HeapBoxed with stores_pointer in non-pointer context"
         );

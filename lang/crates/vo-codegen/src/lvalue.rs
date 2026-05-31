@@ -1024,9 +1024,9 @@ pub fn snapshot_lvalue_index(lv: &mut LValue, func: &mut FuncBuilder) {
                     key_slot_types,
                     ..
                 } => (*key_slots, key_slot_types.clone()),
-                ContainerKind::StackArray { elem_slots, .. } => {
-                    (1.min(*elem_slots), vec![SlotType::Value])
-                }
+                // The index register is a one-slot integer operand, even for
+                // zero-slot array elements such as struct{}.
+                ContainerKind::StackArray { .. } => (1, vec![SlotType::Value]),
                 _ => (1, vec![SlotType::Value]),
             };
             // Only snapshot if index_reg might be a variable slot that could be modified
@@ -1089,7 +1089,7 @@ fn emit_flattened_load(flat: &FlattenedBase, dst: u16, slots: u16, func: &mut Fu
             func.emit_ptr_get(dst, *ptr_reg, *offset, slots);
         }
         FlattenedBase::Global { index, offset } => {
-            func.emit_with_flags(Opcode::GlobalGetN, slots as u8, dst, index + offset, 0);
+            func.emit_global_get(dst, index + offset, slots);
         }
         FlattenedBase::Capture {
             capture_index,
@@ -1121,7 +1121,7 @@ fn emit_flattened_store(
             func.emit_ptr_set_with_slot_types(*ptr_reg, *offset, src, slot_types);
         }
         FlattenedBase::Global { index, offset } => {
-            func.emit_with_flags(Opcode::GlobalSetN, slots as u8, index + offset, src, 0);
+            func.emit_global_set(index + offset, src, slots);
         }
         FlattenedBase::Capture {
             capture_index,
@@ -1256,5 +1256,18 @@ fn is_composite_literal(expr: &Expr) -> bool {
         ExprKind::CompositeLit(_) => true,
         ExprKind::Paren(inner) => is_composite_literal(inner),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn stack_array_index_snapshot_width_is_not_derived_from_element_layout() {
+        let source = include_str!("lvalue.rs");
+        let forbidden = concat!("1.", "min(*elem_slots)");
+        assert!(
+            !source.contains(forbidden),
+            "stack array index snapshots must copy the one-slot index operand, not the element width"
+        );
     }
 }

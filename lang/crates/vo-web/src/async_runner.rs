@@ -134,7 +134,9 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
     let reg = &mut vm.state.extern_registry;
     let exts = &module.externs;
     register_wasm_runtime_externs(reg, exts);
-    vm.load(module);
+    if let Err(e) = vm.load(module) {
+        return ("error".into(), String::new(), format!("{:?}", e));
+    }
 
     run_vm_async_inner(&mut vm).await
 }
@@ -166,7 +168,9 @@ pub async fn run_bytecode_async_with_externs(
     let exts = &module.externs;
     register_wasm_runtime_externs(reg, exts);
     extra_reg(reg, exts);
-    vm.load(module);
+    if let Err(e) = vm.load(module) {
+        return ("error".into(), String::new(), format!("{:?}", e));
+    }
 
     run_vm_async_inner(&mut vm).await
 }

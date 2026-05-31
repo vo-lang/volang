@@ -1,6 +1,7 @@
 //! Select statement compilation.
 
 use vo_analysis::objects::TypeKey;
+use vo_common_core::instruction::pack_queue_recv_flags;
 use vo_runtime::SlotType;
 use vo_vm::instruction::Opcode;
 
@@ -56,7 +57,7 @@ pub(crate) fn compile_select(
                 let elem_type = info.queue_elem_type(queue_type);
                 let val_reg =
                     crate::expr::compile_expr_to_type(&send.value, elem_type, ctx, func, info)?;
-                let elem_slots = info.queue_elem_slots(queue_type) as u8;
+                let elem_slots = info.queue_send_elem_slots(queue_type);
                 func.emit_with_flags(
                     Opcode::SelectSend,
                     elem_slots,
@@ -80,7 +81,9 @@ pub(crate) fn compile_select(
                 }
                 let dst_reg = func.alloc_slots(&recv_types);
 
-                let flags = ((elem_slots as u8) << 1) | (has_ok as u8);
+                let flags = pack_queue_recv_flags(elem_slots, has_ok).unwrap_or_else(|| {
+                    panic!("SelectRecv ABI supports at most 127 element slots, got {elem_slots}")
+                });
                 func.emit_with_flags(
                     Opcode::SelectRecv,
                     flags,

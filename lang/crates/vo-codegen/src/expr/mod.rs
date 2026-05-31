@@ -12,6 +12,7 @@ pub mod method_value;
 pub mod pointer;
 pub mod selector;
 
+use vo_common_core::instruction::{pack_iface_assert_flags, pack_queue_recv_flags};
 use vo_runtime::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
 use vo_vm::instruction::Opcode;
@@ -154,6 +155,45 @@ pub fn get_expr_source(
     ExprSource::NeedsCompile
 }
 
+fn expr_runtime_slot_types(
+    expr: &Expr,
+    ctx: &CodegenContext,
+    func: &FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Vec<SlotType> {
+    if is_global_array_expr(expr, ctx, func, info) {
+        vec![SlotType::GcRef]
+    } else {
+        info.type_slot_types(info.expr_type(expr.id))
+    }
+}
+
+fn is_global_array_expr(
+    expr: &Expr,
+    ctx: &CodegenContext,
+    func: &FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> bool {
+    match &expr.kind {
+        ExprKind::Ident(ident) => {
+            if func.lookup_local(ident.symbol).is_some() {
+                return false;
+            }
+            let obj_key = info.get_use(ident);
+            ctx.get_global_index(obj_key).is_some()
+                && info
+                    .try_obj_type(obj_key)
+                    .is_some_and(|type_key| info.is_array(type_key))
+        }
+        ExprKind::Selector(sel) if selector::is_pkg_qualified_name(sel, info) => {
+            let obj_key = info.get_use(&sel.sel);
+            ctx.get_global_index(obj_key).is_some() && info.is_array(info.expr_type(expr.id))
+        }
+        ExprKind::Paren(inner) => is_global_array_expr(inner, ctx, func, info),
+        _ => false,
+    }
+}
+
 /// Get the GcRef slot from a StorageKind.
 pub fn get_gcref_slot(storage: &StorageKind) -> Option<u16> {
     match storage {
@@ -269,12 +309,11 @@ pub fn compile_expr(
             _ => {}
         }
     }
-    // Use expression type's slot types to ensure GcRefs (strings, pointers, etc.) are tracked by GC
-    let expr_type = info.expr_type(expr.id);
-    let slot_types = info.type_slot_types(expr_type);
+    let slot_types = expr_runtime_slot_types(expr, ctx, func, info);
     let dst = func.alloc_slots(&slot_types);
     compile_expr_to(expr, dst, ctx, func, info)?;
     // Truncate narrow integer types to ensure Go semantics (operations in 64-bit, result in type width)
+    let expr_type = info.expr_type(expr.id);
     emit_int_trunc(dst, expr_type, func, info);
     Ok(dst)
 }
@@ -510,7 +549,7 @@ fn compile_type_assert(
         .as_ref()
         .map(|ty| info.type_expr_type(ty.id))
         .expect("type assertion must have target type");
-    let target_slots = info.type_slot_count(target_type) as u8;
+    let target_slots = info.type_slot_count(target_type);
     let result_type = info.expr_type(expr.id);
     let has_ok = info.is_tuple(result_type);
 
@@ -523,7 +562,11 @@ fn compile_type_assert(
         (0, rttid)
     };
 
-    let flags = assert_kind | (if has_ok { 1 << 2 } else { 0 }) | ((target_slots) << 3);
+    let flags = pack_iface_assert_flags(assert_kind, has_ok, target_slots).ok_or_else(|| {
+        CodegenError::Internal(format!(
+            "IfaceAssert ABI supports at most 31 target slots, got {target_slots}"
+        ))
+    })?;
     func.emit_with_flags(Opcode::IfaceAssert, flags, dst, iface_reg, target_id as u16);
     Ok(())
 }
@@ -541,7 +584,11 @@ fn compile_receive(
     let elem_slots = info.queue_elem_slots(target_type);
     let result_slots = info.expr_slots(expr.id);
     let has_ok = result_slots > elem_slots;
-    let flags = ((elem_slots as u8) << 1) | (if has_ok { 1 } else { 0 });
+    let flags = pack_queue_recv_flags(elem_slots, has_ok).ok_or_else(|| {
+        CodegenError::Internal(format!(
+            "QueueRecv ABI supports at most 127 element slots, got {elem_slots}"
+        ))
+    })?;
     func.emit_with_flags(Opcode::QueueRecv, flags, dst, target_reg, 0);
     Ok(())
 }
@@ -570,13 +617,7 @@ fn compile_try_unwrap(
     } else {
         // Panic mode: panic with error directly
         let panic_extern = ctx.get_or_register_extern("panic_with_error");
-        func.emit_with_flags(
-            Opcode::CallExtern,
-            2,
-            error_start,
-            panic_extern as u16,
-            error_start,
-        );
+        func.emit_call_extern(error_start, panic_extern, error_start, 2);
     }
 
     func.patch_jump(skip_fail_jump, func.current_pc());

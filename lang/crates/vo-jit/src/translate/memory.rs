@@ -12,7 +12,7 @@ use crate::translator::{
 };
 use crate::JitError;
 
-use super::emit_nil_ptr_check_for_slot;
+use super::{emit_nil_ptr_check_for_slot, require_helper};
 
 pub(super) fn global_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     let globals = e.globals_ptr();
@@ -67,7 +67,7 @@ pub(super) fn ptr_get<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, v);
 }
 
-pub(super) fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> Result<(), JitError> {
     let ptr = e.read_var(inst.a);
     emit_nil_ptr_check_for_slot(e, inst.a, ptr);
     let v = e.read_var(inst.c);
@@ -76,14 +76,12 @@ pub(super) fn ptr_set<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 
     // Write barrier if val may be GcRef (flags & 1)
     if (inst.flags & 1) != 0 {
-        let wb_ref = e
-            .helpers()
-            .write_barrier
-            .expect("write_barrier helper not registered");
+        let wb_ref = require_helper(e.helpers().write_barrier, "write_barrier")?;
         let gc = e.gc_ptr();
         let offset_val = e.builder().ins().iconst(types::I32, inst.b as i64);
         emit_funcref_call(e, wb_ref, &[gc, ptr, offset_val, v]);
     }
+    Ok(())
 }
 
 pub(super) fn ptr_get_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {

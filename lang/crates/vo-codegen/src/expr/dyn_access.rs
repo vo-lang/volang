@@ -70,14 +70,8 @@ fn compile_dyn_call_unified(
 
     let pack_result =
         func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
-    let pack_arg_count = (2 + arg_count * 2) as u8;
-    func.emit_with_flags(
-        Opcode::CallExtern,
-        pack_arg_count,
-        pack_result,
-        pack_extern as u16,
-        pack_args,
-    );
+    let pack_arg_count = 2 + arg_count * 2;
+    func.emit_call_extern(pack_result, pack_extern, pack_args, pack_arg_count);
 
     // Check pack error
     let expected_dst_slots = info.dyn_access_dst_slots(ret_types);
@@ -189,12 +183,11 @@ fn compile_dyn_call_unified(
 
     let call_result = func.alloc_slots(&call_result_types);
     let call_error_slot = call_result + call_error_offset;
-    func.emit_with_flags(
-        Opcode::CallExtern,
-        call_arg_count as u8,
+    func.emit_call_extern(
         call_result,
-        call_extern_id as u16,
+        call_extern_id,
         call_args,
+        usize::from(call_arg_count),
     );
 
     // Step 4: Copy results to dst
@@ -421,7 +414,7 @@ fn compile_dyn_op(
                 SlotType::Interface1, // error
             ]);
             let extern_id = ctx.get_or_register_extern("dyn_field");
-            func.emit_with_flags(Opcode::CallExtern, 5, result, extern_id as u16, args);
+            func.emit_call_extern(result, extern_id, args, 5);
 
             // Copy result to dst based on ret_type
             emit_copy_dyn_field_result(ret_type, ret_slots, ret_vk, dst, result, func, info);
@@ -495,7 +488,7 @@ fn compile_dyn_op(
                 SlotType::Interface0,
                 SlotType::Interface1,
             ]);
-            func.emit_with_flags(Opcode::CallExtern, 6, result, extern_id as u16, args);
+            func.emit_call_extern(result, extern_id, args, 6);
 
             // Copy result to destination
             let ret_vk = info.type_value_kind(ret_type);
@@ -590,14 +583,8 @@ fn compile_dyn_method_unified(
 
     let pack_result =
         func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
-    let pack_arg_count = (2 + arg_count * 2) as u8;
-    func.emit_with_flags(
-        Opcode::CallExtern,
-        pack_arg_count,
-        pack_result,
-        pack_extern as u16,
-        pack_args,
-    );
+    let pack_arg_count = 2 + arg_count * 2;
+    func.emit_call_extern(pack_result, pack_extern, pack_args, pack_arg_count);
 
     // Check pack error
     let expected_dst_slots = info.dyn_access_dst_slots(ret_types);
@@ -712,12 +699,11 @@ fn compile_dyn_method_unified(
 
     let call_result = func.alloc_slots(&call_result_types);
     let call_error_slot = call_result + call_error_offset;
-    func.emit_with_flags(
-        Opcode::CallExtern,
-        call_arg_count as u8,
+    func.emit_call_extern(
         call_result,
-        call_extern_id as u16,
+        call_extern_id,
         call_args,
+        usize::from(call_arg_count),
     );
 
     // Step 4: Copy results to dst

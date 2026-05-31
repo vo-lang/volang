@@ -7,9 +7,15 @@
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::instruction::Opcode;
-use vo_runtime::jit_api::{JitContext, JitResult, JitRuntimeTrapKind};
+use vo_runtime::jit_api::{
+    JitContext, JitResult, JitRuntimeTrapKind, JIT_INFRA_ERROR_MISSING_CALLBACK,
+    JIT_INFRA_ERROR_SENTINEL,
+};
 
 use crate::translator::{emit_funcref_call, IrEmitter};
+
+const MISSING_RUNTIME_TRAP_HELPER_ID: u32 = 1;
+const MISSING_PANIC_HELPER_ID: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EffectContract {
@@ -103,14 +109,13 @@ pub fn opcode_contract(opcode: Opcode) -> EffectContract {
         SlotGet | SlotGetN | SlotSet | SlotSetN => EffectContract {
             may_panic: true,
             needs_slot_metadata: true,
-            needs_write_barrier: matches!(opcode, SlotSet | SlotSetN),
             ..EffectContract::PURE
         },
 
         GlobalSet | GlobalSetN | PtrSet | PtrSetN | ArraySet | SliceSet => EffectContract {
             may_panic: matches!(opcode, PtrSet | PtrSetN | ArraySet | SliceSet),
             needs_slot_metadata: matches!(opcode, ArraySet | SliceSet),
-            needs_write_barrier: true,
+            needs_write_barrier: matches!(opcode, PtrSet | ArraySet | SliceSet),
             ..EffectContract::PURE
         },
 
@@ -406,17 +411,20 @@ pub fn emit_runtime_trap_return<'a>(
     let kind_val = e.builder().ins().iconst(types::I32, kind as i64);
     let current_pc = e.current_pc();
     let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
-    let trap_func = e
-        .helpers()
-        .runtime_trap
-        .expect("runtime_trap helper must be registered");
+    let Some(trap_func) = e.helpers().runtime_trap else {
+        emit_missing_helper_jit_error_return(e, MISSING_RUNTIME_TRAP_HELPER_ID);
+        return;
+    };
     let call = emit_funcref_call(e, trap_func, &[ctx, kind_val, arg0, arg1, pc_val]);
     let panic_ret = e.builder().inst_results(call)[0];
     e.builder().ins().return_(&[panic_ret]);
 }
 
 pub fn emit_user_panic_return<'a>(e: &mut impl IrEmitter<'a>, msg_slot: u16) {
-    let panic_func = e.helpers().panic.expect("panic helper must be registered");
+    let Some(panic_func) = e.helpers().panic else {
+        emit_missing_helper_jit_error_return(e, MISSING_PANIC_HELPER_ID);
+        return;
+    };
     let ctx = e.ctx_param();
     let current_pc = e.current_pc();
     let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);
@@ -435,6 +443,42 @@ pub fn emit_user_panic_return<'a>(e: &mut impl IrEmitter<'a>, msg_slot: u16) {
         .ins()
         .iconst(types::I32, JitResult::Panic as i64);
     e.builder().ins().return_(&[panic_val]);
+}
+
+fn emit_missing_helper_jit_error_return<'a>(e: &mut impl IrEmitter<'a>, helper_id: u32) {
+    let ctx = e.ctx_param();
+    let sentinel = e
+        .builder()
+        .ins()
+        .iconst(types::I64, JIT_INFRA_ERROR_SENTINEL as i64);
+    let missing = e
+        .builder()
+        .ins()
+        .iconst(types::I64, JIT_INFRA_ERROR_MISSING_CALLBACK as i64);
+    let helper_id = e.builder().ins().iconst(types::I32, helper_id as i64);
+    e.builder().ins().store(
+        MemFlags::trusted(),
+        sentinel,
+        ctx,
+        JitContext::OFFSET_RUNTIME_TRAP_ARG0,
+    );
+    e.builder().ins().store(
+        MemFlags::trusted(),
+        missing,
+        ctx,
+        JitContext::OFFSET_RUNTIME_TRAP_ARG1,
+    );
+    e.builder().ins().store(
+        MemFlags::trusted(),
+        helper_id,
+        ctx,
+        JitContext::OFFSET_RUNTIME_TRAP_PC,
+    );
+    let jit_error = e
+        .builder()
+        .ins()
+        .iconst(types::I32, JitResult::JitError as i64);
+    e.builder().ins().return_(&[jit_error]);
 }
 
 pub fn emit_runtime_trap_if<'a>(
