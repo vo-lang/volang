@@ -28,9 +28,10 @@ use crate::bytecode::{
 use crate::instruction::Instruction;
 use crate::types::{SlotType, ValueMeta, ValueRttid};
 use crate::RuntimeType;
+use num_enum::TryFromPrimitive;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 4;
+const VERSION: u32 = 7;
 const MIN_SUPPORTED_VERSION: u32 = 2;
 
 #[derive(Debug)]
@@ -41,6 +42,11 @@ pub enum SerializeError {
     InvalidUtf8,
     InvalidConstant,
     InvalidJitMetadata,
+    InvalidSlotType(u8),
+    InvalidValueKind(u8),
+    InvalidRuntimeType(u8),
+    InvalidChanDir(u8),
+    InvalidExtSlotKind(u8),
 }
 
 pub struct ByteWriter {
@@ -117,72 +123,255 @@ fn read_option_u32(r: &mut ByteReader) -> Result<Option<u32>, SerializeError> {
     Ok(if raw == 0 { None } else { Some(raw - 1) })
 }
 
-fn write_jit_instruction_metadata(w: &mut ByteWriter, meta: JitInstructionMetadata) {
+fn write_slot_layout(w: &mut ByteWriter, layout: &[SlotType]) {
+    w.write_vec(layout, |w, st| w.write_u8(*st as u8));
+}
+
+fn read_slot_layout(r: &mut ByteReader) -> Result<Vec<SlotType>, SerializeError> {
+    r.read_vec(read_slot_type)
+}
+
+fn read_slot_type(r: &mut ByteReader) -> Result<SlotType, SerializeError> {
+    let raw = r.read_u8()?;
+    SlotType::try_from_primitive(raw).map_err(|_| SerializeError::InvalidSlotType(raw))
+}
+
+fn read_value_kind(r: &mut ByteReader) -> Result<crate::types::ValueKind, SerializeError> {
+    let raw = r.read_u8()?;
+    crate::types::ValueKind::try_from_primitive(raw)
+        .map_err(|_| SerializeError::InvalidValueKind(raw))
+}
+
+fn validate_value_kind_raw(raw: u32) -> Result<(), SerializeError> {
+    let kind = raw as u8;
+    crate::types::ValueKind::try_from_primitive(kind)
+        .map(|_| ())
+        .map_err(|_| SerializeError::InvalidValueKind(kind))
+}
+
+fn read_value_meta(r: &mut ByteReader) -> Result<ValueMeta, SerializeError> {
+    let raw = r.read_u32()?;
+    validate_value_kind_raw(raw)?;
+    Ok(ValueMeta::from_raw(raw))
+}
+
+fn read_value_rttid(r: &mut ByteReader) -> Result<ValueRttid, SerializeError> {
+    let raw = r.read_u32()?;
+    validate_value_kind_raw(raw)?;
+    Ok(ValueRttid::from_raw(raw))
+}
+
+fn read_chan_dir(r: &mut ByteReader) -> Result<crate::runtime_type::ChanDir, SerializeError> {
+    use crate::runtime_type::ChanDir;
+    let raw = r.read_u8()?;
+    match raw {
+        0 => Ok(ChanDir::Both),
+        1 => Ok(ChanDir::Send),
+        2 => Ok(ChanDir::Recv),
+        _ => Err(SerializeError::InvalidChanDir(raw)),
+    }
+}
+
+fn read_ext_slot_kind(r: &mut ByteReader) -> Result<ExtSlotKind, SerializeError> {
+    let raw = r.read_u8()?;
+    match raw {
+        0 => Ok(ExtSlotKind::Value),
+        1 => Ok(ExtSlotKind::Bytes),
+        _ => Err(SerializeError::InvalidExtSlotKind(raw)),
+    }
+}
+
+fn write_jit_instruction_metadata(w: &mut ByteWriter, meta: &JitInstructionMetadata) {
     match meta {
         JitInstructionMetadata::None => w.write_u8(0),
         JitInstructionMetadata::ElemLayout {
             elem_bytes,
             needs_sign_extend,
+            slot_layout,
         } => {
             w.write_u8(1);
-            w.write_u32(elem_bytes);
-            w.write_u8(needs_sign_extend as u8);
+            w.write_u32(*elem_bytes);
+            w.write_u8(*needs_sign_extend as u8);
+            write_slot_layout(w, slot_layout);
         }
         JitInstructionMetadata::MapGet {
+            key_layout,
+            val_layout,
+            has_ok,
+        } => {
+            w.write_u8(2);
+            write_slot_layout(w, key_layout);
+            write_slot_layout(w, val_layout);
+            w.write_u8(*has_ok as u8);
+        }
+        JitInstructionMetadata::MapSet {
+            key_layout,
+            val_layout,
+        } => {
+            w.write_u8(3);
+            write_slot_layout(w, key_layout);
+            write_slot_layout(w, val_layout);
+        }
+        JitInstructionMetadata::MapDelete { key_layout } => {
+            w.write_u8(4);
+            write_slot_layout(w, key_layout);
+        }
+        JitInstructionMetadata::PtrLayout { value_layout } => {
+            w.write_u8(9);
+            write_slot_layout(w, value_layout);
+        }
+        JitInstructionMetadata::SlotLayout { elem_layout } => {
+            w.write_u8(10);
+            write_slot_layout(w, elem_layout);
+        }
+        JitInstructionMetadata::CallLayout {
+            arg_layout,
+            ret_layout,
+        } => {
+            w.write_u8(11);
+            write_slot_layout(w, arg_layout);
+            write_slot_layout(w, ret_layout);
+        }
+        JitInstructionMetadata::CallExternLayout {
+            arg_layout,
+            ret_layout,
+        } => {
+            w.write_u8(12);
+            write_slot_layout(w, arg_layout);
+            write_slot_layout(w, ret_layout);
+        }
+        JitInstructionMetadata::QueueLayout { elem_layout } => {
+            w.write_u8(13);
+            write_slot_layout(w, elem_layout);
+        }
+        JitInstructionMetadata::MapIterNext {
+            key_layout,
+            val_layout,
+        } => {
+            w.write_u8(14);
+            write_slot_layout(w, key_layout);
+            write_slot_layout(w, val_layout);
+        }
+        JitInstructionMetadata::IfaceAssertLayout { result_layout } => {
+            w.write_u8(15);
+            write_slot_layout(w, result_layout);
+        }
+        JitInstructionMetadata::LoopEnd { end_pc } => {
+            w.write_u8(5);
+            w.write_u32(*end_pc);
+        }
+        JitInstructionMetadata::LegacyMapGet {
             key_slots,
             val_slots,
             has_ok,
         } => {
-            w.write_u8(2);
-            w.write_u16(key_slots);
-            w.write_u16(val_slots);
-            w.write_u8(has_ok as u8);
+            w.write_u8(6);
+            w.write_u16(*key_slots);
+            w.write_u16(*val_slots);
+            w.write_u8(*has_ok as u8);
         }
-        JitInstructionMetadata::MapSet {
+        JitInstructionMetadata::LegacyMapSet {
             key_slots,
             val_slots,
         } => {
-            w.write_u8(3);
-            w.write_u16(key_slots);
-            w.write_u16(val_slots);
+            w.write_u8(7);
+            w.write_u16(*key_slots);
+            w.write_u16(*val_slots);
         }
-        JitInstructionMetadata::MapDelete { key_slots } => {
-            w.write_u8(4);
-            w.write_u16(key_slots);
-        }
-        JitInstructionMetadata::LoopEnd { end_pc } => {
-            w.write_u8(5);
-            w.write_u32(end_pc);
+        JitInstructionMetadata::LegacyMapDelete { key_slots } => {
+            w.write_u8(8);
+            w.write_u16(*key_slots);
         }
     }
 }
 
-fn read_jit_instruction_metadata(
+fn read_jit_instruction_metadata_for_version(
     r: &mut ByteReader,
+    version: u32,
 ) -> Result<JitInstructionMetadata, SerializeError> {
     match r.read_u8()? {
         0 => Ok(JitInstructionMetadata::None),
         1 => Ok(JitInstructionMetadata::ElemLayout {
             elem_bytes: r.read_u32()?,
             needs_sign_extend: r.read_u8()? != 0,
+            slot_layout: if version >= 6 {
+                read_slot_layout(r)?
+            } else {
+                Vec::new()
+            },
         }),
-        2 => Ok(JitInstructionMetadata::MapGet {
+        2 if version >= 5 => Ok(JitInstructionMetadata::MapGet {
+            key_layout: read_slot_layout(r)?,
+            val_layout: read_slot_layout(r)?,
+            has_ok: r.read_u8()? != 0,
+        }),
+        2 => Ok(JitInstructionMetadata::LegacyMapGet {
             key_slots: r.read_u16()?,
             val_slots: r.read_u16()?,
             has_ok: r.read_u8()? != 0,
         }),
-        3 => Ok(JitInstructionMetadata::MapSet {
+        3 if version >= 5 => Ok(JitInstructionMetadata::MapSet {
+            key_layout: read_slot_layout(r)?,
+            val_layout: read_slot_layout(r)?,
+        }),
+        3 => Ok(JitInstructionMetadata::LegacyMapSet {
             key_slots: r.read_u16()?,
             val_slots: r.read_u16()?,
         }),
-        4 => Ok(JitInstructionMetadata::MapDelete {
+        4 if version >= 5 => Ok(JitInstructionMetadata::MapDelete {
+            key_layout: read_slot_layout(r)?,
+        }),
+        4 => Ok(JitInstructionMetadata::LegacyMapDelete {
             key_slots: r.read_u16()?,
         }),
         5 => Ok(JitInstructionMetadata::LoopEnd {
             end_pc: r.read_u32()?,
         }),
+        6 => Ok(JitInstructionMetadata::LegacyMapGet {
+            key_slots: r.read_u16()?,
+            val_slots: r.read_u16()?,
+            has_ok: r.read_u8()? != 0,
+        }),
+        7 => Ok(JitInstructionMetadata::LegacyMapSet {
+            key_slots: r.read_u16()?,
+            val_slots: r.read_u16()?,
+        }),
+        8 => Ok(JitInstructionMetadata::LegacyMapDelete {
+            key_slots: r.read_u16()?,
+        }),
+        9 if version >= 6 => Ok(JitInstructionMetadata::PtrLayout {
+            value_layout: read_slot_layout(r)?,
+        }),
+        10 if version >= 6 => Ok(JitInstructionMetadata::SlotLayout {
+            elem_layout: read_slot_layout(r)?,
+        }),
+        11 if version >= 6 => Ok(JitInstructionMetadata::CallLayout {
+            arg_layout: read_slot_layout(r)?,
+            ret_layout: read_slot_layout(r)?,
+        }),
+        12 if version >= 6 => Ok(JitInstructionMetadata::CallExternLayout {
+            arg_layout: read_slot_layout(r)?,
+            ret_layout: read_slot_layout(r)?,
+        }),
+        13 if version >= 6 => Ok(JitInstructionMetadata::QueueLayout {
+            elem_layout: read_slot_layout(r)?,
+        }),
+        14 if version >= 6 => Ok(JitInstructionMetadata::MapIterNext {
+            key_layout: read_slot_layout(r)?,
+            val_layout: read_slot_layout(r)?,
+        }),
+        15 if version >= 7 => Ok(JitInstructionMetadata::IfaceAssertLayout {
+            result_layout: read_slot_layout(r)?,
+        }),
         _ => Err(SerializeError::InvalidJitMetadata),
     }
+}
+
+#[cfg(test)]
+fn read_jit_instruction_metadata(
+    r: &mut ByteReader,
+) -> Result<JitInstructionMetadata, SerializeError> {
+    read_jit_instruction_metadata_for_version(r, VERSION)
 }
 
 // RuntimeType serialization tags
@@ -294,17 +483,11 @@ fn write_runtime_type(w: &mut ByteWriter, rt: &RuntimeType) {
 }
 
 fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> {
-    use crate::runtime_type::ChanDir;
-    use crate::types::ValueKind;
-    use num_enum::TryFromPrimitive;
-
     let tag = r.read_u8()?;
     match tag {
         RT_BASIC => {
-            let vk = r.read_u8()?;
-            Ok(RuntimeType::Basic(
-                ValueKind::try_from_primitive(vk).unwrap_or(ValueKind::Void),
-            ))
+            let vk = read_value_kind(r)?;
+            Ok(RuntimeType::Basic(vk))
         }
         RT_NAMED => {
             let id = r.read_u32()?;
@@ -317,41 +500,31 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             Ok(RuntimeType::Named { id, struct_meta_id })
         }
         RT_POINTER => {
-            let elem_rttid = ValueRttid::from_raw(r.read_u32()?);
+            let elem_rttid = read_value_rttid(r)?;
             Ok(RuntimeType::Pointer(elem_rttid))
         }
         RT_ARRAY => {
             let len = r.read_u64()?;
-            let elem = ValueRttid::from_raw(r.read_u32()?);
+            let elem = read_value_rttid(r)?;
             Ok(RuntimeType::Array { len, elem })
         }
         RT_SLICE => {
-            let elem_rttid = ValueRttid::from_raw(r.read_u32()?);
+            let elem_rttid = read_value_rttid(r)?;
             Ok(RuntimeType::Slice(elem_rttid))
         }
         RT_MAP => {
-            let key = ValueRttid::from_raw(r.read_u32()?);
-            let val = ValueRttid::from_raw(r.read_u32()?);
+            let key = read_value_rttid(r)?;
+            let val = read_value_rttid(r)?;
             Ok(RuntimeType::Map { key, val })
         }
         RT_CHAN => {
-            let dir = r.read_u8()?;
-            let elem = ValueRttid::from_raw(r.read_u32()?);
-            let dir = match dir {
-                1 => ChanDir::Send,
-                2 => ChanDir::Recv,
-                _ => ChanDir::Both,
-            };
+            let dir = read_chan_dir(r)?;
+            let elem = read_value_rttid(r)?;
             Ok(RuntimeType::Chan { dir, elem })
         }
         RT_PORT => {
-            let dir = r.read_u8()?;
-            let elem = ValueRttid::from_raw(r.read_u32()?);
-            let dir = match dir {
-                1 => ChanDir::Send,
-                2 => ChanDir::Recv,
-                _ => ChanDir::Both,
-            };
+            let dir = read_chan_dir(r)?;
+            let elem = read_value_rttid(r)?;
             Ok(RuntimeType::Port { dir, elem })
         }
         RT_FUNC => {
@@ -359,12 +532,12 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let param_count = r.read_u32()? as usize;
             let mut params = Vec::with_capacity(param_count);
             for _ in 0..param_count {
-                params.push(ValueRttid::from_raw(r.read_u32()?));
+                params.push(read_value_rttid(r)?);
             }
             let result_count = r.read_u32()? as usize;
             let mut results = Vec::with_capacity(result_count);
             for _ in 0..result_count {
-                results.push(ValueRttid::from_raw(r.read_u32()?));
+                results.push(read_value_rttid(r)?);
             }
             Ok(RuntimeType::Func {
                 params,
@@ -379,7 +552,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
                 let name = r.read_string()?;
-                let typ = ValueRttid::from_raw(r.read_u32()?);
+                let typ = read_value_rttid(r)?;
                 let tag = r.read_string()?;
                 let embedded = r.read_u8()? != 0;
                 let pkg = r.read_string()?;
@@ -394,7 +567,7 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let mut methods = Vec::with_capacity(method_count);
             for _ in 0..method_count {
                 let name = r.read_string()?;
-                let sig = ValueRttid::from_raw(r.read_u32()?);
+                let sig = read_value_rttid(r)?;
                 methods.push(InterfaceMethod::new(name, sig));
             }
             Ok(RuntimeType::Interface { methods, meta_id })
@@ -403,12 +576,12 @@ fn read_runtime_type(r: &mut ByteReader) -> Result<RuntimeType, SerializeError> 
             let type_count = r.read_u32()? as usize;
             let mut types = Vec::with_capacity(type_count);
             for _ in 0..type_count {
-                types.push(ValueRttid::from_raw(r.read_u32()?));
+                types.push(read_value_rttid(r)?);
             }
             Ok(RuntimeType::Tuple(types))
         }
         RT_ISLAND => Ok(RuntimeType::Island),
-        _ => Ok(RuntimeType::Basic(crate::types::ValueKind::Void)),
+        _ => Err(SerializeError::InvalidRuntimeType(tag)),
     }
 }
 
@@ -625,6 +798,7 @@ impl Module {
             w.write_u16(f.param_slots);
             w.write_u16(f.local_slots);
             w.write_u16(f.ret_slots);
+            w.write_vec(&f.ret_slot_types, |w, st| w.write_u8(*st as u8));
             w.write_u16(f.recv_slots);
             w.write_u16(f.heap_ret_gcref_count);
             w.write_u16(f.heap_ret_gcref_start);
@@ -642,7 +816,7 @@ impl Module {
                 w.write_u16(inst.c);
             }
             w.write_vec(&f.jit_metadata, |w, meta| {
-                write_jit_instruction_metadata(w, *meta);
+                write_jit_instruction_metadata(w, meta);
             });
             // Cross-island transfer types
             w.write_vec(&f.capture_types, |w, typ| {
@@ -706,12 +880,12 @@ impl Module {
         let name = r.read_string()?;
 
         let struct_metas = r.read_vec(|r| {
-            let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
+            let slot_types = r.read_vec(read_slot_type)?;
             let fields = r.read_vec(|r| {
                 let name = r.read_string()?;
                 let offset = r.read_u16()?;
                 let slot_count = r.read_u16()?;
-                let type_info = ValueRttid::from_raw(r.read_u32()?);
+                let type_info = read_value_rttid(r)?;
                 let embedded = r.read_u8()? != 0;
                 let tag = if r.read_u8()? != 0 {
                     Some(r.read_string()?)
@@ -760,8 +934,8 @@ impl Module {
 
         let named_type_metas = r.read_vec(|r| {
             let name = r.read_string()?;
-            let underlying_meta = ValueMeta::from_raw(r.read_u32()?);
-            let underlying_rttid = ValueRttid::from_raw(r.read_u32()?);
+            let underlying_meta = read_value_meta(r)?;
+            let underlying_rttid = read_value_rttid(r)?;
             let method_count = r.read_u32()? as usize;
             let mut methods = BTreeMap::new();
             for _ in 0..method_count {
@@ -827,9 +1001,9 @@ impl Module {
         let globals = r.read_vec(|r| {
             let name = r.read_string()?;
             let slots = r.read_u16()?;
-            let value_kind = r.read_u8()?;
+            let value_kind = read_value_kind(r)? as u8;
             let meta_id = r.read_u32()?;
-            let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
+            let slot_types = r.read_vec(read_slot_type)?;
             Ok(GlobalDef {
                 name,
                 slots,
@@ -845,6 +1019,11 @@ impl Module {
             let param_slots = r.read_u16()?;
             let local_slots = r.read_u16()?;
             let ret_slots = r.read_u16()?;
+            let ret_slot_types = if version >= 6 {
+                r.read_vec(read_slot_type)?
+            } else {
+                Vec::new()
+            };
             let recv_slots = r.read_u16()?;
             let heap_ret_gcref_count = r.read_u16()?;
             let heap_ret_gcref_start = r.read_u16()?;
@@ -852,7 +1031,7 @@ impl Module {
             let is_closure = r.read_u8()? != 0;
             let error_ret_slot = r.read_i16()?;
             let has_defer = r.read_u8()? != 0;
-            let slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
+            let slot_types = r.read_vec(read_slot_type)?;
             let code_len = r.read_u32()? as usize;
             let mut code = Vec::with_capacity(code_len);
             for _ in 0..code_len {
@@ -864,7 +1043,7 @@ impl Module {
                 code.push(Instruction { op, flags, a, b, c });
             }
             let jit_metadata = if version >= 3 {
-                r.read_vec(read_jit_instruction_metadata)?
+                r.read_vec(|r| read_jit_instruction_metadata_for_version(r, version))?
             } else {
                 let mut metadata = Vec::with_capacity(code.len());
                 metadata.resize(code.len(), JitInstructionMetadata::None);
@@ -874,17 +1053,25 @@ impl Module {
             let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
             // Cross-island transfer types
             let capture_types = r.read_vec(|r| {
+                let meta_raw = r.read_u32()?;
+                let rttid_raw = r.read_u32()?;
+                validate_value_kind_raw(meta_raw)?;
+                validate_value_kind_raw(rttid_raw)?;
                 Ok(TransferType {
-                    meta_raw: r.read_u32()?,
-                    rttid_raw: r.read_u32()?,
+                    meta_raw,
+                    rttid_raw,
                     slots: r.read_u16()?,
                 })
             })?;
-            let capture_slot_types = r.read_vec(|r| Ok(SlotType::from_u8(r.read_u8()?)))?;
+            let capture_slot_types = r.read_vec(read_slot_type)?;
             let param_types = r.read_vec(|r| {
+                let meta_raw = r.read_u32()?;
+                let rttid_raw = r.read_u32()?;
+                validate_value_kind_raw(meta_raw)?;
+                validate_value_kind_raw(rttid_raw)?;
                 Ok(TransferType {
-                    meta_raw: r.read_u32()?,
-                    rttid_raw: r.read_u32()?,
+                    meta_raw,
+                    rttid_raw,
                     slots: r.read_u16()?,
                 })
             })?;
@@ -898,6 +1085,7 @@ impl Module {
                 local_slots,
                 gc_scan_slots,
                 ret_slots,
+                ret_slot_types,
                 recv_slots,
                 heap_ret_gcref_count,
                 heap_ret_gcref_start,
@@ -922,7 +1110,7 @@ impl Module {
             let param_slots = r.read_u16()?;
             let ret_slots = r.read_u16()?;
             let is_blocking = r.read_u8()? != 0;
-            let param_kinds = r.read_vec(|r| Ok(ExtSlotKind::from_u8(r.read_u8()?)))?;
+            let param_kinds = r.read_vec(read_ext_slot_kind)?;
             Ok(ExternDef {
                 name,
                 param_slots,
@@ -1025,6 +1213,7 @@ mod tests {
             local_slots: 2,
             gc_scan_slots: 0,
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -1046,8 +1235,8 @@ mod tests {
                 JitInstructionMetadata::None,
                 JitInstructionMetadata::None,
                 JitInstructionMetadata::MapGet {
-                    key_slots: 2,
-                    val_slots: 3,
+                    key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+                    val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Float],
                     has_ok: true,
                 },
                 JitInstructionMetadata::None,
@@ -1076,7 +1265,7 @@ mod tests {
     fn test_serialize_deserialize_loop_end_metadata() {
         let mut writer = ByteWriter::new();
         let metadata = JitInstructionMetadata::LoopEnd { end_pc: 300 };
-        write_jit_instruction_metadata(&mut writer, metadata);
+        write_jit_instruction_metadata(&mut writer, &metadata);
         let bytes = writer.into_bytes();
         let mut reader = ByteReader::new(&bytes);
 
@@ -1084,6 +1273,121 @@ mod tests {
             read_jit_instruction_metadata(&mut reader).unwrap(),
             metadata
         );
+    }
+
+    #[test]
+    fn test_serialize_deserialize_precise_jit_layout_metadata() {
+        let metadata = [
+            JitInstructionMetadata::ElemLayout {
+                elem_bytes: 16,
+                needs_sign_extend: false,
+                slot_layout: vec![SlotType::GcRef, SlotType::Float],
+            },
+            JitInstructionMetadata::PtrLayout {
+                value_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            },
+            JitInstructionMetadata::SlotLayout {
+                elem_layout: vec![SlotType::Value, SlotType::GcRef],
+            },
+            JitInstructionMetadata::CallLayout {
+                arg_layout: vec![SlotType::Value, SlotType::Float],
+                ret_layout: vec![SlotType::GcRef],
+            },
+            JitInstructionMetadata::CallExternLayout {
+                arg_layout: vec![SlotType::Interface0, SlotType::Interface1],
+                ret_layout: vec![SlotType::Value],
+            },
+            JitInstructionMetadata::QueueLayout {
+                elem_layout: vec![SlotType::GcRef],
+            },
+            JitInstructionMetadata::MapIterNext {
+                key_layout: vec![SlotType::Value],
+                val_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            },
+            JitInstructionMetadata::IfaceAssertLayout {
+                result_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            },
+        ];
+
+        for expected in metadata {
+            let mut writer = ByteWriter::new();
+            write_jit_instruction_metadata(&mut writer, &expected);
+            let bytes = writer.into_bytes();
+            let mut reader = ByteReader::new(&bytes);
+            assert_eq!(
+                read_jit_instruction_metadata(&mut reader).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_slot_type_tags_are_rejected() {
+        let mut writer = ByteWriter::new();
+        writer.write_u32(1);
+        writer.write_u8(99);
+        let bytes = writer.into_bytes();
+        let mut reader = ByteReader::new(&bytes);
+
+        assert!(matches!(
+            read_slot_layout(&mut reader),
+            Err(SerializeError::InvalidSlotType(99))
+        ));
+    }
+
+    #[test]
+    fn malformed_value_kind_tags_are_rejected_in_runtime_types() {
+        let mut writer = ByteWriter::new();
+        writer.write_u8(RT_BASIC);
+        writer.write_u8(99);
+        let bytes = writer.into_bytes();
+        let mut reader = ByteReader::new(&bytes);
+
+        assert!(matches!(
+            read_runtime_type(&mut reader),
+            Err(SerializeError::InvalidValueKind(99))
+        ));
+    }
+
+    #[test]
+    fn malformed_runtime_type_and_channel_dir_tags_are_rejected() {
+        let mut runtime_type = ByteReader::new(&[255]);
+        assert!(matches!(
+            read_runtime_type(&mut runtime_type),
+            Err(SerializeError::InvalidRuntimeType(255))
+        ));
+
+        let mut writer = ByteWriter::new();
+        writer.write_u8(RT_CHAN);
+        writer.write_u8(9);
+        writer.write_u32(ValueRttid::new(0, crate::types::ValueKind::Int).to_raw());
+        let bytes = writer.into_bytes();
+        let mut chan = ByteReader::new(&bytes);
+        assert!(matches!(
+            read_runtime_type(&mut chan),
+            Err(SerializeError::InvalidChanDir(9))
+        ));
+    }
+
+    #[test]
+    fn malformed_jit_metadata_tags_and_layouts_are_rejected() {
+        let mut bad_tag = ByteReader::new(&[255]);
+        assert!(matches!(
+            read_jit_instruction_metadata(&mut bad_tag),
+            Err(SerializeError::InvalidJitMetadata)
+        ));
+
+        let mut writer = ByteWriter::new();
+        writer.write_u8(11);
+        writer.write_u32(1);
+        writer.write_u8(99);
+        writer.write_u32(0);
+        let bytes = writer.into_bytes();
+        let mut bad_layout = ByteReader::new(&bytes);
+        assert!(matches!(
+            read_jit_instruction_metadata(&mut bad_layout),
+            Err(SerializeError::InvalidSlotType(99))
+        ));
     }
 
     #[test]

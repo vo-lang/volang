@@ -6,7 +6,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::FuncBuilder;
+use crate::func::{ElemLayoutSpec, FuncBuilder};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 /// Compile a map literal key, handling interface key boxing.
@@ -53,20 +53,27 @@ fn compile_ident_as_map_key(
     }
 
     // Variable reference - load value first
+    let src_type = match info.ident_type(ident) {
+        Some(src_type) => src_type,
+        None if needs_boxing => {
+            return Err(CodegenError::Internal(format!(
+                "cannot get concrete type for interface map key ident: {:?}",
+                ident.symbol
+            )));
+        }
+        None => key_type,
+    };
+    let src_slot_types = info.type_slot_types(src_type);
     let storage = func
         .lookup_local(ident.symbol)
         .map(|l| l.storage)
         .ok_or_else(|| {
             CodegenError::Internal(format!("map key ident not found: {:?}", ident.symbol))
         })?;
-    let value_slots = storage.value_slots();
-    let src_reg = func.alloc_slots(&vec![SlotType::Value; value_slots as usize]);
+    let src_reg = func.alloc_slots(&src_slot_types);
     func.emit_storage_load(storage, src_reg);
 
     if needs_boxing {
-        let src_type = info.ident_type(ident).ok_or_else(|| {
-            CodegenError::Internal(format!("cannot get type for ident: {:?}", ident.symbol))
-        })?;
         let key_slot_types = info.type_slot_types(key_type);
         let iface_reg = func.alloc_slots(&key_slot_types);
         crate::assign::emit_iface_assign_from_concrete(
@@ -366,7 +373,13 @@ fn compile_slice_lit(
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
     }
-    func.emit_slice_new(dst, meta_reg, len_cap_reg, flags, elem_bytes, elem_vk);
+    func.emit_slice_new(
+        dst,
+        meta_reg,
+        len_cap_reg,
+        flags,
+        ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+    );
 
     // Set each element with keyed index support
     let mut current_index: u64 = 0;
@@ -376,7 +389,13 @@ fn compile_slice_lit(
         super::compile_elem_to(&elem.value, val_reg, elem_type, ctx, func, info)?;
         let idx_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_reg, index as u16, 0);
-        func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
+        func.emit_slice_set(
+            dst,
+            idx_reg,
+            val_reg,
+            ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+            ctx,
+        );
     }
     Ok(())
 }
@@ -437,7 +456,21 @@ fn compile_map_lit(
             super::compile_elem_to(&elem.value, val_reg, val_type, ctx, func, info)?;
 
             // MapSet: a=map, b=meta_and_key, c=val
-            func.emit_map_set(0, dst, meta_and_key_reg, val_reg, key_slots, val_slots);
+            let key_may_gc = key_slot_types
+                .iter()
+                .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
+            let val_may_gc = val_slot_types
+                .iter()
+                .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
+            let flags = (key_may_gc as u8) | ((val_may_gc as u8) << 1);
+            func.emit_map_set(
+                flags,
+                dst,
+                meta_and_key_reg,
+                val_reg,
+                &key_slot_types,
+                &val_slot_types,
+            );
         }
     }
     Ok(())
@@ -510,7 +543,7 @@ pub(crate) fn lower_func_lit(
         let slots = info.type_slot_count(type_key);
         // Compute raw ValueMeta directly (not constant pool index)
         let meta_raw = ctx.compute_value_meta_raw(type_key, info);
-        let rttid_raw = ctx.intern_type_key(type_key, info);
+        let rttid_raw = ctx.compute_value_rttid_raw(type_key, info);
         closure_builder.add_capture_type(meta_raw, rttid_raw, slots);
         // All regular closure captures are GcRef (pointers to heap-boxed escaped vars)
         closure_builder.add_capture_slot_types(&[SlotType::GcRef]);
@@ -567,13 +600,19 @@ pub(crate) fn lower_func_lit(
     }
 
     // Set return slots and types
+    let mut ret_slot_types = Vec::new();
     let ret_slots: u16 = func_lit
         .sig
         .results
         .iter()
-        .map(|r| info.type_expr_layout(r.ty.id).0)
+        .map(|r| {
+            let (slots, slot_types) = info.type_expr_layout(r.ty.id);
+            ret_slot_types.extend(slot_types);
+            slots
+        })
         .sum();
-    closure_builder.set_ret_slots(ret_slots);
+    debug_assert_eq!(ret_slot_types.len(), ret_slots as usize);
+    closure_builder.set_ret_slot_types(ret_slot_types);
     let return_types: Vec<_> = func_lit
         .sig
         .results

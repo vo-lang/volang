@@ -24,6 +24,8 @@ use vo_analysis::Project;
 use vo_syntax::ast::Decl;
 use vo_vm::bytecode::Module;
 
+use crate::func::ElemLayoutSpec;
+
 /// Compile a type-checked project to VM bytecode.
 pub fn compile_project(project: &Project) -> Result<Module, CodegenError> {
     let info = TypeInfoWrapper::for_main_package(project);
@@ -1163,13 +1165,23 @@ fn compile_func_body(
     }
 
     // Set return slots and types
+    let mut ret_slot_types = Vec::new();
     let ret_slots: u16 = func_decl
         .sig
         .results
         .iter()
-        .map(|r| info.type_expr_layout(r.ty.id).0)
+        .map(|r| {
+            let (slots, slot_types) = info.type_expr_layout(r.ty.id);
+            ret_slot_types.extend(slot_types);
+            slots
+        })
         .sum();
-    builder.set_ret_slots(ret_slots);
+    assert_eq!(
+        ret_slot_types.len(),
+        ret_slots as usize,
+        "function return slot layout must exactly match return slot count"
+    );
+    builder.set_ret_slot_types(ret_slot_types);
     let return_types: Vec<_> = func_decl
         .sig
         .results
@@ -1316,18 +1328,30 @@ fn compile_global_array_init(
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_reg + 1, eb_idx, 0);
     }
-    func.emit_array_new(gcref_slot, meta_reg, len_reg, flags, elem_bytes, elem_vk);
+    let elem_slot_types = info.type_slot_types(elem_type);
+    func.emit_array_new(
+        gcref_slot,
+        meta_reg,
+        len_reg,
+        flags,
+        ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+    );
 
     // Compile array elements and set them
     if let vo_syntax::ast::ExprKind::CompositeLit(lit) = &rhs.kind {
-        let elem_slot_types = info.type_slot_types(elem_type);
         let tmp_elem = func.alloc_slots(&elem_slot_types);
         let idx_reg = func.alloc_slots(&[vo_runtime::SlotType::Value]);
 
         for (i, elem) in lit.elems.iter().enumerate() {
             crate::expr::compile_elem_to(&elem.value, tmp_elem, elem_type, ctx, func, info)?;
             func.emit_op(Opcode::LoadInt, idx_reg, i as u16, 0);
-            func.emit_array_set(gcref_slot, idx_reg, tmp_elem, elem_bytes, elem_vk, ctx);
+            func.emit_array_set(
+                gcref_slot,
+                idx_reg,
+                tmp_elem,
+                ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+                ctx,
+            );
         }
     }
 

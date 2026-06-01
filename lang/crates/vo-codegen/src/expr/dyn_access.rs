@@ -71,7 +71,13 @@ fn compile_dyn_call_unified(
     let pack_result =
         func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
     let pack_arg_count = 2 + arg_count * 2;
-    func.emit_call_extern(pack_result, pack_extern, pack_args, pack_arg_count);
+    func.emit_call_extern(
+        pack_result,
+        pack_extern,
+        pack_args,
+        pack_arg_count,
+        &[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1],
+    );
 
     // Check pack error
     let expected_dst_slots = info.dyn_access_dst_slots(ret_types);
@@ -145,38 +151,10 @@ fn compile_dyn_call_unified(
         );
     }
 
-    // Build result types based on LHS
+    // Build result types based on LHS.
     let mut call_result_types = Vec::new();
     for &ret_type in ret_types {
-        let is_any = info.is_any_type(ret_type);
-        let slots = info.type_slot_count(ret_type);
-        let vk = info.type_value_kind(ret_type);
-
-        if is_any {
-            call_result_types.push(SlotType::Interface0);
-            call_result_types.push(SlotType::Interface1);
-        } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
-            call_result_types.push(SlotType::Value);
-            call_result_types.push(SlotType::GcRef);
-        } else if slots == 1 {
-            if matches!(
-                vk,
-                ValueKind::Pointer
-                    | ValueKind::Slice
-                    | ValueKind::Map
-                    | ValueKind::String
-                    | ValueKind::Closure
-                    | ValueKind::Channel
-                    | ValueKind::Port
-            ) {
-                call_result_types.push(SlotType::GcRef);
-            } else {
-                call_result_types.push(SlotType::Value);
-            }
-        } else {
-            call_result_types.push(SlotType::Value);
-            call_result_types.push(SlotType::Value);
-        }
+        call_result_types.extend(dyn_result_value_slot_types(ret_type, info, false));
     }
     call_result_types.push(SlotType::Interface0);
     call_result_types.push(SlotType::Interface1);
@@ -188,6 +166,7 @@ fn compile_dyn_call_unified(
         call_extern_id,
         call_args,
         usize::from(call_arg_count),
+        &call_result_types,
     );
 
     // Step 4: Copy results to dst
@@ -260,6 +239,35 @@ fn call_result_types_len(ret_types: &[vo_analysis::TypeKey], info: &TypeInfoWrap
     }
     let error_offset = total;
     (total + 2, error_offset) // +2 for error[2]
+}
+
+fn dyn_result_value_slot_types(
+    ret_type: vo_analysis::TypeKey,
+    info: &TypeInfoWrapper,
+    fixed_two_slot_value: bool,
+) -> Vec<SlotType> {
+    let ret_slots = info.type_slot_count(ret_type);
+    let ret_vk = info.type_value_kind(ret_type);
+
+    let mut layout = if info.is_any_type(ret_type) || ret_vk == ValueKind::Interface {
+        vec![SlotType::Interface0, SlotType::Interface1]
+    } else if ret_slots > 2 && (ret_vk == ValueKind::Struct || ret_vk == ValueKind::Array) {
+        vec![SlotType::Value, SlotType::GcRef]
+    } else {
+        let mut layout = info.type_slot_types(ret_type);
+        if layout.is_empty() {
+            layout.push(SlotType::Value);
+        }
+        layout
+    };
+
+    if fixed_two_slot_value {
+        while layout.len() < 2 {
+            layout.push(SlotType::Value);
+        }
+    }
+
+    layout
 }
 
 /// Copy dyn_field result from extern format to dst.
@@ -406,15 +414,14 @@ fn compile_dyn_op(
             func.emit_op(Opcode::LoadConst, args + 3, rttid_const, 0);
             func.emit_op(Opcode::LoadInt, args + 4, ret_vk as u16, 0);
 
-            // Result: (value[2], error[2]) = 4 slots fixed
-            let result = func.alloc_slots(&[
-                SlotType::Value,
-                SlotType::Value, // value (format depends on ret_type)
-                SlotType::Interface0,
-                SlotType::Interface1, // error
-            ]);
+            // Result: (value[2], error[2]) fixed ABI, with precise slot
+            // kinds for the value pair.
+            let mut result_slot_types = dyn_result_value_slot_types(ret_type, info, true);
+            result_slot_types.push(SlotType::Interface0);
+            result_slot_types.push(SlotType::Interface1);
+            let result = func.alloc_slots(&result_slot_types);
             let extern_id = ctx.get_or_register_extern("dyn_field");
-            func.emit_call_extern(result, extern_id, args, 5);
+            func.emit_call_extern(result, extern_id, args, 5, &result_slot_types);
 
             // Copy result to dst based on ret_type
             emit_copy_dyn_field_result(ret_type, ret_slots, ret_vk, dst, result, func, info);
@@ -481,14 +488,13 @@ fn compile_dyn_op(
             func.emit_op(Opcode::LoadInt, args + 4, rttid_lo, rttid_hi);
             func.emit_op(Opcode::LoadInt, args + 5, expected_vk as u16, 0);
 
-            // Call dyn_index: 6 arg slots, 4 ret slots
-            let result = func.alloc_slots(&[
-                SlotType::Interface0,
-                SlotType::Interface1,
-                SlotType::Interface0,
-                SlotType::Interface1,
-            ]);
-            func.emit_call_extern(result, extern_id, args, 6);
+            // Call dyn_index: 6 arg slots, fixed (value[2], error[2])
+            // return ABI.
+            let mut result_slot_types = dyn_result_value_slot_types(ret_type, info, true);
+            result_slot_types.push(SlotType::Interface0);
+            result_slot_types.push(SlotType::Interface1);
+            let result = func.alloc_slots(&result_slot_types);
+            func.emit_call_extern(result, extern_id, args, 6, &result_slot_types);
 
             // Copy result to destination
             let ret_vk = info.type_value_kind(ret_type);
@@ -584,7 +590,13 @@ fn compile_dyn_method_unified(
     let pack_result =
         func.alloc_slots(&[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1]);
     let pack_arg_count = 2 + arg_count * 2;
-    func.emit_call_extern(pack_result, pack_extern, pack_args, pack_arg_count);
+    func.emit_call_extern(
+        pack_result,
+        pack_extern,
+        pack_args,
+        pack_arg_count,
+        &[SlotType::GcRef, SlotType::Interface0, SlotType::Interface1],
+    );
 
     // Check pack error
     let expected_dst_slots = info.dyn_access_dst_slots(ret_types);
@@ -664,35 +676,7 @@ fn compile_dyn_method_unified(
     // Build result types based on LHS
     let mut call_result_types = Vec::new();
     for &ret_type in ret_types {
-        let is_any = info.is_any_type(ret_type);
-        let slots = info.type_slot_count(ret_type);
-        let vk = info.type_value_kind(ret_type);
-
-        if is_any {
-            call_result_types.push(SlotType::Interface0);
-            call_result_types.push(SlotType::Interface1);
-        } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
-            call_result_types.push(SlotType::Value);
-            call_result_types.push(SlotType::GcRef);
-        } else if slots == 1 {
-            if matches!(
-                vk,
-                ValueKind::Pointer
-                    | ValueKind::Slice
-                    | ValueKind::Map
-                    | ValueKind::String
-                    | ValueKind::Closure
-                    | ValueKind::Channel
-                    | ValueKind::Port
-            ) {
-                call_result_types.push(SlotType::GcRef);
-            } else {
-                call_result_types.push(SlotType::Value);
-            }
-        } else {
-            call_result_types.push(SlotType::Value);
-            call_result_types.push(SlotType::Value);
-        }
+        call_result_types.extend(dyn_result_value_slot_types(ret_type, info, false));
     }
     call_result_types.push(SlotType::Interface0);
     call_result_types.push(SlotType::Interface1);
@@ -704,6 +688,7 @@ fn compile_dyn_method_unified(
         call_extern_id,
         call_args,
         usize::from(call_arg_count),
+        &call_result_types,
     );
 
     // Step 4: Copy results to dst

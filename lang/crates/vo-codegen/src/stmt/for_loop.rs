@@ -581,8 +581,15 @@ pub(super) fn compile_for_three(
 
     // Sync heap→stack before exiting scope
     for (i, lv) in loop_var_info.iter().enumerate() {
-        for j in 0..lv.value_slots {
-            func.emit_op(Opcode::PtrGet, lv.ctrl_slot + j, gcref_slots[i], j);
+        let slot_types = info.type_slot_types(lv.type_key);
+        debug_assert_eq!(slot_types.len(), lv.value_slots as usize);
+        for (j, slot_type) in slot_types.iter().copied().enumerate() {
+            func.emit_ptr_get_with_slot_types(
+                lv.ctrl_slot + j as u16,
+                gcref_slots[i],
+                j as u16,
+                &[slot_type],
+            );
         }
     }
 

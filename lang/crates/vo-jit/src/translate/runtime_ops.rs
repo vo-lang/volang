@@ -533,6 +533,15 @@ pub(super) fn go_island<'a>(
     let go_island_func = require_helper(e.helpers().go_island, "go_island")?;
     let ctx = e.ctx_param();
     let island = e.read_var(inst.a);
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let island_is_nil = e.builder().ins().icmp(IntCC::Equal, island, zero);
+    emit_runtime_trap_if(
+        e,
+        island_is_nil,
+        JitRuntimeTrapKind::NilPointerDereference,
+        None,
+        None,
+    );
     let closure_ref = e.read_var(inst.b);
     crate::contract::emit_nil_func_trap_if(e, closure_ref);
     let args_ptr = e.var_addr(inst.c);

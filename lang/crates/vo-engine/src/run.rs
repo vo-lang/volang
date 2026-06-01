@@ -307,6 +307,7 @@ mod tests {
     use vo_runtime::bytecode::JitInstructionMetadata;
     use vo_runtime::instruction::Opcode;
     use vo_runtime::output::CaptureSink;
+    use vo_runtime::SlotType;
 
     fn vm_error_for(source: &str, mode: RunMode) -> VmError {
         let compiled = crate::compile_string(source).expect("source should compile");
@@ -804,7 +805,9 @@ func main() {
             .iter()
             .position(|inst| inst.opcode() == Opcode::Return)
             .expect("return pc");
-        func.jit_metadata[return_pc] = JitInstructionMetadata::MapDelete { key_slots: 1 };
+        func.jit_metadata[return_pc] = JitInstructionMetadata::MapDelete {
+            key_layout: vec![SlotType::Value],
+        };
 
         let err = vm_error_for_compiled(
             compiled,
@@ -904,7 +907,9 @@ func main() {
             .iter()
             .position(|inst| inst.opcode() == Opcode::Return)
             .expect("return pc");
-        func.jit_metadata[return_pc] = JitInstructionMetadata::MapDelete { key_slots: 1 };
+        func.jit_metadata[return_pc] = JitInstructionMetadata::MapDelete {
+            key_layout: vec![SlotType::Value],
+        };
 
         let err = vm_error_for_compiled(
             compiled,

@@ -2201,7 +2201,18 @@ impl Vm {
                     exec::exec_str_concat(stack, bp, &inst, &mut self.state.gc);
                 }
                 Opcode::StrSlice => {
-                    exec::exec_str_slice(stack, bp, &inst, &mut self.state.gc);
+                    if !exec::exec_str_slice(stack, bp, &inst, &mut self.state.gc) {
+                        let lo = stack_get(stack, bp + inst.c as usize);
+                        let hi = stack_get(stack, bp + inst.c as usize + 1);
+                        handle_panic_result!(runtime_panic(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::SliceBoundsOutOfRange,
+                            format!("runtime error: slice bounds out of range [{}:{}]", lo, hi)
+                        ));
+                    }
                 }
                 Opcode::StrEq => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -3011,6 +3022,17 @@ impl Vm {
                     let _ = exec::exec_island_new(stack, bp, &inst, &mut self.state.gc, island_id);
                 }
                 Opcode::GoIsland => {
+                    let island_ref =
+                        stack_get(stack, bp + inst.a as usize) as vo_runtime::gc::GcRef;
+                    if island_ref.is_null() {
+                        handle_panic_result!(runtime_trap(
+                            &mut self.state.gc,
+                            fiber,
+                            stack,
+                            module,
+                            RuntimeTrapKind::NilPointerDereference
+                        ));
+                    }
                     let closure_ref =
                         stack_get(stack, bp + inst.b as usize) as vo_runtime::gc::GcRef;
                     if closure_ref.is_null() {
@@ -3200,6 +3222,7 @@ mod tests {
             local_slots: root_slots,
             gc_scan_slots: root_slots,
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -3237,6 +3260,7 @@ mod tests {
             local_slots: 4,
             gc_scan_slots: 0,
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -4137,6 +4161,7 @@ mod tests {
             local_slots: 1,
             gc_scan_slots: 0,
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,

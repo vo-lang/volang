@@ -6,6 +6,7 @@
 
 use vo_runtime::bytecode::JitInstructionMetadata;
 use vo_runtime::instruction::Instruction;
+use vo_runtime::SlotType;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MetadataFacts<'a> {
@@ -46,28 +47,33 @@ impl<'a> MetadataFacts<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElemLayout {
     pub bytes: usize,
     pub slots: u16,
     pub needs_sign_extend: bool,
+    pub slot_layout: Vec<SlotType>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapGetLayout {
+    pub key_layout: Vec<SlotType>,
+    pub val_layout: Vec<SlotType>,
     pub key_slots: u16,
     pub val_slots: u16,
     pub has_ok: bool,
 }
 
 impl MapGetLayout {
-    pub fn output_slots(self) -> Option<u16> {
+    pub fn output_slots(&self) -> Option<u16> {
         self.val_slots.checked_add(u16::from(self.has_ok))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapSetLayout {
+    pub key_layout: Vec<SlotType>,
+    pub val_layout: Vec<SlotType>,
     pub key_slots: u16,
     pub val_slots: u16,
 }
@@ -81,36 +87,53 @@ pub fn elem_layout_from_flags(flags: u8) -> ElemLayout {
         0x44 => (4, false),
         f => (f as usize, false),
     };
+    let slot = if (flags & vo_common_core::ELEM_FLAG_FLOAT_BIT) != 0 {
+        SlotType::Float
+    } else {
+        SlotType::Value
+    };
+    let slots = bytes.div_ceil(8) as u16;
     ElemLayout {
         bytes,
-        slots: bytes.div_ceil(8) as u16,
+        slots,
         needs_sign_extend,
+        slot_layout: vec![slot; slots as usize],
     }
 }
 
 pub fn elem_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<ElemLayout> {
-    match *metadata {
+    match metadata {
         JitInstructionMetadata::ElemLayout {
             elem_bytes,
             needs_sign_extend,
-        } => elem_layout_from_bytes(elem_bytes as usize, needs_sign_extend),
+            slot_layout,
+        } => elem_layout_from_bytes(*elem_bytes as usize, *needs_sign_extend, slot_layout),
         _ => None,
     }
 }
 
-fn elem_layout_from_bytes(bytes: usize, needs_sign_extend: bool) -> Option<ElemLayout> {
+fn elem_layout_from_bytes(
+    bytes: usize,
+    needs_sign_extend: bool,
+    slot_layout: &[SlotType],
+) -> Option<ElemLayout> {
     if bytes == 0 {
-        return (!needs_sign_extend).then_some(ElemLayout {
+        return (!needs_sign_extend && slot_layout.is_empty()).then_some(ElemLayout {
             bytes: 0,
             slots: 0,
             needs_sign_extend: false,
+            slot_layout: Vec::new(),
         });
     }
     let slots = u16::try_from(bytes.div_ceil(8)).ok()?;
+    if slot_layout.len() != slots as usize {
+        return None;
+    }
     Some(ElemLayout {
         bytes,
         slots,
         needs_sign_extend,
+        slot_layout: slot_layout.to_vec(),
     })
 }
 
@@ -135,15 +158,17 @@ pub fn slice_append_value_slots(inst: &Instruction, facts: MetadataFacts<'_>) ->
 }
 
 pub fn map_get_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<MapGetLayout> {
-    match *metadata {
+    match metadata {
         JitInstructionMetadata::MapGet {
-            key_slots,
-            val_slots,
+            key_layout,
+            val_layout,
             has_ok,
         } => Some(MapGetLayout {
-            key_slots,
-            val_slots,
-            has_ok,
+            key_layout: key_layout.clone(),
+            val_layout: val_layout.clone(),
+            key_slots: u16::try_from(key_layout.len()).ok()?,
+            val_slots: u16::try_from(val_layout.len()).ok()?,
+            has_ok: *has_ok,
         }),
         _ => None,
     }
@@ -155,13 +180,15 @@ pub fn map_get_layout(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<Ma
 }
 
 pub fn map_set_layout_from_instruction(metadata: &JitInstructionMetadata) -> Option<MapSetLayout> {
-    match *metadata {
+    match metadata {
         JitInstructionMetadata::MapSet {
-            key_slots,
-            val_slots,
+            key_layout,
+            val_layout,
         } => Some(MapSetLayout {
-            key_slots,
-            val_slots,
+            key_layout: key_layout.clone(),
+            val_layout: val_layout.clone(),
+            key_slots: u16::try_from(key_layout.len()).ok()?,
+            val_slots: u16::try_from(val_layout.len()).ok()?,
         }),
         _ => None,
     }
@@ -173,8 +200,19 @@ pub fn map_set_layout(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<Ma
 }
 
 pub fn map_delete_key_slots_from_instruction(metadata: &JitInstructionMetadata) -> Option<u16> {
-    match *metadata {
-        JitInstructionMetadata::MapDelete { key_slots } => Some(key_slots),
+    match metadata {
+        JitInstructionMetadata::MapDelete { key_layout } => {
+            Some(u16::try_from(key_layout.len()).ok()?)
+        }
+        _ => None,
+    }
+}
+
+pub fn map_delete_key_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<Vec<SlotType>> {
+    match metadata {
+        JitInstructionMetadata::MapDelete { key_layout } => Some(key_layout.clone()),
         _ => None,
     }
 }
@@ -196,7 +234,8 @@ mod tests {
             ElemLayout {
                 bytes: 2,
                 slots: 1,
-                needs_sign_extend: true
+                needs_sign_extend: true,
+                slot_layout: vec![SlotType::Value]
             }
         );
     }
@@ -206,13 +245,14 @@ mod tests {
         let map_get = Instruction::new(Opcode::MapGet, 10, 2, 5);
         let slice_get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
         let map_meta = JitInstructionMetadata::MapGet {
-            key_slots: 2,
-            val_slots: 3,
+            key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Float],
             has_ok: false,
         };
         let elem_meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value; 3],
         };
 
         assert_eq!(
@@ -236,6 +276,7 @@ mod tests {
         let elem_meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 0,
             needs_sign_extend: false,
+            slot_layout: Vec::new(),
         };
 
         assert_eq!(
@@ -253,13 +294,14 @@ mod tests {
         let slice_get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
 
         let map_meta = JitInstructionMetadata::MapGet {
-            key_slots: 4,
-            val_slots: 3,
+            key_layout: vec![SlotType::Value; 4],
+            val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Float],
             has_ok: true,
         };
         let elem_meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value; 3],
         };
 
         assert_eq!(

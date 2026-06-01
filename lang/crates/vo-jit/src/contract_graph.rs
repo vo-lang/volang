@@ -7,7 +7,7 @@
 
 use vo_runtime::instruction::Opcode;
 use vo_runtime::jit_api::{
-    jit_callback_abi_fields, runtime_helper_abi_fields, JitCallbackReturnPolicy,
+    jit_callback_abi_fields, runtime_helper_abi_fields, JitAbiType, JitCallbackReturnPolicy,
     JitRuntimeHelperPanicPolicy, JitRuntimeHelperReturnPolicy,
 };
 
@@ -50,6 +50,16 @@ pub enum JitMetadataKind {
     MapGet,
     MapSet,
     MapDelete,
+    PtrLayout,
+    SlotLayout,
+    CallLayout,
+    CallExternLayout,
+    QueueLayout,
+    MapIterNext,
+    IfaceAssertLayout,
+    LegacyMapGet,
+    LegacyMapSet,
+    LegacyMapDelete,
     LoopEnd,
 }
 
@@ -88,8 +98,15 @@ pub enum WidthPolicy {
     U32,
     U64,
     Pointer,
-    SlotCount { bits: u8, max: Option<u16> },
+    SlotCount {
+        bits: u8,
+        max: Option<u16>,
+    },
     PackedFields(&'static [FieldWidth]),
+    Structured {
+        fields: &'static [FieldWidth],
+        slot_layouts: &'static [SlotLayoutField],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +114,14 @@ pub struct FieldWidth {
     pub name: &'static str,
     pub bits: u8,
     pub max: Option<u16>,
+    pub authority: LayoutAuthority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotLayoutField {
+    pub name: &'static str,
+    pub count_bits: u8,
+    pub slot_type_bits: u8,
     pub authority: LayoutAuthority,
 }
 
@@ -161,11 +186,25 @@ pub enum ContractEndpoint {
     ContractGraph,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbiShape {
+    pub params: &'static [JitAbiType],
+    pub ret: JitAbiType,
+}
+
+impl AbiShape {
+    pub const NONE: Self = Self {
+        params: &[],
+        ret: JitAbiType::Void,
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractEdge {
     pub kind: ContractKind,
     pub subject: ContractSubject,
     pub width: WidthPolicy,
+    pub abi: AbiShape,
     pub layout_authority: LayoutAuthority,
     pub return_policy: ReturnPolicy,
     pub panic_policy: PanicPolicy,
@@ -355,7 +394,79 @@ const FIELD_META_ELEM: &[FieldWidth] = &[
         authority: LayoutAuthority::CodegenTypeInfo,
     },
 ];
-const FIELD_META_MAP_GET: &[FieldWidth] = &[
+const FIELD_META_ELEM_LAYOUTS: &[SlotLayoutField] = &[SlotLayoutField {
+    name: "slot_layout",
+    count_bits: 32,
+    slot_type_bits: 8,
+    authority: LayoutAuthority::CodegenTypeInfo,
+}];
+const FIELD_META_MAP_GET_SCALARS: &[FieldWidth] = &[FieldWidth {
+    name: "has_ok",
+    bits: 1,
+    max: Some(1),
+    authority: LayoutAuthority::CodegenTypeInfo,
+}];
+const FIELD_META_MAP_GET_LAYOUTS: &[SlotLayoutField] = &[
+    SlotLayoutField {
+        name: "key_layout",
+        count_bits: 32,
+        slot_type_bits: 8,
+        authority: LayoutAuthority::CodegenTypeInfo,
+    },
+    SlotLayoutField {
+        name: "val_layout",
+        count_bits: 32,
+        slot_type_bits: 8,
+        authority: LayoutAuthority::CodegenTypeInfo,
+    },
+];
+const FIELD_META_MAP_SET_LAYOUTS: &[SlotLayoutField] = FIELD_META_MAP_GET_LAYOUTS;
+const FIELD_META_MAP_DELETE_LAYOUTS: &[SlotLayoutField] = &[SlotLayoutField {
+    name: "key_layout",
+    count_bits: 32,
+    slot_type_bits: 8,
+    authority: LayoutAuthority::CodegenTypeInfo,
+}];
+const FIELD_META_PTR_LAYOUTS: &[SlotLayoutField] = &[SlotLayoutField {
+    name: "value_layout",
+    count_bits: 32,
+    slot_type_bits: 8,
+    authority: LayoutAuthority::CodegenTypeInfo,
+}];
+const FIELD_META_SLOT_LAYOUTS: &[SlotLayoutField] = &[SlotLayoutField {
+    name: "elem_layout",
+    count_bits: 32,
+    slot_type_bits: 8,
+    authority: LayoutAuthority::CodegenTypeInfo,
+}];
+const FIELD_META_CALL_LAYOUTS: &[SlotLayoutField] = &[
+    SlotLayoutField {
+        name: "arg_layout",
+        count_bits: 32,
+        slot_type_bits: 8,
+        authority: LayoutAuthority::CodegenTypeInfo,
+    },
+    SlotLayoutField {
+        name: "ret_layout",
+        count_bits: 32,
+        slot_type_bits: 8,
+        authority: LayoutAuthority::CodegenTypeInfo,
+    },
+];
+const FIELD_META_QUEUE_LAYOUTS: &[SlotLayoutField] = &[SlotLayoutField {
+    name: "elem_layout",
+    count_bits: 32,
+    slot_type_bits: 8,
+    authority: LayoutAuthority::CodegenTypeInfo,
+}];
+const FIELD_META_MAP_ITER_NEXT_LAYOUTS: &[SlotLayoutField] = FIELD_META_MAP_GET_LAYOUTS;
+const FIELD_META_IFACE_ASSERT_LAYOUTS: &[SlotLayoutField] = &[SlotLayoutField {
+    name: "result_layout",
+    count_bits: 32,
+    slot_type_bits: 8,
+    authority: LayoutAuthority::CodegenTypeInfo,
+}];
+const FIELD_META_LEGACY_MAP_GET: &[FieldWidth] = &[
     FieldWidth {
         name: "key_slots",
         bits: 16,
@@ -375,7 +486,7 @@ const FIELD_META_MAP_GET: &[FieldWidth] = &[
         authority: LayoutAuthority::CodegenTypeInfo,
     },
 ];
-const FIELD_META_MAP_SET: &[FieldWidth] = &[
+const FIELD_META_LEGACY_MAP_SET: &[FieldWidth] = &[
     FieldWidth {
         name: "key_slots",
         bits: 16,
@@ -389,7 +500,7 @@ const FIELD_META_MAP_SET: &[FieldWidth] = &[
         authority: LayoutAuthority::CodegenTypeInfo,
     },
 ];
-const FIELD_META_MAP_DELETE: &[FieldWidth] = &[FieldWidth {
+const FIELD_META_LEGACY_MAP_DELETE: &[FieldWidth] = &[FieldWidth {
     name: "key_slots",
     bits: 16,
     max: None,
@@ -434,6 +545,14 @@ fn layout_authority_for_metadata(req: JitMetadataRequirement) -> LayoutAuthority
         | JitMetadataRequirement::MapGet
         | JitMetadataRequirement::MapSet
         | JitMetadataRequirement::MapDelete
+        | JitMetadataRequirement::PtrLayout
+        | JitMetadataRequirement::SlotLayout
+        | JitMetadataRequirement::CallLayout
+        | JitMetadataRequirement::CallLayoutWhenClosureShape
+        | JitMetadataRequirement::CallExternLayout
+        | JitMetadataRequirement::QueueLayout
+        | JitMetadataRequirement::MapIterNext
+        | JitMetadataRequirement::IfaceAssertLayout
         | JitMetadataRequirement::LoopEndForHintLoop => LayoutAuthority::JitInstructionMetadata,
     }
 }
@@ -473,10 +592,12 @@ fn callback_return_policy(policy: JitCallbackReturnPolicy) -> ReturnPolicy {
     }
 }
 
-fn edge(
+#[allow(clippy::too_many_arguments)]
+fn edge_with_abi(
     kind: ContractKind,
     subject: ContractSubject,
     width: WidthPolicy,
+    abi: AbiShape,
     layout_authority: LayoutAuthority,
     return_policy: ReturnPolicy,
     panic_policy: PanicPolicy,
@@ -490,6 +611,7 @@ fn edge(
         kind,
         subject,
         width,
+        abi,
         layout_authority,
         return_policy,
         panic_policy,
@@ -500,6 +622,36 @@ fn edge(
         producer,
         consumer,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn edge(
+    kind: ContractKind,
+    subject: ContractSubject,
+    width: WidthPolicy,
+    layout_authority: LayoutAuthority,
+    return_policy: ReturnPolicy,
+    panic_policy: PanicPolicy,
+    may_gc: bool,
+    observes_frame: bool,
+    fail_fast: &'static [FailFastCondition],
+    producer: ContractEndpoint,
+    consumer: ContractEndpoint,
+) -> ContractEdge {
+    edge_with_abi(
+        kind,
+        subject,
+        width,
+        AbiShape::NONE,
+        layout_authority,
+        return_policy,
+        panic_policy,
+        may_gc,
+        observes_frame,
+        fail_fast,
+        producer,
+        consumer,
+    )
 }
 
 pub fn opcode_contract_edges() -> Vec<ContractEdge> {
@@ -568,6 +720,7 @@ const fn packed_operand_edge(operand: PackedOperand) -> ContractEdge {
         kind: ContractKind::PackedOperand,
         subject: ContractSubject::PackedOperand(operand),
         width: packed_operand_width_const(operand),
+        abi: AbiShape::NONE,
         layout_authority: LayoutAuthority::InstructionOperandAndFlags,
         return_policy: ReturnPolicy::None,
         panic_policy: PanicPolicy::CompileFailFast,
@@ -596,12 +749,22 @@ const fn packed_operand_width_const(operand: PackedOperand) -> WidthPolicy {
     }
 }
 
-static JIT_METADATA_CONTRACT_EDGES: [ContractEdge; 6] = [
+static JIT_METADATA_CONTRACT_EDGES: [ContractEdge; 16] = [
     metadata_edge(JitMetadataKind::None),
     metadata_edge(JitMetadataKind::ElemLayout),
     metadata_edge(JitMetadataKind::MapGet),
     metadata_edge(JitMetadataKind::MapSet),
     metadata_edge(JitMetadataKind::MapDelete),
+    metadata_edge(JitMetadataKind::PtrLayout),
+    metadata_edge(JitMetadataKind::SlotLayout),
+    metadata_edge(JitMetadataKind::CallLayout),
+    metadata_edge(JitMetadataKind::CallExternLayout),
+    metadata_edge(JitMetadataKind::QueueLayout),
+    metadata_edge(JitMetadataKind::MapIterNext),
+    metadata_edge(JitMetadataKind::IfaceAssertLayout),
+    metadata_edge(JitMetadataKind::LegacyMapGet),
+    metadata_edge(JitMetadataKind::LegacyMapSet),
+    metadata_edge(JitMetadataKind::LegacyMapDelete),
     metadata_edge(JitMetadataKind::LoopEnd),
 ];
 
@@ -614,6 +777,7 @@ const fn metadata_edge(kind: JitMetadataKind) -> ContractEdge {
         kind: ContractKind::JitMetadata,
         subject: ContractSubject::JitMetadata(kind),
         width: metadata_width_const(kind),
+        abi: AbiShape::NONE,
         layout_authority: match kind {
             JitMetadataKind::None => LayoutAuthority::None,
             _ => LayoutAuthority::JitInstructionMetadata,
@@ -637,10 +801,51 @@ const fn metadata_edge(kind: JitMetadataKind) -> ContractEdge {
 const fn metadata_width_const(kind: JitMetadataKind) -> WidthPolicy {
     match kind {
         JitMetadataKind::None => WidthPolicy::None,
-        JitMetadataKind::ElemLayout => WidthPolicy::PackedFields(FIELD_META_ELEM),
-        JitMetadataKind::MapGet => WidthPolicy::PackedFields(FIELD_META_MAP_GET),
-        JitMetadataKind::MapSet => WidthPolicy::PackedFields(FIELD_META_MAP_SET),
-        JitMetadataKind::MapDelete => WidthPolicy::PackedFields(FIELD_META_MAP_DELETE),
+        JitMetadataKind::ElemLayout => WidthPolicy::Structured {
+            fields: FIELD_META_ELEM,
+            slot_layouts: FIELD_META_ELEM_LAYOUTS,
+        },
+        JitMetadataKind::MapGet => WidthPolicy::Structured {
+            fields: FIELD_META_MAP_GET_SCALARS,
+            slot_layouts: FIELD_META_MAP_GET_LAYOUTS,
+        },
+        JitMetadataKind::MapSet => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_MAP_SET_LAYOUTS,
+        },
+        JitMetadataKind::MapDelete => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_MAP_DELETE_LAYOUTS,
+        },
+        JitMetadataKind::PtrLayout => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_PTR_LAYOUTS,
+        },
+        JitMetadataKind::SlotLayout => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_SLOT_LAYOUTS,
+        },
+        JitMetadataKind::CallLayout | JitMetadataKind::CallExternLayout => {
+            WidthPolicy::Structured {
+                fields: &[],
+                slot_layouts: FIELD_META_CALL_LAYOUTS,
+            }
+        }
+        JitMetadataKind::QueueLayout => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_QUEUE_LAYOUTS,
+        },
+        JitMetadataKind::MapIterNext => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_MAP_ITER_NEXT_LAYOUTS,
+        },
+        JitMetadataKind::IfaceAssertLayout => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_IFACE_ASSERT_LAYOUTS,
+        },
+        JitMetadataKind::LegacyMapGet => WidthPolicy::PackedFields(FIELD_META_LEGACY_MAP_GET),
+        JitMetadataKind::LegacyMapSet => WidthPolicy::PackedFields(FIELD_META_LEGACY_MAP_SET),
+        JitMetadataKind::LegacyMapDelete => WidthPolicy::PackedFields(FIELD_META_LEGACY_MAP_DELETE),
         JitMetadataKind::LoopEnd => WidthPolicy::PackedFields(FIELD_META_LOOP_END),
     }
 }
@@ -649,16 +854,25 @@ pub fn runtime_helper_contract_edges() -> Vec<ContractEdge> {
     runtime_helper_abi_fields()
         .iter()
         .map(|helper| {
-            edge(
+            edge_with_abi(
                 ContractKind::RuntimeHelper,
                 ContractSubject::RuntimeHelper(helper.name),
                 WidthPolicy::PackedFields(&[]),
+                AbiShape {
+                    params: helper.params,
+                    ret: helper.ret,
+                },
                 LayoutAuthority::RuntimeHelperAbi,
                 runtime_return_policy(helper.return_policy),
                 runtime_panic_policy(helper.panic_policy),
                 helper.may_gc,
                 helper.observes_frame,
-                if helper.return_policy == JitRuntimeHelperReturnPolicy::JitResult {
+                if matches!(
+                    helper.return_policy,
+                    JitRuntimeHelperReturnPolicy::JitResult
+                        | JitRuntimeHelperReturnPolicy::I32StatusOutPointer
+                        | JitRuntimeHelperReturnPolicy::U64ErrorSentinel
+                ) {
                     FF_HELPER
                 } else {
                     FF_NONE
@@ -674,10 +888,14 @@ pub fn callback_contract_edges() -> Vec<ContractEdge> {
     jit_callback_abi_fields()
         .iter()
         .map(|callback| {
-            edge(
+            edge_with_abi(
                 ContractKind::JitContextCallback,
                 ContractSubject::JitContextCallback(callback.name),
                 WidthPolicy::Pointer,
+                AbiShape {
+                    params: callback.params,
+                    ret: callback.ret,
+                },
                 LayoutAuthority::JitContextAbi,
                 callback_return_policy(callback.return_policy),
                 if matches!(
@@ -705,10 +923,14 @@ pub fn callback_callsite_contract_edges() -> Vec<ContractEdge> {
         .iter()
         .map(|callsite| {
             let callback = callsite.abi();
-            edge(
+            edge_with_abi(
                 ContractKind::JitContextCallbackCallsite,
                 ContractSubject::JitContextCallbackCallsite(callsite.name),
                 WidthPolicy::Pointer,
+                AbiShape {
+                    params: callback.params,
+                    ret: callback.ret,
+                },
                 LayoutAuthority::JitContextAbi,
                 callback_return_policy(callback.return_policy),
                 if matches!(
@@ -764,6 +986,7 @@ const fn gc_edge(entry: GcContractEntry, consumer: &'static str) -> ContractEdge
             bits: 16,
             max: None,
         },
+        abi: AbiShape::NONE,
         layout_authority: LayoutAuthority::ModuleMetadata,
         return_policy: ReturnPolicy::JitResultChecked,
         panic_policy: PanicPolicy::ReturnsJitResult,
@@ -784,6 +1007,7 @@ const fn gc_scan_edge(entry: GcContractEntry, consumer: &'static str) -> Contrac
             bits: 16,
             max: None,
         },
+        abi: AbiShape::NONE,
         layout_authority: LayoutAuthority::GcHeader,
         return_policy: ReturnPolicy::None,
         panic_policy: PanicPolicy::InternalRustPanicOnly,
@@ -849,6 +1073,7 @@ const fn entry_edge(
         kind: ContractKind::EntryPolicy,
         subject: ContractSubject::EntryPolicy(policy),
         width: WidthPolicy::Pointer,
+        abi: AbiShape::NONE,
         layout_authority: LayoutAuthority::VmFrame,
         return_policy: ReturnPolicy::JitResultChecked,
         panic_policy: PanicPolicy::ReturnsJitResult,
@@ -1021,6 +1246,16 @@ mod tests {
                 JitMetadataKind::MapGet as u8,
                 JitMetadataKind::MapSet as u8,
                 JitMetadataKind::MapDelete as u8,
+                JitMetadataKind::PtrLayout as u8,
+                JitMetadataKind::SlotLayout as u8,
+                JitMetadataKind::CallLayout as u8,
+                JitMetadataKind::CallExternLayout as u8,
+                JitMetadataKind::QueueLayout as u8,
+                JitMetadataKind::MapIterNext as u8,
+                JitMetadataKind::IfaceAssertLayout as u8,
+                JitMetadataKind::LegacyMapGet as u8,
+                JitMetadataKind::LegacyMapSet as u8,
+                JitMetadataKind::LegacyMapDelete as u8,
                 JitMetadataKind::LoopEnd as u8,
             ]
             .into_iter()
@@ -1033,6 +1268,41 @@ mod tests {
                     LayoutAuthority::JitInstructionMetadata
                 );
                 assert!(edge.fail_fast.contains(&FailFastCondition::MissingMetadata));
+                match edge.width {
+                    WidthPolicy::PackedFields(fields) => {
+                        assert!(
+                            !fields.is_empty(),
+                            "{:?} has no metadata fields",
+                            edge.subject
+                        );
+                    }
+                    WidthPolicy::Structured {
+                        fields,
+                        slot_layouts,
+                    } => {
+                        assert!(
+                            !fields.is_empty() || !slot_layouts.is_empty(),
+                            "{:?} has no structured metadata fields",
+                            edge.subject
+                        );
+                        for layout in slot_layouts {
+                            assert!(
+                                layout.count_bits > 0 && layout.slot_type_bits > 0,
+                                "{:?} slot layout {} has zero-width encoding",
+                                edge.subject,
+                                layout.name
+                            );
+                            assert_ne!(
+                                layout.authority,
+                                LayoutAuthority::None,
+                                "{:?} slot layout {} has no layout authority",
+                                edge.subject,
+                                layout.name
+                            );
+                        }
+                    }
+                    other => panic!("{:?} has unexpected metadata width {other:?}", edge.subject),
+                }
             }
         }
     }
@@ -1053,6 +1323,43 @@ mod tests {
             .collect();
         assert_eq!(graph_names, abi_names);
 
+        for helper in runtime_helper_abi_fields() {
+            let edge = graph
+                .iter()
+                .find(|edge| edge.subject == ContractSubject::RuntimeHelper(helper.name))
+                .unwrap_or_else(|| panic!("missing helper edge for {}", helper.name));
+            assert_eq!(
+                edge.abi.params, helper.params,
+                "{} params missing from contract graph",
+                helper.name
+            );
+            assert_eq!(
+                edge.abi.ret, helper.ret,
+                "{} return type missing from contract graph",
+                helper.name
+            );
+            assert_eq!(
+                edge.return_policy,
+                runtime_return_policy(helper.return_policy)
+            );
+            assert_eq!(edge.panic_policy, runtime_panic_policy(helper.panic_policy));
+            assert_eq!(edge.may_gc, helper.may_gc);
+            assert_eq!(edge.observes_frame, helper.observes_frame);
+            assert_eq!(edge.needs_spill, helper.may_gc || helper.observes_frame);
+            if matches!(
+                helper.return_policy,
+                JitRuntimeHelperReturnPolicy::JitResult
+                    | JitRuntimeHelperReturnPolicy::I32StatusOutPointer
+                    | JitRuntimeHelperReturnPolicy::U64ErrorSentinel
+            ) {
+                assert!(
+                    edge.fail_fast.contains(&FailFastCondition::MissingHelper),
+                    "{} structured status/sentinel helper must fail fast when unavailable",
+                    helper.name
+                );
+            }
+        }
+
         for row in opcode_semantic_matrix() {
             for dep in row.runtime_dependencies {
                 if let RuntimeDependency::RuntimeHelper(name) = *dep {
@@ -1064,6 +1371,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn string_slice_bounds_trap_is_manifest_backed() {
+        let helper = runtime_helper_abi_fields()
+            .iter()
+            .find(|field| field.name == "vo_str_slice")
+            .expect("vo_str_slice ABI");
+        assert_eq!(
+            helper.return_policy,
+            JitRuntimeHelperReturnPolicy::U64ErrorSentinel
+        );
+        assert_eq!(
+            helper.panic_policy,
+            JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel
+        );
+
+        let edge = runtime_helper_contract_edges()
+            .into_iter()
+            .find(|edge| edge.subject == ContractSubject::RuntimeHelper("vo_str_slice"))
+            .expect("vo_str_slice contract edge");
+        assert_eq!(edge.abi.params, helper.params);
+        assert_eq!(edge.abi.ret, helper.ret);
+        assert_eq!(edge.return_policy, ReturnPolicy::U64Sentinel);
+        assert_eq!(edge.panic_policy, PanicPolicy::ReturnsStatusOrSentinel);
+        assert!(edge.may_gc);
+        assert!(edge.needs_spill);
+
+        let row = opcode_semantic_matrix()
+            .into_iter()
+            .find(|row| row.opcode == Opcode::StrSlice)
+            .expect("StrSlice semantic row");
+        assert_eq!(row.helper_return, HelperReturnPolicy::RuntimeTrapReturn);
+        assert!(row
+            .runtime_dependencies
+            .contains(&RuntimeDependency::RuntimeHelper("vo_str_slice")));
+        assert!(row
+            .runtime_dependencies
+            .contains(&RuntimeDependency::RuntimeHelper("vo_runtime_trap")));
     }
 
     #[test]
@@ -1081,6 +1427,23 @@ mod tests {
             .map(|field| field.name)
             .collect();
         assert_eq!(graph_names, abi_names);
+
+        for callback in jit_callback_abi_fields() {
+            let edge = graph
+                .iter()
+                .find(|edge| edge.subject == ContractSubject::JitContextCallback(callback.name))
+                .unwrap_or_else(|| panic!("missing callback edge for {}", callback.name));
+            assert_eq!(
+                edge.abi.params, callback.params,
+                "{} params missing from contract graph",
+                callback.name
+            );
+            assert_eq!(
+                edge.abi.ret, callback.ret,
+                "{} return type missing from contract graph",
+                callback.name
+            );
+        }
 
         for row in opcode_semantic_matrix() {
             for dep in row.runtime_dependencies {

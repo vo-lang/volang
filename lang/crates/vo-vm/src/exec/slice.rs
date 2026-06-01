@@ -60,10 +60,19 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
     let is_array = (inst.flags & 0b01) != 0;
     let has_max = (inst.flags & 0b10) != 0;
 
-    // nil slice slicing returns nil (Go semantics: nil[0:0] == nil)
+    // nil slice slicing returns nil only for all-zero bounds.
     if s.is_null() && !is_array {
-        stack_set(stack, bp + inst.a as usize, 0);
-        return true;
+        if has_max {
+            let max = stack_get(stack, bp + inst.c as usize + 2) as usize;
+            if lo == 0 && hi == 0 && max == 0 {
+                stack_set(stack, bp + inst.a as usize, 0);
+                return true;
+            }
+        } else if lo == 0 && hi == 0 {
+            stack_set(stack, bp + inst.a as usize, 0);
+            return true;
+        }
+        return false;
     }
 
     let result = if is_array {

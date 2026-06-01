@@ -58,13 +58,9 @@ pub(crate) fn compile_select(
                 let val_reg =
                     crate::expr::compile_expr_to_type(&send.value, elem_type, ctx, func, info)?;
                 let elem_slots = info.queue_send_elem_slots(queue_type);
-                func.emit_with_flags(
-                    Opcode::SelectSend,
-                    elem_slots,
-                    queue_reg,
-                    val_reg,
-                    case_idx as u16,
-                );
+                let elem_layout = info.type_slot_types(elem_type);
+                debug_assert_eq!(elem_layout.len(), elem_slots as usize);
+                func.emit_select_send(queue_reg, val_reg, case_idx as u16, &elem_layout);
                 recv_infos.push(None);
             }
             Some(CommClause::Recv(recv)) => {
@@ -75,7 +71,8 @@ pub(crate) fn compile_select(
 
                 // Allocate destination with correct slot types for GC scanning
                 let elem_type = info.queue_elem_type(queue_type);
-                let mut recv_types = info.type_slot_types(elem_type);
+                let elem_layout = info.type_slot_types(elem_type);
+                let mut recv_types = elem_layout.clone();
                 if has_ok {
                     recv_types.push(SlotType::Value); // ok bool
                 }
@@ -84,13 +81,8 @@ pub(crate) fn compile_select(
                 let flags = pack_queue_recv_flags(elem_slots, has_ok).unwrap_or_else(|| {
                     panic!("SelectRecv ABI supports at most 127 element slots, got {elem_slots}")
                 });
-                func.emit_with_flags(
-                    Opcode::SelectRecv,
-                    flags,
-                    dst_reg,
-                    queue_reg,
-                    case_idx as u16,
-                );
+                debug_assert_eq!(elem_layout.len(), elem_slots as usize);
+                func.emit_select_recv(dst_reg, queue_reg, case_idx as u16, flags, &elem_layout);
                 recv_infos.push(Some(RecvCaseInfo {
                     dst_reg,
                     elem_slots,

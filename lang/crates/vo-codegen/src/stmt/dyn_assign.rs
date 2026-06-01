@@ -17,7 +17,7 @@ use crate::type_info::TypeInfoWrapper;
 /// Dynamic write always panics on error (does not propagate).
 fn emit_dyn_write_panic(error_src: u16, ctx: &mut CodegenContext, func: &mut FuncBuilder) {
     let extern_id = ctx.get_or_register_extern("panic_with_error");
-    func.emit_call_extern(error_src, extern_id, error_src, 2);
+    func.emit_call_extern(error_src, extern_id, error_src, 2, &[]);
 }
 
 /// Emit error short-circuit for (any, error) tuple base in dynamic assignment.
@@ -117,7 +117,13 @@ pub(crate) fn compile_dyn_field_assign(
 
     // Call dyn_set_field: 5 arg slots, 2 ret slots (error)
     let err_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-    func.emit_call_extern(err_reg, extern_id, args, 5);
+    func.emit_call_extern(
+        err_reg,
+        extern_id,
+        args,
+        5,
+        &[SlotType::Interface0, SlotType::Interface1],
+    );
 
     // Panic on error
     let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
@@ -173,7 +179,13 @@ pub(crate) fn compile_dyn_index_assign(
 
     // Call dyn_set_index_unified: 6 arg slots, 2 ret slots (error)
     let err_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-    func.emit_call_extern(err_reg, extern_id, args, 6);
+    func.emit_call_extern(
+        err_reg,
+        extern_id,
+        args,
+        6,
+        &[SlotType::Interface0, SlotType::Interface1],
+    );
 
     // Panic on error
     let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);

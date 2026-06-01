@@ -254,7 +254,7 @@ pub fn exec_call_closure(
         borrowed_start + arg_slots as u16,
         ret_slots,
         caller_scan_slots,
-        func.local_slots as u16,
+        func.local_slots,
         func.gc_scan_slots,
     ) {
         Ok(bp) => bp,
@@ -383,6 +383,7 @@ mod tests {
             local_slots,
             gc_scan_slots: 0,
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,

@@ -12,7 +12,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::expr::{compile_expr_to, get_expr_source};
+use crate::expr::get_expr_source;
 use crate::func::{ExprSource, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
@@ -240,25 +240,23 @@ pub(super) fn compile_return(
             // Store each return value into the corresponding named return variable
             for (i, result) in ret.values.iter().enumerate() {
                 let (gcref_slot, slots, _) = named_return_slots[i];
-                let ret_type = ret_types.get(i).copied();
+                let ret_type = ret_types.get(i).copied().ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "missing return type metadata for escaped named return {i}"
+                    ))
+                })?;
 
                 // Compile value to temp, then store to heap
-                let temp_slot_types = ret_type
-                    .map(|rt| info.type_slot_types(rt))
-                    .unwrap_or_else(|| vec![SlotType::Value; slots as usize]);
+                let temp_slot_types = info.type_slot_types(ret_type);
                 let temp = func.alloc_slots(&temp_slot_types);
-                if let Some(rt) = ret_type {
-                    crate::assign::emit_assign(
-                        temp,
-                        crate::assign::AssignSource::Expr(result),
-                        rt,
-                        ctx,
-                        func,
-                        info,
-                    )?;
-                } else {
-                    compile_expr_to(result, temp, ctx, func, info)?;
-                }
+                crate::assign::emit_assign(
+                    temp,
+                    crate::assign::AssignSource::Expr(result),
+                    ret_type,
+                    ctx,
+                    func,
+                    info,
+                )?;
 
                 assert_eq!(slots as usize, temp_slot_types.len());
                 func.emit_ptr_set_with_slot_types(gcref_slot, 0, temp, &temp_slot_types);

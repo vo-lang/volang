@@ -1006,13 +1006,14 @@ pub fn preserves_reg_const_facts(op: Opcode) -> bool {
 mod tests {
     use super::*;
     use vo_runtime::bytecode::JitInstructionMetadata;
+    use vo_runtime::SlotType;
 
     #[test]
     fn map_get_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapGet, 10, 2, 5);
         let meta = JitInstructionMetadata::MapGet {
-            key_slots: 3,
-            val_slots: 2,
+            key_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
+            val_layout: vec![SlotType::Interface0, SlotType::Interface1],
             has_ok: true,
         };
         let effects =
@@ -1027,8 +1028,8 @@ mod tests {
     fn map_set_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapSet, 1, 4, 9);
         let meta = JitInstructionMetadata::MapSet {
-            key_slots: 2,
-            val_slots: 3,
+            key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
         };
 
         assert_eq!(
@@ -1040,7 +1041,9 @@ mod tests {
     #[test]
     fn map_delete_effects_use_metadata_layout_when_available() {
         let inst = Instruction::new(Opcode::MapDelete, 1, 4, 0);
-        let meta = JitInstructionMetadata::MapDelete { key_slots: 3 };
+        let meta = JitInstructionMetadata::MapDelete {
+            key_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
+        };
 
         assert_eq!(
             try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
@@ -1054,6 +1057,7 @@ mod tests {
         let meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value; 3],
         };
 
         assert_eq!(
@@ -1073,6 +1077,7 @@ mod tests {
         let meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 0,
             needs_sign_extend: false,
+            slot_layout: Vec::new(),
         };
 
         assert_eq!(
@@ -1088,6 +1093,7 @@ mod tests {
         let meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value; 3],
         };
 
         assert_eq!(
@@ -1104,6 +1110,7 @@ mod tests {
         let meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value; 3],
         };
 
         assert_eq!(
@@ -1147,6 +1154,7 @@ mod tests {
         let meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value; 3],
         };
 
         assert_eq!(
@@ -1161,6 +1169,7 @@ mod tests {
         let meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 0,
             needs_sign_extend: false,
+            slot_layout: Vec::new(),
         };
 
         assert_eq!(
@@ -1175,6 +1184,7 @@ mod tests {
         let meta = JitInstructionMetadata::ElemLayout {
             elem_bytes: 24,
             needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value; 3],
         };
 
         assert_eq!(
@@ -1187,8 +1197,8 @@ mod tests {
     fn effects_use_instruction_metadata_without_reg_consts() {
         let inst = Instruction::new(Opcode::MapSet, 1, 4, 9);
         let meta = vo_runtime::bytecode::JitInstructionMetadata::MapSet {
-            key_slots: 2,
-            val_slots: 3,
+            key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
         };
 
         assert_eq!(

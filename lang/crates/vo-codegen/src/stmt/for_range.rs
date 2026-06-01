@@ -11,7 +11,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::{FuncBuilder, StorageKind};
+use crate::func::{ElemLayoutSpec, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 use super::var_def::{DeferredHeapAlloc, LocalDefiner};
@@ -288,7 +288,6 @@ pub(crate) fn compile_for_range(
 
     if sc.info.is_array(range_type) {
         // Array iteration - need to distinguish stack vs heap arrays
-        let es = sc.info.array_elem_slots(range_type);
         let eb = sc.info.array_elem_bytes(range_type);
         let et = sc.info.array_elem_type(range_type);
         let len = sc.info.array_len(range_type) as i64;
@@ -322,11 +321,22 @@ pub(crate) fn compile_for_range(
         if value.is_some() {
             // Stack array uses elem_slots, heap array uses elem_bytes
             if stk {
-                sc.func
-                    .emit_slot_get(val_info.slot, base, lp.idx_slot(), es);
+                let elem_slot_types = sc.info.type_slot_types(et);
+                sc.func.emit_slot_get_with_slot_types(
+                    val_info.slot,
+                    base,
+                    lp.idx_slot(),
+                    &elem_slot_types,
+                );
             } else {
-                sc.func
-                    .emit_array_get(val_info.slot, reg, lp.idx_slot(), eb, evk, sc.ctx);
+                let elem_slot_types = sc.info.type_slot_types(et);
+                sc.func.emit_array_get(
+                    val_info.slot,
+                    reg,
+                    lp.idx_slot(),
+                    ElemLayoutSpec::new(eb, evk, &elem_slot_types),
+                    sc.ctx,
+                );
             }
             emit_range_var_store(sc.ctx, sc.func, sc.info, &val_info)?;
         }
@@ -352,8 +362,14 @@ pub(crate) fn compile_for_range(
             emit_range_var_store(sc.ctx, sc.func, sc.info, &key_info)?;
         }
         if value.is_some() {
-            sc.func
-                .emit_slice_get(val_info.slot, reg, lp.idx_slot(), eb, evk, sc.ctx);
+            let elem_slot_types = sc.info.type_slot_types(et);
+            sc.func.emit_slice_get(
+                val_info.slot,
+                reg,
+                lp.idx_slot(),
+                ElemLayoutSpec::new(eb, evk, &elem_slot_types),
+                sc.ctx,
+            );
             emit_range_var_store(sc.ctx, sc.func, sc.info, &val_info)?;
         }
         super::compile_block(&for_stmt.body, sc.ctx, sc.func, sc.info)?;
@@ -441,8 +457,10 @@ pub(crate) fn compile_for_range(
         // Dedicated contiguous buffer for MapIterNext output.
         // MapIterNext writes key+value contiguously to inst.a, so the buffer
         // must have correct slot_types for BOTH key and value portions.
-        let mut iter_kv_types = sc.info.type_slot_types(kt);
-        iter_kv_types.extend(sc.info.type_slot_types(vt));
+        let key_layout = sc.info.type_slot_types(kt);
+        let val_layout = sc.info.type_slot_types(vt);
+        let mut iter_kv_types = key_layout.clone();
+        iter_kv_types.extend(val_layout.iter().copied());
         let iter_kv_slot = sc.func.alloc_slots(&iter_kv_types);
 
         let iter_slot = sc
@@ -464,12 +482,13 @@ pub(crate) fn compile_for_range(
                 "MapIterNext ABI supports at most 15 key/value slots, got key={kn} value={vn}"
             ))
         })?;
-        sc.func.emit_with_flags(
-            Opcode::MapIterNext,
-            iter_flags,
+        sc.func.emit_map_iter_next(
             iter_kv_slot,
             iter_slot,
             ok_slot,
+            iter_flags,
+            &key_layout,
+            &val_layout,
         );
 
         // if !ok { goto end }
@@ -528,6 +547,7 @@ pub(crate) fn compile_for_range(
         let queue_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
         let elem_type = sc.info.queue_elem_type(range_type);
         let elem_slots = sc.info.queue_elem_slots(range_type);
+        let elem_layout = sc.info.type_slot_types(elem_type);
 
         // Channel: use value or key (Go semantics: single var is value)
         let var_expr = value.as_ref().or(key.as_ref());
@@ -551,8 +571,9 @@ pub(crate) fn compile_for_range(
                 "QueueRecv ABI supports at most 127 element slots, got {elem_slots}"
             ))
         })?;
+        debug_assert_eq!(elem_layout.len(), elem_slots as usize);
         sc.func
-            .emit_with_flags(Opcode::QueueRecv, recv_flags, recv_slot, queue_reg, 0);
+            .emit_queue_recv(recv_slot, queue_reg, recv_flags, &elem_layout);
 
         // if !ok { goto end }
         let end_jump = sc.func.emit_jump(Opcode::JumpIfNot, ok_slot);

@@ -10,7 +10,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::{FuncBuilder, StorageKind};
+use crate::func::{ElemLayoutSpec, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 /// Deferred heap allocation info for loop variables (Go 1.22 per-iteration semantics).
@@ -159,10 +159,17 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         } else if self.info.is_array(type_key) {
             // Stack array: memory semantics, accessed via SlotGet/SlotSet
             let elem_slots = self.info.array_elem_slots(type_key);
+            let elem_type = self.info.array_elem_type(type_key);
+            let elem_slot_types = self.info.type_slot_types(elem_type);
             let len = self.info.array_len(type_key) as u16;
-            let base_slot =
-                self.func
-                    .define_local_stack_array(sym, slots, elem_slots, len, &slot_types);
+            let base_slot = self.func.define_local_stack_array(
+                sym,
+                slots,
+                elem_slots,
+                len,
+                &slot_types,
+                &elem_slot_types,
+            );
             Ok((
                 StorageKind::StackArray {
                     base_slot,
@@ -187,6 +194,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         let elem_slots = self.info.array_elem_slots(type_key);
         let elem_bytes = self.info.array_elem_bytes(type_key);
         let elem_type = self.info.array_elem_type(type_key);
+        let elem_slot_types = self.info.type_slot_types(elem_type);
         let elem_vk = self.info.type_value_kind(elem_type);
         let gcref_slot =
             self.func
@@ -210,8 +218,13 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
             let eb_idx = self.ctx.const_int(elem_bytes as i64);
             self.func.emit_op(Opcode::LoadConst, len_reg + 1, eb_idx, 0);
         }
-        self.func
-            .emit_array_new(gcref_slot, meta_reg, len_reg, flags, elem_bytes, elem_vk);
+        self.func.emit_array_new(
+            gcref_slot,
+            meta_reg,
+            len_reg,
+            flags,
+            ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+        );
 
         Ok(StorageKind::HeapArray {
             gcref_slot,
@@ -329,8 +342,11 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
                         gcref_slot,
                         idx_reg,
                         src_offset,
-                        elem_bytes as usize,
-                        elem_vk,
+                        ElemLayoutSpec::new(
+                            elem_bytes as usize,
+                            elem_vk,
+                            &slot_types[(i * elem_slots) as usize..((i + 1) * elem_slots) as usize],
+                        ),
                         self.ctx,
                     );
                 }

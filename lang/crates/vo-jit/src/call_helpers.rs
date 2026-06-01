@@ -2620,6 +2620,7 @@ mod tests {
             local_slots,
             gc_scan_slots: local_slots,
             ret_slots: 1,
+            ret_slot_types: vec![vo_runtime::SlotType::Value],
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,

@@ -6,9 +6,9 @@ use vo_analysis::importer::NullImporter;
 use vo_analysis::{AnalysisError, Checker, Project};
 use vo_codegen::compile_project;
 use vo_common::SourceMap;
-use vo_runtime::{ValueKind, ValueMeta};
+use vo_runtime::{SlotType, ValueKind, ValueMeta};
 use vo_syntax::parser;
-use vo_vm::bytecode::JitInstructionMetadata;
+use vo_vm::bytecode::{FunctionDef, JitInstructionMetadata};
 use vo_vm::instruction::Opcode;
 use vo_vm::vm::Vm;
 
@@ -106,6 +106,86 @@ func main() int {
         vo_runtime::SlotType::GcRef,
         "global arrays are stored as GcRef roots, so GlobalGet destinations must be GcRef locals"
     );
+}
+
+#[test]
+fn escaped_local_array_slice_does_not_copy_gcref_into_value_temp() {
+    let source = r#"
+package main
+
+type Small struct {
+    a int
+    b int
+}
+
+func main() int {
+    var arr [3]Small
+    arr[0] = Small{1, 2}
+    arr[1] = Small{3, 4}
+    s := arr[:]
+    return s[0].a
+}
+"#;
+
+    let module = compile_source(source);
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+
+    for (pc, inst) in main.code.iter().enumerate() {
+        if inst.opcode() == Opcode::Copy {
+            assert_eq!(
+                main.slot_types[inst.a as usize], main.slot_types[inst.b as usize],
+                "Copy at pc {pc} must not cross slot layouts"
+            );
+        }
+    }
+}
+
+#[test]
+fn named_reference_iface_wrapper_uses_gcref_data_slot() {
+    let source = r#"
+package main
+
+type IntSlice []int
+
+func (s IntSlice) Sum() int {
+    return len(s)
+}
+
+type Summer interface {
+    Sum() int
+}
+
+func main() int {
+    var s Summer = IntSlice{1, 2, 3}
+    return s.Sum()
+}
+"#;
+
+    let module = compile_source(source);
+    let wrapper = module
+        .functions
+        .iter()
+        .find(|func| func.name == "Sum$iface")
+        .expect("value receiver interface wrapper");
+
+    assert_eq!(
+        wrapper.slot_types[0],
+        SlotType::GcRef,
+        "interface wrapper data slot for named slice receiver must be a GcRef"
+    );
+    for (pc, inst) in wrapper.code.iter().enumerate() {
+        if inst.opcode() == Opcode::Copy {
+            assert_eq!(
+                wrapper.slot_types[inst.a as usize], wrapper.slot_types[inst.b as usize],
+                "Copy at pc {pc} in {} must not cross slot layouts",
+                wrapper.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -208,10 +288,11 @@ func main() {}
 
 #[test]
 fn runtime_interface_types_do_not_fallback_to_meta_zero() {
-    let source = include_str!("../src/type_interner.rs")
+    const TYPE_INTERNER_SOURCE: &str = include_str!("../src/type_interner.rs");
+    let source = TYPE_INTERNER_SOURCE
         .split("#[cfg(test)]")
         .next()
-        .unwrap_or_else(|| include_str!("../src/type_interner.rs"));
+        .unwrap_or(TYPE_INTERNER_SOURCE);
 
     assert!(
         !source.contains("ctx.interface_meta_ids.get(&type_key).copied().unwrap_or(0)"),
@@ -357,7 +438,7 @@ type Big struct {
     f int
     g int
     h int
-    i int
+    i string
 }
 
 func main() int {
@@ -428,8 +509,10 @@ func main() int {
                         meta,
                         JitInstructionMetadata::ElemLayout {
                             elem_bytes: 72,
-                            needs_sign_extend: false
+                            needs_sign_extend: false,
+                            slot_layout,
                         }
+                        if slot_layout.len() == 9
                     )
             }),
         "dynamic-width SliceSet should carry explicit JIT element metadata; got:\n{}",
@@ -446,8 +529,10 @@ func main() int {
                         meta,
                         JitInstructionMetadata::ElemLayout {
                             elem_bytes: 72,
-                            needs_sign_extend: false
+                            needs_sign_extend: false,
+                            slot_layout,
                         }
+                        if slot_layout.len() == 9
                     )
             }),
         "dynamic-width SliceAppend should carry explicit JIT element metadata"
@@ -461,10 +546,13 @@ func main() int {
                     && matches!(
                         meta,
                         JitInstructionMetadata::MapGet {
-                            key_slots: 9,
-                            val_slots: 9,
+                            key_layout,
+                            val_layout,
                             has_ok: true
-                        }
+                        } if key_layout.len() == 9
+                            && val_layout.len() == 9
+                            && key_layout.iter().any(|st| matches!(st, SlotType::GcRef))
+                            && val_layout.iter().any(|st| matches!(st, SlotType::GcRef))
                     )
             }),
         "comma-ok MapGet should carry explicit key/value/ok metadata"
@@ -478,9 +566,12 @@ func main() int {
                     && matches!(
                         meta,
                         JitInstructionMetadata::MapSet {
-                            key_slots: 9,
-                            val_slots: 9
-                        }
+                            key_layout,
+                            val_layout
+                        } if key_layout.len() == 9
+                            && val_layout.len() == 9
+                            && key_layout.iter().any(|st| matches!(st, SlotType::GcRef))
+                            && val_layout.iter().any(|st| matches!(st, SlotType::GcRef))
                     )
             }),
         "MapSet should carry explicit key/value metadata"
@@ -491,10 +582,460 @@ func main() int {
             .zip(&main.jit_metadata)
             .any(|(inst, meta)| {
                 inst.opcode() == Opcode::MapDelete
-                    && matches!(meta, JitInstructionMetadata::MapDelete { key_slots: 9 })
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::MapDelete { key_layout }
+                            if key_layout.len() == 9
+                                && key_layout.iter().any(|st| matches!(st, SlotType::GcRef))
+                    )
             }),
         "MapDelete should carry explicit key metadata"
     );
+}
+
+#[test]
+fn type_assert_and_shared_closure_calls_emit_precise_jit_layout_metadata() {
+    let source = r#"
+package main
+
+type Box struct {
+    v int
+}
+
+func main() int {
+    var x any = "hello"
+    s := x.(string)
+
+    f := func(v string, p *Box) {}
+    d := func(v string) {}
+    var n Box
+
+    go f(s, &n)
+    defer d(s)
+    return len(s)
+}
+"#;
+
+    let module = compile_source(source);
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::IfaceAssert
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::IfaceAssertLayout { result_layout }
+                            if result_layout.as_slice() == [SlotType::GcRef]
+                    )
+            }),
+        "type assertion to string must carry exact IfaceAssert result layout"
+    );
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::GoStart
+                    && inst.call_shape_is_closure()
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::CallLayout {
+                            arg_layout,
+                            ret_layout
+                        } if arg_layout.as_slice() == [SlotType::GcRef, SlotType::GcRef]
+                            && ret_layout.is_empty()
+                    )
+            }),
+        "closure go call must carry exact CallLayout argument slots"
+    );
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::DeferPush
+                    && inst.call_shape_is_closure()
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::CallLayout {
+                            arg_layout,
+                            ret_layout
+                        } if arg_layout.as_slice() == [SlotType::GcRef] && ret_layout.is_empty()
+                    )
+            }),
+        "closure defer call must carry exact CallLayout argument slots"
+    );
+}
+
+#[test]
+fn extern_call_string_and_slice_arguments_use_gc_ref_slots() {
+    let source = r#"
+package main
+
+func consume(s string, b []byte);
+
+func main() {
+    consume("hello", []byte("world"))
+}
+"#;
+
+    let module = compile_source(source);
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let call = main
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::CallExtern)
+        .expect("extern call should be emitted");
+
+    assert_eq!(
+        &main.slot_types[call.b as usize..call.b as usize + 2],
+        &[SlotType::GcRef, SlotType::GcRef],
+        "extern call argument buffers must preserve GC-ref layout for string/slice values"
+    );
+
+    for inst in main
+        .code
+        .iter()
+        .filter(|inst| inst.opcode() == Opcode::StrNew)
+    {
+        assert_eq!(
+            main.slot_types[inst.a as usize],
+            SlotType::GcRef,
+            "StrNew destination slot must be a GC root"
+        );
+    }
+}
+
+#[test]
+fn string_conversion_uses_gc_ref_source_and_destination_slots() {
+    let source = r#"
+package main
+
+func main() {
+    _ = []byte("hello")
+}
+"#;
+
+    let module = compile_source(source);
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let call = main
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::CallExtern)
+        .expect("string conversion should lower to an extern helper call");
+
+    assert_eq!(
+        main.slot_types[call.a as usize],
+        SlotType::GcRef,
+        "string-to-slice conversion destination must be a GC root"
+    );
+    assert_eq!(
+        main.slot_types[call.b as usize],
+        SlotType::GcRef,
+        "string-to-slice conversion source argument must be a GC root"
+    );
+}
+
+#[test]
+fn composite_string_comparison_loads_string_slots_as_gc_refs() {
+    let source = r#"
+package main
+
+type Pair struct {
+    name string
+    n int
+}
+
+func main() bool {
+    left := Pair{name: "left", n: 1}
+    right := Pair{name: "right", n: 1}
+    return left == right
+}
+"#;
+
+    let module = compile_source(source);
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+
+    let mut saw_str_eq = false;
+    for inst in main
+        .code
+        .iter()
+        .filter(|inst| inst.opcode() == Opcode::StrEq)
+    {
+        saw_str_eq = true;
+        assert_eq!(
+            main.slot_types[inst.b as usize],
+            SlotType::GcRef,
+            "StrEq lhs must be loaded into a GC-ref temp"
+        );
+        assert_eq!(
+            main.slot_types[inst.c as usize],
+            SlotType::GcRef,
+            "StrEq rhs must be loaded into a GC-ref temp"
+        );
+    }
+    assert!(saw_str_eq, "composite string comparison should emit StrEq");
+    assert!(
+        main.code
+            .iter()
+            .all(|inst| !matches!(inst.opcode(), Opcode::SlotGet | Opcode::SlotGetN)),
+        "heterogeneous composite comparison must use static slot offsets, not SlotGet metadata intended for homogeneous stack arrays"
+    );
+}
+
+#[test]
+fn map_literal_ident_string_key_uses_precise_key_slot_layout() {
+    let source = r#"
+package main
+
+func main() {
+    key := "answer"
+    m := map[string]int{key: 42}
+    _ = m
+}
+"#;
+
+    let module = compile_source(source);
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let map_set = main
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::MapSet)
+        .expect("map literal should emit MapSet");
+
+    assert_eq!(
+        main.slot_types[map_set.b as usize + 1],
+        SlotType::GcRef,
+        "MapSet meta+key buffer must use the map key's precise slot layout"
+    );
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
+                inst.opcode() == Opcode::MapSet
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::MapSet {
+                            key_layout,
+                            val_layout,
+                        } if key_layout == &[SlotType::GcRef] && val_layout == &[SlotType::Value]
+                    )
+            }),
+        "MapSet JIT metadata must carry exact key/value layouts"
+    );
+}
+
+#[test]
+fn generated_function_defs_satisfy_jit_verifier_invariants() {
+    let source = r#"
+package main
+
+func host(s string) int;
+
+func helper(v int) (int, error) {
+    defer func() {}()
+    if v > 0 {
+        return host("x"), nil
+    }
+    return 0, nil
+}
+
+func main() int {
+    v, err := helper(1)
+    if err != nil {
+        return 99
+    }
+    return v
+}
+"#;
+
+    let module = compile_source(source);
+    for func in &module.functions {
+        assert_eq!(
+            func.local_slots as usize,
+            func.slot_types.len(),
+            "{} must keep local_slots aligned with slot_types",
+            func.name
+        );
+        assert_eq!(
+            func.ret_slots as usize,
+            func.ret_slot_types.len(),
+            "{} must keep ret_slots aligned with ret_slot_types",
+            func.name
+        );
+        assert_eq!(
+            func.code.len(),
+            func.jit_metadata.len(),
+            "{} must have one JIT metadata entry per instruction",
+            func.name
+        );
+        assert_eq!(
+            func.gc_scan_slots,
+            FunctionDef::compute_gc_scan_slots(&func.slot_types),
+            "{} must serialize derived GC scan slots",
+            func.name
+        );
+        assert_eq!(
+            func.borrowed_scan_slots_prefix,
+            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types),
+            "{} must serialize derived borrowed scan prefix",
+            func.name
+        );
+        assert_eq!(
+            func.has_defer,
+            func.code
+                .iter()
+                .any(|inst| { matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush) }),
+            "{} must keep has_defer derived from bytecode",
+            func.name
+        );
+        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&func.code);
+        assert_eq!(func.has_calls, has_calls, "{} has_calls drifted", func.name);
+        assert_eq!(
+            func.has_call_extern, has_call_extern,
+            "{} has_call_extern drifted",
+            func.name
+        );
+    }
+}
+
+#[test]
+fn generated_transfer_rttids_store_value_kind_tags() {
+    let source = r#"
+package main
+
+type T00 struct { v int }
+type T01 struct { v int }
+type T02 struct { v int }
+type T03 struct { v int }
+type T04 struct { v int }
+type T05 struct { v int }
+type T06 struct { v int }
+type T07 struct { v int }
+type T08 struct { v int }
+type T09 struct { v int }
+type T10 struct { v int }
+type T11 struct { v int }
+type T12 struct { v int }
+type T13 struct { v int }
+type T14 struct { v int }
+type T15 struct { v int }
+type T16 struct { v int }
+type T17 struct { v int }
+type T18 struct { v int }
+type T19 struct { v int }
+type T20 struct { v int }
+type T21 struct { v int }
+type T22 struct { v int }
+type T23 struct { v int }
+type T24 struct { v int }
+type T25 struct { v int }
+type T26 struct { v int }
+type T27 struct { v int }
+type T28 struct { v int }
+type T29 struct { v int }
+
+func many(
+    a00 T00, a01 T01, a02 T02, a03 T03, a04 T04,
+    a05 T05, a06 T06, a07 T07, a08 T08, a09 T09,
+    a10 T10, a11 T11, a12 T12, a13 T13, a14 T14,
+    a15 T15, a16 T16, a17 T17, a18 T18, a19 T19,
+    a20 T20, a21 T21, a22 T22, a23 T23, a24 T24,
+    a25 T25, a26 T26, a27 T27, a28 T28, a29 T29,
+) {}
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    let many = module
+        .functions
+        .iter()
+        .find(|func| func.name == "many")
+        .expect("many function");
+    assert!(
+        !many.param_types.is_empty(),
+        "function parameters must carry transfer metadata for island/defer paths"
+    );
+
+    for (idx, transfer) in many.param_types.iter().enumerate() {
+        let meta_kind = ValueKind::try_from(transfer.meta_raw as u8)
+            .unwrap_or_else(|_| panic!("param_types[{idx}] invalid ValueMeta kind tag"));
+        let rttid_kind = ValueKind::try_from(transfer.rttid_raw as u8)
+            .unwrap_or_else(|_| panic!("param_types[{idx}] invalid ValueRttid kind tag"));
+        assert_eq!(
+            rttid_kind, meta_kind,
+            "param_types[{idx}] must store packed ValueRttid, not a bare RTTID"
+        );
+    }
+}
+
+#[test]
+fn generated_jump_conditions_are_value_slots_for_jit() {
+    let source = r#"
+package main
+
+type Box struct { v int }
+
+func maybe(ok bool) (int, error) {
+    if ok {
+        return 1, nil
+    }
+    return 0, nil
+}
+
+func main() int {
+    var p *Box
+    if p == nil {
+        p = &Box{v: 1}
+    }
+    _, err := maybe(false)
+    if err != nil {
+        return p.v
+    }
+    return 0
+}
+"#;
+
+    let module = compile_source(source);
+    for func in &module.functions {
+        for inst in &func.code {
+            if matches!(inst.opcode(), Opcode::JumpIf | Opcode::JumpIfNot) {
+                assert_eq!(
+                    func.slot_types[inst.a as usize],
+                    SlotType::Value,
+                    "{} {:?} condition must be a Value slot, got {:?}",
+                    func.name,
+                    inst.opcode(),
+                    func.slot_types[inst.a as usize]
+                );
+            }
+        }
+    }
 }
 
 #[test]

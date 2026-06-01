@@ -1,0 +1,37 @@
+// Regression: nil slice slicing is only valid for zero bounds.
+// The JIT slice helper and VM path must both panic for nil[1:1] instead of
+// silently returning nil.
+package main
+
+import "fmt"
+
+func expectPanic(name string, fn func()) {
+	didPanic := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				didPanic = true
+			}
+		}()
+		fn()
+	}()
+	assert(didPanic, name+" should panic")
+}
+
+func main() {
+	var xs []int
+	z := xs[0:0]
+	assert(z == nil, "nil[0:0] should remain nil")
+
+	expectPanic("nil[1:1]", func() {
+		_ = xs[1:1]
+	})
+	expectPanic("nil[0:1]", func() {
+		_ = xs[0:1]
+	})
+	expectPanic("nil[0:0:1]", func() {
+		_ = xs[0:0:1]
+	})
+
+	fmt.Println("jit nil slice slice bounds: ok")
+}

@@ -802,6 +802,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_array_element_address_escape() {
+        let escaped = get_escaped_vars(
+            r#"
+            package main
+            type Big struct { x int }
+            var sink *Big
+            func main() {
+                var arr [2]Big
+                sink = &arr[0]
+            }
+        "#,
+        );
+        assert!(
+            escaped.contains(&"arr".to_string()),
+            "arr should escape when an element address is taken: {:?}",
+            escaped
+        );
+    }
+
+    #[test]
+    fn test_array_element_pointer_receiver_method_escape() {
+        let escaped = get_escaped_vars(
+            r#"
+            package main
+            type Big struct { x int }
+            func (b *Big) set() { b.x = 1 }
+            func main() {
+                arr := [2]Big{}
+                arr[0].set()
+            }
+        "#,
+        );
+        assert!(
+            escaped.contains(&"arr".to_string()),
+            "arr should escape for pointer-receiver method calls on elements: {:?}",
+            escaped
+        );
+    }
+
     // =========================================================================
     // Closure capture tests
     // =========================================================================

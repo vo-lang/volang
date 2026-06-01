@@ -780,6 +780,34 @@ targets = ["vm", "jit", "osr", "nostd", "wasm"]
 expect = "pass"
 
 [[case]]
+id = "bugs.2026-05-31-jit-nil-slice-slice-bounds"
+kind = "file"
+path = "cases/bugs/2026_05_31_jit_nil_slice_slice_bounds.vo"
+targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-05-31-jit-string-slice-bounds"
+kind = "file"
+path = "cases/bugs/2026_05_31_jit_string_slice_bounds.vo"
+targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-05-31-jit-runtime-trap-spills-defer"
+kind = "file"
+path = "cases/bugs/2026_05_31_jit_runtime_trap_spills_defer.vo"
+targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-06-01-jit-strict-contract-boundaries"
+kind = "file"
+path = "cases/bugs/2026_06_01_jit_strict_contract_boundaries.vo"
+targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
+expect = "pass"
+
+[[case]]
 id = "bugs.any-return-type-loss"
 kind = "file"
 path = "cases/bugs/any_return_type_loss.vo"

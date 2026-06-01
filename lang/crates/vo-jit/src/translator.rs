@@ -923,8 +923,8 @@ mod tests {
         ];
         let mut metadata = vec![JitInstructionMetadata::None; code.len()];
         metadata[2] = JitInstructionMetadata::MapGet {
-            key_slots: 2,
-            val_slots: 2,
+            key_layout: vec![SlotType::Value, SlotType::GcRef],
+            val_layout: vec![SlotType::Interface0, SlotType::Interface1],
             has_ok: true,
         };
         let facts =

@@ -6,7 +6,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::FuncBuilder;
+use crate::func::{ElemLayoutSpec, FuncBuilder};
 use crate::type_info::{encode_i32, TypeInfoWrapper};
 
 use super::{compile_expr, compile_expr_to, compile_expr_to_type, compile_map_key_expr};
@@ -161,7 +161,7 @@ fn compile_builtin_call_impl(
             let extern_id = ctx.get_or_register_extern(extern_name);
             let (args_start, actual_count) =
                 compile_args_as_interfaces(&call.args, ctx, func, info)?;
-            func.emit_call_extern(dst, extern_id, args_start, actual_count * 2);
+            func.emit_call_extern(dst, extern_id, args_start, actual_count * 2, &[]);
         }
         "panic" => {
             // panic(x interface{}) - argument must be converted to interface{}
@@ -183,6 +183,7 @@ fn compile_builtin_call_impl(
                 let elem_bytes = info.slice_elem_bytes(type_key);
                 let elem_type = info.slice_elem_type(type_key);
                 let elem_vk = info.type_value_kind(elem_type);
+                let elem_slot_types = info.type_slot_types(elem_type);
                 let elem_meta_idx = ctx.get_or_create_value_meta(elem_type, info);
 
                 // Load elem_meta into register
@@ -212,7 +213,13 @@ fn compile_builtin_call_impl(
                 }
 
                 // SliceNew: a=dst, b=elem_meta, c=len_cap_start, flags=elem_flags
-                func.emit_slice_new(dst, meta_reg, len_cap_reg, flags, elem_bytes, elem_vk);
+                func.emit_slice_new(
+                    dst,
+                    meta_reg,
+                    len_cap_reg,
+                    flags,
+                    ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+                );
             } else if info.is_map(type_key) {
                 // make(map[K]V)
                 let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) =
@@ -312,7 +319,7 @@ fn compile_builtin_call_impl(
                 func.emit_op(Opcode::Copy, args_reg, slice_reg, 0);
                 func.emit_op(Opcode::Copy, args_reg + 1, other_reg, 0);
                 func.emit_op(Opcode::LoadConst, args_reg + 2, elem_meta_idx, 0);
-                func.emit_call_extern(dst, extern_id, args_reg, 3);
+                func.emit_call_extern(dst, extern_id, args_reg, 3, &[SlotType::GcRef]);
             } else {
                 let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
                 // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
@@ -363,8 +370,7 @@ fn compile_builtin_call_impl(
                         current_slice,
                         meta_and_elem_reg,
                         flags,
-                        elem_bytes,
-                        elem_vk,
+                        ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
                     );
                     current_slice = append_dst;
                 }
@@ -376,7 +382,7 @@ fn compile_builtin_call_impl(
             let args_start = func.alloc_slots(&[SlotType::GcRef, SlotType::GcRef]);
             compile_expr_to(&call.args[0], args_start, ctx, func, info)?;
             compile_expr_to(&call.args[1], args_start + 1, ctx, func, info)?;
-            func.emit_call_extern(dst, extern_id, args_start, 2);
+            func.emit_call_extern(dst, extern_id, args_start, 2, &[SlotType::Value]);
         }
         "delete" => {
             // delete(map, key)
@@ -388,11 +394,12 @@ fn compile_builtin_call_impl(
             // MapDelete expects: a=map, b=meta_and_key
             // meta = key_slots, key at b+1
             let map_type = info.expr_type(call.args[0].id);
-            let (key_slots, _) = info.map_key_val_slots(map_type);
             let (key_type, _) = info.map_key_val_types(map_type);
+            let key_slot_types = info.type_slot_types(key_type);
+            let key_slots = key_slot_types.len() as u16;
 
             let mut delete_slot_types = vec![SlotType::Value]; // meta
-            delete_slot_types.extend(info.type_slot_types(key_type)); // key
+            delete_slot_types.extend(key_slot_types.iter().copied()); // key
             let meta_and_key_reg = func.alloc_slots(&delete_slot_types);
             let meta_idx = ctx.const_int(key_slots as i64);
             func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
@@ -401,7 +408,7 @@ fn compile_builtin_call_impl(
             let key_reg = compile_map_key_expr(&call.args[1], key_type, ctx, func, info)?;
             func.emit_copy(meta_and_key_reg + 1, key_reg, key_slots);
 
-            func.emit_map_delete(map_reg, meta_and_key_reg, key_slots);
+            func.emit_map_delete(map_reg, meta_and_key_reg, &key_slot_types);
         }
         "close" => {
             if call.args.len() != 1 {
@@ -431,7 +438,7 @@ fn compile_builtin_call_impl(
             let pc = func.current_pc() as u32;
             ctx.record_debug_loc(pc, expr.span, &info.project.source_map);
 
-            func.emit_call_extern(dst, extern_id, args_start, actual_count * 2);
+            func.emit_call_extern(dst, extern_id, args_start, actual_count * 2, &[]);
         }
         _ => {
             return Err(CodegenError::UnsupportedExpr(format!("builtin {}", name)));

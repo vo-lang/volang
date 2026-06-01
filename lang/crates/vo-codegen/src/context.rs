@@ -810,6 +810,7 @@ impl CodegenContext {
             local_slots: 0,
             gc_scan_slots: 0,
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -1066,6 +1067,15 @@ impl CodegenContext {
         (meta_id << 8) | (vk as u32)
     }
 
+    pub fn compute_value_rttid_raw(
+        &mut self,
+        type_key: TypeKey,
+        info: &crate::type_info::TypeInfoWrapper,
+    ) -> u32 {
+        let vk = info.type_value_kind(type_key);
+        vo_runtime::ValueRttid::new(self.intern_type_key(type_key, info), vk).to_raw()
+    }
+
     /// Get or create ValueMeta constant in constant pool.
     /// Returns constant pool index.
     pub fn get_or_create_value_meta(
@@ -1219,15 +1229,17 @@ impl CodegenContext {
         &mut self,
         name: String,
         param_slots: u16,
-        ret_slots: u16,
         local_slots: u16,
         code: Vec<vo_vm::instruction::Instruction>,
+        jit_metadata: Vec<JitInstructionMetadata>,
         slot_types: Vec<vo_runtime::SlotType>,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
         capture_slot_types: Vec<vo_runtime::SlotType>,
         param_types: Vec<vo_vm::bytecode::TransferType>,
         cache_key: MethodValueWrapperKey,
     ) -> u32 {
         use vo_vm::bytecode::FunctionDef;
+        let ret_slots = ret_slot_types.len() as u16;
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
         let borrowed_scan_slots_prefix =
@@ -1239,6 +1251,7 @@ impl CodegenContext {
             ret_slots,
             local_slots,
             gc_scan_slots,
+            ret_slot_types,
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -1248,7 +1261,7 @@ impl CodegenContext {
             has_defer: false, // wrappers never have defer
             has_calls,
             has_call_extern,
-            jit_metadata: vec![JitInstructionMetadata::None; code.len()],
+            jit_metadata,
             code,
             slot_types,
             borrowed_scan_slots_prefix,
@@ -1334,7 +1347,7 @@ impl CodegenContext {
             args_start,
             call_c,
         );
-        builder.set_ret_slots(ret_slots);
+        builder.set_ret_slot_types(ret_slot_types);
         builder.emit_op(
             vo_vm::instruction::Opcode::Return,
             args_start + total_arg_slots,
@@ -1408,14 +1421,15 @@ impl CodegenContext {
         }
 
         let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        builder.emit_with_flags(
-            vo_vm::instruction::Opcode::CallIface,
-            crate::func::FuncBuilder::checked_call_iface_method_idx(method_idx),
+        builder.emit_call_iface(
+            method_idx,
             iface_slot,
             args_start,
             call_c,
+            &forwarded_slot_types,
+            &ret_slot_types,
         );
-        builder.set_ret_slots(ret_slots);
+        builder.set_ret_slot_types(ret_slot_types);
         builder.emit_op(
             vo_vm::instruction::Opcode::Return,
             args_start + param_slots,
@@ -1434,8 +1448,8 @@ impl CodegenContext {
         iface_type: TypeKey,
         embed_offset: u16,
         method_idx: u32,
-        param_slots: u16,
-        ret_slots: u16,
+        param_slot_types: Vec<Vec<vo_runtime::SlotType>>,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
         method_name: &str,
         param_types: Vec<vo_vm::bytecode::TransferType>,
     ) -> Result<u32, crate::error::CodegenError> {
@@ -1450,6 +1464,9 @@ impl CodegenContext {
 
         use vo_vm::instruction::{Instruction, Opcode};
 
+        let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
+        let param_slots = forwarded_slot_types.len() as u16;
+        let ret_slots = ret_slot_types.len() as u16;
         let wrapper_param_slots = 1 + param_slots;
         let iface_slots = 2u16;
 
@@ -1488,6 +1505,18 @@ impl CodegenContext {
             ret_slots,
             0,
         ));
+        let call_pc = code.len() - 2;
+        let mut jit_metadata = vec![JitInstructionMetadata::None; code.len()];
+        jit_metadata[1] = JitInstructionMetadata::PtrLayout {
+            value_layout: vec![
+                vo_runtime::SlotType::Interface0,
+                vo_runtime::SlotType::Interface1,
+            ],
+        };
+        jit_metadata[call_pc] = JitInstructionMetadata::CallLayout {
+            arg_layout: forwarded_slot_types.clone(),
+            ret_layout: ret_slot_types.clone(),
+        };
 
         let wrapper_name = format!(
             "__method_value_embed_iface_{}_{}_t{}_o{}",
@@ -1498,19 +1527,29 @@ impl CodegenContext {
         );
         let local_slots =
             wrapper_param_slots + 1 + iface_slots + 1 + (param_slots + ret_slots).max(1);
-        let mut slot_types = vec![vo_runtime::SlotType::GcRef; 2]; // closure ref + ClosureGet dest
-        slot_types.extend(std::iter::repeat_n(
-            vo_runtime::SlotType::Value,
-            (local_slots as usize).saturating_sub(2),
-        ));
+        let mut slot_types = vec![vo_runtime::SlotType::Value; local_slots as usize];
+        slot_types[0] = vo_runtime::SlotType::GcRef;
+        for (idx, slot_type) in forwarded_slot_types.iter().copied().enumerate() {
+            slot_types[1 + idx] = slot_type;
+        }
+        slot_types[outer_ptr as usize] = vo_runtime::SlotType::GcRef;
+        slot_types[iface_reg as usize] = vo_runtime::SlotType::Interface0;
+        slot_types[iface_reg as usize + 1] = vo_runtime::SlotType::Interface1;
+        for (idx, slot_type) in forwarded_slot_types.iter().copied().enumerate() {
+            slot_types[args_start as usize + idx] = slot_type;
+        }
+        for (idx, slot_type) in ret_slot_types.iter().copied().enumerate() {
+            slot_types[ret_start as usize + idx] = slot_type;
+        }
         let capture_slot_types = vec![vo_runtime::SlotType::GcRef];
         let wrapper_id = self.register_wrapper_func(
             wrapper_name,
             wrapper_param_slots,
-            ret_slots,
             local_slots,
             code,
+            jit_metadata,
             slot_types,
+            ret_slot_types,
             capture_slot_types,
             param_types,
             cache_key,

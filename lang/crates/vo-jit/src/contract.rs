@@ -92,19 +92,16 @@ pub fn opcode_contract(opcode: Opcode) -> EffectContract {
         | NegI | AddF | SubF | MulF | DivF | NegF | EqI | NeI | LtI | LtU | LeI | LeU | GtI
         | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF | GeF | And | Or | Xor | AndNot | Not
         | BoolNot | ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | Jump | JumpIf
-        | JumpIfNot | ForLoop | StrLen | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe
-        | SliceLen | SliceCap | MapLen | QueueLen | QueueCap | ClosureGet | Return => {
-            EffectContract::PURE
-        }
+        | JumpIfNot | ForLoop | PtrAdd | StrLen | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe
+        | StrDecodeRune | SliceLen | SliceCap | MapLen | QueueLen | QueueCap | ClosureGet
+        | Return => EffectContract::PURE,
 
         DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | StrIndex | StrSlice
-        | StrDecodeRune | ArrayGet | ArrayAddr | SliceGet | SliceSlice | SliceAddr => {
-            EffectContract {
-                may_panic: true,
-                needs_slot_metadata: matches!(opcode, ArrayGet | ArrayAddr | SliceGet | SliceAddr),
-                ..EffectContract::PURE
-            }
-        }
+        | ArrayGet | ArrayAddr | SliceGet | SliceSlice | SliceAddr => EffectContract {
+            may_panic: true,
+            needs_slot_metadata: matches!(opcode, ArrayGet | ArrayAddr | SliceGet | SliceAddr),
+            ..EffectContract::PURE
+        },
 
         SlotGet | SlotGetN | SlotSet | SlotSetN => EffectContract {
             may_panic: true,
@@ -119,7 +116,7 @@ pub fn opcode_contract(opcode: Opcode) -> EffectContract {
             ..EffectContract::PURE
         },
 
-        PtrGet | PtrGetN | PtrAdd => EffectContract {
+        PtrGet | PtrGetN => EffectContract {
             may_panic: true,
             needs_slot_metadata: true,
             ..EffectContract::PURE

@@ -156,7 +156,8 @@ fn compile_defer_impl(
     // Closure call (local variable or generic expression)
     let closure_reg = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
     let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
-    emit_defer_closure(opcode, closure_reg, args_start, total_arg_slots, func);
+    let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
+    emit_defer_closure(opcode, closure_reg, args_start, &arg_layout, func);
     Ok(())
 }
 
@@ -396,10 +397,10 @@ fn emit_defer_closure(
     opcode: Opcode,
     closure_reg: u16,
     args_start: u16,
-    arg_slots: u16,
+    arg_layout: &[SlotType],
     func: &mut FuncBuilder,
 ) {
-    func.emit_with_flags(opcode, 1, closure_reg, args_start, arg_slots);
+    func.emit_shared_closure_call(opcode, closure_reg, args_start, arg_layout);
 }
 
 fn compile_scheduled_static_method_call<F>(
@@ -657,13 +658,13 @@ fn compile_defer_pkg_func_call(
     // Get return slot count from function signature
     let func_type = info.expr_type(call_expr.func.id);
     let sig = info.as_signature(func_type);
-    let ret_slots = info.type_slot_count(sig.results());
+    let ret_slot_types = info.type_slot_types(sig.results());
 
     let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(
         ctx,
         &extern_name,
         call_expr.args.len(),
-        ret_slots,
+        ret_slot_types,
     );
 
     // Compile args as interface values for print/println/assert style functions
@@ -1050,8 +1051,13 @@ fn emit_go_func(func_idx: u32, args_start: u16, arg_slots: u16, func: &mut FuncB
 }
 
 #[inline]
-fn emit_go_closure(closure_reg: u16, args_start: u16, arg_slots: u16, func: &mut FuncBuilder) {
-    func.emit_with_flags(Opcode::GoStart, 1, closure_reg, args_start, arg_slots);
+fn emit_go_closure(
+    closure_reg: u16,
+    args_start: u16,
+    arg_layout: &[SlotType],
+    func: &mut FuncBuilder,
+) {
+    func.emit_shared_closure_call(Opcode::GoStart, closure_reg, args_start, arg_layout);
 }
 
 /// Compile go statement
@@ -1086,7 +1092,8 @@ pub(crate) fn compile_go(
         let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
 
         // GoIsland: a=island, b=closure, c=args_start, flags=arg_slots.
-        func.emit_go_island(island_reg, closure_reg, args_start, total_arg_slots);
+        let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
+        func.emit_go_island(island_reg, closure_reg, args_start, &arg_layout);
         return Ok(());
     }
 
@@ -1141,7 +1148,8 @@ pub(crate) fn compile_go(
     // Closure call (local variable or generic expression)
     let closure_reg = crate::expr::compile_expr(callee_expr, ctx, func, info)?;
     let (args_start, total_arg_slots) = compile_call_args(call_expr, &sig, ctx, func, info)?;
-    emit_go_closure(closure_reg, args_start, total_arg_slots, func);
+    let arg_layout = func.get_slot_types(args_start, total_arg_slots as usize);
+    emit_go_closure(closure_reg, args_start, &arg_layout, func);
     Ok(())
 }
 
@@ -1168,12 +1176,12 @@ fn compile_go_pkg_func_call(
     let extern_name = crate::expr::call::get_extern_name(sel, info)?;
     let func_type = info.expr_type(call_expr.func.id);
     let sig = info.as_signature(func_type);
-    let ret_slots = info.type_slot_count(sig.results());
+    let ret_slot_types = info.type_slot_types(sig.results());
     let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(
         ctx,
         &extern_name,
         call_expr.args.len(),
-        ret_slots,
+        ret_slot_types,
     );
 
     let any_type = info.any_type();

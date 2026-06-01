@@ -37,24 +37,61 @@ pub struct TransferType {
 /// The instruction stream remains the VM source of truth. This table gives the
 /// JIT typed, per-PC facts that are awkward to recover from temporary metadata
 /// registers after optimization and control-flow merging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum JitInstructionMetadata {
     #[default]
     None,
     ElemLayout {
         elem_bytes: u32,
         needs_sign_extend: bool,
+        slot_layout: Vec<SlotType>,
     },
     MapGet {
+        key_layout: Vec<SlotType>,
+        val_layout: Vec<SlotType>,
+        has_ok: bool,
+    },
+    MapSet {
+        key_layout: Vec<SlotType>,
+        val_layout: Vec<SlotType>,
+    },
+    MapDelete {
+        key_layout: Vec<SlotType>,
+    },
+    PtrLayout {
+        value_layout: Vec<SlotType>,
+    },
+    SlotLayout {
+        elem_layout: Vec<SlotType>,
+    },
+    CallLayout {
+        arg_layout: Vec<SlotType>,
+        ret_layout: Vec<SlotType>,
+    },
+    CallExternLayout {
+        arg_layout: Vec<SlotType>,
+        ret_layout: Vec<SlotType>,
+    },
+    QueueLayout {
+        elem_layout: Vec<SlotType>,
+    },
+    MapIterNext {
+        key_layout: Vec<SlotType>,
+        val_layout: Vec<SlotType>,
+    },
+    IfaceAssertLayout {
+        result_layout: Vec<SlotType>,
+    },
+    LegacyMapGet {
         key_slots: u16,
         val_slots: u16,
         has_ok: bool,
     },
-    MapSet {
+    LegacyMapSet {
         key_slots: u16,
         val_slots: u16,
     },
-    MapDelete {
+    LegacyMapDelete {
         key_slots: u16,
     },
     LoopEnd {
@@ -70,6 +107,7 @@ pub struct FunctionDef {
     pub local_slots: u16,
     pub gc_scan_slots: u16,
     pub ret_slots: u16,
+    pub ret_slot_types: Vec<SlotType>,
     /// Receiver slots for methods (0 for functions, >0 for methods)
     /// Used by CallIface to know how many slots to copy from interface data
     pub recv_slots: u16,
@@ -376,6 +414,7 @@ mod tests {
             local_slots: slot_types.len() as u16,
             gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,

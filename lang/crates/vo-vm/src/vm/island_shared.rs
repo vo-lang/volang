@@ -386,26 +386,6 @@ pub(crate) fn finalize_closed_home_endpoint(
     vm.state.endpoint_registry.mark_tombstone(endpoint_id);
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn endpoint_request_backing_invariant_is_not_debug_only() {
-        let source = include_str!("island_shared.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("island_shared source should contain tests section");
-
-        assert!(
-            !source.contains("debug_assert!"),
-            "EndpointRequest backing invariants must be enforced in release builds"
-        );
-        assert!(
-            source.contains("EndpointRequest arrived at non-LOCAL channel"),
-            "the endpoint backing invariant should stay explicit"
-        );
-    }
-}
-
 fn mark_remote_endpoint_closed(vm: &mut Vm, endpoint_id: u64) {
     if let Some(ch) = vm.state.endpoint_registry.get_live(endpoint_id) {
         if queue::is_remote(ch) {
@@ -447,5 +427,25 @@ pub(crate) fn handle_endpoint_response_command(
             }
             resume_endpoint_response(vm, fiber_id, &kind);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn endpoint_request_backing_invariant_is_not_debug_only() {
+        let source = include_str!("island_shared.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("island_shared source should contain tests section");
+
+        assert!(
+            !source.contains("debug_assert!"),
+            "EndpointRequest backing invariants must be enforced in release builds"
+        );
+        assert!(
+            source.contains("EndpointRequest arrived at non-LOCAL channel"),
+            "the endpoint backing invariant should stay explicit"
+        );
     }
 }

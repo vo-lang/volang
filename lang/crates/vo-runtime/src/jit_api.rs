@@ -1826,15 +1826,15 @@ pub extern "C" fn vo_map_set(
     let gc = unsafe { &mut *(*ctx).gc };
     let km = map::key_meta(m_ref);
     let vm = map::val_meta(m_ref);
-    if km.value_kind().may_contain_gc_refs() {
-        if crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, key, km, module).is_err() {
-            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
-        }
+    if km.value_kind().may_contain_gc_refs()
+        && crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, key, km, module).is_err()
+    {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
     }
-    if vm.value_kind().may_contain_gc_refs() {
-        if crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, val, vm, module).is_err() {
-            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
-        }
+    if vm.value_kind().may_contain_gc_refs()
+        && crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, val, vm, module).is_err()
+    {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
     }
     0
 }
@@ -1975,7 +1975,10 @@ pub extern "C" fn vo_str_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
     use crate::objects::string;
     unsafe {
         let gc = &mut *gc;
-        string::slice_of(gc, s as crate::gc::GcRef, lo as usize, hi as usize) as u64
+        match string::slice_of(gc, s as crate::gc::GcRef, lo as usize, hi as usize) {
+            Some(result) => result as u64,
+            None => JIT_HELPER_U64_ERROR,
+        }
     }
 }
 
@@ -2248,7 +2251,7 @@ pub extern "C" fn vo_slice_set(s: u64, idx: u64, val: u64, elem_bytes: u64) {
 pub extern "C" fn vo_slice_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
     use crate::objects::slice;
     if s == 0 {
-        return 0;
+        return if lo == 0 && hi == 0 { 0 } else { u64::MAX };
     }
     unsafe {
         let gc = &mut *gc;
@@ -2266,7 +2269,11 @@ pub extern "C" fn vo_slice_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
 pub extern "C" fn vo_slice_slice3(gc: *mut Gc, s: u64, lo: u64, hi: u64, max: u64) -> u64 {
     use crate::objects::slice;
     if s == 0 {
-        return 0;
+        return if lo == 0 && hi == 0 && max == 0 {
+            0
+        } else {
+            u64::MAX
+        };
     }
     unsafe {
         let gc = &mut *gc;
@@ -2933,8 +2940,8 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             name: "vo_str_slice",
             params: &[T::Ptr, T::U64, T::U64, T::U64],
             ret: T::U64,
-            return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: true,
             may_schedule: false,
             observes_frame: false,
@@ -3435,7 +3442,7 @@ pub extern "C" fn vo_island_new(ctx: *mut JitContext, out: *mut u64) -> JitResul
     };
     unsafe {
         let handle = create_fn(ctx);
-        if (*ctx).runtime_trap_arg0 == JIT_INFRA_ERROR_SENTINEL {
+        if ctx.runtime_trap_arg0 == JIT_INFRA_ERROR_SENTINEL {
             return JitResult::JitError;
         }
         *out = handle;
@@ -3880,6 +3887,30 @@ mod tests {
             ctx.runtime_trap_pc,
             JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT as u32
         );
+    }
+
+    #[test]
+    fn nil_slice_slice_helpers_only_accept_zero_bounds() {
+        let mut gc = Gc::new();
+
+        assert_eq!(vo_slice_slice(&mut gc, 0, 0, 0), 0);
+        assert_eq!(vo_slice_slice(&mut gc, 0, 1, 1), JIT_HELPER_U64_ERROR);
+        assert_eq!(vo_slice_slice(&mut gc, 0, 0, 1), JIT_HELPER_U64_ERROR);
+
+        assert_eq!(vo_slice_slice3(&mut gc, 0, 0, 0, 0), 0);
+        assert_eq!(vo_slice_slice3(&mut gc, 0, 0, 0, 1), JIT_HELPER_U64_ERROR);
+        assert_eq!(vo_slice_slice3(&mut gc, 0, 1, 1, 1), JIT_HELPER_U64_ERROR);
+    }
+
+    #[test]
+    fn str_slice_helper_reports_bounds_errors_with_sentinel() {
+        let mut gc = Gc::new();
+        let s = crate::objects::string::from_rust_str(&mut gc, "abc") as u64;
+
+        assert_ne!(vo_str_slice(&mut gc, s, 1, 1), JIT_HELPER_U64_ERROR);
+        assert_eq!(vo_str_slice(&mut gc, s, 2, 1), JIT_HELPER_U64_ERROR);
+        assert_eq!(vo_str_slice(&mut gc, s, 0, 4), JIT_HELPER_U64_ERROR);
+        assert_eq!(vo_str_slice(&mut gc, 0, 1, 1), JIT_HELPER_U64_ERROR);
     }
 
     #[test]

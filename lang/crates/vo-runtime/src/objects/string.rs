@@ -113,14 +113,23 @@ pub fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
     alloc_string(gc, arr, arr_ptr, total)
 }
 
-pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> GcRef {
-    if s.is_null() || start >= end {
-        return core::ptr::null_mut();
+pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> Option<GcRef> {
+    let len = len(s);
+    if start > end || end > len {
+        return None;
+    }
+    if start == end {
+        return Some(core::ptr::null_mut());
     }
     let src = SliceData::as_ref(s);
     let arr = slot_to_ptr(src.array);
     let data_ptr = slot_to_ptr::<u8>(src.data_ptr);
-    alloc_string(gc, arr, unsafe { data_ptr.add(start) }, end - start)
+    Some(alloc_string(
+        gc,
+        arr,
+        unsafe { data_ptr.add(start) },
+        end - start,
+    ))
 }
 
 pub fn eq(a: GcRef, b: GcRef) -> bool {

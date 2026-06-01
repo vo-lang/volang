@@ -79,13 +79,7 @@ fn emit_type_switch_binding(
                 "IfaceAssert ABI supports at most 31 target slots, got {slots}"
             ))
         })?;
-        func.emit_with_flags(
-            Opcode::IfaceAssert,
-            flags,
-            value_slot,
-            iface_slot,
-            target_id as u16,
-        );
+        func.emit_iface_assert(flags, value_slot, iface_slot, target_id as u16, &slot_types);
     } else {
         func.emit_copy(value_slot, iface_slot, slots);
     }
@@ -196,12 +190,13 @@ pub(crate) fn compile_type_switch(
                                 ))
                             },
                         )?;
-                    func.emit_with_flags(
-                        Opcode::IfaceAssert,
+                    let result_layout = info.type_slot_types(type_key);
+                    func.emit_iface_assert(
                         flags,
                         result_reg,
                         iface_slot,
                         target_id as u16,
+                        &result_layout,
                     );
 
                     // Jump to case body if ok is true

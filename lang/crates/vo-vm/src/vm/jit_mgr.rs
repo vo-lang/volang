@@ -607,6 +607,7 @@ mod tests {
             local_slots: 0,
             gc_scan_slots: 0,
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,

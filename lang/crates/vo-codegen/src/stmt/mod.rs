@@ -262,9 +262,11 @@ fn compile_stmt_inner(
             let target_type = info.expr_type(send_stmt.chan.id);
             let elem_type = info.queue_elem_type(target_type);
             let elem_slots = info.queue_send_elem_slots(target_type);
+            let elem_layout = info.type_slot_types(elem_type);
             let val_reg =
                 crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
-            func.emit_with_flags(Opcode::QueueSend, elem_slots, target_reg, val_reg, 0);
+            debug_assert_eq!(elem_layout.len(), elem_slots as usize);
+            func.emit_queue_send(target_reg, val_reg, &elem_layout);
         }
 
         // === Select ===

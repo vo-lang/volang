@@ -1550,11 +1550,7 @@ pub fn encode_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
 /// authoritative.
 #[inline]
 pub fn encode_static_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
-    if let Some(shape) = pack_call_shape(arg_slots, ret_slots) {
-        shape
-    } else {
-        0
-    }
+    pack_call_shape(arg_slots, ret_slots).unwrap_or_default()
 }
 
 /// Encode func_id for Call instruction

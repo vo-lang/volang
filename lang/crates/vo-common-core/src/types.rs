@@ -232,6 +232,11 @@ impl ValueKind {
 
 /// Slot type for GC stack scanning and JIT type optimization.
 ///
+/// `GcRef` covers both an object base pointer and an interior pointer derived
+/// from an object base. The runtime GC canonicalizes interior pointers before
+/// marking, so any bytecode/JIT instruction that produces or carries either
+/// form must use a `GcRef`-typed slot.
+///
 /// Interface0 and Interface1 are paired:
 /// - Interface0: header slot (contains value_kind)
 /// - Interface1: data slot (scan depends on Interface0's value_kind)

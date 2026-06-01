@@ -44,7 +44,8 @@ pub fn exec_iface_assign(
     itab_cache: &mut ItabCache,
     module: &Module,
 ) -> Result<(), String> {
-    let vk = ValueKind::from_u8(inst.flags);
+    let vk = ValueKind::try_from(inst.flags)
+        .map_err(|_| format!("IfaceAssign invalid ValueKind tag {}", inst.flags))?;
     let src = stack_get(stack, bp + inst.b as usize);
 
     // Unpack metadata from constant pool

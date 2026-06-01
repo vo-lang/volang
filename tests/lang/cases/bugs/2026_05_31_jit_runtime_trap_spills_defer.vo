@@ -1,0 +1,55 @@
+// Coverage: before returning a typed runtime trap, JIT must keep locals visible
+// to defer/recover. This guards the frame-sync contract but is not a standalone
+// pre-fix repro for the 2026-05-31 slice/string bounds bugs.
+package main
+
+import "fmt"
+
+func divideTrapSeesUpdatedLocal() (result int) {
+	x := 1
+	defer func() {
+		if r := recover(); r != nil {
+			result = x
+		}
+	}()
+	x = 42
+	zero := x - 42
+	_ = 1 / zero
+	result = -1
+	return
+}
+
+func boundsTrapSeesUpdatedLocal() (result int) {
+	x := 3
+	defer func() {
+		if r := recover(); r != nil {
+			result = x
+		}
+	}()
+	x = 77
+	xs := []int{1}
+	idx := x - 76
+	_ = xs[idx]
+	result = -1
+	return
+}
+
+func recoveredTrapReturnsUpdatedNamedResult() (result int) {
+	defer func() {
+		recover()
+	}()
+	result = 123
+	zero := result - 123
+	_ = 1 / zero
+	result = -1
+	return
+}
+
+func main() {
+	for i := 0; i < 8; i++ {
+		assert(divideTrapSeesUpdatedLocal() == 42, "divide trap defer should see updated local")
+		assert(boundsTrapSeesUpdatedLocal() == 77, "bounds trap defer should see updated local")
+		assert(recoveredTrapReturnsUpdatedNamedResult() == 123, "recovered trap should return updated named result")
+	}
+	fmt.Println("jit runtime trap spills defer: ok")
+}

@@ -161,7 +161,11 @@ fn expr_runtime_slot_types(
     func: &FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Vec<SlotType> {
-    if is_global_array_expr(expr, ctx, func, info) {
+    if matches!(
+        get_expr_source(expr, ctx, func, info),
+        ExprSource::Location(StorageKind::HeapArray { .. })
+    ) || is_global_array_expr(expr, ctx, func, info)
+    {
         vec![SlotType::GcRef]
     } else {
         info.type_slot_types(info.expr_type(expr.id))
@@ -305,6 +309,7 @@ pub fn compile_expr(
     if let ExprSource::Location(storage) = get_expr_source(expr, ctx, func, info) {
         match storage {
             StorageKind::StackValue { slot, slots: 1 } => return Ok(slot),
+            StorageKind::HeapArray { gcref_slot, .. } => return Ok(gcref_slot),
             StorageKind::Reference { slot } => return Ok(slot),
             _ => {}
         }
@@ -385,14 +390,17 @@ pub fn compile_expr_to(
                     let obj_key = info.get_use(ident);
                     // Closure capture: ClosureGet returns GcRef to the captured storage
                     if let Some(capture) = func.lookup_capture(ident.symbol) {
-                        func.emit_op(Opcode::ClosureGet, dst, capture.index, 0);
-
+                        let capture_index = capture.index;
                         // Arrays: capture stores GcRef to [ArrayHeader][elems], use directly
                         // Others: capture stores GcRef to box [value], need PtrGet to read value
                         let type_key = info.obj_type(obj_key, "captured var must have type");
-                        if !info.is_array(type_key) {
+                        if info.is_array(type_key) {
+                            func.emit_op(Opcode::ClosureGet, dst, capture_index, 0);
+                        } else {
+                            let capture_ptr = func.alloc_slots(&[SlotType::GcRef]);
+                            func.emit_op(Opcode::ClosureGet, capture_ptr, capture_index, 0);
                             let value_slots = info.type_slot_count(type_key);
-                            func.emit_ptr_get(dst, dst, 0, value_slots);
+                            func.emit_ptr_get(dst, capture_ptr, 0, value_slots);
                         }
                     } else {
                         // Function reference: create closure with no captures
@@ -567,7 +575,12 @@ fn compile_type_assert(
             "IfaceAssert ABI supports at most 31 target slots, got {target_slots}"
         ))
     })?;
-    func.emit_with_flags(Opcode::IfaceAssert, flags, dst, iface_reg, target_id as u16);
+    let result_layout = if assert_kind == 1 {
+        vec![SlotType::Interface0, SlotType::Interface1]
+    } else {
+        info.type_slot_types(target_type)
+    };
+    func.emit_iface_assert(flags, dst, iface_reg, target_id as u16, &result_layout);
     Ok(())
 }
 
@@ -582,6 +595,8 @@ fn compile_receive(
     let target_reg = compile_expr(target_expr, ctx, func, info)?;
     let target_type = info.expr_type(target_expr.id);
     let elem_slots = info.queue_elem_slots(target_type);
+    let elem_type = info.queue_elem_type(target_type);
+    let elem_layout = info.type_slot_types(elem_type);
     let result_slots = info.expr_slots(expr.id);
     let has_ok = result_slots > elem_slots;
     let flags = pack_queue_recv_flags(elem_slots, has_ok).ok_or_else(|| {
@@ -589,7 +604,8 @@ fn compile_receive(
             "QueueRecv ABI supports at most 127 element slots, got {elem_slots}"
         ))
     })?;
-    func.emit_with_flags(Opcode::QueueRecv, flags, dst, target_reg, 0);
+    debug_assert_eq!(elem_layout.len(), elem_slots as usize);
+    func.emit_queue_recv(dst, target_reg, flags, &elem_layout);
     Ok(())
 }
 
@@ -617,7 +633,7 @@ fn compile_try_unwrap(
     } else {
         // Panic mode: panic with error directly
         let panic_extern = ctx.get_or_register_extern("panic_with_error");
-        func.emit_call_extern(error_start, panic_extern, error_start, 2);
+        func.emit_call_extern(error_start, panic_extern, error_start, 2, &[]);
     }
 
     func.patch_jump(skip_fail_jump, func.current_pc());

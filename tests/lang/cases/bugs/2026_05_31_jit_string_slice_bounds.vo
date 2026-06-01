@@ -1,0 +1,43 @@
+// Regression: string slicing must enforce the same range bounds as slice
+// slicing. The JIT helper must not return a raw string handle for an invalid
+// range.
+package main
+
+import "fmt"
+
+func expectPanic(name string, fn func()) {
+	didPanic := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				didPanic = true
+			}
+		}()
+		fn()
+	}()
+	assert(didPanic, name+" should panic")
+}
+
+func main() {
+	s := "abc"
+	empty := s[1:1]
+	assert(len(empty) == 0, "s[1:1] should be an empty string")
+
+	expectPanic("string low > high", func() {
+		lo := 2
+		hi := 1
+		_ = s[lo:hi]
+	})
+	expectPanic("string high > len", func() {
+		hi := 4
+		_ = s[0:hi]
+	})
+	expectPanic("empty string nonzero zero-width slice", func() {
+		emptyString := ""
+		lo := 1
+		hi := 1
+		_ = emptyString[lo:hi]
+	})
+
+	fmt.Println("jit string slice bounds: ok")
+}

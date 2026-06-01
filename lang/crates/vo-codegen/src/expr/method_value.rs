@@ -25,7 +25,7 @@ fn param_transfer_types(
         .iter()
         .map(|&type_key| TransferType {
             meta_raw: ctx.compute_value_meta_raw(type_key, info),
-            rttid_raw: ctx.intern_type_key(type_key, info),
+            rttid_raw: ctx.compute_value_rttid_raw(type_key, info),
             slots: info.type_slot_count(type_key),
         })
         .collect()
@@ -38,7 +38,7 @@ fn transfer_type_for_type(
 ) -> TransferType {
     TransferType {
         meta_raw: ctx.compute_value_meta_raw(type_key, info),
-        rttid_raw: ctx.intern_type_key(type_key, info),
+        rttid_raw: ctx.compute_value_rttid_raw(type_key, info),
         slots: info.type_slot_count(type_key),
     }
 }

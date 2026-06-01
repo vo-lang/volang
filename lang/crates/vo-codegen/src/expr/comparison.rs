@@ -50,36 +50,15 @@ pub fn compile_slot_comparison(
         return Ok(());
     }
 
-    // Reusable temp registers
-    let left_val = func.alloc_slots(&[SlotType::Value]);
-    let right_val = func.alloc_slots(&[SlotType::Value]);
-    let idx_reg = func.alloc_slots(&[SlotType::Value]);
     let tmp_cmp = func.alloc_slots(&[SlotType::Value]);
 
     func.emit_op(Opcode::LoadInt, dst, 1, 0);
 
     let mut i = 0u16;
     while i < total_slots {
-        func.emit_op(Opcode::LoadInt, idx_reg, i, 0);
-        func.emit_op(Opcode::SlotGet, left_val, left_reg, idx_reg);
-        func.emit_op(Opcode::SlotGet, right_val, right_reg, idx_reg);
-
         match slot_types[i as usize] {
             SlotType::Interface0 => {
-                // Interface: load both slots, use IfaceEq
-                let left_iface = func.alloc_interfaces(1);
-                let right_iface = func.alloc_interfaces(1);
-
-                func.emit_op(Opcode::Copy, left_iface, left_val, 0);
-                func.emit_op(Opcode::Copy, right_iface, right_val, 0);
-
-                func.emit_op(Opcode::LoadInt, idx_reg, i + 1, 0);
-                func.emit_op(Opcode::SlotGet, left_val, left_reg, idx_reg);
-                func.emit_op(Opcode::SlotGet, right_val, right_reg, idx_reg);
-                func.emit_op(Opcode::Copy, left_iface + 1, left_val, 0);
-                func.emit_op(Opcode::Copy, right_iface + 1, right_val, 0);
-
-                func.emit_op(Opcode::IfaceEq, tmp_cmp, left_iface, right_iface);
+                func.emit_op(Opcode::IfaceEq, tmp_cmp, left_reg + i, right_reg + i);
                 func.emit_op(Opcode::And, dst, dst, tmp_cmp);
                 i += 2;
             }
@@ -97,12 +76,17 @@ pub fn compile_slot_comparison(
                 } else {
                     Opcode::EqI
                 };
-                func.emit_op(cmp_op, tmp_cmp, left_val, right_val);
+                func.emit_op(cmp_op, tmp_cmp, left_reg + i, right_reg + i);
                 func.emit_op(Opcode::And, dst, dst, tmp_cmp);
                 i += 1;
             }
-            SlotType::Value | SlotType::Float => {
-                func.emit_op(Opcode::EqI, tmp_cmp, left_val, right_val);
+            SlotType::Value => {
+                func.emit_op(Opcode::EqI, tmp_cmp, left_reg + i, right_reg + i);
+                func.emit_op(Opcode::And, dst, dst, tmp_cmp);
+                i += 1;
+            }
+            SlotType::Float => {
+                func.emit_op(Opcode::EqF, tmp_cmp, left_reg + i, right_reg + i);
                 func.emit_op(Opcode::And, dst, dst, tmp_cmp);
                 i += 1;
             }

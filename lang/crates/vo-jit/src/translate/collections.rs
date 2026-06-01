@@ -715,6 +715,15 @@ pub(super) fn str_slice<'a>(
     let hi = e.read_var(inst.c + 1);
     let call = emit_funcref_call(e, func, &[gc_ptr, s, lo, hi]);
     let result = e.builder().inst_results(call)[0];
+    let error_val = e.builder().ins().iconst(types::I64, -1i64);
+    let is_error = e.builder().ins().icmp(IntCC::Equal, result, error_val);
+    emit_runtime_trap_if(
+        e,
+        is_error,
+        JitRuntimeTrapKind::SliceBoundsOutOfRange,
+        Some(lo),
+        Some(hi),
+    );
     e.write_var(inst.a, result);
     Ok(())
 }

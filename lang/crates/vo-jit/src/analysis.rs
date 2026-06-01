@@ -103,6 +103,7 @@ mod tests {
             local_slots: 32,
             gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -130,8 +131,8 @@ mod tests {
         ];
         let metadata = vec![
             JitInstructionMetadata::MapGet {
-                key_slots: 2,
-                val_slots: 3,
+                key_layout: vec![SlotType::Value, SlotType::Value],
+                val_layout: vec![SlotType::Value, SlotType::Value, SlotType::Value],
                 has_ok: true,
             },
             JitInstructionMetadata::None,

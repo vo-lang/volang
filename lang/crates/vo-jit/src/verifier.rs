@@ -1,5 +1,7 @@
 //! Verifier for bytecode facts consumed by the JIT.
 
+#![allow(clippy::too_many_arguments)]
+
 use std::fmt;
 
 use vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS;
@@ -41,6 +43,12 @@ pub enum JitMetadataError {
         raw: u8,
     },
     WrongMetadataKind {
+        func: String,
+        pc: usize,
+        opcode: Opcode,
+        metadata: &'static str,
+    },
+    UnsupportedLegacyMetadata {
         func: String,
         pc: usize,
         opcode: Opcode,
@@ -159,6 +167,16 @@ pub enum JitMetadataError {
         global_slots: usize,
         access: &'static str,
     },
+    FunctionInvariant {
+        func: String,
+        detail: String,
+    },
+    InvalidValueKind {
+        func: String,
+        pc: usize,
+        opcode: Opcode,
+        raw: u8,
+    },
 }
 
 impl fmt::Display for JitMetadataError {
@@ -183,6 +201,15 @@ impl fmt::Display for JitMetadataError {
             } => write!(
                 f,
                 "wrong JIT metadata kind {metadata} for {opcode:?} in {func} at pc {pc}"
+            ),
+            Self::UnsupportedLegacyMetadata {
+                func,
+                pc,
+                opcode,
+                metadata,
+            } => write!(
+                f,
+                "legacy JIT metadata kind {metadata} is not supported by strict {opcode:?} verification in {func} at pc {pc}"
             ),
             Self::InvalidElemLayout {
                 func,
@@ -339,6 +366,18 @@ impl fmt::Display for JitMetadataError {
                 f,
                 "JIT {access} global slot {slot} out of range for {func} at pc {pc} (global_slots={global_slots})"
             ),
+            Self::FunctionInvariant { func, detail } => {
+                write!(f, "JIT function metadata invariant failed in {func}: {detail}")
+            }
+            Self::InvalidValueKind {
+                func,
+                pc,
+                opcode,
+                raw,
+            } => write!(
+                f,
+                "invalid ValueKind tag {raw} for {opcode:?} in {func} at pc {pc}"
+            ),
         }
     }
 }
@@ -378,6 +417,8 @@ pub fn verify_jit_metadata(
     func: &FunctionDef,
     vo_module: &VoModule,
 ) -> Result<(), JitMetadataError> {
+    verify_function_invariants(func)?;
+
     if func.code.len() != func.jit_metadata.len() {
         return Err(JitMetadataError::LengthMismatch {
             func: func.name.clone(),
@@ -415,6 +456,157 @@ pub fn verify_jit_metadata(
         }
     }
 
+    Ok(())
+}
+
+fn verify_function_invariants(func: &FunctionDef) -> Result<(), JitMetadataError> {
+    let invariant = |detail: String| JitMetadataError::FunctionInvariant {
+        func: func.name.clone(),
+        detail,
+    };
+
+    if func.local_slots as usize != func.slot_types.len() {
+        return Err(invariant(format!(
+            "local_slots={} but slot_types.len()={}",
+            func.local_slots,
+            func.slot_types.len()
+        )));
+    }
+    if func.param_slots > func.local_slots {
+        return Err(invariant(format!(
+            "param_slots={} exceeds local_slots={}",
+            func.param_slots, func.local_slots
+        )));
+    }
+    if func.recv_slots > func.param_slots {
+        return Err(invariant(format!(
+            "recv_slots={} exceeds param_slots={}",
+            func.recv_slots, func.param_slots
+        )));
+    }
+    if func.ret_slot_types.len() != func.ret_slots as usize {
+        return Err(invariant(format!(
+            "ret_slot_types.len()={} but ret_slots={}",
+            func.ret_slot_types.len(),
+            func.ret_slots
+        )));
+    }
+    if func.gc_scan_slots != FunctionDef::compute_gc_scan_slots(&func.slot_types) {
+        return Err(invariant(format!(
+            "gc_scan_slots={} but computed={}",
+            func.gc_scan_slots,
+            FunctionDef::compute_gc_scan_slots(&func.slot_types)
+        )));
+    }
+    let expected_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+    if func.borrowed_scan_slots_prefix != expected_prefix {
+        return Err(invariant(format!(
+            "borrowed_scan_slots_prefix.len()={} but computed len={}",
+            func.borrowed_scan_slots_prefix.len(),
+            expected_prefix.len()
+        )));
+    }
+    let has_defer = func
+        .code
+        .iter()
+        .any(|inst| matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush));
+    if func.has_defer != has_defer {
+        return Err(invariant(format!(
+            "has_defer={} but bytecode has_defer={}",
+            func.has_defer, has_defer
+        )));
+    }
+    let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&func.code);
+    if func.has_calls != has_calls {
+        return Err(invariant(format!(
+            "has_calls={} but bytecode has_calls={}",
+            func.has_calls, has_calls
+        )));
+    }
+    if func.has_call_extern != has_call_extern {
+        return Err(invariant(format!(
+            "has_call_extern={} but bytecode has_call_extern={}",
+            func.has_call_extern, has_call_extern
+        )));
+    }
+    if func.heap_ret_slots.len() != func.heap_ret_gcref_count as usize {
+        return Err(invariant(format!(
+            "heap_ret_slots.len()={} but heap_ret_gcref_count={}",
+            func.heap_ret_slots.len(),
+            func.heap_ret_gcref_count
+        )));
+    }
+    if func.heap_ret_gcref_count > 0 {
+        let end = func
+            .heap_ret_gcref_start
+            .checked_add(func.heap_ret_gcref_count)
+            .ok_or_else(|| {
+                invariant(format!(
+                    "heap return range {}..+{} overflows",
+                    func.heap_ret_gcref_start, func.heap_ret_gcref_count
+                ))
+            })?;
+        if end > func.local_slots {
+            return Err(invariant(format!(
+                "heap return range {}..{} exceeds local_slots={}",
+                func.heap_ret_gcref_start, end, func.local_slots
+            )));
+        }
+        for slot in func.heap_ret_gcref_start..end {
+            if func.slot_types[slot as usize] != SlotType::GcRef {
+                return Err(invariant(format!(
+                    "heap return slot {slot} must be GcRef, got {:?}",
+                    func.slot_types[slot as usize]
+                )));
+            }
+        }
+    }
+    if func.error_ret_slot >= 0 && (func.error_ret_slot as u16).saturating_add(1) >= func.ret_slots
+    {
+        return Err(invariant(format!(
+            "error_ret_slot={} is not a two-slot interface inside ret_slots={}",
+            func.error_ret_slot, func.ret_slots
+        )));
+    }
+    if func.is_closure {
+        if func.param_slots == 0 || func.slot_types.first() != Some(&SlotType::GcRef) {
+            return Err(invariant(
+                "closure functions must reserve GcRef slot 0".to_string(),
+            ));
+        }
+    }
+    for (idx, transfer) in func.capture_types.iter().enumerate() {
+        validate_transfer_type_kinds(func, idx, "capture_types", transfer)?;
+    }
+    for (idx, transfer) in func.param_types.iter().enumerate() {
+        validate_transfer_type_kinds(func, idx, "param_types", transfer)?;
+    }
+
+    Ok(())
+}
+
+fn validate_transfer_type_kinds(
+    func: &FunctionDef,
+    idx: usize,
+    access: &'static str,
+    transfer: &vo_common_core::TransferType,
+) -> Result<(), JitMetadataError> {
+    let invariant = |detail: String| JitMetadataError::FunctionInvariant {
+        func: func.name.clone(),
+        detail,
+    };
+    let meta_kind = transfer.meta_raw as u8;
+    if ValueKind::try_from(meta_kind).is_err() {
+        return Err(invariant(format!(
+            "{access}[{idx}] has invalid ValueMeta kind tag {meta_kind}"
+        )));
+    }
+    let rttid_kind = transfer.rttid_raw as u8;
+    if ValueKind::try_from(rttid_kind).is_err() {
+        return Err(invariant(format!(
+            "{access}[{idx}] has invalid ValueRttid kind tag {rttid_kind}"
+        )));
+    }
     Ok(())
 }
 
@@ -598,13 +790,52 @@ fn verify_slot_contract(
                 "IndexCheck length",
             )
         }
-        Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
+        Opcode::Jump => {
+            verify_jump_target_contract(func, pc, opcode, jump_target_i64(pc, inst.imm32()))
+        }
+        Opcode::JumpIf | Opcode::JumpIfNot => {
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::Value],
+                if opcode == Opcode::JumpIf {
+                    "JumpIf condition"
+                } else {
+                    "JumpIfNot condition"
+                },
+            )?;
             verify_jump_target_contract(func, pc, opcode, jump_target_i64(pc, inst.imm32()))
         }
         Opcode::ForLoop => {
+            if inst.flags & !0x07 != 0 {
+                return Err(JitMetadataError::CallShapeMismatch {
+                    func: func.name.clone(),
+                    pc,
+                    opcode,
+                    detail: format!("unsupported ForLoop flags 0x{:02x}", inst.flags),
+                });
+            }
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::Value],
+                "ForLoop index",
+            )?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.b,
+                &[SlotType::Value],
+                "ForLoop limit",
+            )?;
             verify_jump_target_contract(func, pc, opcode, forloop_target_i64(pc, inst.c as i16))
         }
-        Opcode::Copy => Ok(()),
+        Opcode::Copy => verify_copy_contract(func, pc, opcode, inst),
         Opcode::CopyN => verify_copy_n_contract(func, pc, opcode, inst),
         Opcode::SlotGet => verify_slot_get_contract(func, pc, opcode, inst.a, inst.b, inst.c, 1),
         Opcode::SlotGetN => {
@@ -612,48 +843,78 @@ fn verify_slot_contract(
         }
         Opcode::IfaceAssign => {
             verify_interface_or_raw_pair(func, pc, opcode, inst.a, "IfaceAssign destination")?;
-            verify_iface_assign_metadata_constant(func, vo_module, pc, opcode, inst.c)?;
-            verify_iface_assign_source(func, pc, opcode, inst.b, inst.flags)
+            let packed =
+                verify_iface_assign_metadata_constant(func, vo_module, pc, opcode, inst.c)?;
+            let value_kind = verify_value_kind_tag(func, pc, opcode, inst.flags)?;
+            verify_iface_assign_metadata_schema(func, vo_module, pc, opcode, value_kind, packed)?;
+            verify_iface_assign_source(func, pc, opcode, inst.b, value_kind)
         }
         Opcode::ClosureNew => verify_closure_new_contract(func, vo_module, pc, inst),
         Opcode::ClosureGet => verify_closure_get_contract(func, pc, inst),
         Opcode::Return => verify_return_contract(func, pc, inst),
         Opcode::Call => verify_static_call_contract(func, vo_module, pc, inst),
         Opcode::CallClosure => {
-            verify_range(func, pc, inst.a, 1, "CallClosure callee")?;
-            verify_structural_range(
+            verify_layout(
                 func,
                 pc,
                 opcode,
-                inst.b,
-                inst.packed_arg_slots(),
-                "CallClosure args",
+                inst.a,
+                &[SlotType::GcRef],
+                "CallClosure callee",
             )?;
-            verify_structural_range(
+            let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
+            if arg_layout.len() != inst.packed_arg_slots() as usize
+                || ret_layout.len() != inst.packed_ret_slots() as usize
+            {
+                return Err(JitMetadataError::CallShapeMismatch {
+                    func: func.name.clone(),
+                    pc,
+                    opcode,
+                    detail: format!(
+                        "CallClosure metadata layout slots args={} returns={} do not match encoded args={} returns={}",
+                        arg_layout.len(),
+                        ret_layout.len(),
+                        inst.packed_arg_slots(),
+                        inst.packed_ret_slots()
+                    ),
+                });
+            }
+            verify_local_layout_matches(func, pc, opcode, inst.b, &arg_layout, "CallClosure args")?;
+            verify_local_layout_matches(
                 func,
                 pc,
                 opcode,
                 inst.packed_call_ret_start(),
-                inst.packed_ret_slots(),
+                &ret_layout,
                 "CallClosure returns",
             )
         }
         Opcode::CallIface => {
             verify_interface_pair(func, pc, opcode, inst.a, "CallIface receiver")?;
-            verify_structural_range(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                inst.packed_arg_slots(),
-                "CallIface args",
-            )?;
-            verify_structural_range(
+            let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
+            if arg_layout.len() != inst.packed_arg_slots() as usize
+                || ret_layout.len() != inst.packed_ret_slots() as usize
+            {
+                return Err(JitMetadataError::CallShapeMismatch {
+                    func: func.name.clone(),
+                    pc,
+                    opcode,
+                    detail: format!(
+                        "CallIface metadata layout slots args={} returns={} do not match encoded args={} returns={}",
+                        arg_layout.len(),
+                        ret_layout.len(),
+                        inst.packed_arg_slots(),
+                        inst.packed_ret_slots()
+                    ),
+                });
+            }
+            verify_local_layout_matches(func, pc, opcode, inst.b, &arg_layout, "CallIface args")?;
+            verify_local_layout_matches(
                 func,
                 pc,
                 opcode,
                 inst.packed_call_ret_start(),
-                inst.packed_ret_slots(),
+                &ret_layout,
                 "CallIface returns",
             )
         }
@@ -662,9 +923,37 @@ fn verify_slot_contract(
             verify_shared_call_shape_contract(func, vo_module, pc, opcode, inst)
         }
         Opcode::GoIsland => {
-            verify_range(func, pc, inst.a, 1, "GoIsland island")?;
-            verify_range(func, pc, inst.b, 1, "GoIsland closure")?;
-            verify_structural_range(func, pc, opcode, inst.c, inst.flags as u16, "GoIsland args")
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "GoIsland island",
+            )?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.b,
+                &[SlotType::GcRef],
+                "GoIsland closure",
+            )?;
+            let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
+            if !ret_layout.is_empty() || arg_layout.len() != inst.flags as usize {
+                return Err(JitMetadataError::CallShapeMismatch {
+                    func: func.name.clone(),
+                    pc,
+                    opcode,
+                    detail: format!(
+                        "GoIsland metadata layout slots args={} returns={} do not match encoded args={}",
+                        arg_layout.len(),
+                        ret_layout.len(),
+                        inst.flags
+                    ),
+                });
+            }
+            verify_local_layout_matches(func, pc, opcode, inst.c, &arg_layout, "GoIsland args")
         }
         Opcode::GlobalGet => {
             verify_global_get_contract(func, vo_module, pc, opcode, inst.b, inst.a, 1)
@@ -687,14 +976,36 @@ fn verify_slot_contract(
                 &[SlotType::Value],
                 "PtrNew metadata",
             )?;
-            verify_structural_range(func, pc, opcode, inst.a, 1, "PtrNew destination")
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "PtrNew destination",
+            )
         }
         Opcode::PtrGet => verify_ptr_get_contract(func, pc, opcode, inst.a, inst.b, 1),
         Opcode::PtrGetN => {
             verify_ptr_get_contract(func, pc, opcode, inst.a, inst.b, inst.flags as u16)
         }
         Opcode::PtrAdd => {
-            verify_range(func, pc, inst.b, 1, "PtrAdd pointer")?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "PtrAdd destination",
+            )?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.b,
+                &[SlotType::GcRef],
+                "PtrAdd pointer",
+            )?;
             verify_layout(
                 func,
                 pc,
@@ -706,8 +1017,29 @@ fn verify_slot_contract(
         }
         Opcode::PtrSet => verify_ptr_set_contract(func, pc, opcode, inst.a, inst.c, inst.flags),
         Opcode::PtrSetN => {
-            verify_range(func, pc, inst.a, 1, "PtrSetN pointer")?;
+            let value_layout = ptr_value_layout(func, pc, opcode)?;
+            if value_layout.len() != inst.flags as usize {
+                return Err(JitMetadataError::CallShapeMismatch {
+                    func: func.name.clone(),
+                    pc,
+                    opcode,
+                    detail: format!(
+                        "PtrSetN metadata layout slots {} do not match encoded count {}",
+                        value_layout.len(),
+                        inst.flags
+                    ),
+                });
+            }
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "PtrSetN pointer",
+            )?;
             let source = local_layout(func, pc, inst.c, inst.flags as u16, "PtrSetN source")?;
+            verify_local_layout_matches(func, pc, opcode, inst.c, &value_layout, "PtrSetN source")?;
             if source
                 .iter()
                 .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1))
@@ -751,11 +1083,19 @@ fn verify_slot_contract(
                 func,
                 pc,
                 opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "ArrayNew destination",
+            )?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
                 inst.b,
                 &[SlotType::Value],
                 "ArrayNew metadata",
             )?;
-            verify_structural_range(
+            verify_value_range(
                 func,
                 pc,
                 opcode,
@@ -765,16 +1105,31 @@ fn verify_slot_contract(
             )
         }
         Opcode::ArrayGet => {
-            verify_range(func, pc, inst.b, 1, "Array source")?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Array source")?;
             verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "Array index")?;
             verify_indexed_layout_contract(func, pc, opcode, inst, inst.a, "ArrayGet destination")
         }
         Opcode::ArrayAddr => {
-            verify_range(func, pc, inst.b, 1, "Array source")?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "ArrayAddr destination",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Array source")?;
             verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "Array index")
         }
         Opcode::ArraySet => {
-            verify_range(func, pc, inst.a, 1, "ArraySet target")?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "ArraySet target",
+            )?;
             verify_layout(
                 func,
                 pc,
@@ -790,11 +1145,19 @@ fn verify_slot_contract(
                 func,
                 pc,
                 opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "SliceNew destination",
+            )?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
                 inst.b,
                 &[SlotType::Value],
                 "SliceNew metadata",
             )?;
-            verify_structural_range(
+            verify_value_range(
                 func,
                 pc,
                 opcode,
@@ -804,16 +1167,31 @@ fn verify_slot_contract(
             )
         }
         Opcode::SliceGet => {
-            verify_range(func, pc, inst.b, 1, "Slice source")?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Slice source")?;
             verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "Slice index")?;
             verify_indexed_layout_contract(func, pc, opcode, inst, inst.a, "SliceGet destination")
         }
         Opcode::SliceAddr => {
-            verify_range(func, pc, inst.b, 1, "Slice source")?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "SliceAddr destination",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Slice source")?;
             verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "Slice index")
         }
         Opcode::SliceSet => {
-            verify_range(func, pc, inst.a, 1, "SliceSet target")?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "SliceSet target",
+            )?;
             verify_layout(
                 func,
                 pc,
@@ -825,7 +1203,22 @@ fn verify_slot_contract(
             verify_indexed_layout_contract(func, pc, opcode, inst, inst.c, "SliceSet source")
         }
         Opcode::SliceAppend => {
-            verify_range(func, pc, inst.b, 1, "SliceAppend source")?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "SliceAppend destination",
+            )?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.b,
+                &[SlotType::GcRef],
+                "SliceAppend source",
+            )?;
             verify_layout(
                 func,
                 pc,
@@ -843,36 +1236,148 @@ fn verify_slot_contract(
             )?;
             verify_indexed_layout_contract(func, pc, opcode, inst, value_start, "SliceAppend value")
         }
-        Opcode::SliceLen | Opcode::SliceCap => verify_range(func, pc, inst.b, 1, "Slice source"),
-        Opcode::StrLen => verify_range(func, pc, inst.b, 1, "string"),
+        Opcode::SliceLen | Opcode::SliceCap => {
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::Value],
+                "slice length/capacity result",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Slice source")
+        }
+        Opcode::StrLen => {
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::Value],
+                "StrLen destination",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string")
+        }
         Opcode::StrIndex | Opcode::StrDecodeRune => {
-            verify_range(func, pc, inst.b, 1, "string")?;
+            if opcode == Opcode::StrDecodeRune {
+                verify_layout(
+                    func,
+                    pc,
+                    opcode,
+                    inst.a,
+                    &[SlotType::Value, SlotType::Value],
+                    "StrDecodeRune destination",
+                )?;
+            } else {
+                verify_layout(
+                    func,
+                    pc,
+                    opcode,
+                    inst.a,
+                    &[SlotType::Value],
+                    "StrIndex destination",
+                )?;
+            }
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string")?;
             verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "string index")
         }
-        Opcode::StrConcat
-        | Opcode::StrEq
+        Opcode::StrConcat => {
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "StrConcat destination",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string lhs")?;
+            verify_layout(func, pc, opcode, inst.c, &[SlotType::GcRef], "string rhs")
+        }
+        Opcode::StrEq
         | Opcode::StrNe
         | Opcode::StrLt
         | Opcode::StrLe
         | Opcode::StrGt
         | Opcode::StrGe => {
-            verify_range(func, pc, inst.b, 1, "string lhs")?;
-            verify_range(func, pc, inst.c, 1, "string rhs")
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::Value],
+                "string comparison destination",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string lhs")?;
+            verify_layout(func, pc, opcode, inst.c, &[SlotType::GcRef], "string rhs")
         }
         Opcode::StrSlice => {
-            verify_range(func, pc, inst.b, 1, "string")?;
-            verify_structural_range(func, pc, opcode, inst.c, 2, "string slice bounds")
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "StrSlice destination",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string")?;
+            verify_value_range(func, pc, opcode, inst.c, 2, "string slice bounds")
         }
         Opcode::SliceSlice => {
-            verify_range(func, pc, inst.b, 1, "SliceSlice source")?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "SliceSlice destination",
+            )?;
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.b,
+                &[SlotType::GcRef],
+                "SliceSlice source",
+            )?;
             let bound_slots = if (inst.flags & 0b10) != 0 { 3 } else { 2 };
-            verify_structural_range(func, pc, opcode, inst.c, bound_slots, "SliceSlice bounds")
+            verify_value_range(func, pc, opcode, inst.c, bound_slots, "SliceSlice bounds")
         }
-        Opcode::MapNew => verify_structural_range(func, pc, opcode, inst.b, 2, "MapNew metadata"),
+        Opcode::MapNew => {
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::GcRef],
+                "MapNew destination",
+            )?;
+            verify_value_range(func, pc, opcode, inst.b, 2, "MapNew metadata")
+        }
         Opcode::MapGet => verify_map_get_contract(func, pc, inst),
         Opcode::MapSet => verify_map_set_contract(func, pc, inst),
         Opcode::MapDelete => verify_map_delete_contract(func, pc, inst),
-        Opcode::MapLen | Opcode::MapIterInit => verify_range(func, pc, inst.b, 1, "map"),
+        Opcode::MapLen => {
+            verify_layout(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &[SlotType::Value],
+                "MapLen destination",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "map")
+        }
+        Opcode::MapIterInit => {
+            verify_local_layout_matches(
+                func,
+                pc,
+                opcode,
+                inst.a,
+                &vo_runtime::objects::map::MAP_ITER_SLOT_TYPES,
+                "MapIterInit iterator",
+            )?;
+            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "map")
+        }
         Opcode::MapIterNext => verify_map_iter_next_contract(func, pc, opcode, inst),
         Opcode::Panic => verify_interface_pair(func, pc, opcode, inst.a, "Panic payload"),
         Opcode::QueueNew => verify_queue_new_contract(func, pc, inst),
@@ -940,16 +1445,31 @@ fn verify_map_iter_next_contract(
     opcode: Opcode,
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
-    verify_structural_range(
+    verify_local_layout_matches(
         func,
         pc,
         opcode,
         inst.b,
-        crate::effects::MAP_ITER_SLOTS as u16,
+        &vo_runtime::objects::map::MAP_ITER_SLOT_TYPES,
         "MapIterNext iterator",
     )?;
     let key_slots = inst.map_iter_key_slots();
     let val_slots = inst.map_iter_val_slots();
+    let (key_layout, val_layout) = map_iter_layout(func, pc, opcode)?;
+    if key_layout.len() != key_slots as usize || val_layout.len() != val_slots as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "MapIterNext metadata layout slots key={} value={} do not match encoded key={} value={}",
+                key_layout.len(),
+                val_layout.len(),
+                key_slots,
+                val_slots
+            ),
+        });
+    }
     let kv_slots = key_slots
         .checked_add(val_slots)
         .ok_or(JitMetadataError::SlotRangeOverflow {
@@ -959,7 +1479,17 @@ fn verify_map_iter_next_contract(
             count: key_slots,
             access: "MapIterNext key/value",
         })?;
-    verify_structural_range(func, pc, opcode, inst.a, kv_slots, "MapIterNext key/value")?;
+    let mut kv_layout = key_layout;
+    kv_layout.extend(val_layout);
+    debug_assert_eq!(kv_layout.len(), kv_slots as usize);
+    verify_local_layout_matches(
+        func,
+        pc,
+        opcode,
+        inst.a,
+        &kv_layout,
+        "MapIterNext key/value",
+    )?;
     verify_layout(
         func,
         pc,
@@ -1022,6 +1552,19 @@ fn verify_queue_send_contract(
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
     let opcode = Opcode::QueueSend;
+    let elem_layout = queue_elem_layout(func, pc, opcode)?;
+    if elem_layout.len() != inst.flags as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "QueueSend metadata layout slots {} do not match encoded count {}",
+                elem_layout.len(),
+                inst.flags
+            ),
+        });
+    }
     verify_layout(
         func,
         pc,
@@ -1030,14 +1573,7 @@ fn verify_queue_send_contract(
         &[SlotType::GcRef],
         "QueueSend queue",
     )?;
-    verify_structural_range(
-        func,
-        pc,
-        opcode,
-        inst.b,
-        inst.flags as u16,
-        "QueueSend value",
-    )
+    verify_local_layout_matches(func, pc, opcode, inst.b, &elem_layout, "QueueSend value")
 }
 
 fn verify_select_send_contract(
@@ -1046,6 +1582,24 @@ fn verify_select_send_contract(
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
     let opcode = Opcode::SelectSend;
+    let elem_layout = queue_elem_layout(func, pc, opcode)?;
+    let elem_slots = if inst.flags == 0 {
+        1
+    } else {
+        inst.flags as u16
+    };
+    if elem_layout.len() != elem_slots as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "SelectSend metadata layout slots {} do not match encoded count {}",
+                elem_layout.len(),
+                elem_slots
+            ),
+        });
+    }
     verify_layout(
         func,
         pc,
@@ -1054,12 +1608,7 @@ fn verify_select_send_contract(
         &[SlotType::GcRef],
         "SelectSend queue",
     )?;
-    let elem_slots = if inst.flags == 0 {
-        1
-    } else {
-        inst.flags as u16
-    };
-    verify_structural_range(func, pc, opcode, inst.b, elem_slots, "SelectSend value")
+    verify_local_layout_matches(func, pc, opcode, inst.b, &elem_layout, "SelectSend value")
 }
 
 fn verify_recv_contract(
@@ -1086,8 +1635,21 @@ fn verify_recv_contract(
     if normalize_zero_elem_slots && elem_slots == 0 {
         elem_slots = 1;
     }
+    let elem_layout = queue_elem_layout(func, pc, opcode)?;
+    if elem_layout.len() != elem_slots as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "{access_prefix} metadata layout slots {} do not match encoded count {}",
+                elem_layout.len(),
+                elem_slots
+            ),
+        });
+    }
     if elem_slots > 0 {
-        verify_structural_range(func, pc, opcode, dst_start, elem_slots, access_prefix)?;
+        verify_local_layout_matches(func, pc, opcode, dst_start, &elem_layout, access_prefix)?;
     }
     if inst.recv_has_ok() {
         let ok_slot =
@@ -1127,21 +1689,32 @@ fn verify_iface_assert_contract(
     }
     let has_ok = ((inst.flags >> 2) & 0x01) != 0;
     let target_slots = (inst.flags >> 3) as u16;
+    let result_layout = iface_assert_result_layout(func, pc, opcode)?;
     let dst_slots = if assert_kind == 1 {
-        verify_interface_pair(func, pc, opcode, inst.a, "IfaceAssert destination")?;
         2
     } else {
-        let dst_slots = target_slots.max(1);
-        verify_structural_range(
-            func,
+        target_slots.max(1)
+    };
+    if result_layout.len() != dst_slots as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
             pc,
             opcode,
-            inst.a,
-            dst_slots,
-            "IfaceAssert destination",
-        )?;
-        dst_slots
-    };
+            detail: format!(
+                "IfaceAssert metadata layout slots {} do not match encoded destination slots {}",
+                result_layout.len(),
+                dst_slots
+            ),
+        });
+    }
+    verify_local_layout_matches(
+        func,
+        pc,
+        opcode,
+        inst.a,
+        &result_layout,
+        "IfaceAssert destination",
+    )?;
     if has_ok {
         let ok_slot =
             checked_slot_offset_for_verifier(func, pc, inst.a, dst_slots, "IfaceAssert ok")?;
@@ -1299,7 +1872,14 @@ fn verify_return_contract(
                 ),
             });
         }
-        verify_range(func, pc, inst.a, inst.b, "Return heap named returns")?;
+        verify_layout(
+            func,
+            pc,
+            opcode,
+            inst.a,
+            &vec![SlotType::GcRef; inst.b as usize],
+            "Return heap named returns",
+        )?;
         return Ok(());
     }
 
@@ -1314,7 +1894,20 @@ fn verify_return_contract(
             ),
         });
     }
-    verify_structural_range(func, pc, opcode, inst.a, inst.b, "Return values")?;
+    if func.ret_slot_types.len() != func.ret_slots as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "function has {} ret_slot_types but ret_slots={}",
+                func.ret_slot_types.len(),
+                func.ret_slots
+            ),
+        });
+    }
+    let expected = &func.ret_slot_types[..inst.b as usize];
+    verify_local_layout_matches(func, pc, opcode, inst.a, expected, "Return values")?;
 
     if func.error_ret_slot >= 0 {
         let error_offset = func.error_ret_slot as u16;
@@ -1434,12 +2027,12 @@ fn verify_str_new_contract(
     pc: usize,
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
-    verify_one_of_single_slot_layout(
+    verify_layout(
         func,
         pc,
         Opcode::StrNew,
         inst.a,
-        &[SlotType::Value, SlotType::GcRef],
+        &[SlotType::GcRef],
         "StrNew destination",
     )?;
     let constant = constant_at(func, vo_module, pc, inst.b)?;
@@ -1462,16 +2055,75 @@ fn verify_iface_assign_metadata_constant(
     pc: usize,
     opcode: Opcode,
     const_id: u16,
-) -> Result<(), JitMetadataError> {
+) -> Result<i64, JitMetadataError> {
     let constant = constant_at(func, vo_module, pc, const_id)?;
-    if !matches!(constant, Constant::Int(_)) {
-        return Err(JitMetadataError::ConstantKindMismatch {
+    if let Constant::Int(packed) = constant {
+        Ok(*packed)
+    } else {
+        Err(JitMetadataError::ConstantKindMismatch {
             func: func.name.clone(),
             pc,
             opcode,
             const_id,
             expected: "Int",
             actual: constant_kind(constant),
+        })
+    }
+}
+
+fn verify_value_kind_tag(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    raw: u8,
+) -> Result<ValueKind, JitMetadataError> {
+    ValueKind::try_from(raw).map_err(|_| JitMetadataError::InvalidValueKind {
+        func: func.name.clone(),
+        pc,
+        opcode,
+        raw,
+    })
+}
+
+fn verify_iface_assign_metadata_schema(
+    func: &FunctionDef,
+    vo_module: &VoModule,
+    pc: usize,
+    opcode: Opcode,
+    value_kind: ValueKind,
+    packed: i64,
+) -> Result<(), JitMetadataError> {
+    let packed = packed as u64;
+    let high = (packed >> 32) as u32;
+    let low = (packed & 0xFFFF_FFFF) as u32;
+    if value_kind == ValueKind::Interface {
+        if high != 0 {
+            return Err(JitMetadataError::CallShapeMismatch {
+                func: func.name.clone(),
+                pc,
+                opcode,
+                detail: format!(
+                    "interface source metadata must store target iface id in low word only, got high word {high}"
+                ),
+            });
+        }
+        if low != 0 && low as usize >= vo_module.interface_metas.len() {
+            return Err(JitMetadataError::CallShapeMismatch {
+                func: func.name.clone(),
+                pc,
+                opcode,
+                detail: format!(
+                    "target interface meta id {low} exceeds interface metadata count {}",
+                    vo_module.interface_metas.len()
+                ),
+            });
+        }
+    } else if low != 0 && low as usize >= vo_module.itabs.len() {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!("itab id {low} exceeds itab count {}", vo_module.itabs.len()),
         });
     }
     Ok(())
@@ -1509,7 +2161,14 @@ fn verify_closure_new_contract(
     pc: usize,
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
-    verify_range(func, pc, inst.a, 1, "ClosureNew dst")?;
+    verify_layout(
+        func,
+        pc,
+        Opcode::ClosureNew,
+        inst.a,
+        &[SlotType::GcRef],
+        "ClosureNew destination",
+    )?;
     let callee_id = inst.closure_new_func_id();
     vo_module.functions.get(callee_id as usize).ok_or_else(|| {
         JitMetadataError::MissingFunction {
@@ -1526,7 +2185,14 @@ fn verify_closure_get_contract(
     pc: usize,
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
-    verify_range(func, pc, 0, 1, "ClosureGet closure")?;
+    verify_layout(
+        func,
+        pc,
+        Opcode::ClosureGet,
+        0,
+        &[SlotType::GcRef],
+        "ClosureGet closure",
+    )?;
     let capture_slot = inst.b as usize;
     let Some(expected) = func.capture_slot_types.get(capture_slot).copied() else {
         return Err(JitMetadataError::CallShapeMismatch {
@@ -1540,8 +2206,14 @@ fn verify_closure_get_contract(
             ),
         });
     };
-    let _ = expected;
-    verify_range(func, pc, inst.a, 1, "ClosureGet destination")
+    verify_layout(
+        func,
+        pc,
+        Opcode::ClosureGet,
+        inst.a,
+        &[expected],
+        "ClosureGet destination",
+    )
 }
 
 fn verify_static_call_contract(
@@ -1624,12 +2296,25 @@ fn verify_static_call_contract(
             access: "Call return buffer",
         }
     })?;
-    verify_structural_range(
+    if callee.ret_slot_types.len() != callee.ret_slots as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "callee {} has {} ret_slot_types but ret_slots={}",
+                callee.name,
+                callee.ret_slot_types.len(),
+                callee.ret_slots
+            ),
+        });
+    }
+    verify_local_layout_matches(
         func,
         pc,
         opcode,
         ret_start,
-        callee.ret_slots,
+        &callee.ret_slot_types,
         "Call return buffer",
     )
 }
@@ -1642,7 +2327,29 @@ fn verify_shared_call_shape_contract(
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
     if inst.call_shape_is_closure() {
-        verify_range(func, pc, inst.a, 1, "closure callee")?;
+        verify_layout(
+            func,
+            pc,
+            opcode,
+            inst.a,
+            &[SlotType::GcRef],
+            "closure callee",
+        )?;
+        let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
+        if !ret_layout.is_empty() || arg_layout.len() != inst.c as usize {
+            return Err(JitMetadataError::CallShapeMismatch {
+                func: func.name.clone(),
+                pc,
+                opcode,
+                detail: format!(
+                    "{opcode:?} closure metadata layout slots args={} returns={} do not match encoded args={}",
+                    arg_layout.len(),
+                    ret_layout.len(),
+                    inst.c
+                ),
+            });
+        }
+        verify_local_layout_matches(func, pc, opcode, inst.b, &arg_layout, "closure call args")
     } else {
         let callee_id = inst.call_shape_static_func_id();
         let callee = vo_module.functions.get(callee_id as usize).ok_or_else(|| {
@@ -1652,7 +2359,7 @@ fn verify_shared_call_shape_contract(
                 callee_id,
             }
         })?;
-        if callee.param_slots <= u16::MAX && inst.c != callee.param_slots {
+        if inst.c != callee.param_slots {
             return Err(JitMetadataError::CallShapeMismatch {
                 func: func.name.clone(),
                 pc,
@@ -1678,8 +2385,8 @@ fn verify_shared_call_shape_contract(
                 ),
             })?;
         verify_layout(func, pc, opcode, inst.b, expected_args, "static call args")?;
+        Ok(())
     }
-    verify_structural_range(func, pc, opcode, inst.b, inst.c, "call args")
 }
 
 fn verify_call_extern_contract(
@@ -1711,15 +2418,24 @@ fn verify_call_extern_contract(
             ),
         });
     }
-    verify_range(func, pc, inst.c, inst.flags as u16, "CallExtern args")?;
-    verify_structural_range(
-        func,
-        pc,
-        opcode,
-        inst.a,
-        extern_def.ret_slots,
-        "CallExtern returns",
-    )
+    let (arg_layout, ret_layout) = call_extern_layout(func, pc, opcode)?;
+    if arg_layout.len() != inst.flags as usize || ret_layout.len() != extern_def.ret_slots as usize
+    {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "CallExtern metadata layout slots args={} returns={} do not match encoded args={} extern returns={}",
+                arg_layout.len(),
+                ret_layout.len(),
+                inst.flags,
+                extern_def.ret_slots
+            ),
+        });
+    }
+    verify_local_layout_matches(func, pc, opcode, inst.c, &arg_layout, "CallExtern args")?;
+    verify_local_layout_matches(func, pc, opcode, inst.a, &ret_layout, "CallExtern returns")
 }
 
 fn verify_indexed_layout_contract(
@@ -1730,40 +2446,54 @@ fn verify_indexed_layout_contract(
     start: u16,
     access: &'static str,
 ) -> Result<(), JitMetadataError> {
-    let slots = indexed_elem_slots(func, pc, opcode, inst)?;
-    if slots == 0 {
+    let layout = indexed_elem_layout(func, pc, opcode, inst)?;
+    if layout.is_empty() {
         return Ok(());
     }
-    verify_structural_range(func, pc, opcode, start, slots, access)
+    verify_local_layout_matches(func, pc, opcode, start, &layout, access)
 }
 
-fn indexed_elem_slots(
+fn indexed_elem_layout(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
     inst: vo_runtime::instruction::Instruction,
-) -> Result<u16, JitMetadataError> {
-    if inst.flags == 0 {
-        let metadata =
-            func.jit_metadata
-                .get(pc)
-                .ok_or_else(|| JitMetadataError::MissingLayout {
-                    func: func.name.clone(),
-                    pc,
-                    opcode,
-                    layout: "ElemLayout",
-                })?;
-        crate::metadata::elem_layout_from_instruction(metadata)
-            .map(|layout| layout.slots)
-            .ok_or_else(|| JitMetadataError::MissingLayout {
+) -> Result<Vec<SlotType>, JitMetadataError> {
+    let metadata = func
+        .jit_metadata
+        .get(pc)
+        .ok_or_else(|| JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "ElemLayout",
+        })?;
+    let layout = crate::metadata::elem_layout_from_instruction(metadata).ok_or_else(|| {
+        JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "ElemLayout",
+        }
+    })?;
+    debug_assert_eq!(layout.slot_layout.len(), layout.slots as usize);
+    let from_flags = if inst.flags == 0 {
+        None
+    } else {
+        Some(crate::metadata::elem_layout_from_flags(inst.flags))
+    };
+    if let Some(from_flags) = from_flags {
+        if from_flags.bytes != layout.bytes
+            || from_flags.needs_sign_extend != layout.needs_sign_extend
+        {
+            return Err(JitMetadataError::InconsistentElemLayout {
                 func: func.name.clone(),
                 pc,
-                opcode,
-                layout: "ElemLayout",
-            })
-    } else {
-        Ok(crate::metadata::elem_layout_from_flags(inst.flags).slots)
+                flags: inst.flags,
+            });
+        }
     }
+    Ok(layout.slot_layout)
 }
 
 fn verify_map_get_contract(
@@ -1773,7 +2503,7 @@ fn verify_map_get_contract(
 ) -> Result<(), JitMetadataError> {
     let opcode = Opcode::MapGet;
     let layout = map_get_layout(func, pc, opcode)?;
-    verify_range(func, pc, inst.b, 1, "MapGet map")?;
+    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "MapGet map")?;
     verify_layout(
         func,
         pc,
@@ -1783,7 +2513,14 @@ fn verify_map_get_contract(
         "MapGet metadata",
     )?;
     let key_start = checked_slot_offset_for_verifier(func, pc, inst.c, 1, "MapGet key")?;
-    verify_structural_range(func, pc, opcode, key_start, layout.key_slots, "MapGet key")?;
+    verify_layout(
+        func,
+        pc,
+        opcode,
+        key_start,
+        &layout.key_layout,
+        "MapGet key",
+    )?;
     let output_slots =
         layout
             .output_slots()
@@ -1794,7 +2531,19 @@ fn verify_map_get_contract(
                 count: layout.val_slots,
                 access: "MapGet destination",
             })?;
-    verify_structural_range(func, pc, opcode, inst.a, output_slots, "MapGet destination")
+    let mut output_layout = layout.val_layout.clone();
+    if layout.has_ok {
+        output_layout.push(SlotType::Value);
+    }
+    debug_assert_eq!(output_layout.len(), output_slots as usize);
+    verify_layout(
+        func,
+        pc,
+        opcode,
+        inst.a,
+        &output_layout,
+        "MapGet destination",
+    )
 }
 
 fn verify_map_set_contract(
@@ -1804,7 +2553,7 @@ fn verify_map_set_contract(
 ) -> Result<(), JitMetadataError> {
     let opcode = Opcode::MapSet;
     let layout = map_set_layout(func, pc, opcode)?;
-    verify_range(func, pc, inst.a, 1, "MapSet map")?;
+    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], "MapSet map")?;
     verify_layout(
         func,
         pc,
@@ -1814,8 +2563,15 @@ fn verify_map_set_contract(
         "MapSet metadata",
     )?;
     let key_start = checked_slot_offset_for_verifier(func, pc, inst.b, 1, "MapSet key")?;
-    verify_structural_range(func, pc, opcode, key_start, layout.key_slots, "MapSet key")?;
-    verify_structural_range(func, pc, opcode, inst.c, layout.val_slots, "MapSet value")
+    verify_layout(
+        func,
+        pc,
+        opcode,
+        key_start,
+        &layout.key_layout,
+        "MapSet key",
+    )?;
+    verify_layout(func, pc, opcode, inst.c, &layout.val_layout, "MapSet value")
 }
 
 fn verify_map_delete_contract(
@@ -1824,8 +2580,15 @@ fn verify_map_delete_contract(
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
     let opcode = Opcode::MapDelete;
-    let key_slots = map_delete_key_slots(func, pc, opcode)?;
-    verify_range(func, pc, inst.a, 1, "MapDelete map")?;
+    let key_layout = map_delete_key_layout(func, pc, opcode)?;
+    verify_layout(
+        func,
+        pc,
+        opcode,
+        inst.a,
+        &[SlotType::GcRef],
+        "MapDelete map",
+    )?;
     verify_layout(
         func,
         pc,
@@ -1835,7 +2598,7 @@ fn verify_map_delete_contract(
         "MapDelete metadata",
     )?;
     let key_start = checked_slot_offset_for_verifier(func, pc, inst.b, 1, "MapDelete key")?;
-    verify_structural_range(func, pc, opcode, key_start, key_slots, "MapDelete key")
+    verify_layout(func, pc, opcode, key_start, &key_layout, "MapDelete key")
 }
 
 fn map_get_layout(
@@ -1870,20 +2633,143 @@ fn map_set_layout(
         })
 }
 
-fn map_delete_key_slots(
+fn map_delete_key_layout(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
-) -> Result<u16, JitMetadataError> {
+) -> Result<Vec<SlotType>, JitMetadataError> {
     func.jit_metadata
         .get(pc)
-        .and_then(crate::metadata::map_delete_key_slots_from_instruction)
+        .and_then(crate::metadata::map_delete_key_layout_from_instruction)
         .ok_or_else(|| JitMetadataError::MissingLayout {
             func: func.name.clone(),
             pc,
             opcode,
             layout: "MapDelete",
         })
+}
+
+fn ptr_value_layout(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+) -> Result<Vec<SlotType>, JitMetadataError> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::PtrLayout { value_layout }) => Ok(value_layout.clone()),
+        _ => Err(JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "PtrLayout",
+        }),
+    }
+}
+
+fn slot_elem_layout(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+) -> Result<Vec<SlotType>, JitMetadataError> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::SlotLayout { elem_layout }) => Ok(elem_layout.clone()),
+        _ => Err(JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "SlotLayout",
+        }),
+    }
+}
+
+fn call_layout(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+) -> Result<(Vec<SlotType>, Vec<SlotType>), JitMetadataError> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::CallLayout {
+            arg_layout,
+            ret_layout,
+        }) => Ok((arg_layout.clone(), ret_layout.clone())),
+        _ => Err(JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "CallLayout",
+        }),
+    }
+}
+
+fn call_extern_layout(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+) -> Result<(Vec<SlotType>, Vec<SlotType>), JitMetadataError> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::CallExternLayout {
+            arg_layout,
+            ret_layout,
+        }) => Ok((arg_layout.clone(), ret_layout.clone())),
+        _ => Err(JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "CallExternLayout",
+        }),
+    }
+}
+
+fn queue_elem_layout(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+) -> Result<Vec<SlotType>, JitMetadataError> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::QueueLayout { elem_layout }) => Ok(elem_layout.clone()),
+        _ => Err(JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "QueueLayout",
+        }),
+    }
+}
+
+fn map_iter_layout(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+) -> Result<(Vec<SlotType>, Vec<SlotType>), JitMetadataError> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::MapIterNext {
+            key_layout,
+            val_layout,
+        }) => Ok((key_layout.clone(), val_layout.clone())),
+        _ => Err(JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "MapIterNext",
+        }),
+    }
+}
+
+fn iface_assert_result_layout(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+) -> Result<Vec<SlotType>, JitMetadataError> {
+    match func.jit_metadata.get(pc) {
+        Some(JitInstructionMetadata::IfaceAssertLayout { result_layout }) => {
+            Ok(result_layout.clone())
+        }
+        _ => Err(JitMetadataError::MissingLayout {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            layout: "IfaceAssertLayout",
+        }),
+    }
 }
 
 fn checked_slot_offset_for_verifier(
@@ -1912,8 +2798,28 @@ fn verify_ptr_set_contract(
     src_slot: u16,
     flags: u8,
 ) -> Result<(), JitMetadataError> {
-    verify_range(func, pc, ptr_slot, 1, "PtrSet pointer")?;
+    let value_layout = ptr_value_layout(func, pc, opcode)?;
+    if value_layout.len() != 1 {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "PtrSet metadata layout slots {} do not match encoded count 1",
+                value_layout.len()
+            ),
+        });
+    }
+    verify_layout(
+        func,
+        pc,
+        opcode,
+        ptr_slot,
+        &[SlotType::GcRef],
+        "PtrSet pointer",
+    )?;
     let source = local_layout(func, pc, src_slot, 1, "PtrSet source")?;
+    verify_raw_or_exact_layout_matches(func, pc, opcode, src_slot, &value_layout, "PtrSet source")?;
     let requires_barrier = matches!(source[0], SlotType::GcRef | SlotType::Interface1);
     let has_barrier = (flags & 1) != 0;
     if requires_barrier && !has_barrier {
@@ -2013,8 +2919,35 @@ fn verify_ptr_get_contract(
     ptr_slot: u16,
     count: u16,
 ) -> Result<(), JitMetadataError> {
-    verify_range(func, pc, ptr_slot, 1, "PtrGet pointer")?;
-    verify_structural_range(func, pc, opcode, dst_start, count, "PtrGet destination")
+    let value_layout = ptr_value_layout(func, pc, opcode)?;
+    if value_layout.len() != count as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "PtrGet metadata layout slots {} do not match encoded count {}",
+                value_layout.len(),
+                count
+            ),
+        });
+    }
+    verify_layout(
+        func,
+        pc,
+        opcode,
+        ptr_slot,
+        &[SlotType::GcRef],
+        "PtrGet pointer",
+    )?;
+    verify_local_layout_matches(
+        func,
+        pc,
+        opcode,
+        dst_start,
+        &value_layout,
+        "PtrGet destination",
+    )
 }
 
 fn verify_slot_get_contract(
@@ -2026,6 +2959,19 @@ fn verify_slot_get_contract(
     index_slot: u16,
     count: u16,
 ) -> Result<(), JitMetadataError> {
+    let elem_layout = slot_elem_layout(func, pc, opcode)?;
+    if elem_layout.len() != count as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "SlotGet metadata layout slots {} do not match encoded count {}",
+                elem_layout.len(),
+                count
+            ),
+        });
+    }
     verify_layout(
         func,
         pc,
@@ -2034,8 +2980,41 @@ fn verify_slot_get_contract(
         &[SlotType::Value],
         "SlotGet index",
     )?;
-    verify_raw_or_structural_range(func, pc, opcode, base_start, count, "SlotGet element")?;
-    verify_raw_or_structural_range(func, pc, opcode, dst_start, count, "SlotGet destination")
+    if count == 1 {
+        verify_raw_or_exact_layout_matches(
+            func,
+            pc,
+            opcode,
+            base_start,
+            &elem_layout,
+            "SlotGet element",
+        )?;
+        verify_raw_or_exact_layout_matches(
+            func,
+            pc,
+            opcode,
+            dst_start,
+            &elem_layout,
+            "SlotGet destination",
+        )
+    } else {
+        verify_local_layout_matches(
+            func,
+            pc,
+            opcode,
+            base_start,
+            &elem_layout,
+            "SlotGet element",
+        )?;
+        verify_local_layout_matches(
+            func,
+            pc,
+            opcode,
+            dst_start,
+            &elem_layout,
+            "SlotGet destination",
+        )
+    }
 }
 
 fn verify_slot_set_contract(
@@ -2047,6 +3026,19 @@ fn verify_slot_set_contract(
     src_start: u16,
     count: u16,
 ) -> Result<(), JitMetadataError> {
+    let elem_layout = slot_elem_layout(func, pc, opcode)?;
+    if elem_layout.len() != count as usize {
+        return Err(JitMetadataError::CallShapeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            detail: format!(
+                "SlotSet metadata layout slots {} do not match encoded count {}",
+                elem_layout.len(),
+                count
+            ),
+        });
+    }
     verify_layout(
         func,
         pc,
@@ -2055,8 +3047,15 @@ fn verify_slot_set_contract(
         &[SlotType::Value],
         "SlotSet index",
     )?;
-    verify_raw_or_structural_range(func, pc, opcode, base_start, count, "SlotSet element")?;
-    verify_raw_or_structural_range(func, pc, opcode, src_start, count, "SlotSet source")
+    verify_local_layout_matches(
+        func,
+        pc,
+        opcode,
+        base_start,
+        &elem_layout,
+        "SlotSet element",
+    )?;
+    verify_local_layout_matches(func, pc, opcode, src_start, &elem_layout, "SlotSet source")
 }
 
 fn verify_copy_n_contract(
@@ -2066,8 +3065,32 @@ fn verify_copy_n_contract(
     inst: vo_runtime::instruction::Instruction,
 ) -> Result<(), JitMetadataError> {
     let count = inst.copy_n_count();
-    verify_raw_or_structural_range(func, pc, opcode, inst.a, count, "CopyN destination")?;
-    verify_raw_or_structural_range(func, pc, opcode, inst.b, count, "CopyN source")
+    let source = local_layout(func, pc, inst.b, count, "CopyN source")?;
+    verify_structural_layout(func, pc, opcode, inst.b, source, "CopyN source")?;
+    verify_local_layout_matches(func, pc, opcode, inst.a, source, "CopyN destination")
+}
+
+fn verify_copy_contract(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    inst: vo_runtime::instruction::Instruction,
+) -> Result<(), JitMetadataError> {
+    let source = local_layout(func, pc, inst.b, 1, "Copy source")?;
+    let actual = local_layout(func, pc, inst.a, 1, "Copy destination")?;
+    if actual == source {
+        Ok(())
+    } else {
+        Err(JitMetadataError::SlotTypeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            access: "Copy destination",
+            slot: inst.a,
+            expected: source.to_vec(),
+            actual: actual.to_vec(),
+        })
+    }
 }
 
 fn verify_iface_assign_source(
@@ -2075,9 +3098,8 @@ fn verify_iface_assign_source(
     pc: usize,
     opcode: Opcode,
     src_slot: u16,
-    raw_vk: u8,
+    vk: ValueKind,
 ) -> Result<(), JitMetadataError> {
-    let vk = ValueKind::from_u8(raw_vk);
     match vk {
         ValueKind::Interface => {
             verify_interface_pair(func, pc, opcode, src_slot, "IfaceAssign source")
@@ -2091,7 +3113,14 @@ fn verify_iface_assign_source(
         | ValueKind::Closure
         | ValueKind::Pointer
         | ValueKind::Port
-        | ValueKind::Island => verify_range(func, pc, src_slot, 1, "IfaceAssign source"),
+        | ValueKind::Island => verify_layout(
+            func,
+            pc,
+            opcode,
+            src_slot,
+            &[SlotType::GcRef],
+            "IfaceAssign source",
+        ),
         ValueKind::Float32 | ValueKind::Float64 => verify_layout(
             func,
             pc,
@@ -2157,7 +3186,7 @@ fn verify_interface_or_raw_pair(
     }
 }
 
-fn verify_structural_range(
+fn verify_value_range(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
@@ -2165,8 +3194,14 @@ fn verify_structural_range(
     count: u16,
     access: &'static str,
 ) -> Result<(), JitMetadataError> {
-    let layout = local_layout(func, pc, start, count, access)?;
-    verify_structural_layout(func, pc, opcode, start, layout, access)
+    verify_layout(
+        func,
+        pc,
+        opcode,
+        start,
+        &vec![SlotType::Value; count as usize],
+        access,
+    )
 }
 
 fn verify_local_layout_matches(
@@ -2194,18 +3229,28 @@ fn verify_local_layout_matches(
     }
 }
 
-fn verify_raw_or_structural_range(
+fn verify_raw_or_exact_layout_matches(
     func: &FunctionDef,
     pc: usize,
     opcode: Opcode,
     start: u16,
-    count: u16,
+    expected: &[SlotType],
     access: &'static str,
 ) -> Result<(), JitMetadataError> {
-    if count == 1 {
-        verify_range(func, pc, start, count, access)
+    let actual = local_layout(func, pc, start, expected.len() as u16, access)?;
+    if actual == expected {
+        Ok(())
     } else {
-        verify_structural_range(func, pc, opcode, start, count, access)
+        verify_structural_layout(func, pc, opcode, start, actual, access)?;
+        Err(JitMetadataError::SlotTypeMismatch {
+            func: func.name.clone(),
+            pc,
+            opcode,
+            access,
+            slot: start,
+            expected: expected.to_vec(),
+            actual: actual.to_vec(),
+        })
     }
 }
 
@@ -2356,7 +3401,7 @@ fn verify_metadata_kind(
     flags: u8,
     metadata: &JitInstructionMetadata,
 ) -> Result<(), JitMetadataError> {
-    match *metadata {
+    match metadata {
         JitInstructionMetadata::None => {
             if let Some(layout) = required_layout(opcode, flags) {
                 return Err(JitMetadataError::MissingLayout {
@@ -2397,12 +3442,14 @@ fn verify_metadata_kind(
                 return Err(JitMetadataError::InvalidElemLayout {
                     func: func.name.clone(),
                     pc,
-                    elem_bytes,
+                    elem_bytes: *elem_bytes,
                 });
             };
             if func.code[pc].flags != 0 {
                 let from_flags = crate::metadata::elem_layout_from_flags(func.code[pc].flags);
-                if from_flags != layout {
+                if from_flags.bytes != layout.bytes
+                    || from_flags.needs_sign_extend != layout.needs_sign_extend
+                {
                     return Err(JitMetadataError::InconsistentElemLayout {
                         func: func.name.clone(),
                         pc,
@@ -2421,11 +3468,65 @@ fn verify_metadata_kind(
         JitInstructionMetadata::MapDelete { .. } => (opcode == Opcode::MapDelete)
             .then_some(())
             .ok_or_else(|| wrong_kind(func, pc, opcode, "MapDelete")),
+        JitInstructionMetadata::PtrLayout { .. } => matches!(
+            opcode,
+            Opcode::PtrGet | Opcode::PtrGetN | Opcode::PtrSet | Opcode::PtrSetN
+        )
+        .then_some(())
+        .ok_or_else(|| wrong_kind(func, pc, opcode, "PtrLayout")),
+        JitInstructionMetadata::SlotLayout { .. } => matches!(
+            opcode,
+            Opcode::SlotGet | Opcode::SlotGetN | Opcode::SlotSet | Opcode::SlotSetN
+        )
+        .then_some(())
+        .ok_or_else(|| wrong_kind(func, pc, opcode, "SlotLayout")),
+        JitInstructionMetadata::CallLayout { .. } => (matches!(
+            opcode,
+            Opcode::CallClosure | Opcode::CallIface | Opcode::GoIsland
+        ) || (matches!(
+            opcode,
+            Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush
+        ) && (flags & 1) != 0))
+            .then_some(())
+            .ok_or_else(|| wrong_kind(func, pc, opcode, "CallLayout")),
+        JitInstructionMetadata::CallExternLayout { .. } => (opcode == Opcode::CallExtern)
+            .then_some(())
+            .ok_or_else(|| wrong_kind(func, pc, opcode, "CallExternLayout")),
+        JitInstructionMetadata::QueueLayout { .. } => matches!(
+            opcode,
+            Opcode::QueueSend | Opcode::QueueRecv | Opcode::SelectSend | Opcode::SelectRecv
+        )
+        .then_some(())
+        .ok_or_else(|| wrong_kind(func, pc, opcode, "QueueLayout")),
+        JitInstructionMetadata::MapIterNext { .. } => (opcode == Opcode::MapIterNext)
+            .then_some(())
+            .ok_or_else(|| wrong_kind(func, pc, opcode, "MapIterNext")),
+        JitInstructionMetadata::IfaceAssertLayout { .. } => (opcode == Opcode::IfaceAssert)
+            .then_some(())
+            .ok_or_else(|| wrong_kind(func, pc, opcode, "IfaceAssertLayout")),
+        JitInstructionMetadata::LegacyMapGet { .. } => Err(unsupported_legacy_metadata(
+            func,
+            pc,
+            opcode,
+            "LegacyMapGet",
+        )),
+        JitInstructionMetadata::LegacyMapSet { .. } => Err(unsupported_legacy_metadata(
+            func,
+            pc,
+            opcode,
+            "LegacyMapSet",
+        )),
+        JitInstructionMetadata::LegacyMapDelete { .. } => Err(unsupported_legacy_metadata(
+            func,
+            pc,
+            opcode,
+            "LegacyMapDelete",
+        )),
         JitInstructionMetadata::LoopEnd { end_pc } => {
             if opcode != Opcode::Hint || flags != HINT_LOOP {
                 return Err(wrong_kind(func, pc, opcode, "LoopEnd"));
             }
-            let end_pc = end_pc as usize;
+            let end_pc = *end_pc as usize;
             let begin_pc = pc + 1;
             if begin_pc >= func.code.len() || end_pc >= func.code.len() || begin_pc > end_pc {
                 return Err(JitMetadataError::InvalidLoopEnd {
@@ -2505,11 +3606,21 @@ fn required_layout(opcode: Opcode, flags: u8) -> Option<&'static str> {
         | Opcode::SliceGet
         | Opcode::SliceSet
         | Opcode::SliceAddr
-        | Opcode::SliceAppend
-            if flags == 0 =>
-        {
-            Some("ElemLayout")
+        | Opcode::SliceAppend => Some("ElemLayout"),
+        Opcode::PtrGet | Opcode::PtrGetN | Opcode::PtrSet | Opcode::PtrSetN => Some("PtrLayout"),
+        Opcode::SlotGet | Opcode::SlotGetN | Opcode::SlotSet | Opcode::SlotSetN => {
+            Some("SlotLayout")
         }
+        Opcode::CallClosure | Opcode::CallIface | Opcode::GoIsland => Some("CallLayout"),
+        Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush if (flags & 1) != 0 => {
+            Some("CallLayout")
+        }
+        Opcode::CallExtern => Some("CallExternLayout"),
+        Opcode::QueueSend | Opcode::QueueRecv | Opcode::SelectSend | Opcode::SelectRecv => {
+            Some("QueueLayout")
+        }
+        Opcode::MapIterNext => Some("MapIterNext"),
+        Opcode::IfaceAssert => Some("IfaceAssertLayout"),
         Opcode::MapGet => Some("MapGet"),
         Opcode::MapSet => Some("MapSet"),
         Opcode::MapDelete => Some("MapDelete"),
@@ -2529,9 +3640,27 @@ pub(crate) fn jit_metadata_requirement(opcode: Opcode, _flags: u8) -> JitMetadat
         | Opcode::SliceSet
         | Opcode::SliceAddr
         | Opcode::SliceAppend => JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        Opcode::PtrGet | Opcode::PtrGetN | Opcode::PtrSet | Opcode::PtrSetN => {
+            JitMetadataRequirement::PtrLayout
+        }
+        Opcode::SlotGet | Opcode::SlotGetN | Opcode::SlotSet | Opcode::SlotSetN => {
+            JitMetadataRequirement::SlotLayout
+        }
+        Opcode::CallClosure | Opcode::CallIface | Opcode::GoIsland => {
+            JitMetadataRequirement::CallLayout
+        }
+        Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
+            JitMetadataRequirement::CallLayoutWhenClosureShape
+        }
+        Opcode::CallExtern => JitMetadataRequirement::CallExternLayout,
+        Opcode::QueueSend | Opcode::QueueRecv | Opcode::SelectSend | Opcode::SelectRecv => {
+            JitMetadataRequirement::QueueLayout
+        }
+        Opcode::MapIterNext => JitMetadataRequirement::MapIterNext,
         Opcode::MapGet => JitMetadataRequirement::MapGet,
         Opcode::MapSet => JitMetadataRequirement::MapSet,
         Opcode::MapDelete => JitMetadataRequirement::MapDelete,
+        Opcode::IfaceAssert => JitMetadataRequirement::IfaceAssertLayout,
         Opcode::Hint => JitMetadataRequirement::LoopEndForHintLoop,
         _ => JitMetadataRequirement::None,
     }
@@ -2544,6 +3673,20 @@ fn wrong_kind(
     metadata: &'static str,
 ) -> JitMetadataError {
     JitMetadataError::WrongMetadataKind {
+        func: func.name.clone(),
+        pc,
+        opcode,
+        metadata,
+    }
+}
+
+fn unsupported_legacy_metadata(
+    func: &FunctionDef,
+    pc: usize,
+    opcode: Opcode,
+    metadata: &'static str,
+) -> JitMetadataError {
+    JitMetadataError::UnsupportedLegacyMetadata {
         func: func.name.clone(),
         pc,
         opcode,
@@ -2606,6 +3749,9 @@ mod tests {
         let borrowed_scan_slots_prefix =
             FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
         let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
+        let has_defer = code
+            .iter()
+            .any(|inst| matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush));
         FunctionDef {
             name: "verify".to_string(),
             param_count: 0,
@@ -2613,13 +3759,14 @@ mod tests {
             local_slots,
             gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots,
+            ret_slot_types: vec![SlotType::Value; ret_slots as usize],
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
             heap_ret_slots: Vec::new(),
             is_closure: false,
             error_ret_slot,
-            has_defer: false,
+            has_defer,
             has_calls,
             has_call_extern,
             code,
@@ -2639,6 +3786,20 @@ mod tests {
     fn jump(offset: i32) -> Instruction {
         let encoded = offset as u32;
         Instruction::new(Opcode::Jump, 0, encoded as u16, (encoded >> 16) as u16)
+    }
+
+    fn refresh_function_metadata(func: &mut FunctionDef) {
+        func.local_slots = func.slot_types.len() as u16;
+        func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
+        func.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+        func.has_defer = func
+            .code
+            .iter()
+            .any(|inst| matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush));
+        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&func.code);
+        func.has_calls = has_calls;
+        func.has_call_extern = has_call_extern;
     }
 
     #[test]
@@ -2712,6 +3873,227 @@ mod tests {
     }
 
     #[test]
+    fn rejects_copyn_source_destination_layout_mismatch() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::new(Opcode::CopyN, 0, 2, 2)],
+            vec![JitInstructionMetadata::None],
+            vec![
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::Value,
+                SlotType::GcRef,
+            ],
+            0,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::CopyN,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_function_def_invariant_mismatches_before_instruction_review() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_shape(
+            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::Value],
+            2,
+            0,
+            -1,
+        ));
+        module.functions[0].local_slots = 3;
+
+        let err = verify_jit_metadata(&module.functions[0], &module)
+            .expect_err("local_slots/slot_types drift must fail before JIT lowering");
+        assert!(
+            matches!(err, JitMetadataError::FunctionInvariant { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_function_def_derived_flag_drift() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::new(Opcode::CallExtern, 0, 0, 0)],
+            vec![JitInstructionMetadata::CallExternLayout {
+                arg_layout: Vec::new(),
+                ret_layout: Vec::new(),
+            }],
+            vec![SlotType::Value],
+            0,
+        ));
+        module.functions[0].has_call_extern = false;
+
+        let err = verify_jit_metadata(&module.functions[0], &module)
+            .expect_err("derived call flags must be recomputed at the verifier boundary");
+        assert!(
+            matches!(err, JitMetadataError::FunctionInvariant { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_single_copy_source_destination_layout_mismatch() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::new(Opcode::Copy, 0, 1, 0)],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::GcRef, SlotType::Value],
+            0,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::Copy,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_dynamic_closure_and_island_operands_outside_gcref_slots() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::new(Opcode::CallClosure, 0, 1, 0)],
+            vec![JitInstructionMetadata::CallLayout {
+                arg_layout: Vec::new(),
+                ret_layout: Vec::new(),
+            }],
+            vec![SlotType::Value],
+            0,
+        ));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(Opcode::GoIsland, 1, 0, 1, 2)],
+            vec![JitInstructionMetadata::CallLayout {
+                arg_layout: vec![SlotType::Value],
+                ret_layout: Vec::new(),
+            }],
+            vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
+            0,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::CallClosure,
+                access: "CallClosure callee",
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[1], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::GoIsland,
+                access: "GoIsland island",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_integer_control_and_len_ops_on_root_typed_slots() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::new(Opcode::JumpIf, 0, 1, 0)],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::GcRef],
+            0,
+        ));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(
+                Opcode::ForLoop,
+                0,
+                0,
+                1,
+                (-1i16) as u16,
+            )],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::GcRef, SlotType::Value],
+            0,
+        ));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::new(Opcode::MapLen, 0, 1, 0)],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::GcRef, SlotType::GcRef],
+            0,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::JumpIf,
+                access: "JumpIf condition",
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[1], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::ForLoop,
+                access: "ForLoop index",
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[2], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::MapLen,
+                access: "MapLen destination",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_iface_assign_invalid_flags_and_reference_source_drift() {
+        let mut module = VoModule::new("verify".to_string());
+        module.constants.push(Constant::Int(0));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(Opcode::IfaceAssign, 250, 0, 2, 0)],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::Interface0, SlotType::Interface1, SlotType::Value],
+            0,
+        ));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(
+                Opcode::IfaceAssign,
+                ValueKind::String as u8,
+                0,
+                2,
+                0,
+            )],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::Interface0, SlotType::Interface1, SlotType::Value],
+            0,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::InvalidValueKind {
+                opcode: Opcode::IfaceAssign,
+                raw: 250,
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[1], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::IfaceAssign,
+                access: "IfaceAssign source",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn rejects_iface_assign_and_panic_without_interface_pairs() {
         let mut module = VoModule::new("verify".to_string());
         module.functions.push(make_func_with_slot_types(
@@ -2754,6 +4136,7 @@ mod tests {
             2,
             0,
         ));
+        module.functions[0].ret_slot_types = vec![SlotType::GcRef, SlotType::Value];
 
         assert!(matches!(
             verify_jit_metadata(&module.functions[0], &module),
@@ -2782,13 +4165,19 @@ mod tests {
         );
         let closure = make_func_with_slot_types(
             vec![Instruction::new(Opcode::CallClosure, 0, 1, 1 << 8)],
-            vec![JitInstructionMetadata::None],
-            vec![SlotType::Value, SlotType::Interface1],
+            vec![JitInstructionMetadata::CallLayout {
+                arg_layout: vec![SlotType::Interface0],
+                ret_layout: Vec::new(),
+            }],
+            vec![SlotType::GcRef, SlotType::Interface1],
             0,
         );
         let iface = make_func_with_slot_types(
             vec![Instruction::new(Opcode::CallIface, 0, 2, 0)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::CallLayout {
+                arg_layout: Vec::new(),
+                ret_layout: Vec::new(),
+            }],
             vec![SlotType::GcRef, SlotType::Value],
             0,
         );
@@ -2822,6 +4211,59 @@ mod tests {
     }
 
     #[test]
+    fn rejects_shared_closure_call_without_precise_arg_layout() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(Opcode::GoStart, 1, 0, 1, 2)],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::GcRef, SlotType::Value, SlotType::GcRef],
+            0,
+        ));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(Opcode::DeferPush, 1, 0, 1, 2)],
+            vec![JitInstructionMetadata::CallLayout {
+                arg_layout: vec![SlotType::Value, SlotType::GcRef],
+                ret_layout: Vec::new(),
+            }],
+            vec![SlotType::GcRef, SlotType::Value, SlotType::Value],
+            0,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::MissingLayout {
+                opcode: Opcode::GoStart,
+                layout: "CallLayout",
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[1], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::DeferPush,
+                access: "closure call args",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn accepts_shared_closure_call_with_precise_arg_layout() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(Opcode::GoStart, 1, 0, 1, 2)],
+            vec![JitInstructionMetadata::CallLayout {
+                arg_layout: vec![SlotType::Value, SlotType::GcRef],
+                ret_layout: Vec::new(),
+            }],
+            vec![SlotType::GcRef, SlotType::Value, SlotType::GcRef],
+            0,
+        ));
+
+        verify_jit_metadata(&module.functions[0], &module).unwrap();
+    }
+
+    #[test]
     fn rejects_call_extern_param_kind_mismatch() {
         let mut module = VoModule::new("verify".to_string());
         module.externs.push(ExternDef {
@@ -2833,7 +4275,10 @@ mod tests {
         });
         module.functions.push(make_func(
             vec![Instruction::with_flags(Opcode::CallExtern, 2, 0, 0, 0)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::CallExternLayout {
+                arg_layout: Vec::new(),
+                ret_layout: Vec::new(),
+            }],
             2,
         ));
 
@@ -3002,13 +4447,17 @@ mod tests {
         ));
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::with_flags(Opcode::PtrSet, 0, 0, 0, 1)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::PtrLayout {
+                value_layout: vec![SlotType::GcRef],
+            }],
             vec![SlotType::GcRef, SlotType::GcRef],
             0,
         ));
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::with_flags(Opcode::SlotSetN, 2, 0, 2, 3)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::SlotLayout {
+                elem_layout: vec![SlotType::Value, SlotType::Value],
+            }],
             vec![
                 SlotType::Value,
                 SlotType::Value,
@@ -3078,7 +4527,9 @@ mod tests {
         let mut module = VoModule::new("verify".to_string());
         module.functions.push(make_func(
             vec![Instruction::new(Opcode::LoadInt, 0, 1, 0)],
-            vec![JitInstructionMetadata::MapDelete { key_slots: 1 }],
+            vec![JitInstructionMetadata::MapDelete {
+                key_layout: vec![SlotType::Value],
+            }],
             1,
         ));
 
@@ -3382,8 +4833,10 @@ mod tests {
     fn rejects_slot_get_contract_mismatches() {
         let mut module = VoModule::new("verify".to_string());
         module.functions.push(make_func_with_slot_types(
-            vec![Instruction::with_flags(Opcode::SlotGetN, 2, 0, 1, 2)],
-            vec![JitInstructionMetadata::None],
+            vec![Instruction::with_flags(Opcode::SlotGetN, 2, 2, 0, 1)],
+            vec![JitInstructionMetadata::SlotLayout {
+                elem_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            }],
             vec![
                 SlotType::Interface0,
                 SlotType::Value,
@@ -3407,7 +4860,9 @@ mod tests {
         let mut module = VoModule::new("verify".to_string());
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::new(Opcode::SlotGet, 2, 0, 1)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::SlotLayout {
+                elem_layout: vec![SlotType::Interface0],
+            }],
             vec![SlotType::Interface0, SlotType::Value, SlotType::Interface0],
             0,
         ));
@@ -3416,16 +4871,78 @@ mod tests {
     }
 
     #[test]
-    fn accepts_pointer_read_from_value_slot_used_by_current_codegen_metadata() {
+    fn rejects_pointer_reads_from_non_root_slots() {
         let mut module = VoModule::new("verify".to_string());
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::new(Opcode::PtrGet, 0, 1, 0)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::PtrLayout {
+                value_layout: vec![SlotType::Value],
+            }],
             vec![SlotType::Value, SlotType::Value],
             0,
         ));
 
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::PtrGet,
+                access: "PtrGet pointer",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn accepts_pointer_reads_from_gc_root_slots() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::new(Opcode::PtrGet, 0, 1, 0)],
+            vec![JitInstructionMetadata::PtrLayout {
+                value_layout: vec![SlotType::Value],
+            }],
+            vec![SlotType::Value, SlotType::GcRef],
+            0,
+        ));
+
         assert!(verify_jit_metadata(&module.functions[0], &module).is_ok());
+    }
+
+    #[test]
+    fn rejects_interior_pointer_destinations_outside_gc_root_slots() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::new(Opcode::PtrAdd, 0, 1, 2)],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
+            0,
+        ));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(Opcode::SliceAddr, 0x08, 0, 1, 2)],
+            vec![JitInstructionMetadata::ElemLayout {
+                elem_bytes: 8,
+                needs_sign_extend: false,
+                slot_layout: vec![SlotType::Value],
+            }],
+            vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
+            0,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::PtrAdd,
+                access: "PtrAdd destination",
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[1], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::SliceAddr,
+                access: "SliceAddr destination",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3436,6 +4953,7 @@ mod tests {
             vec![JitInstructionMetadata::ElemLayout {
                 elem_bytes: 0,
                 needs_sign_extend: false,
+                slot_layout: Vec::new(),
             }],
             vec![
                 SlotType::Value,
@@ -3457,6 +4975,7 @@ mod tests {
             vec![JitInstructionMetadata::ElemLayout {
                 elem_bytes: 0,
                 needs_sign_extend: true,
+                slot_layout: Vec::new(),
             }],
             4,
         ));
@@ -3475,6 +4994,7 @@ mod tests {
             vec![JitInstructionMetadata::ElemLayout {
                 elem_bytes: 8,
                 needs_sign_extend: false,
+                slot_layout: vec![SlotType::Value],
             }],
             4,
         ));
@@ -3496,7 +5016,10 @@ mod tests {
 
         assert!(matches!(
             verify_jit_metadata(&module.functions[0], &module),
-            Err(JitMetadataError::SlotOutOfRange { access: "read", .. })
+            Err(JitMetadataError::SlotOutOfRange {
+                access: "Copy source",
+                ..
+            })
         ));
     }
 
@@ -3526,9 +5049,12 @@ mod tests {
             vec![JitInstructionMetadata::ElemLayout {
                 elem_bytes: 24,
                 needs_sign_extend: false,
+                slot_layout: vec![SlotType::Value; 3],
             }],
             4,
         ));
+        module.functions[0].slot_types[0] = SlotType::GcRef;
+        refresh_function_metadata(&mut module.functions[0]);
 
         assert!(matches!(
             verify_jit_metadata(&module.functions[0], &module),
@@ -3603,6 +5129,7 @@ mod tests {
             vec![JitInstructionMetadata::ElemLayout {
                 elem_bytes: 16,
                 needs_sign_extend: false,
+                slot_layout: vec![SlotType::Value; 2],
             }],
             vec![
                 SlotType::Interface0,
@@ -3617,6 +5144,7 @@ mod tests {
             vec![JitInstructionMetadata::ElemLayout {
                 elem_bytes: 16,
                 needs_sign_extend: false,
+                slot_layout: vec![SlotType::Value; 2],
             }],
             vec![
                 SlotType::Value,
@@ -3669,8 +5197,8 @@ mod tests {
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::new(Opcode::MapGet, 8, 1, 4)],
             vec![JitInstructionMetadata::MapGet {
-                key_slots: 2,
-                val_slots: 2,
+                key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+                val_layout: vec![SlotType::Value, SlotType::GcRef],
                 has_ok: true,
             }],
             vec![
@@ -3691,8 +5219,8 @@ mod tests {
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::new(Opcode::MapSet, 1, 4, 8)],
             vec![JitInstructionMetadata::MapSet {
-                key_slots: 1,
-                val_slots: 2,
+                key_layout: vec![SlotType::Value],
+                val_layout: vec![SlotType::Interface0, SlotType::Interface1],
             }],
             vec![
                 SlotType::Value,
@@ -3710,7 +5238,9 @@ mod tests {
         ));
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::new(Opcode::MapDelete, 1, 4, 0)],
-            vec![JitInstructionMetadata::MapDelete { key_slots: 2 }],
+            vec![JitInstructionMetadata::MapDelete {
+                key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            }],
             vec![
                 SlotType::Value,
                 SlotType::GcRef,
@@ -3725,7 +5255,7 @@ mod tests {
 
         assert!(matches!(
             verify_jit_metadata(&module.functions[0], &module),
-            Err(JitMetadataError::InvalidInterfaceLayout {
+            Err(JitMetadataError::SlotTypeMismatch {
                 opcode: Opcode::MapGet,
                 access: "MapGet key",
                 ..
@@ -3733,7 +5263,7 @@ mod tests {
         ));
         assert!(matches!(
             verify_jit_metadata(&module.functions[1], &module),
-            Err(JitMetadataError::InvalidInterfaceLayout {
+            Err(JitMetadataError::SlotTypeMismatch {
                 opcode: Opcode::MapSet,
                 access: "MapSet value",
                 ..
@@ -3741,7 +5271,7 @@ mod tests {
         ));
         assert!(matches!(
             verify_jit_metadata(&module.functions[2], &module),
-            Err(JitMetadataError::InvalidInterfaceLayout {
+            Err(JitMetadataError::SlotTypeMismatch {
                 opcode: Opcode::MapDelete,
                 access: "MapDelete key",
                 ..
@@ -3754,19 +5284,25 @@ mod tests {
         let mut module = VoModule::new("verify".to_string());
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::with_flags(Opcode::QueueSend, 2, 0, 1, 0)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::QueueLayout {
+                elem_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            }],
             vec![SlotType::GcRef, SlotType::Interface0, SlotType::Value],
             0,
         ));
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::with_flags(Opcode::QueueRecv, 3, 0, 2, 0)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::QueueLayout {
+                elem_layout: vec![SlotType::GcRef],
+            }],
             vec![SlotType::GcRef, SlotType::Interface1, SlotType::GcRef],
             0,
         ));
         module.functions.push(make_func_with_slot_types(
             vec![Instruction::with_flags(Opcode::SelectSend, 2, 0, 1, 0)],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::QueueLayout {
+                elem_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            }],
             vec![SlotType::GcRef, SlotType::Interface0, SlotType::Value],
             0,
         ));
@@ -3778,7 +5314,9 @@ mod tests {
                 1,
                 0,
             )],
-            vec![JitInstructionMetadata::None],
+            vec![JitInstructionMetadata::IfaceAssertLayout {
+                result_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            }],
             vec![
                 SlotType::Value,
                 SlotType::GcRef,
@@ -3857,11 +5395,82 @@ mod tests {
     }
 
     #[test]
+    fn rejects_iface_assert_missing_or_mismatched_result_layout() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(
+                Opcode::IfaceAssert,
+                1 << 3,
+                0,
+                1,
+                0,
+            )],
+            vec![JitInstructionMetadata::None],
+            vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],
+            0,
+        ));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(
+                Opcode::IfaceAssert,
+                1 << 3,
+                0,
+                1,
+                0,
+            )],
+            vec![JitInstructionMetadata::IfaceAssertLayout {
+                result_layout: vec![SlotType::Value, SlotType::Value],
+            }],
+            vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],
+            0,
+        ));
+        module.functions.push(make_func_with_slot_types(
+            vec![Instruction::with_flags(
+                Opcode::IfaceAssert,
+                1 << 3,
+                0,
+                1,
+                0,
+            )],
+            vec![JitInstructionMetadata::IfaceAssertLayout {
+                result_layout: vec![SlotType::GcRef],
+            }],
+            vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],
+            0,
+        ));
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::MissingLayout {
+                opcode: Opcode::IfaceAssert,
+                layout: "IfaceAssertLayout",
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[1], &module),
+            Err(JitMetadataError::CallShapeMismatch {
+                opcode: Opcode::IfaceAssert,
+                ..
+            })
+        ));
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[2], &module),
+            Err(JitMetadataError::SlotTypeMismatch {
+                opcode: Opcode::IfaceAssert,
+                access: "IfaceAssert destination",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn rejects_wrong_slice_addr_layout_metadata_kind() {
         let mut module = VoModule::new("verify".to_string());
         module.functions.push(make_func(
             vec![Instruction::with_flags(Opcode::SliceAddr, 0, 0, 1, 2)],
-            vec![JitInstructionMetadata::MapDelete { key_slots: 1 }],
+            vec![JitInstructionMetadata::MapDelete {
+                key_layout: vec![SlotType::Value],
+            }],
             4,
         ));
 
@@ -3882,6 +5491,7 @@ mod tests {
             vec![JitInstructionMetadata::ElemLayout {
                 elem_bytes: 4,
                 needs_sign_extend: false,
+                slot_layout: vec![SlotType::Value],
             }],
             4,
         ));
@@ -3904,17 +5514,19 @@ mod tests {
                 JitInstructionMetadata::ElemLayout {
                     elem_bytes: 2,
                     needs_sign_extend: true,
+                    slot_layout: vec![SlotType::Value],
                 },
                 JitInstructionMetadata::ElemLayout {
                     elem_bytes: 4,
                     needs_sign_extend: false,
+                    slot_layout: vec![SlotType::Float],
                 },
             ],
             vec![
-                SlotType::Value,
+                SlotType::GcRef,
                 SlotType::GcRef,
                 SlotType::Value,
-                SlotType::Value,
+                SlotType::GcRef,
                 SlotType::GcRef,
                 SlotType::Value,
             ],
@@ -3930,12 +5542,14 @@ mod tests {
         module.functions.push(make_func(
             vec![Instruction::new(Opcode::MapGet, 0, 1, 2)],
             vec![JitInstructionMetadata::MapGet {
-                key_slots: 1,
-                val_slots: u16::MAX,
+                key_layout: vec![SlotType::Value],
+                val_layout: vec![SlotType::Value; u16::MAX as usize],
                 has_ok: true,
             }],
             4,
         ));
+        module.functions[0].slot_types[1] = SlotType::GcRef;
+        refresh_function_metadata(&mut module.functions[0]);
 
         assert!(matches!(
             verify_jit_metadata(&module.functions[0], &module),
@@ -3952,14 +5566,40 @@ mod tests {
         module.functions.push(make_func(
             vec![Instruction::new(Opcode::MapGet, 4, 1, 2)],
             vec![JitInstructionMetadata::MapGet {
-                key_slots: 2,
-                val_slots: 2,
+                key_layout: vec![SlotType::Value, SlotType::Value],
+                val_layout: vec![SlotType::Value, SlotType::Value],
                 has_ok: true,
             }],
             8,
         ));
+        module.functions[0].slot_types[1] = SlotType::GcRef;
+        refresh_function_metadata(&mut module.functions[0]);
 
         verify_jit_metadata(&module.functions[0], &module).expect("valid metadata");
+    }
+
+    #[test]
+    fn rejects_legacy_map_metadata_without_precise_slot_layouts() {
+        let mut module = VoModule::new("verify".to_string());
+        module.functions.push(make_func(
+            vec![Instruction::new(Opcode::MapSet, 1, 2, 4)],
+            vec![JitInstructionMetadata::LegacyMapSet {
+                key_slots: 1,
+                val_slots: 1,
+            }],
+            6,
+        ));
+        module.functions[0].slot_types[1] = SlotType::GcRef;
+        refresh_function_metadata(&mut module.functions[0]);
+
+        assert!(matches!(
+            verify_jit_metadata(&module.functions[0], &module),
+            Err(JitMetadataError::UnsupportedLegacyMetadata {
+                opcode: Opcode::MapSet,
+                metadata: "LegacyMapSet",
+                ..
+            })
+        ));
     }
 
     #[test]

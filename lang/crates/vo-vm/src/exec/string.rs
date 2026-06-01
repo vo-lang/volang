@@ -48,10 +48,15 @@ pub fn exec_str_concat(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut
 }
 
 #[inline]
-pub fn exec_str_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) {
+pub fn exec_str_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) -> bool {
     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
     let lo = stack_get(stack, bp + inst.c as usize) as usize;
     let hi = stack_get(stack, bp + inst.c as usize + 1) as usize;
-    let result = string::slice_of(gc, s, lo, hi);
-    stack_set(stack, bp + inst.a as usize, result as u64);
+    match string::slice_of(gc, s, lo, hi) {
+        Some(result) => {
+            stack_set(stack, bp + inst.a as usize, result as u64);
+            true
+        }
+        None => false,
+    }
 }

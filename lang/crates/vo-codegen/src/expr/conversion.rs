@@ -95,9 +95,17 @@ fn emit_string_conversion(
     };
 
     let extern_id = ctx.get_or_register_extern(extern_name);
-    let args_start = func.alloc_slots(&[SlotType::Value]);
-    func.emit_op(Opcode::Copy, args_start, src_reg, 0);
-    func.emit_call_extern(dst, extern_id, args_start, 1);
+    let arg_slot_types = info.type_slot_types(src_type);
+    let args_start = func.alloc_slots(&arg_slot_types);
+    func.emit_copy(args_start, src_reg, arg_slot_types.len() as u16);
+    let ret_slot_types = info.type_slot_types(dst_type);
+    func.emit_call_extern(
+        dst,
+        extern_id,
+        args_start,
+        arg_slot_types.len(),
+        &ret_slot_types,
+    );
     true
 }
 

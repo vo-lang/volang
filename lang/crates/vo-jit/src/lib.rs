@@ -504,7 +504,7 @@ mod tests {
     use super::*;
     use std::ptr;
     use std::sync::Arc;
-    use vo_runtime::bytecode::{Constant, FunctionDef, Module as VoModule};
+    use vo_runtime::bytecode::{Constant, FunctionDef, JitInstructionMetadata, Module as VoModule};
     use vo_runtime::instruction::{Instruction, Opcode};
     use vo_runtime::jit_api::{alloc_ic_table, DynCallIC};
     use vo_runtime::objects::interface::InterfaceSlot;
@@ -554,6 +554,7 @@ mod tests {
             local_slots,
             gc_scan_slots,
             ret_slots,
+            ret_slot_types: vec![SlotType::Value; ret_slots as usize],
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -797,15 +798,18 @@ mod tests {
 
     #[test]
     fn compile_supports_port_select_recv_opcode() {
-        let func = make_func_with_slot_types(
+        let mut func = make_func_with_slot_types(
             vec![
                 Instruction::with_flags(Opcode::SelectBegin, 1, 0, 0, 0),
-                Instruction::with_flags(Opcode::SelectRecv, 2, 0, 0, 0),
+                Instruction::with_flags(Opcode::SelectRecv, 2, 2, 0, 0),
                 Instruction::new(Opcode::SelectExec, 1, 0, 0),
                 Instruction::new(Opcode::Return, 0, 0, 0),
             ],
             vec![SlotType::GcRef, SlotType::Value, SlotType::Value],
         );
+        func.jit_metadata[1] = JitInstructionMetadata::QueueLayout {
+            elem_layout: vec![SlotType::Value],
+        };
         let mut module = VoModule::new("test".into());
         module.functions.push(func);
 
@@ -821,7 +825,7 @@ mod tests {
 
     #[test]
     fn compile_supports_port_queue_opcodes() {
-        let func = make_func_with_slot_types(
+        let mut func = make_func_with_slot_types(
             vec![
                 Instruction::with_flags(
                     Opcode::QueueNew,
@@ -845,6 +849,12 @@ mod tests {
                 SlotType::Value,
             ],
         );
+        func.jit_metadata[3] = JitInstructionMetadata::QueueLayout {
+            elem_layout: vec![SlotType::Value],
+        };
+        func.jit_metadata[4] = JitInstructionMetadata::QueueLayout {
+            elem_layout: vec![SlotType::Value],
+        };
         let mut module = VoModule::new("test".into());
         module.functions.push(func);
 

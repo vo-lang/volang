@@ -139,7 +139,7 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::RuntimeHelper,
             "GC allocation",
         ),
-        PtrGet | PtrSet | PtrGetN | PtrSetN | PtrAdd => cap(
+        PtrGet | PtrSet | PtrGetN | PtrSetN => cap(
             opcode,
             OpcodeFamily::Pointer,
             BackendStatus::Native,
@@ -147,14 +147,29 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::RuntimePanic,
             "heap pointer access",
         ),
-        AddI | SubI | MulI | DivI | DivU | ModI | ModU | NegI | AddF | SubF | MulF | DivF
-        | NegF => cap(
+        PtrAdd => cap(
+            PtrAdd,
+            OpcodeFamily::Pointer,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "pointer arithmetic",
+        ),
+        AddI | SubI | MulI | NegI | AddF | SubF | MulF | DivF | NegF => cap(
+            opcode,
+            OpcodeFamily::Arithmetic,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "numeric operation",
+        ),
+        DivI | DivU | ModI | ModU => cap(
             opcode,
             OpcodeFamily::Arithmetic,
             BackendStatus::Native,
             BackendStatus::Native,
             FallbackPolicy::RuntimePanic,
-            "numeric operation",
+            "checked integer division or modulo",
         ),
         EqI | NeI | LtI | LtU | LeI | LeU | GtI | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF
         | GeF => cap(
@@ -165,13 +180,21 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::None,
             "comparison",
         ),
-        And | Or | Xor | AndNot | Not | Shl | ShrS | ShrU => cap(
+        And | Or | Xor | AndNot | Not => cap(
+            opcode,
+            OpcodeFamily::Bitwise,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "bit operation",
+        ),
+        Shl | ShrS | ShrU => cap(
             opcode,
             OpcodeFamily::Bitwise,
             BackendStatus::Native,
             BackendStatus::Native,
             FallbackPolicy::RuntimePanic,
-            "bit operation",
+            "checked shift operation",
         ),
         BoolNot => cap(
             opcode,
@@ -213,21 +236,36 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::VmFallback,
             "dynamic IC with prepare callback fallback",
         ),
-        StrNew | StrLen | StrIndex | StrConcat | StrSlice | StrEq | StrNe | StrLt | StrLe
-        | StrGt | StrGe | StrDecodeRune => cap(
+        StrLen => cap(
+            StrLen,
+            OpcodeFamily::String,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "inline string length",
+        ),
+        StrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrDecodeRune => cap(
+            opcode,
+            OpcodeFamily::String,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "non-panicking string helper",
+        ),
+        StrIndex | StrSlice => cap(
             opcode,
             OpcodeFamily::String,
             BackendStatus::RuntimeHelper,
             BackendStatus::RuntimeHelper,
             FallbackPolicy::RuntimePanic,
-            "string helper",
+            "string helper with checked runtime trap",
         ),
         ArrayNew => cap(
             ArrayNew,
             OpcodeFamily::Array,
             BackendStatus::RuntimeHelper,
             BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
+            FallbackPolicy::RuntimeHelper,
             "array allocation helper",
         ),
         ArrayGet | ArraySet | ArrayAddr => cap(
@@ -238,7 +276,7 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::RuntimePanic,
             "inline array access with bounds checks and typed element layout",
         ),
-        SliceNew | SliceSlice | SliceAppend => cap(
+        SliceNew | SliceSlice => cap(
             opcode,
             OpcodeFamily::Slice,
             BackendStatus::RuntimeHelper,
@@ -246,7 +284,15 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::RuntimePanic,
             "slice allocation or reslicing helper",
         ),
-        SliceGet | SliceSet | SliceLen | SliceCap | SliceAddr => cap(
+        SliceAppend => cap(
+            SliceAppend,
+            OpcodeFamily::Slice,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "slice append helper with JitError sentinel",
+        ),
+        SliceGet | SliceSet | SliceAddr => cap(
             opcode,
             OpcodeFamily::Slice,
             BackendStatus::Native,
@@ -254,21 +300,53 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::RuntimePanic,
             "inline slice access with nil-aware bounds checks and typed element layout",
         ),
-        MapNew | MapGet | MapSet | MapDelete | MapLen | MapIterInit | MapIterNext => cap(
+        SliceLen | SliceCap => cap(
+            opcode,
+            OpcodeFamily::Slice,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "inline nil-aware slice metadata access",
+        ),
+        MapNew | MapGet | MapDelete | MapLen | MapIterInit | MapIterNext => cap(
             opcode,
             OpcodeFamily::Map,
             BackendStatus::RuntimeHelper,
             BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "map helper",
+            FallbackPolicy::RuntimeHelper,
+            "non-panicking map helper",
         ),
-        QueueNew | QueueSend | QueueRecv | QueueClose | QueueLen | QueueCap => cap(
+        MapSet => cap(
+            MapSet,
+            OpcodeFamily::Map,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimePanic,
+            "map set helper with checked runtime trap",
+        ),
+        QueueNew => cap(
+            QueueNew,
+            OpcodeFamily::Queue,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimePanic,
+            "queue allocation helper with checked runtime trap",
+        ),
+        QueueSend | QueueRecv | QueueClose => cap(
             opcode,
             OpcodeFamily::Queue,
             BackendStatus::RuntimeHelper,
             BackendStatus::RuntimeHelper,
             FallbackPolicy::VmSideExit,
             "queue helper may block or panic",
+        ),
+        QueueLen | QueueCap => cap(
+            opcode,
+            OpcodeFamily::Queue,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "non-blocking queue helper",
         ),
         SelectBegin | SelectSend | SelectRecv | SelectExec => cap(
             opcode,
@@ -310,7 +388,15 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::RuntimeHelper,
             "defer/recover callback",
         ),
-        IfaceAssign | IfaceAssert | IfaceEq => cap(
+        IfaceAssign => cap(
+            IfaceAssign,
+            OpcodeFamily::Interface,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "interface assignment helper",
+        ),
+        IfaceAssert | IfaceEq => cap(
             opcode,
             OpcodeFamily::Interface,
             BackendStatus::RuntimeHelper,
@@ -318,13 +404,21 @@ pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
             FallbackPolicy::RuntimePanic,
             "interface helper",
         ),
-        ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | IndexCheck => cap(
+        ConvI2F | ConvF64F32 | ConvF32F64 | Trunc => cap(
+            opcode,
+            OpcodeFamily::Conversion,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "conversion",
+        ),
+        ConvF2I | IndexCheck => cap(
             opcode,
             OpcodeFamily::Conversion,
             BackendStatus::Native,
             BackendStatus::Native,
             FallbackPolicy::RuntimePanic,
-            "conversion or bounds check",
+            "checked conversion or bounds check",
         ),
         Invalid => cap(
             Invalid,
@@ -389,6 +483,7 @@ mod tests {
                 local_slots,
                 gc_scan_slots: local_slots,
                 ret_slots: 1,
+                ret_slot_types: vec![vo_runtime::SlotType::Value],
                 recv_slots: 0,
                 heap_ret_gcref_count: 0,
                 heap_ret_gcref_start: 0,
@@ -460,6 +555,38 @@ mod tests {
             let capability = opcode_capability(opcode);
             assert_eq!(capability.full_jit, BackendStatus::RuntimeHelper);
             assert_eq!(capability.osr, BackendStatus::RuntimeHelper);
+        }
+    }
+
+    #[test]
+    fn runtime_panic_fallback_is_not_used_for_non_panicking_ops() {
+        for capability in capability_matrix() {
+            if capability.fallback == FallbackPolicy::RuntimePanic {
+                assert!(
+                    crate::contract::opcode_contract(capability.opcode).may_panic
+                        || matches!(capability.opcode, Opcode::ConvF2I),
+                    "{:?} has RuntimePanic fallback but its effect contract is non-panicking",
+                    capability.opcode
+                );
+            }
+        }
+
+        for opcode in [
+            Opcode::StrDecodeRune,
+            Opcode::StrEq,
+            Opcode::StrLt,
+            Opcode::ArrayNew,
+            Opcode::SliceAppend,
+            Opcode::MapGet,
+            Opcode::MapDelete,
+            Opcode::QueueLen,
+            Opcode::IfaceAssign,
+        ] {
+            assert_ne!(
+                opcode_capability(opcode).fallback,
+                FallbackPolicy::RuntimePanic,
+                "{opcode:?} is lowered through a non-panicking helper"
+            );
         }
     }
 }

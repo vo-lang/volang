@@ -6,8 +6,10 @@
 //! verifier requirements.
 
 use vo_runtime::instruction::Opcode;
+#[cfg(test)]
+use vo_runtime::jit_api::{JitRuntimeHelperPanicPolicy, JitRuntimeHelperReturnPolicy};
 
-use crate::capability::{opcode_capability, FallbackPolicy, OpcodeCapability};
+use crate::capability::{opcode_capability, OpcodeCapability};
 use crate::contract::{opcode_contract, EffectContract};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +55,14 @@ pub enum JitMetadataRequirement {
     MapGet,
     MapSet,
     MapDelete,
+    PtrLayout,
+    SlotLayout,
+    CallLayout,
+    CallLayoutWhenClosureShape,
+    CallExternLayout,
+    QueueLayout,
+    MapIterNext,
+    IfaceAssertLayout,
     LoopEndForHintLoop,
 }
 
@@ -115,6 +125,351 @@ pub enum HelperReturnPolicy {
     UserPanicReturn,
     VmSideExit,
     DirectJitCall,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeHelperLoweringPolicy {
+    RuntimeTrapOnU64Sentinel,
+    ReturnJitErrorOnU64Sentinel,
+    RuntimeTrapOnI32StatusOutPointer,
+    CheckedJitResult,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeHelperLoweringDescriptor {
+    pub opcode: Opcode,
+    pub helper: &'static str,
+    pub lowering_owner: LoweringOwner,
+    pub callsite: &'static str,
+    pub abi_return: JitRuntimeHelperReturnPolicy,
+    pub abi_panic: JitRuntimeHelperPanicPolicy,
+    pub helper_return: HelperReturnPolicy,
+    pub lowering_policy: RuntimeHelperLoweringPolicy,
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+const fn helper_lowering(
+    opcode: Opcode,
+    helper: &'static str,
+    lowering_owner: LoweringOwner,
+    callsite: &'static str,
+    abi_return: JitRuntimeHelperReturnPolicy,
+    abi_panic: JitRuntimeHelperPanicPolicy,
+    helper_return: HelperReturnPolicy,
+    lowering_policy: RuntimeHelperLoweringPolicy,
+) -> RuntimeHelperLoweringDescriptor {
+    RuntimeHelperLoweringDescriptor {
+        opcode,
+        helper,
+        lowering_owner,
+        callsite,
+        abi_return,
+        abi_panic,
+        helper_return,
+        lowering_policy,
+    }
+}
+
+#[cfg(test)]
+const RUNTIME_HELPER_LOWERINGS: &[RuntimeHelperLoweringDescriptor] = &[
+    helper_lowering(
+        Opcode::CallExtern,
+        "vo_call_extern",
+        LoweringOwner::CallHelpers,
+        "emit_call_extern",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::ArraySet,
+        "vo_gc_typed_write_barrier_by_meta",
+        LoweringOwner::TranslateCollections,
+        "emit_array_write_barrier_multi",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::SliceSet,
+        "vo_gc_typed_write_barrier_by_meta",
+        LoweringOwner::TranslateCollections,
+        "emit_array_write_barrier_multi",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::SliceNew,
+        "vo_slice_new_checked",
+        LoweringOwner::TranslateCollections,
+        "slice_new",
+        JitRuntimeHelperReturnPolicy::I32StatusOutPointer,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnI32StatusOutPointer,
+    ),
+    helper_lowering(
+        Opcode::QueueNew,
+        "vo_queue_new_checked",
+        LoweringOwner::TranslateRuntimeOps,
+        "queue_new",
+        JitRuntimeHelperReturnPolicy::I32StatusOutPointer,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnI32StatusOutPointer,
+    ),
+    helper_lowering(
+        Opcode::StrSlice,
+        "vo_str_slice",
+        LoweringOwner::TranslateCollections,
+        "str_slice",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::SliceSlice,
+        "vo_slice_slice",
+        LoweringOwner::TranslateCollections,
+        "slice_slice",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::SliceSlice,
+        "vo_slice_slice3",
+        LoweringOwner::TranslateCollections,
+        "slice_slice",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::SliceSlice,
+        "vo_slice_from_array",
+        LoweringOwner::TranslateCollections,
+        "slice_slice",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::SliceSlice,
+        "vo_slice_from_array3",
+        LoweringOwner::TranslateCollections,
+        "slice_slice",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::RuntimeTrapReturn,
+        RuntimeHelperLoweringPolicy::RuntimeTrapOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::SliceAppend,
+        "vo_slice_append",
+        LoweringOwner::TranslateCollections,
+        "slice_append",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::U64JitErrorSentinel,
+        RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::MapGet,
+        "vo_map_get",
+        LoweringOwner::TranslateCollections,
+        "map_get",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::U64JitErrorSentinel,
+        RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::MapSet,
+        "vo_map_set",
+        LoweringOwner::TranslateCollections,
+        "map_set",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::U64JitErrorSentinel,
+        RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::MapDelete,
+        "vo_map_delete",
+        LoweringOwner::TranslateCollections,
+        "map_delete",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::U64JitErrorSentinel,
+        RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::MapIterNext,
+        "vo_map_iter_next",
+        LoweringOwner::TranslateCollections,
+        "map_iter_next",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::U64JitErrorSentinel,
+        RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::IfaceAssert,
+        "vo_iface_assert",
+        LoweringOwner::TranslateRuntimeOps,
+        "iface_assert",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::IslandNew,
+        "vo_island_new",
+        LoweringOwner::TranslateRuntimeOps,
+        "island_new",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::QueueClose,
+        "vo_chan_close",
+        LoweringOwner::TranslateRuntimeOps,
+        "queue_close",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::QueueSend,
+        "vo_chan_send",
+        LoweringOwner::TranslateRuntimeOps,
+        "queue_send",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::QueueRecv,
+        "vo_chan_recv",
+        LoweringOwner::TranslateRuntimeOps,
+        "queue_recv",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::GoStart,
+        "vo_go_start",
+        LoweringOwner::TranslateRuntimeOps,
+        "go_start",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::GoIsland,
+        "vo_go_island",
+        LoweringOwner::TranslateRuntimeOps,
+        "go_island",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::DeferPush,
+        "vo_defer_push",
+        LoweringOwner::TranslateRuntimeOps,
+        "defer_push",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::ErrDeferPush,
+        "vo_defer_push",
+        LoweringOwner::TranslateRuntimeOps,
+        "defer_push",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::Recover,
+        "vo_recover",
+        LoweringOwner::TranslateRuntimeOps,
+        "recover",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::SelectBegin,
+        "vo_select_begin",
+        LoweringOwner::TranslateRuntimeOps,
+        "select_begin",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::SelectSend,
+        "vo_select_send",
+        LoweringOwner::TranslateRuntimeOps,
+        "select_send",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::SelectRecv,
+        "vo_select_recv",
+        LoweringOwner::TranslateRuntimeOps,
+        "select_recv",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::SelectExec,
+        "vo_select_exec",
+        LoweringOwner::TranslateRuntimeOps,
+        "select_exec",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+];
+
+#[cfg(test)]
+pub fn runtime_helper_lowering_descriptors() -> &'static [RuntimeHelperLoweringDescriptor] {
+    RUNTIME_HELPER_LOWERINGS
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,10 +579,12 @@ const REQ_STATIC_CALL: &[VerifierRequirement] = &[
     VerifierRequirement::LocalSlotLayout,
 ];
 const REQ_DYNAMIC_CALL: &[VerifierRequirement] = &[
+    VerifierRequirement::JitMetadata,
     VerifierRequirement::LocalSlotRange,
     VerifierRequirement::LocalSlotLayout,
 ];
 const REQ_EXTERN_CALL: &[VerifierRequirement] = &[
+    VerifierRequirement::JitMetadata,
     VerifierRequirement::ExternIndex,
     VerifierRequirement::LocalSlotRange,
     VerifierRequirement::LocalSlotLayout,
@@ -239,11 +596,6 @@ const REQ_GLOBAL_READ: &[VerifierRequirement] = &[
 ];
 const REQ_GLOBAL_WRITE: &[VerifierRequirement] = &[
     VerifierRequirement::GlobalWriteRange,
-    VerifierRequirement::LocalSlotRange,
-    VerifierRequirement::LocalSlotLayout,
-    VerifierRequirement::WriteBarrierLayout,
-];
-const REQ_LOCAL_WRITE_BARRIER: &[VerifierRequirement] = &[
     VerifierRequirement::LocalSlotRange,
     VerifierRequirement::LocalSlotLayout,
     VerifierRequirement::WriteBarrierLayout,
@@ -269,6 +621,12 @@ const REQ_METADATA_WRITE_BARRIER: &[VerifierRequirement] = &[
     VerifierRequirement::LocalSlotLayout,
     VerifierRequirement::WriteBarrierLayout,
 ];
+const REQ_METADATA_INTERFACE_PAIR: &[VerifierRequirement] = &[
+    VerifierRequirement::JitMetadata,
+    VerifierRequirement::LocalSlotRange,
+    VerifierRequirement::LocalSlotLayout,
+    VerifierRequirement::InterfacePair,
+];
 const REQ_LOOP_METADATA: &[VerifierRequirement] = &[
     VerifierRequirement::LoopMetadata,
     VerifierRequirement::LocalSlotRange,
@@ -284,6 +642,7 @@ const REQ_CLOSURE_NEW: &[VerifierRequirement] = &[
     VerifierRequirement::LocalSlotLayout,
 ];
 const REQ_SHARED_STATIC_CALL: &[VerifierRequirement] = &[
+    VerifierRequirement::JitMetadata,
     VerifierRequirement::StaticFunctionIndex,
     VerifierRequirement::LocalSlotRange,
     VerifierRequirement::LocalSlotLayout,
@@ -310,10 +669,8 @@ const DEP_STR_SLICE: &[RuntimeDependency] = &[
 ];
 const DEP_STR_EQ: &[RuntimeDependency] = &[RuntimeDependency::RuntimeHelper("vo_str_eq")];
 const DEP_STR_CMP: &[RuntimeDependency] = &[RuntimeDependency::RuntimeHelper("vo_str_cmp")];
-const DEP_STR_DECODE_RUNE: &[RuntimeDependency] = &[
-    RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
-    RuntimeDependency::RuntimeHelper("vo_str_decode_rune"),
-];
+const DEP_STR_DECODE_RUNE: &[RuntimeDependency] =
+    &[RuntimeDependency::RuntimeHelper("vo_str_decode_rune")];
 const DEP_ARRAY_NEW: &[RuntimeDependency] = &[RuntimeDependency::RuntimeHelper("vo_array_new")];
 const DEP_ARRAY_BARRIER: &[RuntimeDependency] = &[
     RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
@@ -331,15 +688,15 @@ const DEP_SLICE_SLICE: &[RuntimeDependency] = &[
     RuntimeDependency::RuntimeHelper("vo_slice_from_array"),
     RuntimeDependency::RuntimeHelper("vo_slice_from_array3"),
 ];
-const DEP_SLICE_APPEND: &[RuntimeDependency] = &[
-    RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
-    RuntimeDependency::RuntimeHelper("vo_slice_append"),
-    RuntimeDependency::RuntimeHelper("vo_gc_typed_write_barrier_by_meta"),
-];
+const DEP_SLICE_APPEND: &[RuntimeDependency] =
+    &[RuntimeDependency::RuntimeHelper("vo_slice_append")];
 const DEP_MAP_NEW: &[RuntimeDependency] = &[RuntimeDependency::RuntimeHelper("vo_map_new")];
 const DEP_MAP_LEN: &[RuntimeDependency] = &[RuntimeDependency::RuntimeHelper("vo_map_len")];
 const DEP_MAP_GET: &[RuntimeDependency] = &[RuntimeDependency::RuntimeHelper("vo_map_get")];
-const DEP_MAP_SET: &[RuntimeDependency] = &[RuntimeDependency::RuntimeHelper("vo_map_set")];
+const DEP_MAP_SET: &[RuntimeDependency] = &[
+    RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
+    RuntimeDependency::RuntimeHelper("vo_map_set"),
+];
 const DEP_MAP_DELETE: &[RuntimeDependency] = &[RuntimeDependency::RuntimeHelper("vo_map_delete")];
 const DEP_MAP_ITER_INIT: &[RuntimeDependency] =
     &[RuntimeDependency::RuntimeHelper("vo_map_iter_init")];
@@ -450,6 +807,13 @@ const FF_META_HELPER: &[FailFastCondition] = &[
     FailFastCondition::MissingHelper,
     FailFastCondition::CallbackError,
 ];
+const FF_META_HELPER_FRAME: &[FailFastCondition] = &[
+    FailFastCondition::MissingMetadata,
+    FailFastCondition::LayoutMismatch,
+    FailFastCondition::MissingHelper,
+    FailFastCondition::CallbackError,
+    FailFastCondition::GcFrameContract,
+];
 const FF_CONSTANT_LAYOUT: &[FailFastCondition] = &[
     FailFastCondition::MissingConstant,
     FailFastCondition::LayoutMismatch,
@@ -468,6 +832,7 @@ const FF_FUNCTION_HELPER: &[FailFastCondition] = &[
     FailFastCondition::GcFrameContract,
 ];
 const FF_FUNCTION_CALLBACK: &[FailFastCondition] = &[
+    FailFastCondition::MissingMetadata,
     FailFastCondition::MissingFunction,
     FailFastCondition::LayoutMismatch,
     FailFastCondition::MissingHelper,
@@ -476,6 +841,7 @@ const FF_FUNCTION_CALLBACK: &[FailFastCondition] = &[
     FailFastCondition::GcFrameContract,
 ];
 const FF_EXTERN_CALLBACK: &[FailFastCondition] = &[
+    FailFastCondition::MissingMetadata,
     FailFastCondition::MissingExtern,
     FailFastCondition::LayoutMismatch,
     FailFastCondition::MissingHelper,
@@ -501,7 +867,24 @@ const FF_CALLBACK_FRAME: &[FailFastCondition] = &[
     FailFastCondition::CallbackError,
     FailFastCondition::GcFrameContract,
 ];
+const FF_META_CALLBACK_FRAME: &[FailFastCondition] = &[
+    FailFastCondition::MissingMetadata,
+    FailFastCondition::LayoutMismatch,
+    FailFastCondition::MissingHelper,
+    FailFastCondition::MissingCallback,
+    FailFastCondition::CallbackError,
+    FailFastCondition::GcFrameContract,
+];
 const FF_CALL: &[FailFastCondition] = &[
+    FailFastCondition::MissingFunction,
+    FailFastCondition::LayoutMismatch,
+    FailFastCondition::MissingCallback,
+    FailFastCondition::InvalidJitEntry,
+    FailFastCondition::CallbackError,
+    FailFastCondition::GcFrameContract,
+];
+const FF_CALL_METADATA: &[FailFastCondition] = &[
+    FailFastCondition::MissingMetadata,
     FailFastCondition::MissingFunction,
     FailFastCondition::LayoutMismatch,
     FailFastCondition::MissingCallback,
@@ -630,7 +1013,7 @@ pub fn opcode_runtime_dependencies(opcode: Opcode) -> &'static [RuntimeDependenc
     use Opcode::*;
 
     match opcode {
-        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | PtrGet | PtrGetN | PtrAdd
+        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | PtrGet | PtrGetN
         | ArrayGet | ArrayAddr | SliceGet | SliceAddr => DEP_RUNTIME_TRAP,
         Panic => DEP_PANIC,
         PtrNew => DEP_PTR_NEW,
@@ -692,14 +1075,15 @@ pub fn opcode_helper_return_policy(opcode: Opcode) -> HelperReturnPolicy {
         CallExtern | QueueClose | QueueSend | QueueRecv | SelectBegin | SelectSend | SelectRecv
         | SelectExec | GoStart | GoIsland | DeferPush | ErrDeferPush | Recover | IfaceAssert
         | IslandNew => Ret::JitResultChecked,
-        QueueNew | SliceNew | IfaceEq | IndexCheck | DivI | DivU | ModI | ModU | Shl | ShrS
-        | ShrU | PtrGet | PtrGetN | PtrAdd | ArrayGet | ArrayAddr | SliceGet | SliceAddr
-        | StrIndex | StrSlice | StrDecodeRune => Ret::RuntimeTrapReturn,
+        QueueNew | SliceNew | SliceSlice | IfaceEq | IndexCheck | DivI | DivU | ModI | ModU
+        | Shl | ShrS | ShrU | PtrGet | PtrGetN | ArrayGet | ArrayAddr | SliceGet | SliceAddr
+        | StrIndex | StrSlice => Ret::RuntimeTrapReturn,
         Panic => Ret::UserPanicReturn,
         SliceAppend | MapGet | MapSet | MapDelete | MapIterNext => Ret::U64JitErrorSentinel,
-        ArrayNew => Ret::OutPointer,
-        PtrNew | StrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | MapNew
-        | MapLen | MapIterInit | QueueLen | QueueCap | ClosureNew | IfaceAssign => Ret::RawValue,
+        ArrayNew => Ret::RawValue,
+        PtrNew | StrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe
+        | StrDecodeRune | MapNew | MapLen | MapIterInit | QueueLen | QueueCap | ClosureNew
+        | IfaceAssign => Ret::RawValue,
         _ => Ret::None,
     }
 }
@@ -742,9 +1126,7 @@ pub fn opcode_trap_policy(opcode: Opcode) -> TrapPolicy {
         ConvF2I => Trap::HostTrapGuarded,
         DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | PtrGet | PtrGetN | PtrSet
         | PtrSetN | ArrayGet | ArraySet | ArrayAddr | SliceNew | SliceGet | SliceSet
-        | SliceSlice | SliceAppend | SliceAddr | StrIndex | StrSlice | StrDecodeRune | MapGet
-        | MapSet | MapDelete | QueueNew | IfaceEq => Trap::RuntimeTrap,
-        _ if opcode_capability(opcode).fallback == FallbackPolicy::RuntimePanic => {
+        | SliceSlice | SliceAddr | StrIndex | StrSlice | MapSet | QueueNew | IfaceEq => {
             Trap::RuntimeTrap
         }
         _ => Trap::None,
@@ -763,26 +1145,30 @@ pub fn opcode_fail_fast_conditions(opcode: Opcode) -> &'static [FailFastConditio
         Panic => FF_HELPER_FRAME,
         Call => FF_CALL,
         CallExtern => FF_EXTERN_CALLBACK,
-        CallClosure | CallIface => FF_CALL,
+        CallClosure | CallIface => FF_CALL_METADATA,
         Jump | JumpIf | JumpIfNot | ForLoop => FF_BRANCH,
         Hint => FF_META_LAYOUT,
         ArrayNew | ArrayGet | ArraySet | ArrayAddr | SliceNew | SliceGet | SliceSet | SliceAddr
         | SliceAppend | MapGet | MapSet | MapDelete => FF_META_HELPER,
-        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | PtrGet | PtrGetN | PtrAdd
-        | PtrSetN | StrIndex | StrSlice | StrDecodeRune | SliceSlice => FF_HELPER_FRAME,
-        PtrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | MapNew | MapLen
-        | MapIterInit | MapIterNext | QueueNew | QueueLen | QueueCap | IfaceEq => FF_HELPER,
-        PtrSet => FF_HELPER_FRAME,
-        QueueClose | QueueSend | QueueRecv | SelectBegin | SelectSend | SelectRecv | SelectExec
-        | GoIsland | Recover | IslandNew | IfaceAssert => FF_CALLBACK_FRAME,
-        opcode if opcode_contract(opcode).needs_slot_metadata => FF_LAYOUT,
-        LoadInt | Copy | CopyN | GlobalGet | GlobalGetN | GlobalSet | GlobalSetN | SlotGet
-        | SlotGetN | SlotSet | SlotSetN | AddI | SubI | MulI | NegI | AddF | SubF | MulF | DivF
-        | NegF | EqI | NeI | LtI | LtU | LeI | LeU | GtI | GtU | GeI | GeU | EqF | NeF | LtF
-        | LeF | GtF | GeF | And | Or | Xor | AndNot | Not | BoolNot | ConvI2F | ConvF2I
-        | ConvF64F32 | ConvF32F64 | Trunc | Return | StrLen | SliceLen | SliceCap | ClosureGet => {
-            FF_LAYOUT
+        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | StrIndex | StrSlice
+        | SliceSlice => FF_HELPER_FRAME,
+        PtrGet | PtrGetN | PtrSetN => FF_META_HELPER_FRAME,
+        SlotGet | SlotGetN | SlotSet | SlotSetN => FF_META_LAYOUT,
+        PtrAdd => FF_LAYOUT,
+        PtrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrDecodeRune
+        | MapNew | MapLen | MapIterInit | QueueNew | QueueLen | QueueCap | IfaceEq => FF_HELPER,
+        MapIterNext => FF_META_HELPER,
+        PtrSet => FF_META_HELPER_FRAME,
+        QueueClose | SelectBegin | SelectExec | Recover | IslandNew => FF_CALLBACK_FRAME,
+        QueueSend | QueueRecv | SelectSend | SelectRecv | GoIsland | IfaceAssert => {
+            FF_META_CALLBACK_FRAME
         }
+        opcode if opcode_contract(opcode).needs_slot_metadata => FF_LAYOUT,
+        LoadInt | Copy | CopyN | GlobalGet | GlobalGetN | GlobalSet | GlobalSetN | AddI | SubI
+        | MulI | NegI | AddF | SubF | MulF | DivF | NegF | EqI | NeI | LtI | LtU | LeI | LeU
+        | GtI | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF | GeF | And | Or | Xor | AndNot
+        | Not | BoolNot | ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | Return | StrLen
+        | SliceLen | SliceCap | ClosureGet => FF_LAYOUT,
     }
 }
 
@@ -833,15 +1219,15 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateMemory,
-            Meta::None,
-            REQ_LOCAL_LAYOUT,
+            Meta::SlotLayout,
+            REQ_METADATA_LOCAL,
         ),
         SlotSet | SlotSetN => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateMemory,
-            Meta::None,
-            REQ_LOCAL_LAYOUT,
+            Meta::SlotLayout,
+            REQ_METADATA_LOCAL,
         ),
         GlobalGet | GlobalGetN => (
             NO_PACKED,
@@ -868,15 +1254,23 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateMemory,
-            Meta::None,
-            REQ_LOCAL_LAYOUT,
+            if matches!(opcode, PtrAdd) {
+                Meta::None
+            } else {
+                Meta::PtrLayout
+            },
+            if matches!(opcode, PtrAdd) {
+                REQ_LOCAL_LAYOUT
+            } else {
+                REQ_METADATA_LOCAL
+            },
         ),
         PtrSet | PtrSetN => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateMemory,
-            Meta::None,
-            REQ_LOCAL_WRITE_BARRIER,
+            Meta::PtrLayout,
+            REQ_METADATA_WRITE_BARRIER,
         ),
         AddI | SubI | MulI | DivI | DivU | ModI | ModU | NegI | AddF | SubF | MulF | DivF
         | NegF | EqI | NeI | LtI | LtU | LeI | LeU | GtI | GtU | GeI | GeU | EqF | NeF | LtF
@@ -926,14 +1320,14 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             NO_PACKED,
             Vm::VmExec("exec/call.rs"),
             Lowering::CallHelpers,
-            Meta::None,
+            Meta::CallExternLayout,
             REQ_EXTERN_CALL,
         ),
         CallClosure | CallIface => (
             DYNAMIC_CALL,
             Vm::VmExec("exec/call.rs"),
             Lowering::CallHelpers,
-            Meta::None,
+            Meta::CallLayout,
             REQ_DYNAMIC_CALL,
         ),
         StrNew => (
@@ -1016,8 +1410,8 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             MAP_ITER,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::None,
-            REQ_LOCAL_LAYOUT,
+            Meta::MapIterNext,
+            REQ_METADATA_LOCAL,
         ),
         QueueNew => (
             QUEUE_NEW,
@@ -1026,7 +1420,7 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
-        QueueSend | QueueRecv | QueueClose | QueueLen | QueueCap => (
+        QueueSend | QueueRecv => (
             if matches!(opcode, QueueRecv) {
                 RECV
             } else {
@@ -1034,22 +1428,36 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             },
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::None,
-            REQ_LOCAL_LAYOUT,
+            Meta::QueueLayout,
+            REQ_METADATA_LOCAL,
         ),
-        SelectBegin | SelectSend | SelectExec => (
+        QueueClose | QueueLen | QueueCap => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
             Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
-        SelectRecv => (
-            RECV,
+        SelectBegin | SelectExec => (
+            NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
             Meta::None,
             REQ_LOCAL_LAYOUT,
+        ),
+        SelectSend => (
+            NO_PACKED,
+            Vm::VmDispatch,
+            Lowering::TranslateRuntimeOps,
+            Meta::QueueLayout,
+            REQ_METADATA_LOCAL,
+        ),
+        SelectRecv => (
+            RECV,
+            Vm::VmDispatch,
+            Lowering::TranslateRuntimeOps,
+            Meta::QueueLayout,
+            REQ_METADATA_LOCAL,
         ),
         ClosureNew => (
             CLOSURE_NEW,
@@ -1069,14 +1477,14 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             SHARED_CALL,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::None,
+            Meta::CallLayoutWhenClosureShape,
             REQ_SHARED_STATIC_CALL,
         ),
         GoIsland => (
             SHARED_CALL,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::None,
+            Meta::CallLayout,
             REQ_DYNAMIC_CALL,
         ),
         Recover => (
@@ -1093,7 +1501,14 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             Meta::None,
             REQ_IFACE_CONST,
         ),
-        IfaceAssert | IfaceEq => (
+        IfaceAssert => (
+            NO_PACKED,
+            Vm::VmExec("exec/iface.rs"),
+            Lowering::TranslateRuntimeOps,
+            Meta::IfaceAssertLayout,
+            REQ_METADATA_INTERFACE_PAIR,
+        ),
+        IfaceEq => (
             NO_PACKED,
             Vm::VmExec("exec/iface.rs"),
             Lowering::TranslateRuntimeOps,
@@ -1158,7 +1573,7 @@ pub fn opcode_semantic_matrix() -> Vec<OpcodeSemantics> {
 mod tests {
     use super::*;
     use crate::call_helpers::{jit_context_callback_callsites, JitContextCallbackCallKind};
-    use crate::capability::BackendStatus;
+    use crate::capability::{BackendStatus, FallbackPolicy};
     use crate::effects::{
         try_instruction_effects_with_module_context, EffectError, EffectFacts, MemorySyncEffect,
     };
@@ -1181,101 +1596,158 @@ mod tests {
     }
 
     #[test]
-    fn u64_jit_error_sentinel_helpers_are_checked_by_lowering() {
-        for opcode in [
-            Opcode::SliceAppend,
-            Opcode::MapGet,
-            Opcode::MapSet,
-            Opcode::MapDelete,
-            Opcode::MapIterNext,
-        ] {
-            assert_eq!(
-                opcode_helper_return_policy(opcode),
-                HelperReturnPolicy::U64JitErrorSentinel,
-                "{opcode:?} must declare that u64::MAX is a JitError sentinel"
-            );
-        }
+    fn str_decode_rune_contract_matches_non_panicking_helper() {
+        let row = opcode_semantics(Opcode::StrDecodeRune);
+        assert_eq!(row.helper_return, HelperReturnPolicy::RawValue);
+        assert_eq!(row.trap_policy, TrapPolicy::None);
+        assert_eq!(row.frame_policy, FramePolicy::NoSpill);
+        assert!(!row.contract.may_panic);
+        assert_ne!(row.capability.fallback, FallbackPolicy::RuntimePanic);
+        assert_eq!(
+            row.runtime_dependencies,
+            &[RuntimeDependency::RuntimeHelper("vo_str_decode_rune")]
+        );
+    }
 
-        let src = include_str!("translate/collections.rs");
-        for function in [
-            "slice_append",
-            "map_get",
-            "map_set",
-            "map_delete",
-            "map_iter_next",
-        ] {
-            let start_marker = format!("pub(super) fn {function}");
-            let start = src
-                .find(&start_marker)
-                .unwrap_or_else(|| panic!("missing lowering function {function}"));
-            let tail = &src[start..];
-            let end = tail[1..]
-                .find("\npub(super) ")
-                .map(|idx| idx + 1)
-                .unwrap_or(tail.len());
-            let body = &tail[..end];
-            assert!(
-                body.contains("emit_return_if_u64_jit_error(e,"),
-                "{function} lowering must branch u64::MAX helper results to JitResult::JitError"
+    #[test]
+    fn runtime_helper_lowering_descriptors_match_abi_and_opcode_policy() {
+        use RuntimeHelperLoweringPolicy as Policy;
+
+        let helper_abi: std::collections::BTreeMap<_, _> =
+            vo_runtime::jit_api::runtime_helper_abi_fields()
+                .iter()
+                .map(|field| (field.name, field))
+                .collect();
+
+        for descriptor in runtime_helper_lowering_descriptors() {
+            let abi = helper_abi
+                .get(descriptor.helper)
+                .unwrap_or_else(|| panic!("missing ABI manifest row for {}", descriptor.helper));
+            assert_eq!(abi.return_policy, descriptor.abi_return);
+            assert_eq!(abi.panic_policy, descriptor.abi_panic);
+
+            let row = opcode_semantics(descriptor.opcode);
+            assert_eq!(
+                row.lowering_owner, descriptor.lowering_owner,
+                "{} descriptor lowering owner drifted",
+                descriptor.helper
             );
+            assert!(
+                row.runtime_dependencies
+                    .contains(&RuntimeDependency::RuntimeHelper(descriptor.helper)),
+                "{:?} descriptor helper {} is absent from runtime dependencies",
+                descriptor.opcode,
+                descriptor.helper
+            );
+
+            match descriptor.lowering_policy {
+                Policy::RuntimeTrapOnU64Sentinel => {
+                    assert_eq!(
+                        descriptor.abi_return,
+                        JitRuntimeHelperReturnPolicy::U64ErrorSentinel
+                    );
+                    assert_eq!(
+                        descriptor.helper_return,
+                        HelperReturnPolicy::RuntimeTrapReturn
+                    );
+                    assert_eq!(row.trap_policy, TrapPolicy::RuntimeTrap);
+                    assert!(row
+                        .runtime_dependencies
+                        .contains(&RuntimeDependency::RuntimeHelper("vo_runtime_trap")));
+                }
+                Policy::ReturnJitErrorOnU64Sentinel => {
+                    assert_eq!(
+                        descriptor.abi_return,
+                        JitRuntimeHelperReturnPolicy::U64ErrorSentinel
+                    );
+                    assert_eq!(
+                        descriptor.helper_return,
+                        HelperReturnPolicy::U64JitErrorSentinel
+                    );
+                    if row
+                        .runtime_dependencies
+                        .contains(&RuntimeDependency::RuntimeHelper("vo_runtime_trap"))
+                    {
+                        assert_eq!(row.trap_policy, TrapPolicy::RuntimeTrap);
+                    } else {
+                        assert_ne!(row.trap_policy, TrapPolicy::RuntimeTrap);
+                    }
+                }
+                Policy::RuntimeTrapOnI32StatusOutPointer => {
+                    assert_eq!(
+                        descriptor.abi_return,
+                        JitRuntimeHelperReturnPolicy::I32StatusOutPointer
+                    );
+                    assert_eq!(
+                        descriptor.helper_return,
+                        HelperReturnPolicy::RuntimeTrapReturn
+                    );
+                    assert_eq!(row.trap_policy, TrapPolicy::RuntimeTrap);
+                }
+                Policy::CheckedJitResult => {
+                    assert_eq!(
+                        descriptor.abi_return,
+                        JitRuntimeHelperReturnPolicy::JitResult
+                    );
+                    assert_eq!(
+                        descriptor.helper_return,
+                        HelperReturnPolicy::JitResultChecked
+                    );
+                }
+            }
+
+            if descriptor.opcode != Opcode::ArraySet && descriptor.opcode != Opcode::SliceSet {
+                assert_eq!(
+                    row.helper_return, descriptor.helper_return,
+                    "{:?} helper return policy drifted for {}",
+                    descriptor.opcode, descriptor.helper
+                );
+            }
         }
     }
 
     #[test]
-    fn runtime_ops_jit_result_helpers_use_typed_checked_lowering() {
-        for opcode in [
-            Opcode::QueueClose,
-            Opcode::QueueSend,
-            Opcode::QueueRecv,
-            Opcode::SelectBegin,
-            Opcode::SelectSend,
-            Opcode::SelectRecv,
-            Opcode::SelectExec,
-            Opcode::GoStart,
-            Opcode::GoIsland,
-            Opcode::DeferPush,
-            Opcode::ErrDeferPush,
-            Opcode::Recover,
-            Opcode::IfaceAssert,
-            Opcode::IslandNew,
-        ] {
-            assert_eq!(
-                opcode_helper_return_policy(opcode),
-                HelperReturnPolicy::JitResultChecked,
-                "{opcode:?} must declare that helper JitResult is control-flow significant"
-            );
-        }
+    fn non_raw_runtime_helper_returns_have_structured_lowering_policy() {
+        let descriptors = runtime_helper_lowering_descriptors();
 
-        let src = include_str!("translate/runtime_ops.rs");
-        for function in [
-            "island_new",
-            "queue_close",
-            "emit_queue_send",
-            "emit_queue_recv",
-            "go_start",
-            "go_island",
-            "defer_push",
-            "recover",
-            "select_begin",
-            "select_send",
-            "select_recv",
-            "select_exec",
-            "iface_assert",
-        ] {
-            let start_marker = format!("pub(super) fn {function}");
-            let start = src
-                .find(&start_marker)
-                .unwrap_or_else(|| panic!("missing lowering function {function}"));
-            let tail = &src[start..];
-            let end = tail[1..]
-                .find("\npub(super) ")
-                .map(|idx| idx + 1)
-                .unwrap_or(tail.len());
-            let body = &tail[..end];
-            assert!(
-                body.contains("emit_checked_jit_result_helper_call"),
-                "{function} lowering must route JitResult-returning helpers through the typed checked helper"
-            );
+        for row in opcode_semantic_matrix() {
+            for dep in row.runtime_dependencies {
+                let RuntimeDependency::RuntimeHelper(name) = *dep else {
+                    continue;
+                };
+                if name == "vo_runtime_trap" {
+                    assert!(
+                        matches!(
+                            row.trap_policy,
+                            TrapPolicy::RuntimeTrap | TrapPolicy::HostTrapGuarded
+                        ),
+                        "{:?} uses vo_runtime_trap without a runtime trap policy",
+                        row.opcode
+                    );
+                    continue;
+                }
+                let Some(abi) = vo_runtime::jit_api::runtime_helper_abi_fields()
+                    .iter()
+                    .find(|field| field.name == name)
+                else {
+                    continue;
+                };
+                if matches!(
+                    abi.return_policy,
+                    JitRuntimeHelperReturnPolicy::JitResult
+                        | JitRuntimeHelperReturnPolicy::I32StatusOutPointer
+                        | JitRuntimeHelperReturnPolicy::U64ErrorSentinel
+                ) {
+                    assert!(
+                        descriptors
+                            .iter()
+                            .any(|descriptor| descriptor.opcode == row.opcode
+                                && descriptor.helper == name),
+                        "{:?} uses non-raw helper {name} without a structured lowering descriptor",
+                        row.opcode
+                    );
+                }
+            }
         }
     }
 
@@ -1474,17 +1946,66 @@ mod tests {
             | Opcode::SliceAppend => Some(JitInstructionMetadata::ElemLayout {
                 elem_bytes: 16,
                 needs_sign_extend: false,
+                slot_layout: vec![SlotType::Value; 2],
             }),
             Opcode::MapGet => Some(JitInstructionMetadata::MapGet {
-                key_slots: 2,
-                val_slots: 3,
+                key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+                val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
                 has_ok: true,
             }),
             Opcode::MapSet => Some(JitInstructionMetadata::MapSet {
-                key_slots: 2,
-                val_slots: 3,
+                key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+                val_layout: vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
             }),
-            Opcode::MapDelete => Some(JitInstructionMetadata::MapDelete { key_slots: 2 }),
+            Opcode::MapDelete => Some(JitInstructionMetadata::MapDelete {
+                key_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            }),
+            Opcode::PtrGet | Opcode::PtrSet | Opcode::SlotGet | Opcode::SlotSet => {
+                let layout = vec![SlotType::Value];
+                match opcode {
+                    Opcode::PtrGet | Opcode::PtrSet => Some(JitInstructionMetadata::PtrLayout {
+                        value_layout: layout,
+                    }),
+                    _ => Some(JitInstructionMetadata::SlotLayout {
+                        elem_layout: layout,
+                    }),
+                }
+            }
+            Opcode::PtrGetN | Opcode::PtrSetN | Opcode::SlotGetN | Opcode::SlotSetN => {
+                let layout = vec![SlotType::Value, SlotType::Value];
+                match opcode {
+                    Opcode::PtrGetN | Opcode::PtrSetN => Some(JitInstructionMetadata::PtrLayout {
+                        value_layout: layout,
+                    }),
+                    _ => Some(JitInstructionMetadata::SlotLayout {
+                        elem_layout: layout,
+                    }),
+                }
+            }
+            Opcode::CallClosure | Opcode::CallIface => Some(JitInstructionMetadata::CallLayout {
+                arg_layout: vec![SlotType::Value, SlotType::Value],
+                ret_layout: vec![SlotType::Value],
+            }),
+            Opcode::CallExtern => Some(JitInstructionMetadata::CallExternLayout {
+                arg_layout: vec![SlotType::Value, SlotType::Value],
+                ret_layout: vec![SlotType::Value, SlotType::Value],
+            }),
+            Opcode::QueueSend | Opcode::QueueRecv | Opcode::SelectSend | Opcode::SelectRecv => {
+                Some(JitInstructionMetadata::QueueLayout {
+                    elem_layout: vec![SlotType::Value, SlotType::Value],
+                })
+            }
+            Opcode::MapIterNext => Some(JitInstructionMetadata::MapIterNext {
+                key_layout: vec![SlotType::Value],
+                val_layout: vec![SlotType::Value, SlotType::Value],
+            }),
+            Opcode::GoIsland => Some(JitInstructionMetadata::CallLayout {
+                arg_layout: vec![SlotType::Value, SlotType::Value],
+                ret_layout: Vec::new(),
+            }),
+            Opcode::IfaceAssert => Some(JitInstructionMetadata::IfaceAssertLayout {
+                result_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            }),
             _ => None,
         }
     }
@@ -1507,6 +2028,7 @@ mod tests {
             local_slots,
             gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
             ret_slots,
+            ret_slot_types: vec![SlotType::Value; ret_slots as usize],
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,

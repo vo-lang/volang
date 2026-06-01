@@ -4,12 +4,13 @@
 //! They handle: func_id resolution, jit_func_table lookup, push_frame, and arg layout.
 
 use vo_runtime::bytecode::FunctionDef;
-use vo_runtime::gc::GcRef;
+use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::jit_api::{
     set_jit_infra_error, DynCallIC, JitContext, JitResult, JitRuntimeTrapKind, PreparedCall,
     JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_MISSING_CALLBACK,
 };
 use vo_runtime::objects::closure;
+use vo_runtime::ValueKind;
 
 #[inline]
 fn can_use_direct_call_table_entry(func_def: &FunctionDef) -> bool {
@@ -58,28 +59,59 @@ fn reject_prepared_call_state(
     set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, detail)
 }
 
-#[inline]
-fn validate_prepared_call_shape(
+fn reject_invalid_object_kind(
     ctx: &mut JitContext,
     out: *mut PreparedCall,
+    raw_ref: u64,
+) -> JitResult {
+    unsafe { write_trapped_prepared_call(out) };
+    set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, raw_ref)
+}
+
+fn canonical_object_with_kind(
+    ctx: &JitContext,
+    raw_ref: u64,
+    expected: ValueKind,
+) -> Option<GcRef> {
+    let gc = unsafe { &*ctx.gc };
+    let obj = gc.canonicalize_ref(raw_ref as GcRef)?;
+    (Gc::header(obj).kind() == expected).then_some(obj)
+}
+
+struct PreparedCallShape {
     expected_user_arg_count: usize,
     user_arg_count: u32,
     expected_ret_slots: u32,
     ret_slots: u32,
     user_args: *const u64,
     ret_ptr: *mut u64,
+}
+
+#[inline]
+fn validate_prepared_call_shape(
+    ctx: &mut JitContext,
+    out: *mut PreparedCall,
+    shape: PreparedCallShape,
 ) -> Option<JitResult> {
-    if user_arg_count as usize != expected_user_arg_count {
-        return Some(reject_prepared_call_state(ctx, out, user_arg_count as u64));
+    if shape.user_arg_count as usize != shape.expected_user_arg_count {
+        return Some(reject_prepared_call_state(
+            ctx,
+            out,
+            shape.user_arg_count as u64,
+        ));
     }
-    if ret_slots != expected_ret_slots {
-        return Some(reject_prepared_call_state(ctx, out, ret_slots as u64));
+    if shape.ret_slots != shape.expected_ret_slots {
+        return Some(reject_prepared_call_state(ctx, out, shape.ret_slots as u64));
     }
-    if user_arg_count != 0 && user_args.is_null() {
-        return Some(reject_prepared_call_state(ctx, out, user_arg_count as u64));
+    if shape.user_arg_count != 0 && shape.user_args.is_null() {
+        return Some(reject_prepared_call_state(
+            ctx,
+            out,
+            shape.user_arg_count as u64,
+        ));
     }
-    if ret_slots != 0 && ret_ptr.is_null() {
-        return Some(reject_prepared_call_state(ctx, out, ret_slots as u64));
+    if shape.ret_slots != 0 && shape.ret_ptr.is_null() {
+        return Some(reject_prepared_call_state(ctx, out, shape.ret_slots as u64));
     }
     None
 }
@@ -112,7 +144,10 @@ pub extern "C" fn jit_prepare_closure_call(
     }
 
     // 1. Resolve func_id from closure
-    let closure_gcref = closure_ref as GcRef;
+    let Some(closure_gcref) = canonical_object_with_kind(ctx, closure_ref, ValueKind::Closure)
+    else {
+        return reject_invalid_object_kind(ctx, out, closure_ref);
+    };
     let func_id = closure::func_id(closure_gcref);
     let Some(func_def) = module.functions.get(func_id as usize) else {
         unsafe { write_trapped_prepared_call(out) };
@@ -133,12 +168,14 @@ pub extern "C" fn jit_prepare_closure_call(
     if let Some(result) = validate_prepared_call_shape(
         ctx,
         out,
-        expected_user_arg_count,
-        user_arg_count,
-        func_def.ret_slots as u32,
-        ret_slots,
-        user_args,
-        ret_ptr,
+        PreparedCallShape {
+            expected_user_arg_count,
+            user_arg_count,
+            expected_ret_slots: func_def.ret_slots as u32,
+            ret_slots,
+            user_args,
+            ret_ptr,
+        },
     ) {
         return result;
     }
@@ -269,12 +306,14 @@ pub extern "C" fn jit_prepare_iface_call(
     if let Some(result) = validate_prepared_call_shape(
         ctx_ref,
         out,
-        expected_user_arg_count,
-        user_arg_count,
-        func_def.ret_slots as u32,
-        ret_slots,
-        user_args,
-        ret_ptr,
+        PreparedCallShape {
+            expected_user_arg_count,
+            user_arg_count,
+            expected_ret_slots: func_def.ret_slots as u32,
+            ret_slots,
+            user_args,
+            ret_ptr,
+        },
     ) {
         return result;
     }
@@ -331,6 +370,7 @@ mod tests {
     use vo_runtime::bytecode::{Itab, Module};
     use vo_runtime::ffi::SentinelErrorCache;
     use vo_runtime::gc::Gc;
+    use vo_runtime::island;
     use vo_runtime::itab::ItabCache;
     use vo_runtime::jit_api::{JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_SENTINEL};
     use vo_runtime::objects::interface;
@@ -345,6 +385,7 @@ mod tests {
             local_slots: 1,
             gc_scan_slots: 0,
             ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -525,6 +566,59 @@ mod tests {
             user_args.as_ptr(),
             user_args.len() as u32,
             returns.as_mut_ptr(),
+            &mut out,
+        );
+
+        assert_eq!(result, JitResult::JitError);
+        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
+        assert_eq!(
+            ctx.runtime_trap_arg1,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
+        );
+    }
+
+    #[test]
+    fn prepare_closure_call_rejects_non_closure_gcref_before_header_read() {
+        let mut module = Module::new("test".to_string());
+        module.functions.push(func(false, false, false));
+
+        let mut gc = Gc::new();
+        let wrong_ref = island::create(&mut gc, 0) as u64;
+        let mut itab_cache = ItabCache::new();
+        let safepoint_flag = false;
+        let mut panic_flag = false;
+        let mut is_user_panic = false;
+        let mut panic_msg = InterfaceSlot::nil();
+        let program_args = Vec::new();
+        let mut sentinel_errors = SentinelErrorCache::new();
+        let output = CaptureSink::new();
+        let mut host_output = None;
+        let mut stack = [0_u64; 16];
+        let mut ctx = test_context(
+            &mut gc,
+            &module,
+            &mut itab_cache,
+            &mut stack,
+            &safepoint_flag,
+            &mut panic_flag,
+            &mut is_user_panic,
+            &mut panic_msg,
+            &program_args,
+            &mut sentinel_errors,
+            &output,
+            &mut host_output,
+        );
+        let mut out = PreparedCall::fallback(0, 0);
+
+        let result = jit_prepare_closure_call(
+            &mut ctx,
+            wrong_ref,
+            0,
+            0,
+            10,
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
             &mut out,
         );
 

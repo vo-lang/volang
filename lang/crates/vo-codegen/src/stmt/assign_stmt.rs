@@ -234,7 +234,7 @@ fn compile_multi_value_assign(
                 ctx,
                 func,
                 &[
-                    vo_runtime::SlotType::Value,
+                    vo_runtime::SlotType::Interface0,
                     vo_runtime::SlotType::Interface1,
                 ],
             );
@@ -315,7 +315,7 @@ fn compile_parallel_assign(
                     ctx,
                     func,
                     &[
-                        vo_runtime::SlotType::Value,
+                        vo_runtime::SlotType::Interface0,
                         vo_runtime::SlotType::Interface1,
                     ],
                 );
@@ -364,16 +364,7 @@ fn compile_assign(
         info,
     )?;
 
-    // Store to LValue (interface data slot may contain GcRef)
-    let store_slot_types: Vec<vo_runtime::SlotType> = if info.is_interface(lhs_type) {
-        vec![
-            vo_runtime::SlotType::Value,
-            vo_runtime::SlotType::Interface1,
-        ]
-    } else {
-        slot_types.to_vec()
-    };
-    emit_lvalue_store(&lv, tmp, ctx, func, &store_slot_types);
+    emit_lvalue_store(&lv, tmp, ctx, func, &slot_types);
 
     Ok(())
 }

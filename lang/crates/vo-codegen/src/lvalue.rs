@@ -13,7 +13,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::{FuncBuilder, StorageKind};
+use crate::func::{ElemLayoutSpec, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 /// Container kind for index operations.
@@ -24,23 +24,24 @@ pub enum ContainerKind {
         base_slot: u16,
         elem_slots: u16,
         len: u16,
+        elem_slot_types: Vec<SlotType>,
     },
     /// Heap-allocated array: ArrayGet/ArraySet with elem_bytes and elem_vk
     HeapArray {
         elem_bytes: u16,
         elem_vk: vo_common_core::ValueKind,
+        elem_slot_types: Vec<SlotType>,
     },
     /// Slice: SliceGet/SliceSet with elem_bytes and elem_vk
     Slice {
         elem_bytes: u16,
         elem_vk: vo_common_core::ValueKind,
+        elem_slot_types: Vec<SlotType>,
     },
     /// Map: MapGet/MapSet with meta encoding
     Map {
-        key_slots: u16,
-        val_slots: u16,
         key_slot_types: Vec<SlotType>,
-        val_may_gc: bool,
+        val_slot_types: Vec<SlotType>,
     },
     /// String: StrIndex (read-only)
     String,
@@ -58,6 +59,7 @@ pub enum LValue {
         ptr_reg: u16,
         offset: u16,
         elem_slots: u16,
+        elem_slot_types: Vec<SlotType>,
     },
 
     /// Struct field on a base location
@@ -90,6 +92,7 @@ pub enum LValue {
         index_reg: u16,
         field_offset: u16,
         field_slots: u16,
+        elem_slot_types: Vec<SlotType>,
     },
 }
 
@@ -314,7 +317,15 @@ pub fn resolve_lvalue(
             // Check for indirect selection (embedded pointer fields require runtime deref)
             if let Some(selection) = info.get_selection(expr.id) {
                 if selection.indirect() {
-                    return resolve_indirect_lvalue(sel, selection.indices(), ctx, func, info);
+                    let field_slot_types = info.type_slot_types(info.expr_type(expr.id));
+                    return resolve_indirect_lvalue(
+                        sel,
+                        selection.indices(),
+                        field_slot_types,
+                        ctx,
+                        func,
+                        info,
+                    );
                 }
             }
 
@@ -330,6 +341,7 @@ pub fn resolve_lvalue(
                     ptr_reg,
                     offset,
                     elem_slots: slots,
+                    elem_slot_types: info.type_slot_types(info.expr_type(expr.id)),
                 })
             } else {
                 // Value receiver: resolve base then add offset
@@ -337,9 +349,16 @@ pub fn resolve_lvalue(
 
                 // Special case: Index expression base (container[i].field)
                 if let ExprKind::Index(idx) = &sel.expr.kind {
-                    if let Some(lv) =
-                        resolve_index_field_lvalue(idx, offset, slots, ctx, func, info)?
-                    {
+                    let field_slot_types = info.type_slot_types(info.expr_type(expr.id));
+                    if let Some(lv) = resolve_index_field_lvalue(
+                        idx,
+                        offset,
+                        slots,
+                        field_slot_types,
+                        ctx,
+                        func,
+                        info,
+                    )? {
                         return Ok(lv);
                     }
                 }
@@ -365,6 +384,7 @@ pub fn resolve_lvalue(
                 ptr_reg,
                 offset: 0,
                 elem_slots,
+                elem_slot_types: info.type_slot_types(info.expr_type(expr.id)),
             })
         }
 
@@ -393,6 +413,7 @@ fn resolve_index_lvalue(
         if let Some(nested_info) = try_resolve_nested_stack_array(expr, ctx, func, info)? {
             let elem_type = info.array_elem_type(container_type);
             let inner_elem_slots = info.type_slot_count(elem_type);
+            let elem_slot_types = info.type_slot_types(elem_type);
             let flattened_idx = emit_nested_stack_array_index(&nested_info, func);
 
             return Ok(LValue::Index {
@@ -400,6 +421,7 @@ fn resolve_index_lvalue(
                     base_slot: nested_info.base_slot,
                     elem_slots: inner_elem_slots,
                     len: nested_info.total_flattened_len,
+                    elem_slot_types,
                 },
                 container_reg: nested_info.base_slot,
                 index_reg: flattened_idx,
@@ -418,6 +440,7 @@ fn resolve_index_lvalue(
             kind: ContainerKind::Slice {
                 elem_bytes,
                 elem_vk,
+                elem_slot_types: info.type_slot_types(elem_type),
             },
             container_reg,
             index_reg,
@@ -428,17 +451,12 @@ fn resolve_index_lvalue(
         let container_reg = crate::expr::compile_expr(&idx.expr, ctx, func, info)?;
         let (key_type, _) = info.map_key_val_types(container_type);
         let index_reg = crate::expr::compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
-        let (key_slots, val_slots) = info.map_key_val_slots(container_type);
         let key_slot_types = info.map_key_slot_types(container_type);
-        let val_may_gc = info
-            .map_val_value_kind(container_type)
-            .may_contain_gc_refs();
+        let val_slot_types = info.map_val_slot_types(container_type);
         return Ok(LValue::Index {
             kind: ContainerKind::Map {
-                key_slots,
-                val_slots,
                 key_slot_types,
-                val_may_gc,
+                val_slot_types,
             },
             container_reg,
             index_reg,
@@ -470,6 +488,7 @@ fn resolve_index_field_lvalue(
     idx: &vo_syntax::ast::IndexExpr,
     field_offset: u16,
     field_slots: u16,
+    field_slot_types: Vec<SlotType>,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
@@ -482,6 +501,7 @@ fn resolve_index_field_lvalue(
             ptr_reg: elem_addr_reg,
             offset: field_offset,
             elem_slots: field_slots,
+            elem_slot_types: field_slot_types.clone(),
         }));
     }
 
@@ -495,6 +515,8 @@ fn resolve_index_field_lvalue(
                 ..
             }) => {
                 let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
+                let elem_type = info.array_elem_type(container_type);
+                let elem_slot_types = info.type_slot_types(elem_type);
                 return Ok(Some(LValue::StackArrayField {
                     base_slot,
                     elem_slots,
@@ -502,6 +524,7 @@ fn resolve_index_field_lvalue(
                     index_reg,
                     field_offset,
                     field_slots,
+                    elem_slot_types,
                 }));
             }
             _ => {
@@ -511,6 +534,7 @@ fn resolve_index_field_lvalue(
                     ptr_reg: elem_addr_reg,
                     offset: field_offset,
                     elem_slots: field_slots,
+                    elem_slot_types: field_slot_types.clone(),
                 }));
             }
         }
@@ -518,9 +542,11 @@ fn resolve_index_field_lvalue(
 
     if info.is_map(container_type) {
         // Map returns by value, so we get a copy to temp then access field
-        let (key_slots, val_slots) = info.map_key_val_slots(container_type);
         let (key_type, val_type) = info.map_key_val_types(container_type);
+        let key_slot_types = info.type_slot_types(key_type);
         let val_slot_types = info.type_slot_types(val_type);
+        let key_slots = key_slot_types.len() as u16;
+        let val_slots = val_slot_types.len() as u16;
         let tmp = func.alloc_slots(&val_slot_types);
 
         // Compile map get: container first, then index (Go evaluation order)
@@ -529,12 +555,19 @@ fn resolve_index_field_lvalue(
 
         let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, false);
         let mut meta_slot_types = vec![SlotType::Value];
-        meta_slot_types.extend(info.type_slot_types(key_type));
+        meta_slot_types.extend(key_slot_types.iter().copied());
         let meta_reg = func.alloc_slots(&meta_slot_types);
         let meta_idx = ctx.const_int(meta as i64);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         func.emit_copy(meta_reg + 1, index_reg, key_slots);
-        func.emit_map_get(tmp, container_reg, meta_reg, key_slots, val_slots, false);
+        func.emit_map_get(
+            tmp,
+            container_reg,
+            meta_reg,
+            &key_slot_types,
+            &val_slot_types,
+            false,
+        );
 
         return Ok(Some(LValue::Variable(StorageKind::StackValue {
             slot: tmp + field_offset,
@@ -567,11 +600,13 @@ fn resolve_array_index_lvalue(
             len,
         }) => {
             let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
+            let elem_slot_types = func.stack_array_elem_slot_types(base_slot, es);
             Ok(LValue::Index {
                 kind: ContainerKind::StackArray {
                     base_slot,
                     elem_slots: es,
                     len,
+                    elem_slot_types,
                 },
                 container_reg: base_slot,
                 index_reg,
@@ -584,6 +619,7 @@ fn resolve_array_index_lvalue(
                 kind: ContainerKind::HeapArray {
                     elem_bytes,
                     elem_vk,
+                    elem_slot_types: info.type_slot_types(elem_type),
                 },
                 container_reg: gcref_slot,
                 index_reg,
@@ -594,12 +630,14 @@ fn resolve_array_index_lvalue(
         }) => {
             let index_reg = crate::expr::compile_expr(&idx.index, ctx, func, info)?;
             let elem_slots = info.type_slot_count(elem_type);
+            let elem_slot_types = info.type_slot_types(elem_type);
             let len = info.array_len(container_type) as u16;
             Ok(LValue::Index {
                 kind: ContainerKind::StackArray {
                     base_slot,
                     elem_slots,
                     len,
+                    elem_slot_types,
                 },
                 container_reg: base_slot,
                 index_reg,
@@ -614,6 +652,7 @@ fn resolve_array_index_lvalue(
                 kind: ContainerKind::HeapArray {
                     elem_bytes,
                     elem_vk,
+                    elem_slot_types: info.type_slot_types(elem_type),
                 },
                 container_reg,
                 index_reg,
@@ -630,6 +669,7 @@ fn resolve_array_index_lvalue(
                         kind: ContainerKind::HeapArray {
                             elem_bytes,
                             elem_vk,
+                            elem_slot_types: info.type_slot_types(elem_type),
                         },
                         container_reg: gcref_slot,
                         index_reg,
@@ -645,6 +685,7 @@ fn resolve_array_index_lvalue(
             // Container (literal) compiled first, then index
             if is_composite_literal(&idx.expr) {
                 let elem_slots = info.type_slot_count(elem_type);
+                let elem_slot_types = info.type_slot_types(elem_type);
                 let len = info.array_len(container_type) as u16;
                 let slot_types = info.type_slot_types(container_type);
                 let base_slot = func.alloc_slots(&slot_types);
@@ -655,6 +696,7 @@ fn resolve_array_index_lvalue(
                         base_slot,
                         elem_slots,
                         len,
+                        elem_slot_types,
                     },
                     container_reg: base_slot,
                     index_reg,
@@ -667,6 +709,7 @@ fn resolve_array_index_lvalue(
                 kind: ContainerKind::HeapArray {
                     elem_bytes,
                     elem_vk,
+                    elem_slot_types: info.type_slot_types(elem_type),
                 },
                 container_reg,
                 index_reg,
@@ -709,6 +752,7 @@ fn resolve_heap_struct_array_index(
             ptr_reg: struct_ptr,
             offset: total_offset,
             elem_slots,
+            elem_slot_types: info.type_slot_types(elem_type),
         });
     }
 
@@ -745,6 +789,7 @@ fn resolve_heap_struct_array_index(
         ptr_reg: elem_ptr,
         offset: 0,
         elem_slots,
+        elem_slot_types: info.type_slot_types(elem_type),
     })
 }
 
@@ -764,8 +809,10 @@ pub fn emit_lvalue_load(
             ptr_reg,
             offset,
             elem_slots,
+            elem_slot_types,
         } => {
-            func.emit_ptr_get(dst, *ptr_reg, *offset, *elem_slots);
+            debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
+            func.emit_ptr_get_with_slot_types(dst, *ptr_reg, *offset, elem_slot_types);
         }
 
         LValue::Field {
@@ -788,52 +835,66 @@ pub fn emit_lvalue_load(
                     base_slot,
                     elem_slots,
                     len,
+                    elem_slot_types,
                 } => {
                     // Bounds check: emit IndexCheck before SlotGet
                     let len_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadInt, len_reg, *len, 0);
                     func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
-                    func.emit_slot_get(dst, *base_slot, *index_reg, *elem_slots);
+                    debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
+                    func.emit_slot_get_with_slot_types(
+                        dst,
+                        *base_slot,
+                        *index_reg,
+                        elem_slot_types,
+                    );
                 }
                 ContainerKind::HeapArray {
                     elem_bytes,
                     elem_vk,
+                    elem_slot_types,
                 } => {
                     func.emit_array_get(
                         dst,
                         *container_reg,
                         *index_reg,
-                        *elem_bytes as usize,
-                        *elem_vk,
+                        ElemLayoutSpec::new(*elem_bytes as usize, *elem_vk, elem_slot_types),
                         ctx,
                     );
                 }
                 ContainerKind::Slice {
                     elem_bytes,
                     elem_vk,
+                    elem_slot_types,
                 } => {
                     func.emit_slice_get(
                         dst,
                         *container_reg,
                         *index_reg,
-                        *elem_bytes as usize,
-                        *elem_vk,
+                        ElemLayoutSpec::new(*elem_bytes as usize, *elem_vk, elem_slot_types),
                         ctx,
                     );
                 }
                 ContainerKind::Map {
-                    key_slots,
-                    val_slots,
                     key_slot_types,
-                    ..
+                    val_slot_types,
                 } => {
                     // MapGet: a=dst, b=map, c=meta_and_key
-                    let meta = crate::type_info::encode_map_get_meta(*key_slots, *val_slots, false);
+                    let key_slots = key_slot_types.len() as u16;
+                    let val_slots = val_slot_types.len() as u16;
+                    let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, false);
                     let meta_reg = func.alloc_slots(&build_map_meta_key_slot_types(key_slot_types));
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-                    func.emit_copy(meta_reg + 1, *index_reg, *key_slots);
-                    func.emit_map_get(dst, *container_reg, meta_reg, *key_slots, *val_slots, false);
+                    func.emit_copy(meta_reg + 1, *index_reg, key_slots);
+                    func.emit_map_get(
+                        dst,
+                        *container_reg,
+                        meta_reg,
+                        key_slot_types,
+                        val_slot_types,
+                        false,
+                    );
                 }
                 ContainerKind::String => {
                     func.emit_op(Opcode::StrIndex, dst, *container_reg, *index_reg);
@@ -858,13 +919,15 @@ pub fn emit_lvalue_load(
             index_reg,
             field_offset,
             field_slots,
+            elem_slot_types,
         } => {
             // Read element to temp, then copy field to dst
             let len_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, len_reg, *len, 0);
             func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
-            let tmp = func.alloc_slots(&vec![SlotType::Value; *elem_slots as usize]);
-            func.emit_slot_get(tmp, *base_slot, *index_reg, *elem_slots);
+            debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
+            let tmp = func.alloc_slots(elem_slot_types);
+            func.emit_slot_get_with_slot_types(tmp, *base_slot, *index_reg, elem_slot_types);
             func.emit_copy(dst, tmp + *field_offset, *field_slots);
         }
     }
@@ -888,6 +951,7 @@ pub fn emit_lvalue_store(
             ptr_reg,
             offset,
             elem_slots: _,
+            elem_slot_types: _,
         } => {
             func.emit_ptr_set_with_slot_types(*ptr_reg, *offset, src, slot_types);
         }
@@ -912,64 +976,74 @@ pub fn emit_lvalue_store(
                     base_slot,
                     elem_slots,
                     len,
+                    elem_slot_types,
                 } => {
                     // Bounds check: emit IndexCheck before SlotSet
                     let len_reg = func.alloc_slots(&[SlotType::Value]);
                     func.emit_op(Opcode::LoadInt, len_reg, *len, 0);
                     func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
-                    func.emit_slot_set(*base_slot, *index_reg, src, *elem_slots);
+                    debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
+                    func.emit_slot_set_with_slot_types(
+                        *base_slot,
+                        *index_reg,
+                        src,
+                        elem_slot_types,
+                    );
                 }
                 ContainerKind::HeapArray {
                     elem_bytes,
                     elem_vk,
+                    elem_slot_types,
                 } => {
                     func.emit_array_set(
                         *container_reg,
                         *index_reg,
                         src,
-                        *elem_bytes as usize,
-                        *elem_vk,
+                        ElemLayoutSpec::new(*elem_bytes as usize, *elem_vk, elem_slot_types),
                         ctx,
                     );
                 }
                 ContainerKind::Slice {
                     elem_bytes,
                     elem_vk,
+                    elem_slot_types,
                 } => {
                     func.emit_slice_set(
                         *container_reg,
                         *index_reg,
                         src,
-                        *elem_bytes as usize,
-                        *elem_vk,
+                        ElemLayoutSpec::new(*elem_bytes as usize, *elem_vk, elem_slot_types),
                         ctx,
                     );
                 }
                 ContainerKind::Map {
-                    key_slots,
-                    val_slots,
                     key_slot_types,
-                    val_may_gc,
+                    val_slot_types,
                 } => {
                     // MapSet: a=map, b=meta_and_key, c=val
                     // flags: bit0 = key may contain GcRef, bit1 = val may contain GcRef
-                    let meta = crate::type_info::encode_map_set_meta(*key_slots, *val_slots);
+                    let key_slots = key_slot_types.len() as u16;
+                    let val_slots = val_slot_types.len() as u16;
+                    let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
                     let meta_and_key_reg =
                         func.alloc_slots(&build_map_meta_key_slot_types(key_slot_types));
                     let meta_idx = ctx.const_int(meta as i64);
                     func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
-                    func.emit_copy(meta_and_key_reg + 1, *index_reg, *key_slots);
+                    func.emit_copy(meta_and_key_reg + 1, *index_reg, key_slots);
                     let key_may_gc = key_slot_types
                         .iter()
-                        .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface0));
-                    let flags = (key_may_gc as u8) | ((*val_may_gc as u8) << 1);
+                        .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
+                    let val_may_gc = val_slot_types
+                        .iter()
+                        .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1));
+                    let flags = (key_may_gc as u8) | ((val_may_gc as u8) << 1);
                     func.emit_map_set(
                         flags,
                         *container_reg,
                         meta_and_key_reg,
                         src,
-                        *key_slots,
-                        *val_slots,
+                        key_slot_types,
+                        val_slot_types,
                     );
                 }
                 ContainerKind::String => {
@@ -996,15 +1070,17 @@ pub fn emit_lvalue_store(
             index_reg,
             field_offset,
             field_slots,
+            elem_slot_types,
         } => {
             // Read element to temp, modify field, write back
             let len_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, len_reg, *len, 0);
             func.emit_op(Opcode::IndexCheck, *index_reg, len_reg, 0);
-            let tmp = func.alloc_slots(&vec![SlotType::Value; *elem_slots as usize]);
-            func.emit_slot_get(tmp, *base_slot, *index_reg, *elem_slots);
+            debug_assert_eq!(elem_slot_types.len(), *elem_slots as usize);
+            let tmp = func.alloc_slots(elem_slot_types);
+            func.emit_slot_get_with_slot_types(tmp, *base_slot, *index_reg, elem_slot_types);
             func.emit_copy(tmp + *field_offset, src, *field_slots);
-            func.emit_slot_set(*base_slot, *index_reg, tmp, *elem_slots);
+            func.emit_slot_set_with_slot_types(*base_slot, *index_reg, tmp, elem_slot_types);
         }
     }
 }
@@ -1019,11 +1095,9 @@ pub fn snapshot_lvalue_index(lv: &mut LValue, func: &mut FuncBuilder) {
             kind, index_reg, ..
         } => {
             let (key_slots, key_types) = match kind {
-                ContainerKind::Map {
-                    key_slots,
-                    key_slot_types,
-                    ..
-                } => (*key_slots, key_slot_types.clone()),
+                ContainerKind::Map { key_slot_types, .. } => {
+                    (key_slot_types.len() as u16, key_slot_types.clone())
+                }
                 // The index register is a one-slot integer operand, even for
                 // zero-slot array elements such as struct{}.
                 ContainerKind::StackArray { .. } => (1, vec![SlotType::Value]),
@@ -1194,19 +1268,35 @@ pub fn compile_index_addr(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let container_type = info.expr_type(container_expr.id);
-    let container_reg = crate::expr::compile_expr(container_expr, ctx, func, info)?;
-    let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
 
     if info.is_slice(container_type) {
+        let container_reg = crate::expr::compile_expr(container_expr, ctx, func, info)?;
+        let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
         let elem_type = info.slice_elem_type(container_type);
         let elem_bytes = info.slice_elem_bytes(container_type);
         let elem_vk = info.type_value_kind(elem_type);
-        func.emit_slice_addr(dst, container_reg, index_reg, elem_bytes, elem_vk, ctx);
+        let elem_slot_types = info.type_slot_types(elem_type);
+        func.emit_slice_addr(
+            dst,
+            container_reg,
+            index_reg,
+            ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+            ctx,
+        );
     } else {
+        let container_reg = compile_array_ref_for_addr(container_expr, ctx, func, info)?;
+        let index_reg = crate::expr::compile_expr(index_expr, ctx, func, info)?;
         let elem_type = info.array_elem_type(container_type);
         let elem_bytes = info.array_elem_bytes(container_type);
         let elem_vk = info.type_value_kind(elem_type);
-        func.emit_array_addr(dst, container_reg, index_reg, elem_bytes, elem_vk, ctx);
+        let elem_slot_types = info.type_slot_types(elem_type);
+        func.emit_array_addr(
+            dst,
+            container_reg,
+            index_reg,
+            ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+            ctx,
+        );
     }
 
     Ok(())
@@ -1225,11 +1315,47 @@ pub fn compile_index_addr_to_reg(
     Ok(addr_reg)
 }
 
+fn compile_array_ref_for_addr(
+    container_expr: &Expr,
+    ctx: &mut CodegenContext,
+    func: &mut FuncBuilder,
+    info: &TypeInfoWrapper,
+) -> Result<u16, CodegenError> {
+    match crate::expr::get_expr_source(container_expr, ctx, func, info) {
+        crate::func::ExprSource::Location(StorageKind::HeapArray { gcref_slot, .. }) => {
+            return Ok(gcref_slot);
+        }
+        crate::func::ExprSource::Location(StorageKind::Global { index, .. }) => {
+            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+            func.emit_global_get(gcref_slot, index, 1);
+            return Ok(gcref_slot);
+        }
+        crate::func::ExprSource::Location(StorageKind::Reference { slot }) => {
+            return Ok(slot);
+        }
+        _ => {}
+    }
+
+    if let ExprKind::Ident(ident) = &container_expr.kind {
+        if let Some(capture_index) = func
+            .lookup_capture(ident.symbol)
+            .map(|capture| capture.index)
+        {
+            let gcref_slot = func.alloc_slots(&[SlotType::GcRef]);
+            func.emit_op(Opcode::ClosureGet, gcref_slot, capture_index, 0);
+            return Ok(gcref_slot);
+        }
+    }
+
+    crate::expr::compile_expr(container_expr, ctx, func, info)
+}
+
 /// Resolve LValue for indirect selection (embedded pointer fields).
 /// Uses shared traverse_indirect_field logic.
 fn resolve_indirect_lvalue(
     sel: &vo_syntax::ast::SelectorExpr,
     indices: &[usize],
+    result_slot_types: Vec<SlotType>,
     ctx: &mut CodegenContext,
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
@@ -1241,6 +1367,7 @@ fn resolve_indirect_lvalue(
             ptr_reg: result.base_reg,
             offset: result.offset,
             elem_slots: result.slots,
+            elem_slot_types: result_slot_types,
         })
     } else {
         Ok(LValue::Variable(StorageKind::StackValue {

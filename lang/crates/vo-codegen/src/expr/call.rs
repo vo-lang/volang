@@ -11,7 +11,7 @@ use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
-use crate::func::{FuncBuilder, StorageKind};
+use crate::func::{ElemLayoutSpec, FuncBuilder, StorageKind};
 use crate::type_info::TypeInfoWrapper;
 
 use super::{compile_expr, compile_expr_to};
@@ -333,7 +333,7 @@ pub fn compile_call(
             compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
             let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
-            func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
+            func.emit_call_closure(closure_reg, args_start, c, &arg_slot_types, &ret_slot_types);
 
             let ret_start = args_start + total_arg_slots as u16;
             if ret_slots > 0 && dst != ret_start {
@@ -480,7 +480,7 @@ pub fn compile_closure_call_from_reg(
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
     let c = crate::type_info::encode_call_args(total_arg_slots, ret_slots);
-    func.emit_op(Opcode::CallClosure, closure_reg, args_start, c);
+    func.emit_call_closure(closure_reg, args_start, c, &arg_slot_types, &ret_slot_types);
 
     let ret_start = args_start + total_arg_slots;
     if ret_slots > 0 && dst != ret_start {
@@ -844,12 +844,13 @@ fn emit_interface_call_with_args(
     )?;
 
     let c = crate::type_info::encode_call_args(arg_slots, ret_slots);
-    func.emit_with_flags(
-        Opcode::CallIface,
-        FuncBuilder::checked_call_iface_method_idx(method_idx),
+    func.emit_call_iface(
+        method_idx,
         iface_slot,
         args_start,
         c,
+        &arg_slot_types,
+        &ret_slot_types,
     );
 
     let ret_start = args_start + arg_slots;
@@ -979,14 +980,27 @@ pub fn compile_extern_call(
     // Get return slot count from the function's result type
     let sig = info.as_signature(func_type);
     let ret_slots = info.type_slot_count(sig.results());
+    let ret_slot_types = info.type_slot_types(sig.results());
     let extern_id = ctx.get_or_register_extern_with_slots(extern_name, ret_slots, param_kinds);
 
-    // Use compile_method_args for proper type conversion (e.g., boxing to `any`)
+    // Use compile_method_args for proper type conversion (e.g., boxing to `any`),
+    // and allocate the call buffer with the same slot layout that callees,
+    // extern bridges, GC, and JIT verification will observe.
     let total_slots = calc_method_arg_slots(call, &param_types, is_variadic, info);
-    let args_start = func.alloc_slots(&vec![SlotType::Value; total_slots.max(1) as usize]);
+    let mut arg_slot_types = calc_arg_slot_types(call, &param_types, is_variadic, info);
+    if arg_slot_types.is_empty() {
+        arg_slot_types.push(SlotType::Value);
+    }
+    let args_start = func.alloc_slots(&arg_slot_types);
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    func.emit_call_extern(dst, extern_id, args_start, usize::from(total_slots));
+    func.emit_call_extern(
+        dst,
+        extern_id,
+        args_start,
+        usize::from(total_slots),
+        &ret_slot_types,
+    );
     Ok(())
 }
 
@@ -1236,14 +1250,26 @@ fn pack_variadic_args(
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
     }
-    func.emit_slice_new(dst, meta_reg, len_cap_reg, flags, elem_bytes, elem_vk);
+    func.emit_slice_new(
+        dst,
+        meta_reg,
+        len_cap_reg,
+        flags,
+        ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+    );
 
     // Helper to set one slice element
     let mut slice_idx = 0usize;
     let mut set_elem = |val_reg: u16, func: &mut FuncBuilder, ctx: &mut CodegenContext| {
         let idx_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadInt, idx_reg, slice_idx as u16, 0);
-        func.emit_slice_set(dst, idx_reg, val_reg, elem_bytes, elem_vk, ctx);
+        func.emit_slice_set(
+            dst,
+            idx_reg,
+            val_reg,
+            ElemLayoutSpec::new(elem_bytes, elem_vk, &elem_slot_types),
+            ctx,
+        );
         slice_idx += 1;
     };
 
