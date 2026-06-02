@@ -1,16 +1,16 @@
 //! Global opcode semantic matrix for JIT correctness checks.
 //!
 //! This is intentionally close to the opcode list instead of being inferred from
-//! scattered lowering code. Adding or changing an opcode should force an
-//! explicit update here, in capability declarations, in effect contracts, and in
-//! verifier requirements.
+//! scattered lowering code. Adding or changing an opcode should force one
+//! explicit update here plus a metadata-contract update when the opcode consumes
+//! per-PC JIT metadata.
 
 use vo_runtime::instruction::Opcode;
 #[cfg(test)]
 use vo_runtime::jit_api::{JitRuntimeHelperPanicPolicy, JitRuntimeHelperReturnPolicy};
 
-use crate::capability::{opcode_capability, OpcodeCapability};
-use crate::contract::{opcode_contract, EffectContract};
+use crate::capability::{BackendStatus, FallbackPolicy, OpcodeCapability, OpcodeFamily};
+use crate::contract::EffectContract;
 use crate::metadata_contract::opcode_metadata_requirement;
 pub use crate::metadata_contract::JitMetadataRequirement;
 
@@ -885,6 +885,493 @@ const FF_BRANCH_LAYOUT: &[FailFastCondition] = &[
 ];
 const FF_INVALID: &[FailFastCondition] = &[FailFastCondition::UnsupportedOpcode];
 
+const fn cap(
+    opcode: Opcode,
+    family: OpcodeFamily,
+    full_jit: BackendStatus,
+    osr: BackendStatus,
+    fallback: FallbackPolicy,
+    reason: &'static str,
+) -> OpcodeCapability {
+    OpcodeCapability {
+        opcode,
+        family,
+        full_jit,
+        osr,
+        fallback,
+        reason,
+    }
+}
+
+pub(crate) fn opcode_capability_contract(opcode: Opcode) -> OpcodeCapability {
+    use Opcode::*;
+
+    match opcode {
+        Hint => cap(
+            Hint,
+            OpcodeFamily::Hint,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "JIT loop marker/NOP",
+        ),
+        LoadInt | LoadConst => cap(
+            opcode,
+            OpcodeFamily::Load,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "constant load",
+        ),
+        Copy | CopyN => cap(
+            opcode,
+            OpcodeFamily::Copy,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "slot copy",
+        ),
+        SlotGet | SlotSet | SlotGetN | SlotSetN => cap(
+            opcode,
+            OpcodeFamily::Slot,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "stack slot indexing",
+        ),
+        GlobalGet | GlobalGetN | GlobalSet | GlobalSetN => cap(
+            opcode,
+            OpcodeFamily::Global,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "global slot access",
+        ),
+        PtrNew => cap(
+            opcode,
+            OpcodeFamily::Pointer,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "GC allocation",
+        ),
+        PtrGet | PtrSet | PtrGetN | PtrSetN => cap(
+            opcode,
+            OpcodeFamily::Pointer,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::RuntimePanic,
+            "heap pointer access",
+        ),
+        PtrAdd => cap(
+            PtrAdd,
+            OpcodeFamily::Pointer,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "pointer arithmetic",
+        ),
+        AddI | SubI | MulI | NegI | AddF | SubF | MulF | DivF | NegF => cap(
+            opcode,
+            OpcodeFamily::Arithmetic,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "numeric operation",
+        ),
+        DivI | DivU | ModI | ModU => cap(
+            opcode,
+            OpcodeFamily::Arithmetic,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::RuntimePanic,
+            "checked integer division or modulo",
+        ),
+        EqI | NeI | LtI | LtU | LeI | LeU | GtI | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF
+        | GeF => cap(
+            opcode,
+            OpcodeFamily::Comparison,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "comparison",
+        ),
+        And | Or | Xor | AndNot | Not => cap(
+            opcode,
+            OpcodeFamily::Bitwise,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "bit operation",
+        ),
+        Shl | ShrS | ShrU => cap(
+            opcode,
+            OpcodeFamily::Bitwise,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::RuntimePanic,
+            "checked shift operation",
+        ),
+        BoolNot => cap(
+            opcode,
+            OpcodeFamily::Logic,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "boolean operation",
+        ),
+        Jump | JumpIf | JumpIfNot | Return | Panic | ForLoop => cap(
+            opcode,
+            OpcodeFamily::Control,
+            BackendStatus::CompilerSpecific,
+            BackendStatus::CompilerSpecific,
+            FallbackPolicy::VmSideExit,
+            "compiler-owned control flow",
+        ),
+        Call => cap(
+            opcode,
+            OpcodeFamily::Call,
+            BackendStatus::CompilerSpecific,
+            BackendStatus::CompilerSpecific,
+            FallbackPolicy::VmFallback,
+            "compiler route chooses self/direct/dynamic JIT or VM call materialization",
+        ),
+        CallExtern => cap(
+            opcode,
+            OpcodeFamily::Call,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::VmSideExit,
+            "extern helper may suspend, replay, or panic",
+        ),
+        CallClosure | CallIface => cap(
+            opcode,
+            OpcodeFamily::Call,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::VmFallback,
+            "dynamic IC with prepare callback slow path",
+        ),
+        StrLen => cap(
+            StrLen,
+            OpcodeFamily::String,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "inline string length",
+        ),
+        StrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrDecodeRune => cap(
+            opcode,
+            OpcodeFamily::String,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "non-panicking string helper",
+        ),
+        StrIndex | StrSlice => cap(
+            opcode,
+            OpcodeFamily::String,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimePanic,
+            "string helper with checked runtime trap",
+        ),
+        ArrayNew => cap(
+            ArrayNew,
+            OpcodeFamily::Array,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "array allocation helper",
+        ),
+        ArrayGet | ArraySet | ArrayAddr => cap(
+            opcode,
+            OpcodeFamily::Array,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::RuntimePanic,
+            "inline array access with bounds checks and typed element layout",
+        ),
+        SliceNew | SliceSlice => cap(
+            opcode,
+            OpcodeFamily::Slice,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimePanic,
+            "slice allocation or reslicing helper",
+        ),
+        SliceAppend => cap(
+            SliceAppend,
+            OpcodeFamily::Slice,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "slice append helper with JitError sentinel",
+        ),
+        SliceGet | SliceSet | SliceAddr => cap(
+            opcode,
+            OpcodeFamily::Slice,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::RuntimePanic,
+            "inline slice access with nil-aware bounds checks and typed element layout",
+        ),
+        SliceLen | SliceCap => cap(
+            opcode,
+            OpcodeFamily::Slice,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "inline nil-aware slice metadata access",
+        ),
+        MapNew | MapGet | MapDelete | MapLen | MapIterInit | MapIterNext => cap(
+            opcode,
+            OpcodeFamily::Map,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "non-panicking map helper",
+        ),
+        MapSet => cap(
+            MapSet,
+            OpcodeFamily::Map,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimePanic,
+            "map set helper with checked runtime trap",
+        ),
+        QueueNew => cap(
+            QueueNew,
+            OpcodeFamily::Queue,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimePanic,
+            "queue allocation helper with checked runtime trap",
+        ),
+        QueueSend | QueueRecv | QueueClose => cap(
+            opcode,
+            OpcodeFamily::Queue,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::VmSideExit,
+            "queue helper may block or panic",
+        ),
+        QueueLen | QueueCap => cap(
+            opcode,
+            OpcodeFamily::Queue,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "non-blocking queue helper",
+        ),
+        SelectBegin | SelectSend | SelectRecv | SelectExec => cap(
+            opcode,
+            OpcodeFamily::Select,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::VmSideExit,
+            "select callback may block or panic",
+        ),
+        ClosureNew | ClosureGet => cap(
+            opcode,
+            OpcodeFamily::Closure,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::None,
+            "closure operation",
+        ),
+        GoStart => cap(
+            opcode,
+            OpcodeFamily::Goroutine,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "go start",
+        ),
+        GoIsland | IslandNew => cap(
+            opcode,
+            OpcodeFamily::Island,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "island runtime callback",
+        ),
+        DeferPush | ErrDeferPush | Recover => cap(
+            opcode,
+            OpcodeFamily::Defer,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "defer/recover callback",
+        ),
+        IfaceAssign => cap(
+            IfaceAssign,
+            OpcodeFamily::Interface,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimeHelper,
+            "interface assignment helper",
+        ),
+        IfaceAssert | IfaceEq => cap(
+            opcode,
+            OpcodeFamily::Interface,
+            BackendStatus::RuntimeHelper,
+            BackendStatus::RuntimeHelper,
+            FallbackPolicy::RuntimePanic,
+            "interface helper",
+        ),
+        ConvI2F | ConvF64F32 | ConvF32F64 | Trunc => cap(
+            opcode,
+            OpcodeFamily::Conversion,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::None,
+            "conversion",
+        ),
+        ConvF2I | IndexCheck => cap(
+            opcode,
+            OpcodeFamily::Conversion,
+            BackendStatus::Native,
+            BackendStatus::Native,
+            FallbackPolicy::RuntimePanic,
+            "checked conversion or bounds check",
+        ),
+        Invalid => cap(
+            Invalid,
+            OpcodeFamily::Invalid,
+            BackendStatus::Unsupported,
+            BackendStatus::Unsupported,
+            FallbackPolicy::InvalidOpcode,
+            "invalid opcode sentinel",
+        ),
+    }
+}
+
+pub(crate) fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
+    use Opcode::*;
+
+    match opcode {
+        Hint | LoadInt | LoadConst | Copy | CopyN | GlobalGet | GlobalGetN | AddI | SubI | MulI
+        | NegI | AddF | SubF | MulF | DivF | NegF | EqI | NeI | LtI | LtU | LeI | LeU | GtI
+        | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF | GeF | And | Or | Xor | AndNot | Not
+        | BoolNot | ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | Jump | JumpIf
+        | JumpIfNot | ForLoop | PtrAdd | StrLen | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe
+        | StrDecodeRune | SliceLen | SliceCap | MapLen | QueueLen | QueueCap | ClosureGet
+        | Return => EffectContract::PURE,
+
+        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | StrIndex | StrSlice
+        | ArrayGet | ArrayAddr | SliceGet | SliceSlice | SliceAddr => EffectContract {
+            may_panic: true,
+            needs_slot_metadata: matches!(opcode, ArrayGet | ArrayAddr | SliceGet | SliceAddr),
+            ..EffectContract::PURE
+        },
+
+        SlotGet | SlotGetN | SlotSet | SlotSetN => EffectContract {
+            may_panic: true,
+            needs_slot_metadata: true,
+            ..EffectContract::PURE
+        },
+
+        GlobalSet | GlobalSetN | PtrSet | PtrSetN | ArraySet | SliceSet => EffectContract {
+            may_panic: matches!(opcode, PtrSet | PtrSetN | ArraySet | SliceSet),
+            needs_slot_metadata: matches!(opcode, ArraySet | SliceSet),
+            needs_write_barrier: matches!(opcode, PtrSet | ArraySet | SliceSet),
+            ..EffectContract::PURE
+        },
+
+        PtrGet | PtrGetN => EffectContract {
+            may_panic: true,
+            needs_slot_metadata: true,
+            ..EffectContract::PURE
+        },
+
+        PtrNew | StrNew | StrConcat | ArrayNew | SliceNew | SliceAppend | MapNew | QueueNew
+        | IslandNew => EffectContract {
+            may_gc: true,
+            may_alloc: true,
+            may_panic: matches!(opcode, SliceNew | QueueNew),
+            needs_type_metadata: true,
+            needs_slot_metadata: matches!(opcode, ArrayNew | SliceAppend),
+            ..EffectContract::PURE
+        },
+
+        MapGet | MapSet | MapDelete | MapIterInit | MapIterNext => EffectContract {
+            may_gc: matches!(opcode, MapSet),
+            may_alloc: matches!(opcode, MapSet),
+            may_panic: matches!(opcode, MapGet | MapSet | MapDelete),
+            needs_slot_metadata: true,
+            needs_type_metadata: true,
+            needs_write_barrier: matches!(opcode, MapSet),
+            touches_interface: true,
+            ..EffectContract::PURE
+        },
+
+        QueueSend | QueueRecv | QueueClose | SelectBegin | SelectSend | SelectRecv | SelectExec
+        | GoStart | GoIsland => EffectContract {
+            may_gc: true,
+            may_panic: true,
+            may_call: matches!(opcode, GoStart | GoIsland),
+            may_schedule: true,
+            may_observe_frame: true,
+            needs_frame: true,
+            needs_slot_metadata: true,
+            ..EffectContract::PURE
+        },
+
+        ClosureNew => EffectContract {
+            may_gc: true,
+            may_alloc: true,
+            needs_slot_metadata: true,
+            materializes_closure: true,
+            ..EffectContract::PURE
+        },
+
+        Call | CallExtern | CallClosure | CallIface => EffectContract {
+            may_gc: true,
+            may_alloc: true,
+            may_panic: true,
+            may_unwind: true,
+            may_call: true,
+            may_schedule: matches!(opcode, CallExtern),
+            may_observe_frame: true,
+            needs_frame: true,
+            needs_slot_metadata: true,
+            touches_interface: matches!(opcode, CallIface),
+            materializes_closure: matches!(opcode, CallClosure),
+            ..EffectContract::PURE
+        },
+
+        DeferPush | ErrDeferPush | Panic | Recover => EffectContract {
+            may_gc: true,
+            may_alloc: matches!(opcode, DeferPush | ErrDeferPush | Panic),
+            may_panic: true,
+            may_unwind: true,
+            may_observe_frame: true,
+            needs_frame: true,
+            needs_slot_metadata: true,
+            materializes_closure: matches!(opcode, DeferPush | ErrDeferPush),
+            ..EffectContract::PURE
+        },
+
+        IfaceAssign | IfaceAssert | IfaceEq => EffectContract {
+            may_gc: matches!(opcode, IfaceAssign),
+            may_alloc: matches!(opcode, IfaceAssign),
+            may_panic: matches!(opcode, IfaceAssert | IfaceEq),
+            needs_slot_metadata: true,
+            needs_type_metadata: true,
+            touches_interface: true,
+            ..EffectContract::PURE
+        },
+
+        Invalid => EffectContract {
+            may_panic: true,
+            may_unwind: true,
+            needs_frame: true,
+            ..EffectContract::PURE
+        },
+    }
+}
+
 const fn reg_effects(
     reads: RegisterEffectShape,
     writes: RegisterEffectShape,
@@ -1088,7 +1575,7 @@ pub fn opcode_frame_policy(opcode: Opcode) -> FramePolicy {
     ) {
         return Frame::CompilerOwnedEntryExit;
     }
-    let contract = opcode_contract(opcode);
+    let contract = opcode_effect_contract(opcode);
     if contract.needs_frame || contract.may_observe_frame {
         Frame::MaterializedFrameRequired
     } else if contract.may_gc
@@ -1154,7 +1641,7 @@ pub fn opcode_fail_fast_conditions(opcode: Opcode) -> &'static [FailFastConditio
         QueueSend | QueueRecv | SelectSend | SelectRecv | GoIsland | IfaceAssert => {
             FF_META_CALLBACK_FRAME
         }
-        opcode if opcode_contract(opcode).needs_slot_metadata => FF_LAYOUT,
+        opcode if opcode_effect_contract(opcode).needs_slot_metadata => FF_LAYOUT,
         LoadInt | Copy | CopyN | GlobalGet | GlobalGetN | GlobalSet | GlobalSetN | AddI | SubI
         | MulI | NegI | AddF | SubF | MulF | DivF | NegF | EqI | NeI | LtI | LtU | LeI | LeU
         | GtI | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF | GeF | And | Or | Xor | AndNot
@@ -1490,8 +1977,8 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
         frame_policy: opcode_frame_policy(opcode),
         trap_policy: opcode_trap_policy(opcode),
         fail_fast: opcode_fail_fast_conditions(opcode),
-        capability: opcode_capability(opcode),
-        contract: opcode_contract(opcode),
+        capability: opcode_capability_contract(opcode),
+        contract: opcode_effect_contract(opcode),
     }
 }
 
@@ -1740,8 +2227,8 @@ mod tests {
         for raw in 0..Opcode::COUNT {
             let opcode = Opcode::from_u8(raw as u8);
             let row = opcode_semantics(opcode);
-            assert_eq!(row.capability, opcode_capability(opcode));
-            assert_eq!(row.contract, opcode_contract(opcode));
+            assert_eq!(row.capability, crate::capability::opcode_capability(opcode));
+            assert_eq!(row.contract, crate::contract::opcode_contract(opcode));
         }
     }
 

@@ -84,8 +84,8 @@
       "title": "JIT Design",
       "source": "lang/docs/spec/vm-jit-design.md",
       "output": "spec/vm-jit-design.md",
-      "source_digest": "sha256:774529f94dd58cf937c2a4c891bfcefcf271b456affa7ea7131ae7f95a32c222",
-      "generated_at": "2026-01-21T13:06:28+08:00",
+      "source_digest": "sha256:8a883d71d0aa1829b6844a2b03026b26691c70720491f56f6af03c431459bb45",
+      "generated_at": "2026-06-02T23:43:45+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     }
   ]

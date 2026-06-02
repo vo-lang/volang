@@ -105,51 +105,7 @@ impl<'a> LoopCompiler<'a> {
         // Exactly like func_compiler: entry_block -> prologue -> sequential compile
         self.builder.switch_to_block(self.entry_block);
         self.emit_prologue();
-
-        let mut block_terminated = false;
-
-        // Compile from loop_start (begin_pc) to after back-edge Jump (end_pc + 1)
-        // Note: begin_pc is now loop_start (condition check), not HINT position
-        for pc in self.loop_info.begin_pc..(self.loop_info.end_pc + 1) {
-            self.current_pc = pc;
-
-            if let Some(&block) = self.blocks.get(&pc) {
-                if !block_terminated {
-                    self.builder.ins().jump(block, &[]);
-                }
-                self.builder.switch_to_block(block);
-                self.clear_flow_facts();
-                block_terminated = false;
-            } else if block_terminated {
-                let dummy = self.builder.create_block();
-                self.builder.switch_to_block(dummy);
-                self.clear_flow_facts();
-                block_terminated = false;
-            }
-
-            self.apply_reg_const_facts(pc)?;
-            let inst = self
-                .func_def
-                .code
-                .get(pc)
-                .ok_or(JitError::InvalidOsrTarget(pc))?;
-            if inst.opcode() == Opcode::Hint {
-                continue;
-            }
-
-            block_terminated = self.translate_instruction(inst)?;
-        }
-
-        // If last instruction didn't terminate, jump to exit
-        if !block_terminated {
-            self.builder.ins().jump(self.exit_block, &[]);
-        }
-
-        // Exit block: store vars back to memory, then publish exit_pc via the
-        // LoopFunc ABI and return JitResult::Ok.
-        self.builder.switch_to_block(self.exit_block);
-        self.store_vars_to_memory();
-        self.emit_loop_exit(self.loop_info.exit_pc as u32);
+        crate::compile_common::drive_compile(&mut self)?;
 
         self.builder.seal_all_blocks();
         self.builder.finalize();
@@ -167,33 +123,14 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn scan_jump_targets(&mut self) -> Result<(), JitError> {
-        let loop_end = self.loop_info.end_pc + 1;
-
-        // Always create block for loop header (begin_pc = loop_start)
-        self.ensure_block(self.loop_info.begin_pc);
-
-        for pc in self.loop_info.begin_pc..loop_end {
-            let inst = self
-                .func_def
-                .code
-                .get(pc)
-                .ok_or(JitError::InvalidOsrTarget(pc))?;
-            match inst.opcode() {
-                Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
-                    let raw_target = self.checked_branch_target(pc, inst.imm32(), inst.opcode())?;
-                    // Create block for targets within loop body
-                    if raw_target >= self.loop_info.begin_pc && raw_target < loop_end {
-                        self.ensure_block(raw_target);
-                    }
-                }
-                Opcode::ForLoop => {
-                    let target = self.checked_forloop_target(pc, inst)?;
-                    if target >= self.loop_info.begin_pc && target < loop_end {
-                        self.ensure_block(target);
-                    }
-                }
-                _ => {}
-            }
+        let policy = crate::compile_common::ControlPolicy::loop_osr(
+            self.loop_info.begin_pc,
+            self.loop_info.end_pc,
+            self.loop_info.exit_pc,
+            self.func_def.code.len(),
+        );
+        for target in crate::compile_common::jump_targets_for_policy(&self.func_def.code, policy)? {
+            self.ensure_block(target);
         }
         Ok(())
     }
@@ -472,7 +409,7 @@ impl<'a> LoopCompiler<'a> {
     }
 
     /// Returns true if block is terminated.
-    /// JIT-to-JIT direct calls with fallback to VM.
+    /// JIT-to-JIT direct calls with VM call materialization when needed.
     fn call(&mut self, inst: &Instruction) -> Result<bool, JitError> {
         let func_id = inst.static_call_func_id();
         let arg_start = inst.b as usize;
@@ -493,10 +430,13 @@ impl<'a> LoopCompiler<'a> {
         match call_plan.route_for_loop() {
             crate::call_helpers::CallRoute::KnownDirectJit
             | crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_fallback(self, call_plan.jit_config())?;
+                crate::call_helpers::emit_jit_call_with_vm_materialization(
+                    self,
+                    call_plan.jit_materialization_config(),
+                )?;
                 Ok(false)
             }
-            crate::call_helpers::CallRoute::VmFallback => {
+            crate::call_helpers::CallRoute::VmCallMaterialization => {
                 crate::call_helpers::emit_call_via_vm(
                     self,
                     call_plan.vm_config(self.current_pc + 1),
@@ -513,6 +453,68 @@ impl<'a> LoopCompiler<'a> {
     /// Called before returning Call so VM can see/restore state.
     fn emit_variable_spill(&mut self) {
         self.store_vars_to_memory();
+    }
+}
+
+impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
+    fn control_policy(&self) -> crate::compile_common::ControlPolicy {
+        crate::compile_common::ControlPolicy::loop_osr(
+            self.loop_info.begin_pc,
+            self.loop_info.end_pc,
+            self.loop_info.exit_pc,
+            self.func_def.code.len(),
+        )
+    }
+
+    fn set_current_pc(&mut self, pc: usize) {
+        self.current_pc = pc;
+    }
+
+    fn enter_pc_block(&mut self, pc: usize, block_terminated: &mut bool) -> Result<(), JitError> {
+        if crate::compile_common::enter_compile_pc(
+            &mut self.builder,
+            &self.blocks,
+            pc,
+            block_terminated,
+        ) {
+            self.clear_flow_facts();
+        }
+        Ok(())
+    }
+
+    fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError> {
+        self.apply_reg_const_facts(pc)
+    }
+
+    fn instruction_for_pc(&self, pc: usize) -> Result<Instruction, JitError> {
+        self.func_def
+            .code
+            .get(pc)
+            .copied()
+            .ok_or(JitError::InvalidOsrTarget(pc))
+    }
+
+    fn should_skip_instruction(&self, inst: &Instruction) -> bool {
+        inst.opcode() == Opcode::Hint
+    }
+
+    fn translate_pc_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
+        self.translate_instruction(inst)
+    }
+
+    fn finish_fallthrough(&mut self, block_terminated: bool) -> Result<(), JitError> {
+        if !block_terminated {
+            self.builder.ins().jump(self.exit_block, &[]);
+        }
+
+        self.builder.switch_to_block(self.exit_block);
+        self.store_vars_to_memory();
+        let crate::compile_common::ControlPolicy::LoopOsr { exit_pc, .. } = self.control_policy()
+        else {
+            unreachable!("LoopCompiler must use LoopOsr control policy");
+        };
+        self.emit_loop_exit(exit_pc as u32);
+        Ok(())
     }
 }
 

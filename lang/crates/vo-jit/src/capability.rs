@@ -1,7 +1,7 @@
 //! Machine-checkable JIT capability declarations for every bytecode opcode.
 //!
-//! Keep this file in sync with `Opcode`: adding an opcode must update the
-//! exhaustive match below and make an explicit JIT/OSR/fallback decision.
+//! The public API and capability types live here; the per-opcode declarations
+//! live in `semantics.rs` next to the rest of the JIT opcode contract.
 
 use vo_runtime::instruction::Opcode;
 
@@ -43,7 +43,7 @@ pub enum BackendStatus {
     CompilerSpecific,
     /// Lowered through a runtime helper/callback while staying in JIT code.
     RuntimeHelper,
-    /// Compiled with an explicit VM side-exit or fallback path.
+    /// Compiled with an explicit runtime side-exit or VM call materialization path.
     VmFallback,
     /// Not a valid JIT input.
     Unsupported,
@@ -51,11 +51,17 @@ pub enum BackendStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FallbackPolicy {
+    /// No runtime exit or helper downgrade is expected.
     None,
+    /// Generated code records a language panic through the runtime trap path.
     RuntimePanic,
+    /// Generated code calls a runtime helper and continues in JIT code.
     RuntimeHelper,
+    /// Generated code may return a semantic side exit such as wait/replay/yield.
     VmSideExit,
+    /// Generated code may materialize a VM call frame and return `JitResult::Call`.
     VmFallback,
+    /// Invalid opcode is a strict compile/verification failure, not a runtime fallback.
     InvalidOpcode,
 }
 
@@ -69,366 +75,8 @@ pub struct OpcodeCapability {
     pub reason: &'static str,
 }
 
-const fn cap(
-    opcode: Opcode,
-    family: OpcodeFamily,
-    full_jit: BackendStatus,
-    osr: BackendStatus,
-    fallback: FallbackPolicy,
-    reason: &'static str,
-) -> OpcodeCapability {
-    OpcodeCapability {
-        opcode,
-        family,
-        full_jit,
-        osr,
-        fallback,
-        reason,
-    }
-}
-
 pub fn opcode_capability(opcode: Opcode) -> OpcodeCapability {
-    use Opcode::*;
-
-    match opcode {
-        Hint => cap(
-            Hint,
-            OpcodeFamily::Hint,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "JIT loop marker/NOP",
-        ),
-        LoadInt | LoadConst => cap(
-            opcode,
-            OpcodeFamily::Load,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "constant load",
-        ),
-        Copy | CopyN => cap(
-            opcode,
-            OpcodeFamily::Copy,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "slot copy",
-        ),
-        SlotGet | SlotSet | SlotGetN | SlotSetN => cap(
-            opcode,
-            OpcodeFamily::Slot,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "stack slot indexing",
-        ),
-        GlobalGet | GlobalGetN | GlobalSet | GlobalSetN => cap(
-            opcode,
-            OpcodeFamily::Global,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "global slot access",
-        ),
-        PtrNew => cap(
-            opcode,
-            OpcodeFamily::Pointer,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "GC allocation",
-        ),
-        PtrGet | PtrSet | PtrGetN | PtrSetN => cap(
-            opcode,
-            OpcodeFamily::Pointer,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "heap pointer access",
-        ),
-        PtrAdd => cap(
-            PtrAdd,
-            OpcodeFamily::Pointer,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "pointer arithmetic",
-        ),
-        AddI | SubI | MulI | NegI | AddF | SubF | MulF | DivF | NegF => cap(
-            opcode,
-            OpcodeFamily::Arithmetic,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "numeric operation",
-        ),
-        DivI | DivU | ModI | ModU => cap(
-            opcode,
-            OpcodeFamily::Arithmetic,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "checked integer division or modulo",
-        ),
-        EqI | NeI | LtI | LtU | LeI | LeU | GtI | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF
-        | GeF => cap(
-            opcode,
-            OpcodeFamily::Comparison,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "comparison",
-        ),
-        And | Or | Xor | AndNot | Not => cap(
-            opcode,
-            OpcodeFamily::Bitwise,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "bit operation",
-        ),
-        Shl | ShrS | ShrU => cap(
-            opcode,
-            OpcodeFamily::Bitwise,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "checked shift operation",
-        ),
-        BoolNot => cap(
-            opcode,
-            OpcodeFamily::Logic,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "boolean operation",
-        ),
-        Jump | JumpIf | JumpIfNot | Return | Panic | ForLoop => cap(
-            opcode,
-            OpcodeFamily::Control,
-            BackendStatus::CompilerSpecific,
-            BackendStatus::CompilerSpecific,
-            FallbackPolicy::VmSideExit,
-            "compiler-owned control flow",
-        ),
-        Call => cap(
-            opcode,
-            OpcodeFamily::Call,
-            BackendStatus::CompilerSpecific,
-            BackendStatus::CompilerSpecific,
-            FallbackPolicy::VmFallback,
-            "compiler route chooses self/direct/dynamic JIT or VM fallback",
-        ),
-        CallExtern => cap(
-            opcode,
-            OpcodeFamily::Call,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::VmSideExit,
-            "extern helper may suspend, replay, or panic",
-        ),
-        CallClosure | CallIface => cap(
-            opcode,
-            OpcodeFamily::Call,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::VmFallback,
-            "dynamic IC with prepare callback fallback",
-        ),
-        StrLen => cap(
-            StrLen,
-            OpcodeFamily::String,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "inline string length",
-        ),
-        StrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrDecodeRune => cap(
-            opcode,
-            OpcodeFamily::String,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "non-panicking string helper",
-        ),
-        StrIndex | StrSlice => cap(
-            opcode,
-            OpcodeFamily::String,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "string helper with checked runtime trap",
-        ),
-        ArrayNew => cap(
-            ArrayNew,
-            OpcodeFamily::Array,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "array allocation helper",
-        ),
-        ArrayGet | ArraySet | ArrayAddr => cap(
-            opcode,
-            OpcodeFamily::Array,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "inline array access with bounds checks and typed element layout",
-        ),
-        SliceNew | SliceSlice => cap(
-            opcode,
-            OpcodeFamily::Slice,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "slice allocation or reslicing helper",
-        ),
-        SliceAppend => cap(
-            SliceAppend,
-            OpcodeFamily::Slice,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "slice append helper with JitError sentinel",
-        ),
-        SliceGet | SliceSet | SliceAddr => cap(
-            opcode,
-            OpcodeFamily::Slice,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "inline slice access with nil-aware bounds checks and typed element layout",
-        ),
-        SliceLen | SliceCap => cap(
-            opcode,
-            OpcodeFamily::Slice,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "inline nil-aware slice metadata access",
-        ),
-        MapNew | MapGet | MapDelete | MapLen | MapIterInit | MapIterNext => cap(
-            opcode,
-            OpcodeFamily::Map,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "non-panicking map helper",
-        ),
-        MapSet => cap(
-            MapSet,
-            OpcodeFamily::Map,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "map set helper with checked runtime trap",
-        ),
-        QueueNew => cap(
-            QueueNew,
-            OpcodeFamily::Queue,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "queue allocation helper with checked runtime trap",
-        ),
-        QueueSend | QueueRecv | QueueClose => cap(
-            opcode,
-            OpcodeFamily::Queue,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::VmSideExit,
-            "queue helper may block or panic",
-        ),
-        QueueLen | QueueCap => cap(
-            opcode,
-            OpcodeFamily::Queue,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "non-blocking queue helper",
-        ),
-        SelectBegin | SelectSend | SelectRecv | SelectExec => cap(
-            opcode,
-            OpcodeFamily::Select,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::VmSideExit,
-            "select callback may block or panic",
-        ),
-        ClosureNew | ClosureGet => cap(
-            opcode,
-            OpcodeFamily::Closure,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::None,
-            "closure operation",
-        ),
-        GoStart => cap(
-            opcode,
-            OpcodeFamily::Goroutine,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "go start",
-        ),
-        GoIsland | IslandNew => cap(
-            opcode,
-            OpcodeFamily::Island,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "island runtime callback",
-        ),
-        DeferPush | ErrDeferPush | Recover => cap(
-            opcode,
-            OpcodeFamily::Defer,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "defer/recover callback",
-        ),
-        IfaceAssign => cap(
-            IfaceAssign,
-            OpcodeFamily::Interface,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "interface assignment helper",
-        ),
-        IfaceAssert | IfaceEq => cap(
-            opcode,
-            OpcodeFamily::Interface,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "interface helper",
-        ),
-        ConvI2F | ConvF64F32 | ConvF32F64 | Trunc => cap(
-            opcode,
-            OpcodeFamily::Conversion,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "conversion",
-        ),
-        ConvF2I | IndexCheck => cap(
-            opcode,
-            OpcodeFamily::Conversion,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "checked conversion or bounds check",
-        ),
-        Invalid => cap(
-            Invalid,
-            OpcodeFamily::Invalid,
-            BackendStatus::Unsupported,
-            BackendStatus::Unsupported,
-            FallbackPolicy::InvalidOpcode,
-            "invalid opcode sentinel",
-        ),
-    }
+    crate::semantics::opcode_capability_contract(opcode)
 }
 
 pub fn capability_matrix() -> Vec<OpcodeCapability> {
@@ -518,8 +166,11 @@ mod tests {
             &func((MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS + 1) as u16, false),
             Some(FuncRef::from_u32(3)),
         );
-        assert_eq!(large.route_for_full_function(7), CallRoute::VmFallback);
-        assert_eq!(large.route_for_loop(), CallRoute::VmFallback);
+        assert_eq!(
+            large.route_for_full_function(7),
+            CallRoute::VmCallMaterialization
+        );
+        assert_eq!(large.route_for_loop(), CallRoute::VmCallMaterialization);
     }
 
     #[test]

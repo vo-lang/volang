@@ -1,10 +1,17 @@
 use vo_common_core::bytecode::ReturnFlags;
 use vo_common_core::types::ValueKind;
 use vo_runtime::bytecode::{Constant, FunctionDef, JitInstructionMetadata, Module as VoModule};
-use vo_runtime::instruction::Opcode;
+use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
 use super::JitMetadataError;
+
+mod calls;
+mod collections;
+mod control;
+mod interface;
+mod memory;
+mod scalar;
 
 const RAW_I64_SLOTS: &[SlotType] = &[
     SlotType::Value,
@@ -21,24 +28,63 @@ const ANY_SINGLE_SLOT: &[SlotType] = &[
 ];
 const FLOAT_STORAGE_SLOTS: &[SlotType] = &[SlotType::Float, SlotType::Value];
 
+#[derive(Clone, Copy)]
+struct VerifierCtx<'a> {
+    func: &'a FunctionDef,
+    _vo_module: &'a VoModule,
+    pc: usize,
+    inst: Instruction,
+    opcode: Opcode,
+}
+
+impl<'a> VerifierCtx<'a> {
+    fn new(func: &'a FunctionDef, vo_module: &'a VoModule, pc: usize) -> Self {
+        let inst = func.code[pc];
+        Self {
+            func,
+            _vo_module: vo_module,
+            pc,
+            inst,
+            opcode: inst.opcode(),
+        }
+    }
+
+    fn call_shape_mismatch(self, detail: String) -> JitMetadataError {
+        JitMetadataError::CallShapeMismatch {
+            func: self.func.name.clone(),
+            pc: self.pc,
+            opcode: self.opcode,
+            detail,
+        }
+    }
+}
+
 pub(super) fn verify_slot_contract(
     func: &FunctionDef,
     vo_module: &VoModule,
     pc: usize,
 ) -> Result<(), JitMetadataError> {
-    let inst = func.code[pc];
-    let opcode = inst.opcode();
-    match opcode {
-        Opcode::LoadInt => verify_load_int_contract(func, pc, inst),
-        Opcode::LoadConst => verify_load_const_contract(func, vo_module, pc, inst),
-        Opcode::StrNew => verify_str_new_contract(func, vo_module, pc, inst),
-        Opcode::AddI
+    let ctx = VerifierCtx::new(func, vo_module, pc);
+    match ctx.opcode {
+        Opcode::LoadInt
+        | Opcode::LoadConst
+        | Opcode::Copy
+        | Opcode::CopyN
+        | Opcode::AddI
         | Opcode::SubI
         | Opcode::MulI
         | Opcode::DivI
         | Opcode::DivU
         | Opcode::ModI
         | Opcode::ModU
+        | Opcode::NegI
+        | Opcode::AddF
+        | Opcode::SubF
+        | Opcode::MulF
+        | Opcode::DivF
+        | Opcode::NegF
+        | Opcode::EqI
+        | Opcode::NeI
         | Opcode::LtI
         | Opcode::LtU
         | Opcode::LeI
@@ -47,805 +93,113 @@ pub(super) fn verify_slot_contract(
         | Opcode::GtU
         | Opcode::GeI
         | Opcode::GeU
+        | Opcode::EqF
+        | Opcode::NeF
+        | Opcode::LtF
+        | Opcode::LeF
+        | Opcode::GtF
+        | Opcode::GeF
+        | Opcode::And
+        | Opcode::Or
+        | Opcode::Xor
+        | Opcode::AndNot
+        | Opcode::Not
         | Opcode::Shl
         | Opcode::ShrS
-        | Opcode::ShrU => verify_binary_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            SlotType::Value,
-            SlotType::Value,
-            SlotType::Value,
-            scalar_destination_access(opcode),
-            "scalar lhs",
-            "scalar rhs",
-        ),
-        Opcode::EqI | Opcode::NeI | Opcode::And | Opcode::Or | Opcode::Xor | Opcode::AndNot => {
-            verify_binary_one_of_slot_contract(
-                func,
-                pc,
-                opcode,
-                inst,
-                &[SlotType::Value],
-                RAW_I64_SLOTS,
-                RAW_I64_SLOTS,
-                scalar_destination_access(opcode),
-                "raw lhs",
-                "raw rhs",
-            )
-        }
-        Opcode::NegI | Opcode::BoolNot => verify_unary_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            SlotType::Value,
-            SlotType::Value,
-            scalar_destination_access(opcode),
-            "scalar source",
-        ),
-        Opcode::Not => verify_unary_one_of_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            &[SlotType::Value],
-            RAW_I64_SLOTS,
-            scalar_destination_access(opcode),
-            "raw source",
-        ),
-        Opcode::AddF | Opcode::SubF | Opcode::MulF | Opcode::DivF => {
-            verify_binary_one_of_slot_contract(
-                func,
-                pc,
-                opcode,
-                inst,
-                FLOAT_STORAGE_SLOTS,
-                FLOAT_STORAGE_SLOTS,
-                FLOAT_STORAGE_SLOTS,
-                scalar_destination_access(opcode),
-                "float lhs",
-                "float rhs",
-            )
-        }
-        Opcode::NegF => verify_unary_one_of_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            FLOAT_STORAGE_SLOTS,
-            FLOAT_STORAGE_SLOTS,
-            scalar_destination_access(opcode),
-            "float source",
-        ),
-        Opcode::EqF | Opcode::NeF | Opcode::LtF | Opcode::LeF | Opcode::GtF | Opcode::GeF => {
-            verify_binary_one_of_slot_contract(
-                func,
-                pc,
-                opcode,
-                inst,
-                &[SlotType::Value],
-                FLOAT_STORAGE_SLOTS,
-                FLOAT_STORAGE_SLOTS,
-                scalar_destination_access(opcode),
-                "float lhs",
-                "float rhs",
-            )
-        }
-        Opcode::ConvI2F => verify_unary_one_of_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            FLOAT_STORAGE_SLOTS,
-            &[SlotType::Value],
-            "ConvI2F destination",
-            "ConvI2F source",
-        ),
-        Opcode::ConvF2I => verify_unary_one_of_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            &[SlotType::Value],
-            FLOAT_STORAGE_SLOTS,
-            "ConvF2I destination",
-            "ConvF2I source",
-        ),
-        Opcode::ConvF64F32 => verify_unary_one_of_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            FLOAT_STORAGE_SLOTS,
-            FLOAT_STORAGE_SLOTS,
-            "ConvF64F32 destination",
-            "ConvF64F32 source",
-        ),
-        Opcode::ConvF32F64 => verify_unary_one_of_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            FLOAT_STORAGE_SLOTS,
-            &[SlotType::Value, SlotType::Float],
-            "ConvF32F64 destination",
-            "ConvF32F64 source",
-        ),
-        Opcode::Trunc => verify_unary_slot_contract(
-            func,
-            pc,
-            opcode,
-            inst,
-            SlotType::Value,
-            SlotType::Value,
-            "Trunc destination",
-            "Trunc source",
-        ),
-        Opcode::IndexCheck => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::Value],
-                "IndexCheck index",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::Value],
-                "IndexCheck length",
-            )
-        }
-        Opcode::Jump => {
-            verify_jump_target_contract(func, pc, opcode, jump_target_i64(pc, inst.imm32()))
-        }
-        Opcode::JumpIf | Opcode::JumpIfNot => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::Value],
-                if opcode == Opcode::JumpIf {
-                    "JumpIf condition"
-                } else {
-                    "JumpIfNot condition"
-                },
-            )?;
-            verify_jump_target_contract(func, pc, opcode, jump_target_i64(pc, inst.imm32()))
-        }
-        Opcode::ForLoop => {
-            if inst.flags & !0x07 != 0 {
-                return Err(JitMetadataError::CallShapeMismatch {
-                    func: func.name.clone(),
-                    pc,
-                    opcode,
-                    detail: format!("unsupported ForLoop flags 0x{:02x}", inst.flags),
-                });
-            }
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::Value],
-                "ForLoop index",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::Value],
-                "ForLoop limit",
-            )?;
-            verify_jump_target_contract(func, pc, opcode, forloop_target_i64(pc, inst.c as i16))
-        }
-        Opcode::Copy => verify_copy_contract(func, pc, opcode, inst),
-        Opcode::CopyN => verify_copy_n_contract(func, pc, opcode, inst),
-        Opcode::SlotGet => verify_slot_get_contract(func, pc, opcode, inst.a, inst.b, inst.c, 1),
-        Opcode::SlotGetN => {
-            verify_slot_get_contract(func, pc, opcode, inst.a, inst.b, inst.c, inst.flags as u16)
-        }
-        Opcode::IfaceAssign => {
-            verify_interface_or_raw_pair(func, pc, opcode, inst.a, "IfaceAssign destination")?;
-            let packed =
-                verify_iface_assign_metadata_constant(func, vo_module, pc, opcode, inst.c)?;
-            let value_kind = verify_value_kind_tag(func, pc, opcode, inst.flags)?;
-            verify_iface_assign_metadata_schema(func, vo_module, pc, opcode, value_kind, packed)?;
-            verify_iface_assign_source(func, pc, opcode, inst.b, value_kind)
-        }
-        Opcode::ClosureNew => verify_closure_new_contract(func, vo_module, pc, inst),
-        Opcode::ClosureGet => verify_closure_get_contract(func, pc, inst),
-        Opcode::Return => verify_return_contract(func, pc, inst),
-        Opcode::Call => verify_static_call_contract(func, vo_module, pc, inst),
-        Opcode::CallClosure => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "CallClosure callee",
-            )?;
-            let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
-            if arg_layout.len() != inst.packed_arg_slots() as usize
-                || ret_layout.len() != inst.packed_ret_slots() as usize
-            {
-                return Err(JitMetadataError::CallShapeMismatch {
-                    func: func.name.clone(),
-                    pc,
-                    opcode,
-                    detail: format!(
-                        "CallClosure metadata layout slots args={} returns={} do not match encoded args={} returns={}",
-                        arg_layout.len(),
-                        ret_layout.len(),
-                        inst.packed_arg_slots(),
-                        inst.packed_ret_slots()
-                    ),
-                });
-            }
-            verify_local_layout_matches(func, pc, opcode, inst.b, &arg_layout, "CallClosure args")?;
-            verify_local_layout_matches(
-                func,
-                pc,
-                opcode,
-                inst.packed_call_ret_start(),
-                &ret_layout,
-                "CallClosure returns",
-            )
-        }
-        Opcode::CallIface => {
-            verify_interface_pair(func, pc, opcode, inst.a, "CallIface receiver")?;
-            let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
-            if arg_layout.len() != inst.packed_arg_slots() as usize
-                || ret_layout.len() != inst.packed_ret_slots() as usize
-            {
-                return Err(JitMetadataError::CallShapeMismatch {
-                    func: func.name.clone(),
-                    pc,
-                    opcode,
-                    detail: format!(
-                        "CallIface metadata layout slots args={} returns={} do not match encoded args={} returns={}",
-                        arg_layout.len(),
-                        ret_layout.len(),
-                        inst.packed_arg_slots(),
-                        inst.packed_ret_slots()
-                    ),
-                });
-            }
-            verify_local_layout_matches(func, pc, opcode, inst.b, &arg_layout, "CallIface args")?;
-            verify_local_layout_matches(
-                func,
-                pc,
-                opcode,
-                inst.packed_call_ret_start(),
-                &ret_layout,
-                "CallIface returns",
-            )
-        }
-        Opcode::CallExtern => verify_call_extern_contract(func, vo_module, pc, inst),
-        Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
-            verify_shared_call_shape_contract(func, vo_module, pc, opcode, inst)
-        }
-        Opcode::GoIsland => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "GoIsland island",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::GcRef],
-                "GoIsland closure",
-            )?;
-            let (arg_layout, ret_layout) = call_layout(func, pc, opcode)?;
-            if !ret_layout.is_empty() || arg_layout.len() != inst.flags as usize {
-                return Err(JitMetadataError::CallShapeMismatch {
-                    func: func.name.clone(),
-                    pc,
-                    opcode,
-                    detail: format!(
-                        "GoIsland metadata layout slots args={} returns={} do not match encoded args={}",
-                        arg_layout.len(),
-                        ret_layout.len(),
-                        inst.flags
-                    ),
-                });
-            }
-            verify_local_layout_matches(func, pc, opcode, inst.c, &arg_layout, "GoIsland args")
-        }
-        Opcode::GlobalGet => {
-            verify_global_get_contract(func, vo_module, pc, opcode, inst.b, inst.a, 1)
-        }
-        Opcode::GlobalGetN => verify_global_get_contract(
-            func,
-            vo_module,
-            pc,
-            opcode,
-            inst.b,
-            inst.a,
-            inst.flags as u16,
-        ),
-        Opcode::PtrNew => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::Value],
-                "PtrNew metadata",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "PtrNew destination",
-            )
-        }
-        Opcode::PtrGet => verify_ptr_get_contract(func, pc, opcode, inst.a, inst.b, 1),
-        Opcode::PtrGetN => {
-            verify_ptr_get_contract(func, pc, opcode, inst.a, inst.b, inst.flags as u16)
-        }
-        Opcode::PtrAdd => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "PtrAdd destination",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::GcRef],
-                "PtrAdd pointer",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.c,
-                &[SlotType::Value],
-                "PtrAdd offset",
-            )
-        }
-        Opcode::PtrSet => verify_ptr_set_contract(func, pc, opcode, inst.a, inst.c, inst.flags),
-        Opcode::PtrSetN => {
-            let value_layout = ptr_value_layout(func, pc, opcode)?;
-            if value_layout.len() != inst.flags as usize {
-                return Err(JitMetadataError::CallShapeMismatch {
-                    func: func.name.clone(),
-                    pc,
-                    opcode,
-                    detail: format!(
-                        "PtrSetN metadata layout slots {} do not match encoded count {}",
-                        value_layout.len(),
-                        inst.flags
-                    ),
-                });
-            }
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "PtrSetN pointer",
-            )?;
-            let source = local_layout(func, pc, inst.c, inst.flags as u16, "PtrSetN source")?;
-            verify_local_layout_matches(func, pc, opcode, inst.c, &value_layout, "PtrSetN source")?;
-            if source
-                .iter()
-                .any(|st| matches!(st, SlotType::GcRef | SlotType::Interface1))
-            {
-                return Err(JitMetadataError::SlotTypeMismatch {
-                    func: func.name.clone(),
-                    pc,
-                    opcode,
-                    access: "PtrSetN source requires typed write barriers",
-                    slot: inst.c,
-                    expected: source
-                        .iter()
-                        .map(|st| match st {
-                            SlotType::GcRef | SlotType::Interface1 => SlotType::Value,
-                            other => *other,
-                        })
-                        .collect(),
-                    actual: source.to_vec(),
-                });
-            }
-            Ok(())
-        }
-        Opcode::GlobalSet => {
-            verify_global_set_contract(func, vo_module, pc, opcode, inst.a, inst.b, 1)
-        }
-        Opcode::GlobalSetN => verify_global_set_contract(
-            func,
-            vo_module,
-            pc,
-            opcode,
-            inst.a,
-            inst.b,
-            inst.flags as u16,
-        ),
-        Opcode::SlotSet => verify_slot_set_contract(func, pc, opcode, inst.a, inst.b, inst.c, 1),
-        Opcode::SlotSetN => {
-            verify_slot_set_contract(func, pc, opcode, inst.a, inst.b, inst.c, inst.flags as u16)
-        }
-        Opcode::ArrayNew => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "ArrayNew destination",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::Value],
-                "ArrayNew metadata",
-            )?;
-            verify_value_range(
-                func,
-                pc,
-                opcode,
-                inst.c,
-                if inst.flags == 0 { 2 } else { 1 },
-                "ArrayNew length/elem_bytes",
-            )
-        }
-        Opcode::ArrayGet => {
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Array source")?;
-            verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "Array index")?;
-            verify_indexed_layout_contract(func, pc, opcode, inst, inst.a, "ArrayGet destination")
-        }
-        Opcode::ArrayAddr => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "ArrayAddr destination",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Array source")?;
-            verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "Array index")
-        }
-        Opcode::ArraySet => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "ArraySet target",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::Value],
-                "ArraySet index",
-            )?;
-            verify_indexed_layout_contract(func, pc, opcode, inst, inst.c, "ArraySet source")
-        }
-        Opcode::SliceNew => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "SliceNew destination",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::Value],
-                "SliceNew metadata",
-            )?;
-            verify_value_range(
-                func,
-                pc,
-                opcode,
-                inst.c,
-                if inst.flags == 0 { 3 } else { 2 },
-                "SliceNew len/cap/elem_bytes",
-            )
-        }
-        Opcode::SliceGet => {
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Slice source")?;
-            verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "Slice index")?;
-            verify_indexed_layout_contract(func, pc, opcode, inst, inst.a, "SliceGet destination")
-        }
-        Opcode::SliceAddr => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "SliceAddr destination",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Slice source")?;
-            verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "Slice index")
-        }
-        Opcode::SliceSet => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "SliceSet target",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::Value],
-                "SliceSet index",
-            )?;
-            verify_indexed_layout_contract(func, pc, opcode, inst, inst.c, "SliceSet source")
-        }
-        Opcode::SliceAppend => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "SliceAppend destination",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::GcRef],
-                "SliceAppend source",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.c,
-                &[SlotType::Value],
-                "SliceAppend metadata",
-            )?;
-            let value_start = checked_slot_offset_for_verifier(
-                func,
-                pc,
-                inst.c,
-                if inst.flags == 0 { 2 } else { 1 },
-                "SliceAppend value",
-            )?;
-            verify_indexed_layout_contract(func, pc, opcode, inst, value_start, "SliceAppend value")
-        }
-        Opcode::SliceLen | Opcode::SliceCap => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::Value],
-                "slice length/capacity result",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "Slice source")
-        }
-        Opcode::StrLen => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::Value],
-                "StrLen destination",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string")
-        }
-        Opcode::StrIndex | Opcode::StrDecodeRune => {
-            if opcode == Opcode::StrDecodeRune {
-                verify_layout(
-                    func,
-                    pc,
-                    opcode,
-                    inst.a,
-                    &[SlotType::Value, SlotType::Value],
-                    "StrDecodeRune destination",
-                )?;
-            } else {
-                verify_layout(
-                    func,
-                    pc,
-                    opcode,
-                    inst.a,
-                    &[SlotType::Value],
-                    "StrIndex destination",
-                )?;
-            }
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string")?;
-            verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], "string index")
-        }
-        Opcode::StrConcat => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "StrConcat destination",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string lhs")?;
-            verify_layout(func, pc, opcode, inst.c, &[SlotType::GcRef], "string rhs")
-        }
-        Opcode::StrEq
+        | Opcode::ShrU
+        | Opcode::BoolNot
+        | Opcode::ConvI2F
+        | Opcode::ConvF2I
+        | Opcode::ConvF64F32
+        | Opcode::ConvF32F64
+        | Opcode::Trunc
+        | Opcode::IndexCheck => scalar::verify(ctx),
+
+        Opcode::Jump
+        | Opcode::JumpIf
+        | Opcode::JumpIfNot
+        | Opcode::ForLoop
+        | Opcode::Return
+        | Opcode::Panic => control::verify(ctx),
+
+        Opcode::Call
+        | Opcode::CallExtern
+        | Opcode::CallClosure
+        | Opcode::CallIface
+        | Opcode::ClosureNew
+        | Opcode::ClosureGet
+        | Opcode::GoStart
+        | Opcode::DeferPush
+        | Opcode::ErrDeferPush
+        | Opcode::GoIsland => calls::verify(ctx),
+
+        Opcode::SlotGet
+        | Opcode::SlotSet
+        | Opcode::SlotGetN
+        | Opcode::SlotSetN
+        | Opcode::GlobalGet
+        | Opcode::GlobalGetN
+        | Opcode::GlobalSet
+        | Opcode::GlobalSetN
+        | Opcode::PtrNew
+        | Opcode::PtrGet
+        | Opcode::PtrSet
+        | Opcode::PtrGetN
+        | Opcode::PtrSetN
+        | Opcode::PtrAdd => memory::verify(ctx),
+
+        Opcode::StrNew
+        | Opcode::StrLen
+        | Opcode::StrIndex
+        | Opcode::StrConcat
+        | Opcode::StrSlice
+        | Opcode::StrEq
         | Opcode::StrNe
         | Opcode::StrLt
         | Opcode::StrLe
         | Opcode::StrGt
-        | Opcode::StrGe => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::Value],
-                "string comparison destination",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string lhs")?;
-            verify_layout(func, pc, opcode, inst.c, &[SlotType::GcRef], "string rhs")
+        | Opcode::StrGe
+        | Opcode::StrDecodeRune
+        | Opcode::ArrayNew
+        | Opcode::ArrayGet
+        | Opcode::ArraySet
+        | Opcode::ArrayAddr
+        | Opcode::SliceNew
+        | Opcode::SliceGet
+        | Opcode::SliceSet
+        | Opcode::SliceLen
+        | Opcode::SliceCap
+        | Opcode::SliceSlice
+        | Opcode::SliceAppend
+        | Opcode::SliceAddr
+        | Opcode::MapNew
+        | Opcode::MapGet
+        | Opcode::MapSet
+        | Opcode::MapDelete
+        | Opcode::MapLen
+        | Opcode::MapIterInit
+        | Opcode::MapIterNext
+        | Opcode::QueueNew
+        | Opcode::QueueSend
+        | Opcode::QueueRecv
+        | Opcode::QueueClose
+        | Opcode::QueueLen
+        | Opcode::QueueCap
+        | Opcode::SelectBegin
+        | Opcode::SelectSend
+        | Opcode::SelectRecv
+        | Opcode::SelectExec
+        | Opcode::IslandNew => collections::verify(ctx),
+
+        Opcode::IfaceAssign | Opcode::IfaceAssert | Opcode::IfaceEq | Opcode::Recover => {
+            interface::verify(ctx)
         }
-        Opcode::StrSlice => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "StrSlice destination",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "string")?;
-            verify_value_range(func, pc, opcode, inst.c, 2, "string slice bounds")
-        }
-        Opcode::SliceSlice => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "SliceSlice destination",
-            )?;
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.b,
-                &[SlotType::GcRef],
-                "SliceSlice source",
-            )?;
-            let bound_slots = if (inst.flags & 0b10) != 0 { 3 } else { 2 };
-            verify_value_range(func, pc, opcode, inst.c, bound_slots, "SliceSlice bounds")
-        }
-        Opcode::MapNew => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::GcRef],
-                "MapNew destination",
-            )?;
-            verify_value_range(func, pc, opcode, inst.b, 2, "MapNew metadata")
-        }
-        Opcode::MapGet => verify_map_get_contract(func, pc, inst),
-        Opcode::MapSet => verify_map_set_contract(func, pc, inst),
-        Opcode::MapDelete => verify_map_delete_contract(func, pc, inst),
-        Opcode::MapLen => {
-            verify_layout(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &[SlotType::Value],
-                "MapLen destination",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "map")
-        }
-        Opcode::MapIterInit => {
-            verify_local_layout_matches(
-                func,
-                pc,
-                opcode,
-                inst.a,
-                &vo_runtime::objects::map::MAP_ITER_SLOT_TYPES,
-                "MapIterInit iterator",
-            )?;
-            verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], "map")
-        }
-        Opcode::MapIterNext => verify_map_iter_next_contract(func, pc, opcode, inst),
-        Opcode::Panic => verify_interface_pair(func, pc, opcode, inst.a, "Panic payload"),
-        Opcode::QueueNew => verify_queue_new_contract(func, pc, inst),
-        Opcode::QueueSend => verify_queue_send_contract(func, pc, inst),
-        Opcode::QueueRecv => verify_recv_contract(
-            func,
-            pc,
-            opcode,
-            inst.b,
-            inst.a,
-            inst.flags,
-            false,
-            "QueueRecv",
-        ),
-        Opcode::QueueLen | Opcode::QueueCap | Opcode::QueueClose => {
-            verify_queue_ref_contract(func, pc, opcode, inst)?;
-            if opcode == Opcode::QueueLen || opcode == Opcode::QueueCap {
-                verify_layout(func, pc, opcode, inst.a, &[SlotType::Value], "queue result")?;
-            }
-            Ok(())
-        }
-        Opcode::SelectBegin => Ok(()),
-        Opcode::SelectSend => verify_select_send_contract(func, pc, inst),
-        Opcode::SelectRecv => verify_recv_contract(
-            func,
-            pc,
-            opcode,
-            inst.b,
-            inst.a,
-            inst.flags,
-            true,
-            "SelectRecv",
-        ),
-        Opcode::SelectExec => verify_layout(
-            func,
-            pc,
-            opcode,
-            inst.a,
-            &[SlotType::Value],
-            "SelectExec result",
-        ),
-        Opcode::Recover => verify_interface_pair(func, pc, opcode, inst.a, "Recover destination"),
-        Opcode::IfaceAssert => verify_iface_assert_contract(func, pc, inst),
-        Opcode::IfaceEq => verify_iface_eq_contract(func, pc, inst),
-        Opcode::IslandNew => verify_layout(
-            func,
-            pc,
-            opcode,
-            inst.a,
-            &[SlotType::GcRef],
-            "IslandNew destination",
-        ),
+
         Opcode::Hint => Ok(()),
         Opcode::Invalid => Err(JitMetadataError::InvalidOpcode {
-            func: func.name.clone(),
+            func: ctx.func.name.clone(),
             pc,
-            raw: inst.op,
+            raw: ctx.inst.op,
         }),
     }
 }
@@ -1652,6 +1006,81 @@ fn verify_closure_get_contract(
         inst.a,
         &[expected],
         "ClosureGet destination",
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DynamicCallContractKind {
+    Closure,
+    Interface,
+}
+
+impl DynamicCallContractKind {
+    fn args_access(self) -> &'static str {
+        match self {
+            Self::Closure => "CallClosure args",
+            Self::Interface => "CallIface args",
+        }
+    }
+
+    fn returns_access(self) -> &'static str {
+        match self {
+            Self::Closure => "CallClosure returns",
+            Self::Interface => "CallIface returns",
+        }
+    }
+}
+
+fn verify_dynamic_call_contract(
+    ctx: VerifierCtx<'_>,
+    kind: DynamicCallContractKind,
+) -> Result<(), JitMetadataError> {
+    match kind {
+        DynamicCallContractKind::Closure => verify_layout(
+            ctx.func,
+            ctx.pc,
+            ctx.opcode,
+            ctx.inst.a,
+            &[SlotType::GcRef],
+            "CallClosure callee",
+        )?,
+        DynamicCallContractKind::Interface => verify_interface_pair(
+            ctx.func,
+            ctx.pc,
+            ctx.opcode,
+            ctx.inst.a,
+            "CallIface receiver",
+        )?,
+    }
+
+    let (arg_layout, ret_layout) = call_layout(ctx.func, ctx.pc, ctx.opcode)?;
+    if arg_layout.len() != ctx.inst.packed_arg_slots() as usize
+        || ret_layout.len() != ctx.inst.packed_ret_slots() as usize
+    {
+        return Err(ctx.call_shape_mismatch(format!(
+            "{:?} metadata layout slots args={} returns={} do not match encoded args={} returns={}",
+            ctx.opcode,
+            arg_layout.len(),
+            ret_layout.len(),
+            ctx.inst.packed_arg_slots(),
+            ctx.inst.packed_ret_slots()
+        )));
+    }
+    verify_local_layout_matches(
+        ctx.func,
+        ctx.pc,
+        ctx.opcode,
+        ctx.inst.b,
+        &arg_layout,
+        kind.args_access(),
+    )?;
+    verify_local_layout_matches(
+        ctx.func,
+        ctx.pc,
+        ctx.opcode,
+        ctx.inst.packed_call_ret_start(),
+        &ret_layout,
+        kind.returns_access(),
     )
 }
 

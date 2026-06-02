@@ -5,7 +5,7 @@
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    types, Block, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind, Value,
+    types, Block, InstBuilder, MemFlags, SigRef, StackSlot, StackSlotData, StackSlotKind, Value,
 };
 
 use vo_runtime::instruction::Instruction;
@@ -27,7 +27,9 @@ pub use callback_abi::{
     PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE, PREPARE_CLOSURE_CALLSITE, PREPARE_IFACE_CALLSITE,
     STACK_LIMIT_OVERFLOW_CALLSITE,
 };
-pub use plan::{CallPlan, CallRoute, CallViaVmConfig, DynamicCallPlan, JitCallWithFallbackConfig};
+pub use plan::{
+    CallPlan, CallRoute, CallViaVmConfig, DynamicCallPlan, JitCallWithVmMaterializationConfig,
+};
 pub use result_flow::{
     check_call_result, emit_checked_jit_result_helper_call, emit_non_ok_slow_path,
     NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
@@ -115,14 +117,14 @@ pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
             .ins()
             .icmp(IntCC::UnsignedGreaterThan, new_sp, capacity);
 
-    let fallback_block = emitter.builder().create_block();
+    let materialize_block = emitter.builder().create_block();
     let ok_block = emitter.builder().create_block();
     emitter
         .builder()
         .ins()
-        .brif(exceeds_capacity, fallback_block, &[], ok_block, &[]);
+        .brif(exceeds_capacity, materialize_block, &[], ok_block, &[]);
 
-    (fallback_block, ok_block)
+    (materialize_block, ok_block)
 }
 
 pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) -> Value {
@@ -216,7 +218,7 @@ struct IcHitParams {
     caller_bp: Value,
     old_fiber_sp: Value,
     merge_block: Block,
-    capacity_fallback_block: Block,
+    capacity_materialize_block: Block,
     arg_start: usize,
     arg_slots: usize,
     ret_slots: usize,
@@ -250,11 +252,16 @@ fn emit_ic_hit_call_and_result<'a, E: IrEmitter<'a>>(
     // Update ctx
     let new_bp = p.old_fiber_sp;
     let new_sp = emitter.builder().ins().iadd(new_bp, p.ic_local_slots);
-    let (capacity_fallback_block, capacity_ok_block) =
+    let (capacity_materialize_block, capacity_ok_block) =
         emit_stack_capacity_check(emitter, p.ctx, new_sp);
-    emitter.builder().switch_to_block(capacity_fallback_block);
-    emitter.builder().seal_block(capacity_fallback_block);
-    emitter.builder().ins().jump(p.capacity_fallback_block, &[]);
+    emitter
+        .builder()
+        .switch_to_block(capacity_materialize_block);
+    emitter.builder().seal_block(capacity_materialize_block);
+    emitter
+        .builder()
+        .ins()
+        .jump(p.capacity_materialize_block, &[]);
 
     emitter.builder().switch_to_block(capacity_ok_block);
     emitter.builder().seal_block(capacity_ok_block);
@@ -683,6 +690,204 @@ fn copy_dynamic_call_returns<'a, E: IrEmitter<'a>>(
     }
 }
 
+struct DynamicIcHitFields {
+    local_slots: Value,
+    arg_offset: Value,
+    func_id: Value,
+}
+
+struct DynamicCallMiss {
+    user_args_ptr: Value,
+    out_slot: StackSlot,
+    out_ptr: Value,
+    scalar_values: DynamicCallScalarValues,
+}
+
+struct DynamicCallLowering {
+    plan: DynamicCallPlan,
+    ctx: Value,
+    arg_start: usize,
+    arg_slots: usize,
+    ret_slots: usize,
+    resume_pc: usize,
+    user_arg_vals: Vec<Value>,
+    ic_args_slot: StackSlot,
+    ic_args_ptr: Value,
+    ret_slot: StackSlot,
+    ret_ptr: Value,
+    caller_bp: Value,
+    old_fiber_sp: Value,
+    ic_entry: Value,
+}
+
+impl DynamicCallLowering {
+    fn new<'a, E: IrEmitter<'a>>(emitter: &mut E, inst: &Instruction, ctx: Value) -> Self {
+        let callsite_pc = emitter.current_pc();
+        let caller_func_id = emitter.func_id();
+        let plan = DynamicCallPlan::new(inst, callsite_pc);
+        let arg_start = plan.arg_start;
+        let arg_slots = plan.arg_slots;
+        let ret_slots = plan.ret_slots;
+
+        let user_arg_vals = read_dynamic_user_args(emitter, arg_start, arg_slots);
+        let (ic_args_slot, ic_args_ptr, ret_slot, ret_ptr) =
+            allocate_dynamic_call_scratch(emitter, ret_slots);
+        let caller_bp = emitter.call_caller_bp();
+        let old_fiber_sp = emitter.call_old_fiber_sp();
+        let ic_entry = dynamic_ic_entry(emitter, ctx, caller_func_id, callsite_pc);
+
+        Self {
+            plan,
+            ctx,
+            arg_start,
+            arg_slots,
+            ret_slots,
+            resume_pc: plan.resume_pc,
+            user_arg_vals,
+            ic_args_slot,
+            ic_args_ptr,
+            ret_slot,
+            ret_ptr,
+            caller_bp,
+            old_fiber_sp,
+            ic_entry,
+        }
+    }
+
+    fn branch_on_ic_hit<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        key_match: Value,
+        zero: Value,
+    ) -> (Value, Block, Block, Block) {
+        let ic_jit_ptr = emitter.builder().ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            self.ic_entry,
+            DynCallIC::OFFSET_JIT_FUNC_PTR,
+        );
+        let (ic_hit_block, ic_miss_block, merge_block) =
+            branch_on_dynamic_ic_hit(emitter, key_match, ic_jit_ptr, zero);
+        (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block)
+    }
+
+    fn load_hit_fields<'a, E: IrEmitter<'a>>(&self, emitter: &mut E) -> DynamicIcHitFields {
+        let local_slots = emitter.builder().ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            self.ic_entry,
+            DynCallIC::OFFSET_LOCAL_SLOTS,
+        );
+        let arg_offset = emitter.builder().ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            self.ic_entry,
+            DynCallIC::OFFSET_ARG_OFFSET,
+        );
+        let func_id = emitter.builder().ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            self.ic_entry,
+            DynCallIC::OFFSET_FUNC_ID,
+        );
+        DynamicIcHitFields {
+            local_slots,
+            arg_offset,
+            func_id,
+        }
+    }
+
+    fn load_hit_slot0_kind<'a, E: IrEmitter<'a>>(&self, emitter: &mut E) -> Value {
+        emitter.builder().ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            self.ic_entry,
+            DynCallIC::OFFSET_SLOT0_KIND,
+        )
+    }
+
+    fn emit_hit_call<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        ic_jit_ptr: Value,
+        fields: DynamicIcHitFields,
+        merge_block: Block,
+        capacity_materialize_block: Block,
+    ) {
+        emit_ic_hit_call_and_result(
+            emitter,
+            IcHitParams {
+                ctx: self.ctx,
+                ic_jit_ptr,
+                ic_args_ptr: self.ic_args_ptr,
+                ic_arg_offset: fields.arg_offset,
+                ic_local_slots: fields.local_slots,
+                ic_func_id: fields.func_id,
+                ret_ptr: self.ret_ptr,
+                caller_bp: self.caller_bp,
+                old_fiber_sp: self.old_fiber_sp,
+                merge_block,
+                capacity_materialize_block,
+                arg_start: self.arg_start,
+                arg_slots: self.arg_slots,
+                ret_slots: self.ret_slots,
+                resume_pc: self.resume_pc,
+            },
+            &self.user_arg_vals,
+        );
+    }
+
+    fn begin_miss<'a, E: IrEmitter<'a>>(&self, emitter: &mut E) -> DynamicCallMiss {
+        let (_user_args_slot, user_args_ptr) =
+            copy_user_args_to_stack(emitter, &self.user_arg_vals);
+        let (out_slot, out_ptr) = allocate_prepared_call_out(emitter);
+        let scalar_values = dynamic_call_scalar_values(emitter, self.plan);
+        DynamicCallMiss {
+            user_args_ptr,
+            out_slot,
+            out_ptr,
+            scalar_values,
+        }
+    }
+
+    fn finish_miss<'a, E: IrEmitter<'a>>(
+        &self,
+        emitter: &mut E,
+        miss: DynamicCallMiss,
+        merge_block: Block,
+        ic_key_val: Value,
+    ) -> Result<(), crate::JitError> {
+        emit_ic_miss_update_and_dispatch(
+            emitter,
+            IcMissParams {
+                ic_entry: self.ic_entry,
+                ret_ptr: self.ret_ptr,
+                out_slot: miss.out_slot,
+                ret_slot: self.ret_slot,
+                caller_bp: self.caller_bp,
+                old_fiber_sp: self.old_fiber_sp,
+                arg_start: self.arg_start,
+                ret_slots: self.ret_slots,
+                resume_pc_val: miss.scalar_values.resume_pc_val,
+                ret_reg_val: miss.scalar_values.ret_reg_val,
+                ret_slots_val: miss.scalar_values.ret_slots_val,
+                merge_block,
+                ic_key_val,
+            },
+        )
+    }
+
+    fn copy_returns<'a, E: IrEmitter<'a>>(&self, emitter: &mut E) {
+        copy_dynamic_call_returns(
+            emitter,
+            self.arg_start,
+            self.arg_slots,
+            self.ret_slots,
+            self.ret_slot,
+        );
+    }
+}
+
 /// Emit a closure call instruction with monomorphic inline cache.
 ///
 /// CallClosure: inst.a = closure_slot, inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
@@ -701,15 +906,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     inst: &Instruction,
 ) -> Result<(), crate::JitError> {
     let closure_slot = inst.a as usize;
-    let callsite_pc = emitter.current_pc();
-    let plan = DynamicCallPlan::new(inst, callsite_pc);
-    let arg_start = plan.arg_start;
-    let arg_slots = plan.arg_slots;
-    let ret_slots = plan.ret_slots;
-
     let ctx = emitter.ctx_param();
-    let caller_func_id = emitter.func_id();
-    let resume_pc = plan.resume_pc;
 
     // Read closure_ref
     let closure_ref = emitter.read_var(closure_slot as u16);
@@ -740,15 +937,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(continue_block);
     emitter.builder().seal_block(continue_block);
 
-    // Read user args and allocate stack slots before branching so SSA values
-    // dominate both IC hit and miss paths.
-    let user_arg_vals = read_dynamic_user_args(emitter, arg_start, arg_slots);
-    let (ic_args_slot, ic_args_ptr, ret_slot, ret_ptr) =
-        allocate_dynamic_call_scratch(emitter, ret_slots);
-
-    // Save call-boundary state before branching; the miss path may push a VM frame.
-    let caller_bp = emitter.call_caller_bp();
-    let old_fiber_sp = emitter.call_old_fiber_sp();
+    let lowering = DynamicCallLowering::new(emitter, inst, ctx);
 
     // =====================================================================
     // IC lookup: extract func_id from closure, check IC entry
@@ -760,8 +949,6 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
             .builder()
             .ins()
             .load(types::I32, MemFlags::trusted(), closure_ref, 0);
-
-    let ic_entry = dynamic_ic_entry(emitter, ctx, caller_func_id, callsite_pc);
 
     // Load tagged IC key and compare.
     let closure_func_id_u64 = emitter.builder().ins().uextend(types::I64, closure_func_id);
@@ -776,7 +963,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     let ic_key = emitter.builder().ins().load(
         types::I64,
         MemFlags::trusted(),
-        ic_entry,
+        lowering.ic_entry,
         DynCallIC::OFFSET_KEY,
     );
     let key_match = emitter
@@ -784,46 +971,18 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         .ins()
         .icmp(IntCC::Equal, closure_key, ic_key);
 
-    let ic_jit_ptr = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_JIT_FUNC_PTR,
-    );
-    let (ic_hit_block, ic_miss_block, merge_block) =
-        branch_on_dynamic_ic_hit(emitter, key_match, ic_jit_ptr, zero);
+    let (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block) =
+        lowering.branch_on_ic_hit(emitter, key_match, zero);
 
     // =====================================================================
-    // IC HIT: native stack fast path (like emit_jit_call_with_fallback)
+    // IC HIT: native stack fast path (like emit_jit_call_with_vm_materialization)
     // =====================================================================
     emitter.builder().switch_to_block(ic_hit_block);
     emitter.builder().seal_block(ic_hit_block);
 
     // Load cached layout from IC entry
-    let ic_local_slots = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_LOCAL_SLOTS,
-    );
-    let ic_arg_offset = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_ARG_OFFSET,
-    );
-    let ic_slot0_kind = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_SLOT0_KIND,
-    );
-    let ic_func_id = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_FUNC_ID,
-    );
+    let hit_fields = lowering.load_hit_fields(emitter);
+    let ic_slot0_kind = lowering.load_hit_slot0_kind(emitter);
 
     // Write slot0 based on slot0_kind
     // SLOT0_NONE(0): skip, SLOT0_CLOSURE_REF(1): closure_ref, SLOT0_CAPTURE0(2): captures[0]
@@ -868,7 +1027,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         emitter
             .builder()
             .ins()
-            .stack_store(closure_ref, ic_args_slot, 0);
+            .stack_store(closure_ref, lowering.ic_args_slot, 0);
         emitter.builder().ins().jump(slot0_done_block, &[]);
 
         // SLOT0_CAPTURE0: slot0 = captures[0] = load [closure_ref + HEADER_SLOTS * 8]
@@ -880,34 +1039,17 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
                 .builder()
                 .ins()
                 .load(types::I64, MemFlags::trusted(), closure_ref, cap0_offset);
-        emitter.builder().ins().stack_store(cap0, ic_args_slot, 0);
+        emitter
+            .builder()
+            .ins()
+            .stack_store(cap0, lowering.ic_args_slot, 0);
         emitter.builder().ins().jump(slot0_done_block, &[]);
 
         emitter.builder().switch_to_block(slot0_done_block);
         emitter.builder().seal_block(slot0_done_block);
     }
 
-    emit_ic_hit_call_and_result(
-        emitter,
-        IcHitParams {
-            ctx,
-            ic_jit_ptr,
-            ic_args_ptr,
-            ic_arg_offset,
-            ic_local_slots,
-            ic_func_id,
-            ret_ptr,
-            caller_bp,
-            old_fiber_sp,
-            merge_block,
-            capacity_fallback_block: ic_miss_block,
-            arg_start,
-            arg_slots,
-            ret_slots,
-            resume_pc,
-        },
-        &user_arg_vals,
-    );
+    lowering.emit_hit_call(emitter, ic_jit_ptr, hit_fields, merge_block, ic_miss_block);
 
     // =====================================================================
     // IC MISS: fall through to prepare callback, update IC, dispatch
@@ -915,8 +1057,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(ic_miss_block);
     emitter.builder().seal_block(ic_miss_block);
 
-    let (_user_args_slot, user_args_ptr) = copy_user_args_to_stack(emitter, &user_arg_vals);
-    let (out_slot, out_ptr) = allocate_prepared_call_out(emitter);
+    let miss = lowering.begin_miss(emitter);
 
     // Call prepare_closure_call callback
     let prepare_fn_ptr = emitter.builder().ins().load(
@@ -925,7 +1066,6 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         ctx,
         JitContext::OFFSET_PREPARE_CLOSURE_CALL_FN,
     );
-    let scalar_values = dynamic_call_scalar_values(emitter, plan);
 
     emit_checked_jit_result_indirect_callback_call(
         emitter,
@@ -934,13 +1074,13 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         &[
             ctx,
             closure_ref,
-            scalar_values.ret_reg_val,
-            scalar_values.ret_slots_val,
-            scalar_values.resume_pc_val,
-            user_args_ptr,
-            scalar_values.arg_count_val,
-            ret_ptr,
-            out_ptr,
+            miss.scalar_values.ret_reg_val,
+            miss.scalar_values.ret_slots_val,
+            miss.scalar_values.resume_pc_val,
+            miss.user_args_ptr,
+            miss.scalar_values.arg_count_val,
+            lowering.ret_ptr,
+            miss.out_ptr,
         ],
         true,
     );
@@ -950,7 +1090,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         emitter
             .builder()
             .ins()
-            .stack_load(types::I32, out_slot, PreparedCall::OFFSET_FUNC_ID);
+            .stack_load(types::I32, miss.out_slot, PreparedCall::OFFSET_FUNC_ID);
     let out_func_id_u64 = emitter.builder().ins().uextend(types::I64, out_func_id);
     let closure_key_tag = emitter.builder().ins().iconst(
         types::I64,
@@ -961,30 +1101,13 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         .ins()
         .bor(closure_key_tag, out_func_id_u64);
 
-    emit_ic_miss_update_and_dispatch(
-        emitter,
-        IcMissParams {
-            ic_entry,
-            ret_ptr,
-            out_slot,
-            ret_slot,
-            caller_bp,
-            old_fiber_sp,
-            arg_start,
-            ret_slots,
-            resume_pc_val: scalar_values.resume_pc_val,
-            ret_reg_val: scalar_values.ret_reg_val,
-            ret_slots_val: scalar_values.ret_slots_val,
-            merge_block,
-            ic_key_val,
-        },
-    )?;
+    lowering.finish_miss(emitter, miss, merge_block, ic_key_val)?;
 
     // =====================================================================
     // Merge: copy return values to SSA vars (shared by IC hit OK + prepared OK)
     // =====================================================================
     // Return values live at arg_start + arg_slots (new call buffer layout).
-    copy_dynamic_call_returns(emitter, arg_start, arg_slots, ret_slots, ret_slot);
+    lowering.copy_returns(emitter);
     Ok(())
 }
 
@@ -1001,16 +1124,9 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     inst: &Instruction,
 ) -> Result<(), crate::JitError> {
     let iface_slot = inst.a as usize;
-    let callsite_pc = emitter.current_pc();
-    let plan = DynamicCallPlan::new(inst, callsite_pc);
-    let arg_start = plan.arg_start;
-    let arg_slots = plan.arg_slots;
-    let ret_slots = plan.ret_slots;
     let method_idx = inst.flags as u32;
 
     let ctx = emitter.ctx_param();
-    let caller_func_id = emitter.func_id();
-    let resume_pc = plan.resume_pc;
 
     // Read interface slots
     let slot0 = emitter.read_var(iface_slot as u16);
@@ -1029,15 +1145,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         None,
     );
 
-    // Read user args and allocate stack slots before branching so SSA values
-    // dominate both IC hit and miss paths.
-    let user_arg_vals = read_dynamic_user_args(emitter, arg_start, arg_slots);
-    let (ic_args_slot, ic_args_ptr, ret_slot, ret_ptr) =
-        allocate_dynamic_call_scratch(emitter, ret_slots);
-
-    // Save call-boundary state before branching; the miss path may push a VM frame.
-    let caller_bp = emitter.call_caller_bp();
-    let old_fiber_sp = emitter.call_old_fiber_sp();
+    let lowering = DynamicCallLowering::new(emitter, inst, ctx);
 
     // =====================================================================
     // IC lookup: extract itab_id from slot0, check IC entry
@@ -1064,13 +1172,11 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let tagged_method_key = emitter.builder().ins().bor(iface_key_tag, method_key);
     let ic_key_val = emitter.builder().ins().bor(tagged_method_key, itab_id);
 
-    let ic_entry = dynamic_ic_entry(emitter, ctx, caller_func_id, callsite_pc);
-
     // Load tagged IC key and compare.
     let ic_stored_key = emitter.builder().ins().load(
         types::I64,
         MemFlags::trusted(),
-        ic_entry,
+        lowering.ic_entry,
         DynCallIC::OFFSET_KEY,
     );
     let key_match = emitter
@@ -1078,14 +1184,8 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         .ins()
         .icmp(IntCC::Equal, ic_key_val, ic_stored_key);
 
-    let ic_jit_ptr = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_JIT_FUNC_PTR,
-    );
-    let (ic_hit_block, ic_miss_block, merge_block) =
-        branch_on_dynamic_ic_hit(emitter, key_match, ic_jit_ptr, zero);
+    let (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block) =
+        lowering.branch_on_ic_hit(emitter, key_match, zero);
 
     // =====================================================================
     // IC HIT: native stack fast path
@@ -1093,49 +1193,15 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(ic_hit_block);
     emitter.builder().seal_block(ic_hit_block);
 
-    let ic_local_slots = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_LOCAL_SLOTS,
-    );
-    let ic_arg_offset = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_ARG_OFFSET,
-    );
-    let ic_func_id = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ic_entry,
-        DynCallIC::OFFSET_FUNC_ID,
-    );
+    let hit_fields = lowering.load_hit_fields(emitter);
 
     // Write receiver (slot1) to slot 0 of callee args
-    emitter.builder().ins().stack_store(slot1, ic_args_slot, 0);
+    emitter
+        .builder()
+        .ins()
+        .stack_store(slot1, lowering.ic_args_slot, 0);
 
-    emit_ic_hit_call_and_result(
-        emitter,
-        IcHitParams {
-            ctx,
-            ic_jit_ptr,
-            ic_args_ptr,
-            ic_arg_offset,
-            ic_local_slots,
-            ic_func_id,
-            ret_ptr,
-            caller_bp,
-            old_fiber_sp,
-            merge_block,
-            capacity_fallback_block: ic_miss_block,
-            arg_start,
-            arg_slots,
-            ret_slots,
-            resume_pc,
-        },
-        &user_arg_vals,
-    );
+    lowering.emit_hit_call(emitter, ic_jit_ptr, hit_fields, merge_block, ic_miss_block);
 
     // =====================================================================
     // IC MISS: prepare callback, update IC, dispatch
@@ -1143,8 +1209,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(ic_miss_block);
     emitter.builder().seal_block(ic_miss_block);
 
-    let (_user_args_slot, user_args_ptr) = copy_user_args_to_stack(emitter, &user_arg_vals);
-    let (out_slot, out_ptr) = allocate_prepared_call_out(emitter);
+    let miss = lowering.begin_miss(emitter);
 
     // Call prepare_iface_call callback
     let prepare_fn_ptr = emitter.builder().ins().load(
@@ -1157,7 +1222,6 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         .builder()
         .ins()
         .iconst(types::I32, method_idx as i64);
-    let scalar_values = dynamic_call_scalar_values(emitter, plan);
 
     emit_checked_jit_result_indirect_callback_call(
         emitter,
@@ -1168,41 +1232,24 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
             slot0,
             slot1,
             method_idx_val,
-            scalar_values.ret_reg_val,
-            scalar_values.ret_slots_val,
-            scalar_values.resume_pc_val,
-            user_args_ptr,
-            scalar_values.arg_count_val,
-            ret_ptr,
-            out_ptr,
+            miss.scalar_values.ret_reg_val,
+            miss.scalar_values.ret_slots_val,
+            miss.scalar_values.resume_pc_val,
+            miss.user_args_ptr,
+            miss.scalar_values.arg_count_val,
+            lowering.ret_ptr,
+            miss.out_ptr,
         ],
         true,
     );
 
-    emit_ic_miss_update_and_dispatch(
-        emitter,
-        IcMissParams {
-            ic_entry,
-            ret_ptr,
-            out_slot,
-            ret_slot,
-            caller_bp,
-            old_fiber_sp,
-            arg_start,
-            ret_slots,
-            resume_pc_val: scalar_values.resume_pc_val,
-            ret_reg_val: scalar_values.ret_reg_val,
-            ret_slots_val: scalar_values.ret_slots_val,
-            merge_block,
-            ic_key_val,
-        },
-    )?;
+    lowering.finish_miss(emitter, miss, merge_block, ic_key_val)?;
 
     // =====================================================================
     // Merge: copy return values
     // =====================================================================
     // Return values live at arg_start + arg_slots (new call buffer layout).
-    copy_dynamic_call_returns(emitter, arg_start, arg_slots, ret_slots, ret_slot);
+    lowering.copy_returns(emitter);
     Ok(())
 }
 
@@ -1251,7 +1298,7 @@ fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         JitContext::OFFSET_POP_FRAME_FN,
     );
 
-    // Check if jit_func_ptr is null (needs trampoline fallback)
+    // Check if jit_func_ptr is null (needs the VM call materialization trampoline).
     let null_ptr = emitter.builder().ins().iconst(types::I64, 0);
     let is_null = emitter
         .builder()
@@ -1672,14 +1719,14 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
 /// - Args passed via native stack slot (no fiber.stack access)
 /// - No push_frame/pop_frame calls
 ///
-/// Slow path (Call/WaitIo or VM fallback):
+/// Slow path (Call/WaitIo or VM call materialization):
 /// - Spill vars and materialize callee frame to fiber.stack
 ///
 /// If jit_func_table[func_id] != null: direct JIT call
-/// If jit_func_table[func_id] == null: fallback to VM via set_call_request + return Call
-pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
+/// If jit_func_table[func_id] == null: materialize a VM call via set_call_request + return Call.
+pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
-    config: JitCallWithFallbackConfig,
+    config: JitCallWithVmMaterializationConfig,
 ) -> Result<(), crate::JitError> {
     let ctx = emitter.ctx_param();
 
@@ -1749,10 +1796,12 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         .builder()
         .ins()
         .iadd_imm(new_bp, config.callee_local_slots as i64);
-    let (capacity_fallback_block, capacity_ok_block) =
+    let (capacity_materialize_block, capacity_ok_block) =
         emit_stack_capacity_check(emitter, ctx, new_sp);
-    emitter.builder().switch_to_block(capacity_fallback_block);
-    emitter.builder().seal_block(capacity_fallback_block);
+    emitter
+        .builder()
+        .switch_to_block(capacity_materialize_block);
+    emitter.builder().seal_block(capacity_materialize_block);
     emit_call_via_vm(
         emitter,
         CallViaVmConfig {
@@ -1790,7 +1839,7 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
         emit_call_depth_leave(emitter, ctx, old_call_depth);
         result
     } else {
-        // Indirect call with null check and VM fallback
+        // Indirect call with null check and VM call materialization.
         let jit_func_table = emitter.builder().ins().load(
             types::I64,
             MemFlags::trusted(),
@@ -2073,12 +2122,15 @@ mod tests {
         let self_plan = CallPlan::new(7, 2, &func(8, false), None);
         assert_eq!(
             self_plan.route_for_full_function(7),
-            CallRoute::VmFallback,
+            CallRoute::VmCallMaterialization,
             "self recursion must use VM frames so stack overflow remains recoverable"
         );
 
         let defer_self = CallPlan::new(7, 2, &func(8, true), None);
-        assert_eq!(defer_self.route_for_full_function(7), CallRoute::VmFallback);
+        assert_eq!(
+            defer_self.route_for_full_function(7),
+            CallRoute::VmCallMaterialization
+        );
 
         let large = CallPlan::new(
             7,
@@ -2086,8 +2138,11 @@ mod tests {
             &func((MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS + 1) as u16, false),
             None,
         );
-        assert_eq!(large.route_for_full_function(7), CallRoute::VmFallback);
-        assert_eq!(large.route_for_loop(), CallRoute::VmFallback);
+        assert_eq!(
+            large.route_for_full_function(7),
+            CallRoute::VmCallMaterialization
+        );
+        assert_eq!(large.route_for_loop(), CallRoute::VmCallMaterialization);
 
         let direct = CallPlan::new(8, 2, &func(8, false), Some(FuncRef::from_u32(3)));
         assert_eq!(direct.route_for_full_function(7), CallRoute::KnownDirectJit);
@@ -2110,7 +2165,7 @@ mod tests {
         let allocating_plan = CallPlan::new(8, 2, &allocating, Some(FuncRef::from_u32(4)));
         assert_eq!(
             allocating_plan.route_for_full_function(7),
-            CallRoute::VmFallback,
+            CallRoute::VmCallMaterialization,
             "allocating callees may still JIT, but must use a materialized VM frame"
         );
     }

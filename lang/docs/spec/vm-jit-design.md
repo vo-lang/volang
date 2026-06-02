@@ -56,6 +56,24 @@ a `jit_metadata` table must keep `jit_metadata.len() == code.len()`. Legacy map
 metadata can be read for compatibility, but strict JIT rejects it before
 lowering.
 
+## Opcode Contract
+
+`vo-jit/src/semantics.rs` is the single opcode contract row for JIT semantics.
+Each row records packed operands, VM semantic source, lowering owner, verifier
+requirements, register effect shape, memory sync shape, runtime dependencies,
+helper return policy, frame policy, trap policy, fail-fast conditions,
+capability, and the opcode effect contract. `capability.rs` and `contract.rs`
+keep the public API and data types, but their per-opcode answers delegate to the
+semantic row instead of maintaining separate matches.
+
+Metadata remains a specialized fact source in `metadata_contract.rs`.
+`semantics.rs` imports the opcode metadata requirement from that module, and the
+tests reject any second metadata requirement table in the semantic row.
+Concrete read/write slot lists still come from `effects.rs` because they depend
+on instruction operands, module signatures, extern signatures, and typed
+metadata payloads. The register-constant analysis uses those effect results for
+kill sets and only keeps dedicated logic for constant folding.
+
 ## Lowering Responsibilities
 
 `vo-codegen` owns metadata production and typed instruction construction. It
@@ -71,22 +89,31 @@ manual edits.
 
 - `verifier/` checks function invariants, per-PC metadata, slot layouts, call
   shapes, return flags, transfer metadata, branch targets, and legacy rejection.
-- `semantics.rs`, `capability.rs`, and `contract_graph.rs` describe opcode
-  effects, fail-fast policy, runtime dependencies, and capability coverage.
+- `verifier/instruction_contracts.rs` is the family dispatcher. Scalar,
+  memory, collections, calls, control, and interface contracts live in
+  `verifier/instruction_contracts/`, all sharing `VerifierCtx` plus typed
+  layout helpers from the parent module.
+- `semantics.rs` describes opcode effects, fail-fast policy, runtime
+  dependencies, verifier requirements, and capability coverage. The contract
+  graph consumes those rows rather than re-declaring opcode policy.
 - `call_helpers/plan.rs` owns static/dynamic call route selection.
 - `call_helpers/callback_abi.rs` owns JitContext callback ABI callsites.
 - `call_helpers/result_flow.rs` owns checked helper result routing and non-OK
   JIT call materialization flow.
-- Dynamic closure/interface call lowering shares the IC scratch, IC entry,
-  hit/miss branch, prepare-callback argument, and return-copy skeleton while
-  keeping nil checks, receiver/key construction, slot0/capture handling, and
-  method-index rules explicit.
+- `DynamicCallLowering` in `call_helpers.rs` owns the shared
+  closure/interface dynamic-call skeleton: inline-cache lookup, hit/miss branch,
+  prepare-callback workspace, IC update, JIT/VM call dispatch, and return copy.
+  Closure nil checks, closure func-id keys, slot0/capture handling, interface
+  receiver pairs, method keys, and method-index rules stay explicit at the
+  callsite.
 - `helpers.rs` declares runtime helper imports from one helper table plus the
   runtime ABI manifest; helper names, `FuncId` fields, and per-function refs are
   no longer maintained as separate lists.
-- `compile_common.rs` owns common full-function/OSR compile facts such as
-  variable declaration, float-slot lookup, branch target validation, and flow
-  fact application. OSR range-exit behavior remains in `loop_compiler.rs`.
+- `compile_common.rs` owns common full-function/OSR compile facts and driver
+  mechanics: `ControlPolicy`, jump-target discovery, basic-block transition,
+  per-PC flow fact application, and the `CompileDriver` loop. Full-function and
+  OSR compilers still own their prologues, return/call lowering, and OSR
+  range-exit materialization.
 
 ## VM Boundary
 
@@ -112,6 +139,33 @@ OSR compiles loop ranges with the same slot layout as the interpreter. A normal
 loop exit writes `ctx.loop_exit_pc` and returns `JitResult::Ok`; side exits use
 the same materialization and fail-fast contracts as full-function JIT. Loop-end
 metadata for large hints is required and verifier-checked.
+
+`ControlPolicy::LoopOsr` constrains block creation to targets inside the loop
+range and leaves out-of-range jump, return, call, wait, and replay behavior to
+`loop_compiler.rs`. Fallthrough exits route through the OSR exit block, spill
+live locals, publish `loop_exit_pc`, and return `JitResult::Ok`.
+
+## Adding Or Changing An Opcode
+
+Opcode maintenance is intentionally row-driven:
+
+- Update the opcode definition and typed instruction accessors in
+  `vo-common-core`.
+- Add or update codegen metadata emission and typed builders when the opcode
+  needs JIT metadata.
+- Update `metadata_contract.rs` only if the opcode consumes per-PC JIT
+  metadata.
+- Update the single semantic row in `semantics.rs`: packed operands, lowering
+  owner, verifier requirements, register effect shape, runtime dependencies,
+  helper/trap/fail-fast/frame policy, capability, and effect contract.
+- Add the detailed slot/layout verifier to the appropriate
+  `verifier/instruction_contracts/<family>.rs` file.
+- Add concrete read/write effect handling in `effects.rs` only when the opcode
+  has operand- or metadata-dependent slot lists.
+- Add translate lowering explicitly in the relevant `translate/` module or
+  compiler/call-helper owner; do not macro-generate `translate_inst`.
+- Extend focused tests first for behavior changes, then run the JIT and language
+  parity suites listed below.
 
 ## Testing
 

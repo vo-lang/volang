@@ -20,10 +20,10 @@ pub enum CallRoute {
     KnownDirectJit,
     /// Callee may be compiled at runtime; generated code checks jit_func_table.
     DynamicJitTable,
-    /// Closure/interface call with a monomorphic inline cache and prepare fallback.
+    /// Closure/interface call with a monomorphic inline cache and prepare callback.
     DynamicInlineCache,
     /// Return JitResult::Call so the VM owns frame setup and dispatch.
-    VmFallback,
+    VmCallMaterialization,
 }
 
 /// Static bytecode call shape after decoding the target FunctionDef.
@@ -76,7 +76,7 @@ impl CallPlan {
 
     pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {
         if self.is_self_recursive(current_func_id) {
-            return CallRoute::VmFallback;
+            return CallRoute::VmCallMaterialization;
         }
         self.route_non_recursive()
     }
@@ -87,7 +87,7 @@ impl CallPlan {
 
     fn route_non_recursive(self) -> CallRoute {
         if !self.can_use_direct_jit() {
-            return CallRoute::VmFallback;
+            return CallRoute::VmCallMaterialization;
         }
         if self.callee_func_ref.is_some() {
             CallRoute::KnownDirectJit
@@ -96,8 +96,8 @@ impl CallPlan {
         }
     }
 
-    pub fn jit_config(self) -> JitCallWithFallbackConfig {
-        JitCallWithFallbackConfig {
+    pub fn jit_materialization_config(self) -> JitCallWithVmMaterializationConfig {
+        JitCallWithVmMaterializationConfig {
             func_id: self.func_id,
             arg_start: self.arg_start,
             ret_reg: self.ret_reg,
@@ -146,8 +146,9 @@ impl DynamicCallPlan {
     }
 }
 
-/// Configuration for JIT-to-JIT call with fallback.
-pub struct JitCallWithFallbackConfig {
+/// Configuration for JIT-to-JIT call with VM call materialization when no native
+/// callee entry is available at runtime.
+pub struct JitCallWithVmMaterializationConfig {
     pub func_id: u32,
     pub arg_start: usize,
     pub ret_reg: usize,

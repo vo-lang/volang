@@ -27,7 +27,7 @@ pub struct FunctionCompiler<'a> {
     reg_consts: HashMap<u16, i64>,
     reg_const_facts: Vec<HashMap<u16, i64>>,
     /// FuncRef table for other already-compiled callees.
-    /// Index by func_id. None means keep indirect fallback path.
+    /// Index by func_id. None means generated code keeps the VM call materialization path.
     callee_func_refs: &'a [Option<FuncRef>],
     /// Saved jit_bp from function entry, used to recompute fiber.stack address after reallocation
     saved_jit_bp: Variable,
@@ -100,30 +100,7 @@ impl<'a> FunctionCompiler<'a> {
 
         self.builder.switch_to_block(self.entry_block);
         self.emit_prologue();
-
-        let mut block_terminated = false;
-
-        for pc in 0..self.func_def.code.len() {
-            self.current_pc = pc;
-
-            if let Some(&block) = self.blocks.get(&pc) {
-                if !block_terminated {
-                    self.builder.ins().jump(block, &[]);
-                }
-                self.builder.switch_to_block(block);
-                self.clear_flow_facts();
-            } else if block_terminated {
-                let dummy = self.builder.create_block();
-                self.builder.switch_to_block(dummy);
-                self.clear_flow_facts();
-            }
-
-            self.apply_reg_const_facts(pc)?;
-            let inst = self.func_def.code.get(pc).ok_or_else(|| {
-                JitError::Internal(format!("function compile pc {pc} is outside code"))
-            })?;
-            block_terminated = self.translate_instruction(inst)?;
-        }
+        crate::compile_common::drive_compile(&mut self)?;
 
         self.builder.seal_all_blocks();
         self.builder.finalize();
@@ -141,17 +118,9 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn scan_jump_targets(&mut self) -> Result<(), JitError> {
-        for (pc, inst) in self.func_def.code.iter().enumerate() {
-            match inst.opcode() {
-                Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot => {
-                    let target = self.checked_branch_target(pc, inst.imm32(), inst.opcode())?;
-                    self.ensure_block(target);
-                }
-                Opcode::ForLoop => {
-                    self.ensure_block(self.checked_forloop_target(pc, inst)?);
-                }
-                _ => {}
-            }
+        let policy = crate::compile_common::ControlPolicy::full_function(self.func_def.code.len());
+        for target in crate::compile_common::jump_targets_for_policy(&self.func_def.code, policy)? {
+            self.ensure_block(target);
         }
         Ok(())
     }
@@ -217,7 +186,8 @@ impl<'a> FunctionCompiler<'a> {
 
         // Memory-aliased slots (>= memory_only_start): copy from args_ptr to fiber.stack.
         // In JIT-to-JIT direct calls, args_ptr points to native stack, not fiber.stack.
-        // The VM reads from fiber.stack on Call fallback, so we must sync these slots.
+        // The VM reads from fiber.stack when a JIT call materializes a VM frame,
+        // so we must sync these slots.
         // SlotSet writes go through args_ptr, so args_ptr is the source of truth.
         for i in mem_start..num_slots {
             let offset = (i * 8) as i32;
@@ -792,10 +762,13 @@ impl<'a> FunctionCompiler<'a> {
         match call_plan.route_for_full_function(self.func_id) {
             crate::call_helpers::CallRoute::KnownDirectJit
             | crate::call_helpers::CallRoute::DynamicJitTable => {
-                crate::call_helpers::emit_jit_call_with_fallback(self, call_plan.jit_config())?;
+                crate::call_helpers::emit_jit_call_with_vm_materialization(
+                    self,
+                    call_plan.jit_materialization_config(),
+                )?;
                 Ok(false)
             }
-            crate::call_helpers::CallRoute::VmFallback => {
+            crate::call_helpers::CallRoute::VmCallMaterialization => {
                 crate::call_helpers::emit_call_via_vm(
                     self,
                     call_plan.vm_config(self.current_pc + 1),
@@ -806,6 +779,48 @@ impl<'a> FunctionCompiler<'a> {
                 "static full-function call selected dynamic inline-cache route".into(),
             )),
         }
+    }
+}
+
+impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
+    fn control_policy(&self) -> crate::compile_common::ControlPolicy {
+        crate::compile_common::ControlPolicy::full_function(self.func_def.code.len())
+    }
+
+    fn set_current_pc(&mut self, pc: usize) {
+        self.current_pc = pc;
+    }
+
+    fn enter_pc_block(&mut self, pc: usize, block_terminated: &mut bool) -> Result<(), JitError> {
+        if crate::compile_common::enter_compile_pc(
+            &mut self.builder,
+            &self.blocks,
+            pc,
+            block_terminated,
+        ) {
+            self.clear_flow_facts();
+        }
+        Ok(())
+    }
+
+    fn apply_pc_facts(&mut self, pc: usize) -> Result<(), JitError> {
+        self.apply_reg_const_facts(pc)
+    }
+
+    fn instruction_for_pc(&self, pc: usize) -> Result<Instruction, JitError> {
+        self.func_def
+            .code
+            .get(pc)
+            .copied()
+            .ok_or_else(|| JitError::Internal(format!("function compile pc {pc} is outside code")))
+    }
+
+    fn translate_pc_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
+        self.translate_instruction(inst)
+    }
+
+    fn finish_fallthrough(&mut self, _block_terminated: bool) -> Result<(), JitError> {
+        Ok(())
     }
 }
 

@@ -1,110 +1,185 @@
 <!--
 Generated from lang/docs/spec/vm-jit-design.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:774529f94dd58cf937c2a4c891bfcefcf271b456affa7ea7131ae7f95a32c222
-Generated-At: 2026-01-21T13:06:28+08:00
+Source-Digest: sha256:8a883d71d0aa1829b6844a2b03026b26691c70720491f56f6af03c431459bb45
+Generated-At: 2026-06-02T23:43:45+08:00
 -->
-# Vo VM JIT Design v2 (Implementation Status)
+# Vo VM JIT Design
 
-## 1. Overview
+This document describes the implemented JIT boundary. Historical design notes
+live in `docs/dev-notes`; this file is the current runtime contract.
 
-The Vo JIT is a synchronous, method-based JIT compiler using Cranelift. It operates within the VM's execution model, allowing seamless switching between interpreted and compiled code.
+## Architecture
 
-### Core Architecture
+The JIT is a synchronous Cranelift backend for Vo bytecode. JIT functions run on
+the VM thread and return a `JitResult` to the VM scheduler:
 
-*   **Synchronous Execution**: JIT functions execute synchronously on the VM thread.
-*   **Shared Context**: JIT code shares the `JitContext` with the runtime.
-*   **VM Stack Strategy (No StackMap)**: JIT functions operate directly on the VM's `Fiber` stack for local variables.
-    *   **Int/Float**: Promoted to SSA variables (registers) for performance.
-    *   **GcRef**: **Always** accessed via memory load/store from the VM stack. This ensures GC safety (no stale pointers in registers) without needing JIT stack maps.
-*   **Fallback to VM**: Complex operations trigger a fallback to the VM runtime.
-
-### Current Status
-
-| Component | Status | Implementation Details |
-|-----------|--------|------------------------|
-| **Compiler** | ✅ Active | Uses `cranelift` for code generation. |
-| **Dispatcher** | ✅ Active | `JitManager` handles dispatch. |
-| **GC Support** | ✅ Simplified | Uses VM stack for roots. No JIT stack maps needed. |
-| **Optimization** | ⚠️ Basic | Basic instruction mapping. |
-
-## 2. JIT Compilation Pipeline
-
-### 2.1 Triggering
-
-Hot detection happens in the VM interpreter (`vo-vm`):
-
-1.  **Function Call**: `JitManager::record_call` increments counter. Threshold: 100 calls.
-2.  **Loop Backedge**: `JitManager::record_backedge` increments counter. Threshold: 50 iterations.
-
-### 2.2 Compilation (`vo-jit`)
-
-The `JitCompiler` translates Vo bytecode to Cranelift IR with a hybrid storage strategy:
-
-1.  **Locals Ptr**: The JIT function receives a `locals_ptr` argument pointing to the VM stack frame.
-2.  **GcRef Access**:
-    - `Write`: Store directly to `locals_ptr + offset`.
-    - `Read`: Load directly from `locals_ptr + offset`.
-    - **Crucial**: GcRefs are NEVER kept in Cranelift SSA variables across instructions. This forces a reload after every potential safepoint, ensuring we see updated pointers if GC moved objects.
-3.  **Primitive Access**:
-    - `Int/Float`: Loaded into SSA variables (`Variable`) at start/use, spilled back only when necessary (or kept in sync if needed for debugging).
-    - Optimizations like register allocation work freely for primitives.
-
-### 2.3 Unsupported Features
-
-Functions with `Defer`, `Recover`, `Go`, `Channel`, `Select` are not JIT compiled.
-
-## 3. Runtime Integration (`vo-runtime`)
-
-### 3.1 JitContext & Call Signature
-
-**VM -> JIT Signature**:
 ```rust
-extern "C" fn(
-    ctx: *mut JitContext,
-    locals: *mut u64,    // Pointer to VM stack frame (locals start)
-    args: *const u64,    // Pointer to args (often within locals, or caller frame)
-    ret: *mut u64        // Pointer to return slots
-) -> JitResult
+extern "C" fn(ctx: *mut JitContext, args: *mut u64, ret: *mut u64) -> JitResult
 ```
 
-- **`locals`**: Points to `fiber.stack[frame.bp]`. Used as the "Shadow Stack" root for GC.
+`args` points at the active `Fiber` stack frame. Primitive slots may be promoted
+to Cranelift SSA values, but GC-visible slots remain represented in the VM stack
+at safepoints. If generated code calls a helper that may allocate, block,
+materialize frames, or panic, the helper result is checked before local JIT
+execution continues.
 
-## 4. Implementation Details
+## Strict And Best-Effort Modes
 
-### 4.1 "No StackMap" Strategy
+Strict JIT mode is fail-fast. `vo_jit::verify_module` is the public verifier
+entry, and strict VM load/init paths run it before dispatch tables are usable.
+It returns a `VerifiedModule` digest token; `JitCompiler` caches that token and
+re-verifies only when the serialized module fingerprint changes. Compile
+failure, invalid metadata, missing helper/callback ABI, bad call shape, bad
+return shape, and internal JIT ABI errors surface as `JitError` or
+`VmError::Jit`; they are not semantic side exits.
 
-We avoid implementing complex stack maps (PC -> Register Liveness) by relying on the VM's existing precise GC scanning:
+Best-effort JIT mode exists only through explicitly named VM APIs. It is for
+embedding compatibility and does not change strict behavior.
 
-1.  **Storage**: All `GcRef` local variables reside in the VM stack (`fiber.stack`).
-2.  **Roots**: The VM GC scans `fiber.stack` conservatively or precisely (Vo is precise). Since JIT updates this stack synchronously, the VM sees the correct roots.
-3.  **Safety**:
-    - When JIT calls `vo_gc_alloc` or `vo_call_vm`, a GC may occur.
-    - GC may move objects and update pointers in `fiber.stack`.
-    - JIT code resumes. Since it **loads** GcRefs from `fiber.stack` on use (instead of using a stale register value), it sees the new address.
-    - Primitives (i64, f64) are safe in registers because GC doesn't move/update them.
+Legal runtime side exits are semantic scheduling boundaries:
 
-### 4.2 Control Flow
+- cold or not-hot code remains interpreted
+- regular/prepared VM call materialization
+- `WaitIo`, `WaitQueue`, `Yield`, and `Replay`
+- OSR normal exit
+- stack-capacity trampoline into VM frame setup
+- explicitly requested best-effort embedding APIs
 
-- **Branches**: Direct mapping to Cranelift branches.
-- **Calls**: Trampolines to VM or Runtime helpers.
+## Metadata Contract
 
-### 4.3 GC Integration
+`vo-jit/src/metadata_contract.rs` is the single source of truth for opcode JIT
+metadata requirements. It defines which current metadata kind an opcode may
+consume, which layouts are required before lowering, and which serialized legacy
+kinds are reader compatibility only.
 
-- **Allocation**: Calls `vo_gc_alloc`.
-- **Write Barriers**: `PtrSet` checks flag. If GcRef, calls `vo_gc_write_barrier`.
-- **Safepoints**: Implicit at every function call. No explicit `vo_gc_safepoint` needed for stack scanning, only for interrupting loops (which can check a flag).
+Typed decoding is centralized in `vo-jit/src/metadata.rs`. Verifier, effects,
+lowering, semantics, and contract graph code must use these typed accessors
+instead of introducing local `JitInstructionMetadata` decode tables.
 
-### 4.4 For-Range Loops
+`vo-common-core` owns bytecode serialization. Current-version bytecode that has
+a `jit_metadata` table must keep `jit_metadata.len() == code.len()`. Legacy map
+metadata can be read for compatibility, but strict JIT rejects it before
+lowering.
 
-Expanded to primitive operations by `vo-codegen`. No iterator state in JIT.
+## Opcode Contract
 
-## 5. OSR (On-Stack Replacement)
+`vo-jit/src/semantics.rs` is the single opcode contract row for JIT semantics.
+Each row records packed operands, VM semantic source, lowering owner, verifier
+requirements, register effect shape, memory sync shape, runtime dependencies,
+helper return policy, frame policy, trap policy, fail-fast conditions,
+capability, and the opcode effect contract. `capability.rs` and `contract.rs`
+keep the public API and data types, but their per-opcode answers delegate to the
+semantic row instead of maintaining separate matches.
 
-OSR naturally fits this model. Since JIT and Interpreter use the exact same stack layout (`locals_ptr` -> VM Stack), switching from Interpreter to JIT in the middle of a loop is just a jump instruction with the current `bp`.
+Metadata remains a specialized fact source in `metadata_contract.rs`.
+`semantics.rs` imports the opcode metadata requirement from that module, and the
+tests reject any second metadata requirement table in the semantic row.
+Concrete read/write slot lists still come from `effects.rs` because they depend
+on instruction operands, module signatures, extern signatures, and typed
+metadata payloads. The register-constant analysis uses those effect results for
+kill sets and only keeps dedicated logic for constant folding.
 
-## 6. Future Work
+## Lowering Responsibilities
 
-1.  **Register Maps (Optional)**: If we want to optimize GcRef performance (keep in registers), we would need Register Maps. For now, memory access overhead is acceptable for simplicity.
-2.  **Inline Write Barriers**: Optimize `PtrSet`.
-3.  **JIT-to-JIT Calls**: Direct calls passing `locals_ptr` (requires allocating callee frame on VM stack).
+`vo-codegen` owns metadata production and typed instruction construction. It
+must emit precise layout metadata for dynamic element, map, pointer, slot, call,
+extern call, queue, iterator, and interface assertion operations. It also owns
+typed return buffers and uses `FuncBuilder` helpers for shared shapes such as
+static calls, call buffers, fallthrough returns, and zero-slot initialization.
+Loop hint patching and method-value wrappers must go through typed
+`FuncBuilder` APIs so bytecode and `jit_metadata` cannot drift by pc-indexed
+manual edits.
+
+`vo-jit` owns validation and lowering:
+
+- `verifier/` checks function invariants, per-PC metadata, slot layouts, call
+  shapes, return flags, transfer metadata, branch targets, and legacy rejection.
+- `verifier/instruction_contracts.rs` is the family dispatcher. Scalar,
+  memory, collections, calls, control, and interface contracts live in
+  `verifier/instruction_contracts/`, all sharing `VerifierCtx` plus typed
+  layout helpers from the parent module.
+- `semantics.rs` describes opcode effects, fail-fast policy, runtime
+  dependencies, verifier requirements, and capability coverage. The contract
+  graph consumes those rows rather than re-declaring opcode policy.
+- `call_helpers/plan.rs` owns static/dynamic call route selection.
+- `call_helpers/callback_abi.rs` owns JitContext callback ABI callsites.
+- `call_helpers/result_flow.rs` owns checked helper result routing and non-OK
+  JIT call materialization flow.
+- `DynamicCallLowering` in `call_helpers.rs` owns the shared
+  closure/interface dynamic-call skeleton: inline-cache lookup, hit/miss branch,
+  prepare-callback workspace, IC update, JIT/VM call dispatch, and return copy.
+  Closure nil checks, closure func-id keys, slot0/capture handling, interface
+  receiver pairs, method keys, and method-index rules stay explicit at the
+  callsite.
+- `helpers.rs` declares runtime helper imports from one helper table plus the
+  runtime ABI manifest; helper names, `FuncId` fields, and per-function refs are
+  no longer maintained as separate lists.
+- `compile_common.rs` owns common full-function/OSR compile facts and driver
+  mechanics: `ControlPolicy`, jump-target discovery, basic-block transition,
+  per-PC flow fact application, and the `CompileDriver` loop. Full-function and
+  OSR compilers still own their prologues, return/call lowering, and OSR
+  range-exit materialization.
+
+## VM Boundary
+
+`vo-vm` owns `JitResult` scheduling. `JitResult::Ok` is adapted separately for
+full JIT and OSR because full JIT copies return slots while OSR publishes
+`loop_exit_pc`. Every non-OK result goes through the shared JIT bridge
+transition layer before being adapted to `ExecResult` or `OsrResult`.
+`JitResult::Panic` requires either typed runtime trap payload or explicit user
+panic payload. Missing payload/location is a JIT error.
+
+`JitResult::Call` materializes prepared or regular VM frames and returns
+`FrameChanged` to the VM scheduler. Strict mode may resolve/compile the callee at
+this boundary to keep metadata errors fail-fast, but execution does not
+recursively re-enter a newly materialized frame on the host stack.
+
+`WaitIo`, `WaitQueue`, and `Replay` materialize pending JIT frames before
+blocking or replaying. Legacy-named fallback counters record only semantic
+runtime side exits, not compile or metadata failures.
+
+## OSR
+
+OSR compiles loop ranges with the same slot layout as the interpreter. A normal
+loop exit writes `ctx.loop_exit_pc` and returns `JitResult::Ok`; side exits use
+the same materialization and fail-fast contracts as full-function JIT. Loop-end
+metadata for large hints is required and verifier-checked.
+
+`ControlPolicy::LoopOsr` constrains block creation to targets inside the loop
+range and leaves out-of-range jump, return, call, wait, and replay behavior to
+`loop_compiler.rs`. Fallthrough exits route through the OSR exit block, spill
+live locals, publish `loop_exit_pc`, and return `JitResult::Ok`.
+
+## Adding Or Changing An Opcode
+
+Opcode maintenance is intentionally row-driven:
+
+- Update the opcode definition and typed instruction accessors in
+  `vo-common-core`.
+- Add or update codegen metadata emission and typed builders when the opcode
+  needs JIT metadata.
+- Update `metadata_contract.rs` only if the opcode consumes per-PC JIT
+  metadata.
+- Update the single semantic row in `semantics.rs`: packed operands, lowering
+  owner, verifier requirements, register effect shape, runtime dependencies,
+  helper/trap/fail-fast/frame policy, capability, and effect contract.
+- Add the detailed slot/layout verifier to the appropriate
+  `verifier/instruction_contracts/<family>.rs` file.
+- Add concrete read/write effect handling in `effects.rs` only when the opcode
+  has operand- or metadata-dependent slot lists.
+- Add translate lowering explicitly in the relevant `translate/` module or
+  compiler/call-helper owner; do not macro-generate `translate_inst`.
+- Extend focused tests first for behavior changes, then run the JIT and language
+  parity suites listed below.
+
+## Testing
+
+JIT changes should cover the layer they touch:
+
+- bytecode/serializer schema: `cargo test -p vo-common-core`
+- verifier, semantics, effects, lowering contracts: `cargo test -p vo-jit`
+- metadata production and typed builders: `cargo test -p vo-codegen`
+- VM bridge, callback ABI, frame materialization: `cargo test -p vo-vm --features jit`
+- engine strict mode: `cargo test -p vo-engine --features jit`
+- language parity and OSR: repo `./d.py test` suites, especially `jit` and `osr`

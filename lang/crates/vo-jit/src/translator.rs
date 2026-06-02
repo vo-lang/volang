@@ -490,13 +490,10 @@ fn kill_slots_at_or_after(facts: &mut HashMap<u16, i64>, start: u16) {
 enum RegConstEffect {
     Preserve,
     Clear,
-    KillSlots {
-        start: u16,
-        count: u16,
-    },
     KillSlotsAtOrAfter {
         start: u16,
     },
+    KillSlotList(Vec<u16>),
     SetSlot {
         slot: u16,
         value: Option<i64>,
@@ -512,9 +509,13 @@ impl RegConstEffect {
         match self {
             RegConstEffect::Preserve => {}
             RegConstEffect::Clear => facts.clear(),
-            RegConstEffect::KillSlots { start, count } => kill_slots(facts, start, count),
             RegConstEffect::KillSlotsAtOrAfter { start } => {
                 kill_slots_at_or_after(facts, start);
+            }
+            RegConstEffect::KillSlotList(slots) => {
+                for slot in slots {
+                    kill_slot(facts, slot);
+                }
             }
             RegConstEffect::SetSlot { slot, value } => set_slot_const(facts, slot, value),
             RegConstEffect::SetSlots { start, values } => {
@@ -601,110 +602,39 @@ fn reg_const_effect(
                 values,
             }
         }
-        Opcode::Call => {
-            let Some(callee) = functions.get(inst.static_call_func_id() as usize) else {
-                return RegConstEffect::Clear;
-            };
-            let (arg_slots, ret_slots) = (callee.param_slots, callee.ret_slots);
-            let Some(ret_start) = inst.b.checked_add(arg_slots) else {
-                return RegConstEffect::Clear;
-            };
-            RegConstEffect::KillSlots {
-                start: ret_start,
-                count: ret_slots,
-            }
-        }
-        Opcode::CallClosure | Opcode::CallIface => {
-            let Some(ret_start) = inst.b.checked_add(inst.packed_arg_slots()) else {
-                return RegConstEffect::Clear;
-            };
-            let ret_slots = inst.packed_ret_slots();
-            RegConstEffect::KillSlots {
-                start: ret_start,
-                count: ret_slots,
-            }
-        }
-        Opcode::CallExtern => {
-            if let Some(extern_def) = externs.get(inst.b as usize) {
-                RegConstEffect::KillSlots {
-                    start: inst.a,
-                    count: extern_def.ret_slots,
-                }
-            } else {
-                RegConstEffect::Clear
-            }
-        }
-        Opcode::PtrGetN | Opcode::SlotGetN | Opcode::GlobalGetN => RegConstEffect::KillSlots {
-            start: inst.a,
-            count: inst.flags as u16,
+        Opcode::SelectExec => RegConstEffect::Clear,
+        Opcode::SlotSet | Opcode::SlotSetN => match effects::try_memory_sync_effect(inst) {
+            Ok(MemorySyncEffect::From(start)) => RegConstEffect::KillSlotsAtOrAfter { start },
+            Ok(MemorySyncEffect::None | MemorySyncEffect::All) => RegConstEffect::Clear,
+            Err(_) => RegConstEffect::Clear,
         },
-        Opcode::SliceGet | Opcode::ArrayGet => {
-            if let Some(slots) = crate::metadata::indexed_get_result_slots(inst, metadata_facts) {
-                RegConstEffect::KillSlots {
-                    start: inst.a,
-                    count: slots,
-                }
-            } else {
-                RegConstEffect::Clear
-            }
-        }
-        Opcode::QueueRecv => RegConstEffect::KillSlots {
-            start: inst.a,
-            count: effects::recv_result_slots(inst.flags, false),
-        },
-        Opcode::SelectRecv => RegConstEffect::KillSlots {
-            start: inst.a,
-            count: effects::recv_result_slots(inst.flags, true),
-        },
-        Opcode::IfaceAssign => RegConstEffect::KillSlots {
-            start: inst.a,
-            count: 2,
-        },
-        Opcode::IfaceAssert => {
-            let target_slots = (inst.flags >> 3) as u16;
-            let has_ok = ((inst.flags >> 2) & 1) != 0;
-            let assert_kind = inst.flags & 0x3;
-            let dst_slots = if assert_kind == 1 {
-                2
-            } else {
-                target_slots.max(1)
-            };
-            let Some(count) = dst_slots.checked_add(u16::from(has_ok)) else {
-                return RegConstEffect::Clear;
-            };
-            RegConstEffect::KillSlots {
-                start: inst.a,
-                count,
-            }
-        }
-        Opcode::MapGet => {
-            if let Some(out_slots) = crate::metadata::map_get_layout(inst, metadata_facts)
-                .and_then(|layout| layout.output_slots())
-            {
-                RegConstEffect::KillSlots {
-                    start: inst.a,
-                    count: out_slots,
-                }
-            } else {
-                RegConstEffect::Clear
-            }
-        }
-        Opcode::MapIterInit => RegConstEffect::KillSlots {
-            start: inst.a,
-            count: effects::MAP_ITER_SLOTS,
-        },
-        Opcode::StrDecodeRune | Opcode::Recover => RegConstEffect::KillSlots {
-            start: inst.a,
-            count: 2,
-        },
-        Opcode::SlotSet | Opcode::SlotSetN => RegConstEffect::KillSlotsAtOrAfter { start: inst.a },
-        op if effects::single_slot_unknown_result_opcode(op) => RegConstEffect::KillSlots {
-            start: inst.a,
-            count: 1,
-        },
-        op if effects::preserves_reg_const_facts(op) => RegConstEffect::Preserve,
-        Opcode::MapIterNext | Opcode::SelectExec => RegConstEffect::Clear,
-        _ => RegConstEffect::Clear,
+        _ => effects::try_instruction_effects_with_module_context(
+            inst,
+            metadata_facts,
+            externs,
+            functions,
+        )
+        .map(reg_const_effect_from_instruction_effects)
+        .unwrap_or_else(|_| reg_const_effect_for_unknown_effects(inst)),
+    }
+}
+
+fn reg_const_effect_from_instruction_effects(
+    effects: effects::InstructionEffects,
+) -> RegConstEffect {
+    if effects.writes.is_empty() {
+        RegConstEffect::Preserve
+    } else {
+        RegConstEffect::KillSlotList(effects.writes)
+    }
+}
+
+fn reg_const_effect_for_unknown_effects(inst: &Instruction) -> RegConstEffect {
+    let shape = crate::semantics::opcode_register_effects(inst.opcode());
+    if shape.writes == crate::semantics::RegisterEffectShape::None {
+        RegConstEffect::Preserve
+    } else {
+        RegConstEffect::Clear
     }
 }
 
@@ -1008,6 +938,48 @@ mod tests {
         assert!(
             !facts[2].contains_key(&iter_last),
             "MapIterInit writes all iterator slots, so constants in the tail must be killed"
+        );
+    }
+
+    #[test]
+    fn reg_const_facts_map_iter_next_kills_only_effect_writes() {
+        let constants = vec![Constant::Int(11), Constant::Int(22), Constant::Int(33)];
+        let iter_start = 10;
+        let iter_last = iter_start + effects::MAP_ITER_SLOTS - 1;
+        let code = vec![
+            Instruction::new(Opcode::LoadConst, 2, 0, 0),
+            Instruction::new(Opcode::LoadConst, iter_last, 1, 0),
+            Instruction::new(Opcode::LoadConst, 30, 2, 0),
+            Instruction::with_flags(Opcode::MapIterNext, 0x11, 20, iter_start, 25),
+            Instruction::new(Opcode::MapLen, 31, 2, 0),
+        ];
+        let metadata = vec![
+            JitInstructionMetadata::None,
+            JitInstructionMetadata::None,
+            JitInstructionMetadata::None,
+            JitInstructionMetadata::MapIterNext {
+                key_layout: vec![SlotType::Value],
+                val_layout: vec![SlotType::Value],
+            },
+            JitInstructionMetadata::None,
+        ];
+        let facts =
+            compute_reg_const_facts_with_metadata(&code, &metadata, &constants, &[], 0, code.len());
+
+        assert_eq!(
+            facts[4].get(&2),
+            Some(&11),
+            "MapIterNext should preserve constants outside its effect write set"
+        );
+        assert!(
+            !facts[4].contains_key(&iter_last),
+            "MapIterNext writes the iterator state, so iterator constants must be killed"
+        );
+        assert!(
+            !facts[4].contains_key(&20)
+                && !facts[4].contains_key(&21)
+                && !facts[4].contains_key(&25),
+            "MapIterNext key/value/ok outputs must be killed from the shared effects shape"
         );
     }
 }
