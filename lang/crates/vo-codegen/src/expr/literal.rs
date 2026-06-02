@@ -699,8 +699,7 @@ pub(crate) fn lower_func_lit(
     // Compile closure body
     crate::stmt::compile_block(&func_lit.body, ctx, &mut closure_builder, info)?;
 
-    // Add return if not present
-    closure_builder.emit_op(Opcode::Return, 0, 0, 0);
+    closure_builder.emit_fallthrough_return();
 
     // Build and add closure function to module
     let closure_func = closure_builder.build();

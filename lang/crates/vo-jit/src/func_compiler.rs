@@ -132,16 +132,12 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn declare_variables(&mut self) {
-        self.vars = crate::translator::declare_variables(
-            &mut self.builder,
-            self.func_def.local_slots as usize,
-            &self.func_def.slot_types,
-        );
+        self.vars = crate::compile_common::declare_variables(&mut self.builder, self.func_def);
     }
 
     #[inline]
     fn is_float_slot(&self, slot: u16) -> bool {
-        crate::translator::is_float_slot(&self.func_def.slot_types, slot)
+        crate::compile_common::is_float_slot(self.func_def, slot)
     }
 
     fn scan_jump_targets(&mut self) -> Result<(), JitError> {
@@ -181,39 +177,23 @@ impl<'a> FunctionCompiler<'a> {
         offset: i32,
         opcode: Opcode,
     ) -> Result<usize, JitError> {
-        let target = pc as i64 + offset as i64;
-        if target >= 0 && (target as usize) < self.func_def.code.len() {
-            Ok(target as usize)
-        } else {
-            Err(JitError::Internal(format!(
-                "{opcode:?} at pc {pc} targets invalid pc {target} (code_len={})",
-                self.func_def.code.len()
-            )))
-        }
+        crate::compile_common::checked_branch_target(self.func_def.code.len(), pc, offset, opcode)
     }
 
     fn checked_forloop_target(&self, pc: usize, inst: &Instruction) -> Result<usize, JitError> {
-        let target = pc as i64 + 1 + i64::from(inst.c as i16);
-        if target >= 0 && (target as usize) < self.func_def.code.len() {
-            Ok(target as usize)
-        } else {
-            Err(JitError::Internal(format!(
-                "ForLoop at pc {pc} targets invalid pc {target} (code_len={})",
-                self.func_def.code.len()
-            )))
-        }
+        crate::compile_common::checked_forloop_target(self.func_def.code.len(), pc, inst)
     }
 
     fn clear_flow_facts(&mut self) {
-        self.checked_non_nil.clear();
-        self.reg_consts.clear();
+        crate::compile_common::clear_flow_facts(&mut self.checked_non_nil, &mut self.reg_consts);
     }
 
     fn apply_reg_const_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        self.reg_consts = self.reg_const_facts.get(pc).cloned().ok_or_else(|| {
-            JitError::Internal(format!("missing per-PC register-constant facts at pc {pc}"))
-        })?;
-        Ok(())
+        crate::compile_common::apply_reg_const_facts(
+            &mut self.reg_consts,
+            &self.reg_const_facts,
+            pc,
+        )
     }
 
     /// Spill all SSA variables to fiber.stack (recomputed base, handles reallocation).
@@ -631,11 +611,20 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn ret(&mut self, inst: &Instruction) -> Result<(), JitError> {
-        use vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS;
+        use vo_common_core::bytecode::ReturnFlags;
         let ret_ptr = self.builder.block_params(self.entry_block)[2];
         let ctx = self.builder.block_params(self.entry_block)[0];
-        let heap_returns = (inst.flags & RETURN_FLAG_HEAP_RETURNS) != 0;
-        let is_error_return = (inst.flags & 1) != 0;
+        let flags = ReturnFlags::from_bits(inst.flags).ok_or_else(|| {
+            JitError::InvalidMetadata(crate::JitMetadataError::InvalidInstructionFlags {
+                func: self.func_def.name.clone(),
+                pc: self.current_pc,
+                opcode: Opcode::Return,
+                flags: inst.flags,
+                allowed: ReturnFlags::ALLOWED_BITS,
+            })
+        })?;
+        let heap_returns = flags.has_heap_returns();
+        let is_error_return = flags.is_error_return();
 
         // Pure function: no defer, no error return, no heap returns.
         // VM guards metadata reads with func attributes, so we can skip all metadata stores.

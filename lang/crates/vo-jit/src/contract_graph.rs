@@ -12,6 +12,7 @@ use vo_runtime::jit_api::{
 };
 
 use crate::call_helpers::{jit_context_callback_callsites, JitContextCallbackCallKind};
+pub use crate::metadata_contract::JitMetadataKind;
 use crate::semantics::{
     opcode_semantic_matrix, FailFastCondition, HelperReturnPolicy, JitMetadataRequirement,
     PackedOperand, TrapPolicy,
@@ -41,26 +42,6 @@ pub enum ContractSubject {
     GcEntry(GcContractEntry),
     EntryPolicy(JitEntryPolicy),
     CodegenDecoderPair(Opcode),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JitMetadataKind {
-    None,
-    ElemLayout,
-    MapGet,
-    MapSet,
-    MapDelete,
-    PtrLayout,
-    SlotLayout,
-    CallLayout,
-    CallExternLayout,
-    QueueLayout,
-    MapIterNext,
-    IfaceAssertLayout,
-    LegacyMapGet,
-    LegacyMapSet,
-    LegacyMapDelete,
-    LoopEnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -749,7 +730,7 @@ const fn packed_operand_width_const(operand: PackedOperand) -> WidthPolicy {
     }
 }
 
-static JIT_METADATA_CONTRACT_EDGES: [ContractEdge; 16] = [
+static JIT_METADATA_CONTRACT_EDGES: [ContractEdge; 13] = [
     metadata_edge(JitMetadataKind::None),
     metadata_edge(JitMetadataKind::ElemLayout),
     metadata_edge(JitMetadataKind::MapGet),
@@ -762,14 +743,23 @@ static JIT_METADATA_CONTRACT_EDGES: [ContractEdge; 16] = [
     metadata_edge(JitMetadataKind::QueueLayout),
     metadata_edge(JitMetadataKind::MapIterNext),
     metadata_edge(JitMetadataKind::IfaceAssertLayout),
-    metadata_edge(JitMetadataKind::LegacyMapGet),
-    metadata_edge(JitMetadataKind::LegacyMapSet),
-    metadata_edge(JitMetadataKind::LegacyMapDelete),
     metadata_edge(JitMetadataKind::LoopEnd),
 ];
 
 pub fn jit_metadata_contract_edges() -> &'static [ContractEdge] {
     &JIT_METADATA_CONTRACT_EDGES
+}
+
+#[cfg(test)]
+static LEGACY_JIT_METADATA_COMPAT_EDGES: [ContractEdge; 3] = [
+    legacy_metadata_edge(JitMetadataKind::LegacyMapGet),
+    legacy_metadata_edge(JitMetadataKind::LegacyMapSet),
+    legacy_metadata_edge(JitMetadataKind::LegacyMapDelete),
+];
+
+#[cfg(test)]
+pub fn legacy_jit_metadata_compat_edges() -> &'static [ContractEdge] {
+    &LEGACY_JIT_METADATA_COMPAT_EDGES
 }
 
 const fn metadata_edge(kind: JitMetadataKind) -> ContractEdge {
@@ -795,6 +785,25 @@ const fn metadata_edge(kind: JitMetadataKind) -> ContractEdge {
         consumer: ContractEndpoint::JitVerifier(
             "vo-jit verifier/effects/lowering metadata decoder",
         ),
+    }
+}
+
+#[cfg(test)]
+const fn legacy_metadata_edge(kind: JitMetadataKind) -> ContractEdge {
+    ContractEdge {
+        kind: ContractKind::JitMetadata,
+        subject: ContractSubject::JitMetadata(kind),
+        width: metadata_width_const(kind),
+        abi: AbiShape::NONE,
+        layout_authority: LayoutAuthority::None,
+        return_policy: ReturnPolicy::None,
+        panic_policy: PanicPolicy::CompileFailFast,
+        may_gc: false,
+        observes_frame: false,
+        needs_spill: false,
+        fail_fast: FF_LAYOUT,
+        producer: ContractEndpoint::CommonCore("legacy bytecode deserializer compatibility"),
+        consumer: ContractEndpoint::JitVerifier("strict verifier rejects before lowering"),
     }
 }
 
@@ -1230,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_contracts_cover_all_serialized_kinds() {
+    fn metadata_contracts_cover_all_current_lowering_kinds() {
         let kinds: BTreeSet<_> = jit_metadata_contract_edges()
             .iter()
             .map(|edge| match edge.subject {
@@ -1240,26 +1249,28 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            [
-                JitMetadataKind::None as u8,
-                JitMetadataKind::ElemLayout as u8,
-                JitMetadataKind::MapGet as u8,
-                JitMetadataKind::MapSet as u8,
-                JitMetadataKind::MapDelete as u8,
-                JitMetadataKind::PtrLayout as u8,
-                JitMetadataKind::SlotLayout as u8,
-                JitMetadataKind::CallLayout as u8,
-                JitMetadataKind::CallExternLayout as u8,
-                JitMetadataKind::QueueLayout as u8,
-                JitMetadataKind::MapIterNext as u8,
-                JitMetadataKind::IfaceAssertLayout as u8,
-                JitMetadataKind::LegacyMapGet as u8,
-                JitMetadataKind::LegacyMapSet as u8,
-                JitMetadataKind::LegacyMapDelete as u8,
-                JitMetadataKind::LoopEnd as u8,
-            ]
-            .into_iter()
-            .collect()
+            JitMetadataKind::STRICT_CURRENT
+                .iter()
+                .map(|kind| *kind as u8)
+                .collect()
+        );
+        assert_eq!(
+            JitMetadataKind::STRICT_CURRENT.len(),
+            jit_metadata_contract_edges().len(),
+            "strict metadata graph must mirror metadata_contract::STRICT_CURRENT"
+        );
+        assert_eq!(
+            JitMetadataKind::LEGACY_COMPAT.len(),
+            legacy_jit_metadata_compat_edges().len(),
+            "legacy metadata compat graph must mirror metadata_contract::LEGACY_COMPAT"
+        );
+        let legacy_kinds: BTreeSet<_> = JitMetadataKind::LEGACY_COMPAT
+            .iter()
+            .map(|kind| *kind as u8)
+            .collect();
+        assert!(
+            kinds.is_disjoint(&legacy_kinds),
+            "strict metadata graph must not include legacy compat-only kinds"
         );
         for edge in jit_metadata_contract_edges() {
             if edge.subject != ContractSubject::JitMetadata(JitMetadataKind::None) {
@@ -1304,6 +1315,52 @@ mod tests {
                     other => panic!("{:?} has unexpected metadata width {other:?}", edge.subject),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn strict_jit_metadata_contract_edges_exclude_legacy_schema() {
+        for edge in jit_metadata_contract_edges() {
+            assert!(
+                !matches!(
+                    edge.subject,
+                    ContractSubject::JitMetadata(
+                        JitMetadataKind::LegacyMapGet
+                            | JitMetadataKind::LegacyMapSet
+                            | JitMetadataKind::LegacyMapDelete
+                    )
+                ),
+                "legacy metadata must stay out of the strict JIT metadata contract graph"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_jit_metadata_schema_is_explicit_compat_only() {
+        let subjects: BTreeSet<_> = legacy_jit_metadata_compat_edges()
+            .iter()
+            .map(|edge| match edge.subject {
+                ContractSubject::JitMetadata(kind) => kind as u8,
+                other => panic!("unexpected legacy metadata compat subject {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            subjects,
+            JitMetadataKind::LEGACY_COMPAT
+                .iter()
+                .map(|kind| *kind as u8)
+                .collect()
+        );
+        for edge in legacy_jit_metadata_compat_edges() {
+            assert_eq!(edge.layout_authority, LayoutAuthority::None);
+            assert_eq!(
+                edge.producer,
+                ContractEndpoint::CommonCore("legacy bytecode deserializer compatibility")
+            );
+            assert_eq!(
+                edge.consumer,
+                ContractEndpoint::JitVerifier("strict verifier rejects before lowering")
+            );
         }
     }
 

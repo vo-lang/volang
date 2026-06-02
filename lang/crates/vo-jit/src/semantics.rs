@@ -11,6 +11,8 @@ use vo_runtime::jit_api::{JitRuntimeHelperPanicPolicy, JitRuntimeHelperReturnPol
 
 use crate::capability::{opcode_capability, OpcodeCapability};
 use crate::contract::{opcode_contract, EffectContract};
+use crate::metadata_contract::opcode_metadata_requirement;
+pub use crate::metadata_contract::JitMetadataRequirement;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmSemanticSource {
@@ -46,24 +48,6 @@ pub enum PackedOperand {
     RecvFlags,
     MapIterFlags,
     ForLoopTarget,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JitMetadataRequirement {
-    None,
-    ElemLayoutWhenFlagsZero,
-    MapGet,
-    MapSet,
-    MapDelete,
-    PtrLayout,
-    SlotLayout,
-    CallLayout,
-    CallLayoutWhenClosureShape,
-    CallExternLayout,
-    QueueLayout,
-    MapIterNext,
-    IfaceAssertLayout,
-    LoopEndForHintLoop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -604,6 +588,7 @@ const REQ_BRANCH: &[VerifierRequirement] = &[VerifierRequirement::BranchTarget];
 const REQ_COND_BRANCH: &[VerifierRequirement] = &[
     VerifierRequirement::BranchTarget,
     VerifierRequirement::LocalSlotRange,
+    VerifierRequirement::LocalSlotLayout,
 ];
 const REQ_INTERFACE_PAIR: &[VerifierRequirement] = &[
     VerifierRequirement::LocalSlotRange,
@@ -635,6 +620,7 @@ const REQ_LOOP_METADATA: &[VerifierRequirement] = &[
 const REQ_FOR_LOOP: &[VerifierRequirement] = &[
     VerifierRequirement::BranchTarget,
     VerifierRequirement::LocalSlotRange,
+    VerifierRequirement::LocalSlotLayout,
 ];
 const REQ_CLOSURE_NEW: &[VerifierRequirement] = &[
     VerifierRequirement::ClosureFunctionIndex,
@@ -893,6 +879,10 @@ const FF_CALL_METADATA: &[FailFastCondition] = &[
     FailFastCondition::GcFrameContract,
 ];
 const FF_BRANCH: &[FailFastCondition] = &[FailFastCondition::InvalidBranchTarget];
+const FF_BRANCH_LAYOUT: &[FailFastCondition] = &[
+    FailFastCondition::InvalidBranchTarget,
+    FailFastCondition::LayoutMismatch,
+];
 const FF_INVALID: &[FailFastCondition] = &[FailFastCondition::UnsupportedOpcode];
 
 const fn reg_effects(
@@ -1146,7 +1136,8 @@ pub fn opcode_fail_fast_conditions(opcode: Opcode) -> &'static [FailFastConditio
         Call => FF_CALL,
         CallExtern => FF_EXTERN_CALLBACK,
         CallClosure | CallIface => FF_CALL_METADATA,
-        Jump | JumpIf | JumpIfNot | ForLoop => FF_BRANCH,
+        Jump => FF_BRANCH,
+        JumpIf | JumpIfNot | ForLoop => FF_BRANCH_LAYOUT,
         Hint => FF_META_LAYOUT,
         ArrayNew | ArrayGet | ArraySet | ArrayAddr | SliceNew | SliceGet | SliceSet | SliceAddr
         | SliceAppend | MapGet | MapSet | MapDelete => FF_META_HELPER,
@@ -1173,92 +1164,76 @@ pub fn opcode_fail_fast_conditions(opcode: Opcode) -> &'static [FailFastConditio
 }
 
 pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
-    use JitMetadataRequirement as Meta;
     use LoweringOwner as Lowering;
     use Opcode::*;
     use VmSemanticSource as Vm;
 
-    let (packed_operands, vm_source, lowering_owner, metadata, verifier_requirements) = match opcode
-    {
+    let metadata = opcode_metadata_requirement(opcode);
+    let (packed_operands, vm_source, lowering_owner, verifier_requirements) = match opcode {
         Hint => (
             HINT_LOOP,
             Vm::JitOnlyHint,
             Lowering::TranslateScalar,
-            Meta::LoopEndForHintLoop,
             REQ_LOOP_METADATA,
         ),
         LoadInt => (
             IMM32,
             Vm::VmDispatch,
             Lowering::TranslateScalar,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         LoadConst => (
             NO_PACKED,
             Vm::VmExec("exec/load.rs"),
             Lowering::TranslateScalar,
-            Meta::None,
             REQ_CONST_LAYOUT,
         ),
         Copy => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateScalar,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         CopyN => (
             COPY_N,
             Vm::VmDispatch,
             Lowering::TranslateScalar,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         SlotGet | SlotGetN => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateMemory,
-            Meta::SlotLayout,
             REQ_METADATA_LOCAL,
         ),
         SlotSet | SlotSetN => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateMemory,
-            Meta::SlotLayout,
             REQ_METADATA_LOCAL,
         ),
         GlobalGet | GlobalGetN => (
             NO_PACKED,
             Vm::VmExec("exec/global.rs"),
             Lowering::TranslateMemory,
-            Meta::None,
             REQ_GLOBAL_READ,
         ),
         GlobalSet | GlobalSetN => (
             NO_PACKED,
             Vm::VmExec("exec/global.rs"),
             Lowering::TranslateMemory,
-            Meta::None,
             REQ_GLOBAL_WRITE,
         ),
         PtrNew => (
             NO_PACKED,
             Vm::VmExec("exec/heap.rs"),
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         PtrGet | PtrGetN | PtrAdd => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateMemory,
-            if matches!(opcode, PtrAdd) {
-                Meta::None
-            } else {
-                Meta::PtrLayout
-            },
             if matches!(opcode, PtrAdd) {
                 REQ_LOCAL_LAYOUT
             } else {
@@ -1269,7 +1244,6 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateMemory,
-            Meta::PtrLayout,
             REQ_METADATA_WRITE_BARRIER,
         ),
         AddI | SubI | MulI | DivI | DivU | ModI | ModU | NegI | AddF | SubF | MulF | DivF
@@ -1278,63 +1252,54 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateScalar,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         Jump => (
             IMM32,
             Vm::VmDispatch,
             Lowering::FunctionCompiler,
-            Meta::None,
             REQ_BRANCH,
         ),
         JumpIf | JumpIfNot => (
             IMM32,
             Vm::VmDispatch,
             Lowering::FunctionCompiler,
-            Meta::None,
             REQ_COND_BRANCH,
         ),
         Return => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::FunctionCompiler,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         Panic => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::FunctionCompiler,
-            Meta::None,
             REQ_INTERFACE_PAIR,
         ),
         Call => (
             STATIC_CALL,
             Vm::VmExec("exec/call.rs"),
             Lowering::CallHelpers,
-            Meta::None,
             REQ_STATIC_CALL,
         ),
         CallExtern => (
             NO_PACKED,
             Vm::VmExec("exec/call.rs"),
             Lowering::CallHelpers,
-            Meta::CallExternLayout,
             REQ_EXTERN_CALL,
         ),
         CallClosure | CallIface => (
             DYNAMIC_CALL,
             Vm::VmExec("exec/call.rs"),
             Lowering::CallHelpers,
-            Meta::CallLayout,
             REQ_DYNAMIC_CALL,
         ),
         StrNew => (
             NO_PACKED,
             Vm::VmExec("exec/string.rs"),
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_STRING_CONST_LAYOUT,
         ),
         StrLen | StrIndex | StrConcat | StrSlice | StrEq | StrNe | StrLt | StrLe | StrGt
@@ -1342,7 +1307,6 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             NO_PACKED,
             Vm::VmExec("exec/string.rs"),
             Lowering::TranslateCollections,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         ArrayNew | ArrayGet | ArraySet | ArrayAddr | SliceNew | SliceGet | SliceSet | SliceAddr
@@ -1350,7 +1314,6 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::ElemLayoutWhenFlagsZero,
             if matches!(opcode, ArraySet | SliceSet | SliceAppend) {
                 REQ_METADATA_WRITE_BARRIER
             } else {
@@ -1361,63 +1324,54 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         MapNew => (
             MAP_NEW,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         MapGet => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::MapGet,
             REQ_METADATA_LOCAL,
         ),
         MapSet => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::MapSet,
             REQ_METADATA_WRITE_BARRIER,
         ),
         MapDelete => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::MapDelete,
             REQ_METADATA_LOCAL,
         ),
         MapLen => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         MapIterInit => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         MapIterNext => (
             MAP_ITER,
             Vm::VmDispatch,
             Lowering::TranslateCollections,
-            Meta::MapIterNext,
             REQ_METADATA_LOCAL,
         ),
         QueueNew => (
             QUEUE_NEW,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         QueueSend | QueueRecv => (
@@ -1428,121 +1382,99 @@ pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
             },
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::QueueLayout,
             REQ_METADATA_LOCAL,
         ),
         QueueClose | QueueLen | QueueCap => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         SelectBegin | SelectExec => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         SelectSend => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::QueueLayout,
             REQ_METADATA_LOCAL,
         ),
         SelectRecv => (
             RECV,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::QueueLayout,
             REQ_METADATA_LOCAL,
         ),
         ClosureNew => (
             CLOSURE_NEW,
             Vm::VmExec("exec/closure.rs"),
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_CLOSURE_NEW,
         ),
         ClosureGet => (
             NO_PACKED,
             Vm::VmExec("exec/closure.rs"),
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         GoStart | DeferPush | ErrDeferPush => (
             SHARED_CALL,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::CallLayoutWhenClosureShape,
             REQ_SHARED_STATIC_CALL,
         ),
         GoIsland => (
             SHARED_CALL,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::CallLayout,
             REQ_DYNAMIC_CALL,
         ),
         Recover => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_INTERFACE_PAIR,
         ),
         IfaceAssign => (
             NO_PACKED,
             Vm::VmExec("exec/iface.rs"),
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_IFACE_CONST,
         ),
         IfaceAssert => (
             NO_PACKED,
             Vm::VmExec("exec/iface.rs"),
             Lowering::TranslateRuntimeOps,
-            Meta::IfaceAssertLayout,
             REQ_METADATA_INTERFACE_PAIR,
         ),
         IfaceEq => (
             NO_PACKED,
             Vm::VmExec("exec/iface.rs"),
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_INTERFACE_PAIR,
         ),
         ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | IndexCheck => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateConversions,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         IslandNew => (
             NO_PACKED,
             Vm::VmDispatch,
             Lowering::TranslateRuntimeOps,
-            Meta::None,
             REQ_LOCAL_LAYOUT,
         ),
         ForLoop => (
             FOR_LOOP,
             Vm::VmDispatch,
             Lowering::LoopCompiler,
-            Meta::None,
             REQ_FOR_LOOP,
         ),
-        Invalid => (
-            NO_PACKED,
-            Vm::Invalid,
-            Lowering::Invalid,
-            Meta::None,
-            REQ_NONE,
-        ),
+        Invalid => (NO_PACKED, Vm::Invalid, Lowering::Invalid, REQ_NONE),
     };
 
     OpcodeSemantics {
@@ -1818,12 +1750,32 @@ mod tests {
         for raw in 0..Opcode::COUNT {
             let opcode = Opcode::from_u8(raw as u8);
             let row = opcode_semantics(opcode);
-            let verifier = crate::verifier::jit_metadata_requirement(opcode, 0);
+            let verifier = crate::metadata_contract::opcode_metadata_requirement(opcode);
             assert_eq!(
                 row.metadata, verifier,
-                "{opcode:?} matrix and verifier metadata requirements diverged"
+                "{opcode:?} matrix and strict metadata contract diverged"
             );
         }
+    }
+
+    #[test]
+    fn semantic_matrix_uses_metadata_contract_as_requirement_source() {
+        let src = include_str!("semantics.rs");
+        let body = src
+            .split("pub fn opcode_semantics")
+            .nth(1)
+            .expect("opcode_semantics body")
+            .split("pub fn opcode_semantic_matrix")
+            .next()
+            .expect("opcode_semantics end");
+        assert!(
+            body.contains("let metadata = opcode_metadata_requirement(opcode);"),
+            "OpcodeSemantics.metadata must come from metadata_contract"
+        );
+        assert!(
+            !body.contains("JitMetadataRequirement::") && !body.contains("Meta::"),
+            "opcode_semantics must not hand-maintain a second metadata requirement matrix"
+        );
     }
 
     #[test]
@@ -1832,6 +1784,9 @@ mod tests {
             Opcode::LoadInt,
             Opcode::LoadConst,
             Opcode::StrNew,
+            Opcode::JumpIf,
+            Opcode::JumpIfNot,
+            Opcode::ForLoop,
             Opcode::AddI,
             Opcode::AddF,
             Opcode::EqF,
@@ -1847,6 +1802,27 @@ mod tests {
                 row.verifier_requirements
                     .contains(&VerifierRequirement::LocalSlotLayout),
                 "{opcode:?} lowering depends on concrete SlotType layout and must declare it"
+            );
+        }
+    }
+
+    #[test]
+    fn control_flow_value_slots_declare_layout_and_fail_fast_policy() {
+        for opcode in [Opcode::JumpIf, Opcode::JumpIfNot, Opcode::ForLoop] {
+            let row = opcode_semantics(opcode);
+            assert!(
+                row.verifier_requirements
+                    .contains(&VerifierRequirement::LocalSlotLayout),
+                "{opcode:?} consumes Value-typed local slots and must declare LocalSlotLayout"
+            );
+            assert!(
+                row.fail_fast.contains(&FailFastCondition::LayoutMismatch),
+                "{opcode:?} layout-sensitive control flow must fail fast on LayoutMismatch"
+            );
+            assert!(
+                row.fail_fast
+                    .contains(&FailFastCondition::InvalidBranchTarget),
+                "{opcode:?} still needs branch target fail-fast coverage"
             );
         }
     }

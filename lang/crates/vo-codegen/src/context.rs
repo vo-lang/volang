@@ -95,8 +95,8 @@ use vo_common::span::Span;
 use vo_common::symbol::Symbol;
 use vo_common::SourceMap;
 use vo_vm::bytecode::{
-    Constant, FunctionDef, GlobalDef, InterfaceMeta, Itab, JitInstructionMetadata, MethodInfo,
-    Module, NamedTypeMeta, StructMeta,
+    Constant, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta,
+    StructMeta,
 };
 
 /// Package-level codegen context.
@@ -1171,24 +1171,6 @@ impl CodegenContext {
 
     // === Method value support ===
 
-    /// Helper: emit Copy instructions to copy params from src to dst
-    fn emit_copy_params(
-        code: &mut Vec<vo_vm::instruction::Instruction>,
-        src_start: u16,
-        dst_start: u16,
-        count: u16,
-    ) {
-        use vo_vm::instruction::{Instruction, Opcode};
-        for i in 0..count {
-            code.push(Instruction::new(
-                Opcode::Copy,
-                dst_start + i,
-                src_start + i,
-                0,
-            ));
-        }
-    }
-
     fn define_wrapper_params(
         builder: &mut crate::func::FuncBuilder,
         param_layouts: &[Vec<vo_runtime::SlotType>],
@@ -1220,57 +1202,6 @@ impl CodegenContext {
     ) -> u32 {
         let wrapper_id = self.module.functions.len() as u32;
         self.module.functions.push(builder.build());
-        self.method_value_wrappers.insert(cache_key, wrapper_id);
-        wrapper_id
-    }
-
-    /// Helper: create and register a wrapper function
-    fn register_wrapper_func(
-        &mut self,
-        name: String,
-        param_slots: u16,
-        local_slots: u16,
-        code: Vec<vo_vm::instruction::Instruction>,
-        jit_metadata: Vec<JitInstructionMetadata>,
-        slot_types: Vec<vo_runtime::SlotType>,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
-        capture_slot_types: Vec<vo_runtime::SlotType>,
-        param_types: Vec<vo_vm::bytecode::TransferType>,
-        cache_key: MethodValueWrapperKey,
-    ) -> u32 {
-        use vo_vm::bytecode::FunctionDef;
-        let ret_slots = ret_slot_types.len() as u16;
-        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
-        let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
-        let borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
-        let wrapper_func = FunctionDef {
-            name,
-            param_count: param_slots,
-            param_slots,
-            ret_slots,
-            local_slots,
-            gc_scan_slots,
-            ret_slot_types,
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: true,
-            error_ret_slot: -1,
-            has_defer: false, // wrappers never have defer
-            has_calls,
-            has_call_extern,
-            jit_metadata,
-            code,
-            slot_types,
-            borrowed_scan_slots_prefix,
-            capture_types: Vec::new(),
-            capture_slot_types,
-            param_types,
-        };
-        let wrapper_id = self.module.functions.len() as u32;
-        self.module.functions.push(wrapper_func);
         self.method_value_wrappers.insert(cache_key, wrapper_id);
         wrapper_id
     }
@@ -1338,15 +1269,7 @@ impl CodegenContext {
             builder.emit_copy(args_start + recv_slots, first_param, forwarded_param_slots);
         }
 
-        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(method_func_id);
-        let call_c = crate::type_info::encode_static_call_args(total_arg_slots, ret_slots);
-        builder.emit_with_flags(
-            vo_vm::instruction::Opcode::Call,
-            func_id_high,
-            func_id_low,
-            args_start,
-            call_c,
-        );
+        builder.emit_static_call(method_func_id, args_start, total_arg_slots, ret_slots);
         builder.set_ret_slot_types(ret_slot_types);
         builder.emit_op(
             vo_vm::instruction::Opcode::Return,
@@ -1462,61 +1385,10 @@ impl CodegenContext {
             return Ok(wrapper_id);
         }
 
-        use vo_vm::instruction::{Instruction, Opcode};
-
         let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
         let param_slots = forwarded_slot_types.len() as u16;
         let ret_slots = ret_slot_types.len() as u16;
-        let wrapper_param_slots = 1 + param_slots;
         let iface_slots = 2u16;
-
-        let mut code = Vec::new();
-        let outer_ptr = wrapper_param_slots;
-        let iface_reg = outer_ptr + 1;
-        let args_start = iface_reg + iface_slots + 1;
-
-        // ClosureGet + PtrGet: get embedded interface from boxed outer struct
-        code.push(Instruction::new(Opcode::ClosureGet, outer_ptr, 0, 0));
-        code.push(Instruction::with_flags(
-            Opcode::PtrGet,
-            iface_slots as u8,
-            iface_reg,
-            outer_ptr,
-            embed_offset,
-        ));
-
-        // Copy params and call
-        Self::emit_copy_params(&mut code, 1, args_start, param_slots);
-
-        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        code.push(Instruction::with_flags(
-            Opcode::CallIface,
-            crate::func::FuncBuilder::checked_call_iface_method_idx(method_idx),
-            iface_reg,
-            args_start,
-            call_c,
-        ));
-        // Return values live at args_start + param_slots (new call buffer layout).
-        let ret_start = args_start + param_slots;
-        code.push(Instruction::with_flags(
-            Opcode::Return,
-            0,
-            ret_start,
-            ret_slots,
-            0,
-        ));
-        let call_pc = code.len() - 2;
-        let mut jit_metadata = vec![JitInstructionMetadata::None; code.len()];
-        jit_metadata[1] = JitInstructionMetadata::PtrLayout {
-            value_layout: vec![
-                vo_runtime::SlotType::Interface0,
-                vo_runtime::SlotType::Interface1,
-            ],
-        };
-        jit_metadata[call_pc] = JitInstructionMetadata::CallLayout {
-            arg_layout: forwarded_slot_types.clone(),
-            ret_layout: ret_slot_types.clone(),
-        };
 
         let wrapper_name = format!(
             "__method_value_embed_iface_{}_{}_t{}_o{}",
@@ -1525,36 +1397,47 @@ impl CodegenContext {
             iface_type.raw(),
             embed_offset,
         );
-        let local_slots =
-            wrapper_param_slots + 1 + iface_slots + 1 + (param_slots + ret_slots).max(1);
-        let mut slot_types = vec![vo_runtime::SlotType::Value; local_slots as usize];
-        slot_types[0] = vo_runtime::SlotType::GcRef;
-        for (idx, slot_type) in forwarded_slot_types.iter().copied().enumerate() {
-            slot_types[1 + idx] = slot_type;
-        }
-        slot_types[outer_ptr as usize] = vo_runtime::SlotType::GcRef;
-        slot_types[iface_reg as usize] = vo_runtime::SlotType::Interface0;
-        slot_types[iface_reg as usize + 1] = vo_runtime::SlotType::Interface1;
-        for (idx, slot_type) in forwarded_slot_types.iter().copied().enumerate() {
-            slot_types[args_start as usize + idx] = slot_type;
-        }
-        for (idx, slot_type) in ret_slot_types.iter().copied().enumerate() {
-            slot_types[ret_start as usize + idx] = slot_type;
-        }
-        let capture_slot_types = vec![vo_runtime::SlotType::GcRef];
-        let wrapper_id = self.register_wrapper_func(
-            wrapper_name,
-            wrapper_param_slots,
-            local_slots,
-            code,
-            jit_metadata,
-            slot_types,
-            ret_slot_types,
-            capture_slot_types,
-            param_types,
-            cache_key,
+        let mut builder = crate::func::FuncBuilder::new_closure(&wrapper_name);
+        let first_param_slot = Self::define_wrapper_params(&mut builder, &param_slot_types);
+        builder.add_param_transfer_types(&param_types);
+        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcRef]);
+
+        let outer_ptr = builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
+        builder.emit_op(vo_vm::instruction::Opcode::ClosureGet, outer_ptr, 0, 0);
+
+        let iface_reg = builder.alloc_slots(&[
+            vo_runtime::SlotType::Interface0,
+            vo_runtime::SlotType::Interface1,
+        ]);
+        builder.emit_ptr_get(iface_reg, outer_ptr, embed_offset, iface_slots);
+
+        let args_start = builder.alloc_dynamic_call_buffer(
+            &[vo_runtime::SlotType::Value],
+            &forwarded_slot_types,
+            &ret_slot_types,
         );
-        Ok(wrapper_id)
+        if let Some(first_param) = first_param_slot {
+            builder.emit_copy(args_start, first_param, param_slots);
+        }
+
+        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
+        builder.emit_call_iface(
+            method_idx,
+            iface_reg,
+            args_start,
+            call_c,
+            &forwarded_slot_types,
+            &ret_slot_types,
+        );
+        builder.set_ret_slot_types(ret_slot_types);
+        builder.emit_op(
+            vo_vm::instruction::Opcode::Return,
+            args_start + param_slots,
+            ret_slots,
+            0,
+        );
+
+        Ok(self.register_method_value_wrapper_from_builder(cache_key, builder))
     }
 
     // === Wrapper cache ===

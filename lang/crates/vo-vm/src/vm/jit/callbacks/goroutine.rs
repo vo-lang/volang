@@ -276,6 +276,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn test_context<'a>(
         vm: &'a mut Vm,
         module: &'a Module,

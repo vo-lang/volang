@@ -47,6 +47,7 @@ use helpers::{
 use crate::bytecode::{FunctionDef, Module};
 use crate::exec;
 use crate::fiber::{Fiber, FiberCapacityError};
+use vo_common_core::bytecode::ReturnFlags;
 /// Result of wait_for_work() — what the scheduling loop should do next.
 enum WaitResult {
     /// Work became available, retry the loop.
@@ -94,15 +95,71 @@ pub mod jit_mgr;
 #[cfg(feature = "jit")]
 pub use jit_mgr::{JitConfig, JitManager};
 
+#[cfg(feature = "jit")]
+#[derive(Default)]
+pub enum VmJitState {
+    #[default]
+    Disabled,
+    BestEffort(JitManager),
+    Strict(JitManager),
+}
+
+#[cfg(feature = "jit")]
+impl VmJitState {
+    fn manager(&self) -> Option<&JitManager> {
+        match self {
+            Self::Disabled => None,
+            Self::BestEffort(manager) | Self::Strict(manager) => Some(manager),
+        }
+    }
+
+    fn manager_mut(&mut self) -> Option<&mut JitManager> {
+        match self {
+            Self::Disabled => None,
+            Self::BestEffort(manager) | Self::Strict(manager) => Some(manager),
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    fn is_strict(&self) -> bool {
+        matches!(self, Self::Strict(_))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn ensure_strict(&mut self) -> Result<&mut JitManager, vo_jit::JitError> {
+        let manager = match core::mem::replace(self, Self::Disabled) {
+            Self::Disabled => JitManager::new()?,
+            Self::BestEffort(manager) | Self::Strict(manager) => manager,
+        };
+        *self = Self::Strict(manager);
+        match self {
+            Self::Strict(manager) => Ok(manager),
+            Self::Disabled | Self::BestEffort(_) => Err(vo_jit::JitError::Internal(
+                "failed to enter strict JIT state".to_string(),
+            )),
+        }
+    }
+
+    fn set_best_effort(&mut self, manager: JitManager) {
+        *self = Self::BestEffort(manager);
+    }
+
+    fn set_strict(&mut self, manager: JitManager) {
+        *self = Self::Strict(manager);
+    }
+}
+
 pub struct Vm {
-    /// JIT manager (only available with "jit" feature).
+    /// JIT state (only available with "jit" feature).
     ///
-    /// Note: VM runtime execution is currently interpreter-only. The JIT manager is kept for
-    /// compilation/codegen purposes while the execution integration is being rebuilt.
+    /// Strict JIT entry points validate all function metadata before a module is accepted.
     /// IMPORTANT: Must be first field so it's dropped LAST (Rust drops in reverse order).
     /// JIT code memory must remain valid while scheduler/fibers are being dropped.
     #[cfg(feature = "jit")]
-    pub jit_mgr: Option<JitManager>,
+    pub jit: VmJitState,
     #[cfg(feature = "std")]
     extension_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     #[cfg(feature = "std")]
@@ -133,6 +190,18 @@ fn validate_externs_registered(
         msg.push_str(&format!("  - [{}] {}\n", id, name));
     }
     Err(VmError::Jit(msg))
+}
+
+#[cfg(feature = "jit")]
+#[allow(clippy::result_large_err)]
+fn validate_strict_jit_module(module: &Module) -> Result<(), vo_jit::JitError> {
+    vo_jit::verify_module(module)?;
+    Ok(())
+}
+
+#[cfg(feature = "jit")]
+fn strict_jit_load_error(err: vo_jit::JitError) -> VmError {
+    VmError::Jit(err.to_string())
 }
 
 #[cfg(debug_assertions)]
@@ -315,7 +384,7 @@ impl Vm {
     pub fn new() -> Self {
         Self {
             #[cfg(feature = "jit")]
-            jit_mgr: None,
+            jit: VmJitState::Disabled,
             #[cfg(feature = "std")]
             extension_loader: None,
             #[cfg(feature = "std")]
@@ -337,6 +406,9 @@ impl Vm {
     /// fails, the VM is still created without a JIT manager. Use
     /// [`Vm::try_with_jit_config`] for strict `RunMode::Jit` paths.
     #[cfg(feature = "jit")]
+    #[deprecated(
+        note = "non-strict best-effort API; use try_with_jit_config for strict JIT or with_best_effort_jit_config for explicit fallback"
+    )]
     pub fn with_jit_thresholds(call_threshold: u32, loop_threshold: u32) -> Self {
         Self::with_best_effort_jit_config(JitConfig {
             call_threshold,
@@ -359,7 +431,7 @@ impl Vm {
     pub fn with_best_effort_jit_config(config: JitConfig) -> Self {
         let mut vm = Self::new();
         if let Ok(mgr) = JitManager::with_config(config) {
-            vm.jit_mgr = Some(mgr);
+            vm.jit.set_best_effort(mgr);
         }
         vm
     }
@@ -380,20 +452,26 @@ impl Vm {
     #[allow(clippy::result_large_err)]
     pub fn try_with_jit_config(config: JitConfig) -> Result<Self, vo_jit::JitError> {
         let mut vm = Self::new();
-        vm.jit_mgr = Some(JitManager::with_config(config)?);
+        vm.jit.set_strict(JitManager::with_config(config)?);
         Ok(vm)
     }
 
     /// Strictly initialize the JIT compiler.
     ///
-    /// Does nothing if a JIT manager already exists.
+    /// If a module is already loaded, validates strict JIT metadata before the
+    /// VM can enter JIT mode and sizes dispatch tables for the loaded module.
     #[cfg(feature = "jit")]
     #[allow(clippy::result_large_err)]
     pub fn try_init_jit(&mut self) -> Result<(), vo_jit::JitError> {
-        if self.jit_mgr.is_some() {
-            return Ok(());
+        if let Some(module) = self.module.as_ref() {
+            validate_strict_jit_module(module)?;
         }
-        self.jit_mgr = Some(JitManager::new()?);
+        let jit_mgr = self.jit.ensure_strict()?;
+        if let Some(module) = self.module.as_ref() {
+            if jit_mgr.func_table_len() != module.functions.len() {
+                jit_mgr.init(module.functions.len());
+            }
+        }
         Ok(())
     }
 
@@ -404,17 +482,48 @@ impl Vm {
     /// the VM interpreter-only. Strict run paths must use [`Vm::try_init_jit`]
     /// or [`Vm::try_with_jit_config`].
     #[cfg(feature = "jit")]
-    pub fn init_jit(&mut self) {
-        if let Err(e) = self.try_init_jit() {
-            #[cfg(feature = "std")]
-            eprintln!("Warning: best-effort JIT initialization failed: {}", e);
+    pub fn init_jit_best_effort(&mut self) {
+        if self.jit.is_enabled() {
+            return;
         }
+        match JitManager::new() {
+            Ok(mut mgr) => {
+                if let Some(module) = self.module.as_ref() {
+                    mgr.init(module.functions.len());
+                }
+                self.jit.set_best_effort(mgr);
+            }
+            Err(e) => {
+                #[cfg(feature = "std")]
+                eprintln!("Warning: best-effort JIT initialization failed: {}", e);
+            }
+        }
+    }
+
+    /// Deprecated alias for [`Vm::init_jit_best_effort`].
+    ///
+    /// This method is non-strict and may leave the VM without JIT enabled.
+    /// New strict callers should use [`Vm::try_init_jit`].
+    #[cfg(feature = "jit")]
+    #[deprecated(
+        note = "non-strict best-effort API; use try_init_jit for strict JIT or init_jit_best_effort for explicit fallback"
+    )]
+    pub fn init_jit(&mut self) {
+        self.init_jit_best_effort();
     }
 
     /// Check if JIT is available and enabled.
     #[cfg(feature = "jit")]
     pub fn has_jit(&self) -> bool {
-        self.jit_mgr.is_some()
+        self.jit.is_enabled()
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_execution_stats(&self) -> jit_mgr::JitExecutionStats {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.execution_stats())
+            .unwrap_or_default()
     }
 
     #[cfg(not(feature = "jit"))]
@@ -463,6 +572,11 @@ impl Vm {
     pub fn load(&mut self, module: Module) -> Result<(), VmError> {
         vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
 
+        #[cfg(feature = "jit")]
+        if self.jit.is_strict() {
+            validate_strict_jit_module(&module).map_err(strict_jit_load_error)?;
+        }
+
         self.finish_load(module);
         Ok(())
     }
@@ -492,6 +606,11 @@ impl Vm {
         }
 
         validate_externs_registered(&self.state.extern_registry, &module.externs)?;
+
+        #[cfg(feature = "jit")]
+        if self.jit.is_strict() {
+            validate_strict_jit_module(&module).map_err(strict_jit_load_error)?;
+        }
 
         self.extension_specs = ext_loader.as_ref().map(|loader| loader.specs().to_vec());
         self.extension_loader = ext_loader;
@@ -538,7 +657,7 @@ impl Vm {
 
         // Initialize JIT manager state for this module
         #[cfg(feature = "jit")]
-        if let Some(jit_mgr) = self.jit_mgr.as_mut() {
+        if let Some(jit_mgr) = self.jit.manager_mut() {
             jit_mgr.init(module.functions.len());
         }
 
@@ -603,7 +722,7 @@ impl Vm {
         let registry_clone = registry.clone();
         let extension_specs = self.extension_specs.clone().unwrap_or_default();
         #[cfg(feature = "jit")]
-        let jit_config = self.jit_mgr.as_ref().map(|mgr| mgr.config().clone());
+        let jit_config = self.jit.manager().map(|mgr| mgr.config().clone());
         let join_handle = std::thread::spawn(move || {
             #[cfg(feature = "jit")]
             island_thread::run_island_thread(
@@ -1363,8 +1482,8 @@ impl Vm {
                     && vo_jit::can_enter_materialized_frame_for_jit(func)
                 {
                     if let Some(jit_func) = self
-                        .jit_mgr
-                        .as_ref()
+                        .jit
+                        .manager()
                         .and_then(|jit_mgr| jit_mgr.get_entry(func_id))
                     {
                         let result = jit::dispatch_jit_frame(self, fiber, module, jit_func);
@@ -1857,7 +1976,7 @@ impl Vm {
                     #[cfg(feature = "jit")]
                     {
                         let target_func_id = inst.static_call_func_id();
-                        if let Some(jit_mgr) = self.jit_mgr.as_mut() {
+                        if let Some(jit_mgr) = self.jit.manager_mut() {
                             let Some(target_func) = module.functions.get(target_func_id as usize)
                             else {
                                 return ExecResult::JitError(format!(
@@ -2147,7 +2266,8 @@ impl Vm {
                     let result = if fiber.is_direct_defer_context() {
                         exec::handle_panic_unwind(&mut self.state.gc, fiber, module)
                     } else {
-                        let is_error_return = (inst.flags & 1) != 0;
+                        let is_error_return =
+                            ReturnFlags::from_bits_truncate(inst.flags).is_error_return();
                         exec::handle_return(
                             &mut self.state.gc,
                             fiber,
@@ -4151,8 +4271,217 @@ mod tests {
     }
 
     #[cfg(feature = "jit")]
+    fn invalid_jit_return_shape_module() -> Module {
+        let mut module = Module::new("strict-jit-load-test".to_string());
+        module.functions.push(FunctionDef {
+            name: "main".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 1,
+            gc_scan_slots: 0,
+            ret_slots: 1,
+            ret_slot_types: vec![SlotType::Value],
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            jit_metadata: vec![vo_runtime::bytecode::JitInstructionMetadata::None],
+            slot_types: vec![SlotType::Value],
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
+                SlotType::Value,
+            ]),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        });
+        module
+    }
+
+    #[cfg(feature = "jit")]
+    fn invalid_jit_return_flags_module() -> Module {
+        let slot_types = vec![SlotType::Value];
+        let mut module = Module::new("strict-jit-return-flags-test".to_string());
+        module.functions.push(FunctionDef {
+            name: "main".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 1,
+            gc_scan_slots: 0,
+            ret_slots: 1,
+            ret_slot_types: vec![SlotType::Value],
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code: vec![Instruction::with_flags(Opcode::Return, 0x04, 0, 1, 0)],
+            jit_metadata: vec![vo_runtime::bytecode::JitInstructionMetadata::None],
+            slot_types: slot_types.clone(),
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
+                &slot_types,
+            ),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        });
+        module
+    }
+
+    #[cfg(feature = "jit")]
+    fn valid_empty_return_module() -> Module {
+        let slot_types = Vec::new();
+        let mut module = Module::new("strict-jit-valid-load-test".to_string());
+        module.functions.push(FunctionDef {
+            name: "main".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 0,
+            gc_scan_slots: 0,
+            ret_slots: 0,
+            ret_slot_types: Vec::new(),
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            jit_metadata: vec![vo_runtime::bytecode::JitInstructionMetadata::None],
+            slot_types: slot_types.clone(),
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
+                &slot_types,
+            ),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+        });
+        module
+    }
+
+    #[cfg(feature = "jit")]
     #[test]
-    fn strict_jit_call_to_missing_function_is_jit_error_instead_of_index_panic() {
+    fn strict_jit_load_rejects_invalid_metadata_before_interpreter_dispatch() {
+        let module = invalid_jit_return_shape_module();
+
+        let mut vm = Vm::try_with_jit_config(JitConfig {
+            call_threshold: 1_000_000,
+            loop_threshold: 1_000_000,
+            debug_ir: false,
+        })
+        .expect("strict JIT VM");
+
+        match vm.load(module) {
+            Err(VmError::Jit(msg)) => assert!(
+                msg.contains("invalid JIT metadata"),
+                "unexpected strict load error: {msg}"
+            ),
+            other => panic!("strict JIT load should fail fast, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn strict_jit_load_rejects_return_unknown_flags_before_interpreter_dispatch() {
+        let module = invalid_jit_return_flags_module();
+
+        let mut vm = Vm::try_with_jit_config(JitConfig {
+            call_threshold: 1_000_000,
+            loop_threshold: 1_000_000,
+            debug_ir: false,
+        })
+        .expect("strict JIT VM");
+
+        match vm.load(module) {
+            Err(VmError::Jit(msg)) => {
+                assert!(msg.contains("invalid JIT metadata"), "{msg}");
+                assert!(msg.contains("invalid flags 0x04 for Return"), "{msg}");
+            }
+            other => panic!("strict JIT load should reject Return unknown flags, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn best_effort_jit_config_keeps_legacy_non_strict_load_behavior() {
+        let module = invalid_jit_return_shape_module();
+        let mut vm = Vm::with_best_effort_jit_config(JitConfig {
+            call_threshold: 1_000_000,
+            loop_threshold: 1_000_000,
+            debug_ir: false,
+        });
+
+        assert!(
+            vm.load(module).is_ok(),
+            "legacy best-effort JIT entry point must remain explicit and non-strict"
+        );
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn best_effort_init_jit_after_load_initializes_without_strict_metadata_validation() {
+        let module = invalid_jit_return_shape_module();
+        let mut vm = Vm::new();
+        vm.load(module)
+            .expect("non-strict VM load preserves interpreter compatibility");
+
+        vm.init_jit_best_effort();
+
+        assert_eq!(
+            vm.jit.manager().map(|mgr| mgr.func_table_len()),
+            Some(1),
+            "explicit best-effort JIT init keeps legacy non-strict load behavior"
+        );
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn strict_try_init_jit_after_load_rejects_invalid_metadata() {
+        let module = invalid_jit_return_shape_module();
+        let mut vm = Vm::new();
+        vm.load(module)
+            .expect("non-strict VM load preserves interpreter compatibility");
+
+        let err = vm
+            .try_init_jit()
+            .expect_err("strict post-load JIT init must validate loaded module");
+        assert!(
+            err.to_string().contains("invalid JIT metadata"),
+            "unexpected strict post-load init error: {err}"
+        );
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn strict_try_init_jit_after_load_initializes_loaded_module_tables() {
+        let module = valid_empty_return_module();
+        let mut vm = Vm::new();
+        vm.load(module).expect("valid module load");
+
+        vm.try_init_jit().expect("strict post-load JIT init");
+
+        assert_eq!(
+            vm.jit.manager().map(|mgr| mgr.func_table_len()),
+            Some(1),
+            "post-load strict JIT init must size dispatch tables for the loaded module"
+        );
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn strict_jit_load_rejects_missing_static_call_target_before_dispatch() {
         let mut module = Module::new("missing-call-target-test".to_string());
         module.functions.push(FunctionDef {
             name: "main".to_string(),
@@ -4188,16 +4517,17 @@ mod tests {
             debug_ir: false,
         })
         .expect("strict JIT VM");
-        vm.load(module).unwrap();
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.load(module)));
 
         match result {
             Ok(Err(VmError::Jit(msg))) => {
-                assert!(msg.contains("missing call target function id 7"), "{msg}");
+                assert!(
+                    msg.contains("JIT call references missing function 7"),
+                    "{msg}"
+                );
             }
-            Ok(other) => panic!("missing call target should be a JitError, got {other:?}"),
-            Err(_) => panic!("missing call target must not panic in strict JIT mode"),
+            Ok(other) => panic!("missing call target should be rejected at load, got {other:?}"),
+            Err(_) => panic!("missing call target must not panic during strict JIT load"),
         }
     }
 

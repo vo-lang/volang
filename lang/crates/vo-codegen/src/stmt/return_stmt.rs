@@ -7,6 +7,7 @@
 //! 2. **Escaped vs non-escaped**: escaped use heap (PtrGet), non-escaped use stack (Copy)
 //! 3. **Error position**: error value replaces the last return slot (if it's error type)
 
+use vo_common_core::bytecode::ReturnFlags;
 use vo_runtime::SlotType;
 use vo_vm::instruction::Opcode;
 
@@ -27,11 +28,10 @@ fn emit_heap_returns(
     named_return_slots: &[(u16, u16, bool)],
     is_error_return: bool,
 ) {
-    use vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS;
     let gcref_count = named_return_slots.len() as u16;
     let gcref_start = named_return_slots[0].0;
-    let flags = RETURN_FLAG_HEAP_RETURNS | if is_error_return { 1 } else { 0 };
-    func.emit_with_flags(Opcode::Return, flags, gcref_start, gcref_count, 0);
+    let flags = ReturnFlags::heap_returns(is_error_return);
+    func.emit_with_flags(Opcode::Return, flags.bits(), gcref_start, gcref_count, 0);
 }
 
 /// Read a single named return value to destination slot.
@@ -153,8 +153,13 @@ pub fn emit_error_return(error_slot: u16, func: &mut FuncBuilder, info: &TypeInf
             Some(error_slot),
         );
 
-        // flags bit 0 = 1 indicates error return (for errdefer)
-        func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+        func.emit_with_flags(
+            Opcode::Return,
+            ReturnFlags::ERROR_RETURN.bits(),
+            ret_start,
+            total_ret_slots,
+            0,
+        );
     } else {
         // No named returns: zero values + error (original behavior)
         let ret_types: Vec<_> = func.return_types().to_vec();
@@ -165,9 +170,7 @@ pub fn emit_error_return(error_slot: u16, func: &mut FuncBuilder, info: &TypeInf
             ret_slot_types.extend(info.type_slot_types(*ret_type));
         }
         let ret_start = func.alloc_slots(&ret_slot_types);
-        for i in 0..total_ret_slots {
-            func.emit_op(Opcode::LoadInt, ret_start + i, 0, 0);
-        }
+        func.emit_zero_slots(ret_start, total_ret_slots);
 
         if !ret_types.is_empty() {
             let ret_error_slots = info.type_slot_count(*ret_types.last().unwrap());
@@ -175,8 +178,13 @@ pub fn emit_error_return(error_slot: u16, func: &mut FuncBuilder, info: &TypeInf
             func.emit_copy(ret_error_start, error_slot, ret_error_slots);
         }
 
-        // flags bit 0 = 1 indicates error return (for errdefer)
-        func.emit_with_flags(Opcode::Return, 1, ret_start, total_ret_slots, 0);
+        func.emit_with_flags(
+            Opcode::Return,
+            ReturnFlags::ERROR_RETURN.bits(),
+            ret_start,
+            total_ret_slots,
+            0,
+        );
     }
 }
 

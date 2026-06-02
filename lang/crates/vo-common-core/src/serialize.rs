@@ -1049,6 +1049,9 @@ impl Module {
                 metadata.resize(code.len(), JitInstructionMetadata::None);
                 metadata
             };
+            if jit_metadata.len() != code.len() {
+                return Err(SerializeError::InvalidJitMetadata);
+            }
             // Compute has_calls/has_call_extern from bytecode (not serialized — derived fields)
             let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
             // Cross-island transfer types
@@ -1262,6 +1265,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_jit_metadata_length_drift_during_deserialize() {
+        let mut module = Module::new("test".into());
+        module.functions.push(FunctionDef {
+            name: "main".into(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 1,
+            gc_scan_slots: 0,
+            ret_slots: 0,
+            ret_slot_types: Vec::new(),
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: vec![],
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            slot_types: vec![SlotType::Value],
+            borrowed_scan_slots_prefix: vec![0, 0],
+            code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            jit_metadata: Vec::new(),
+            capture_types: vec![],
+            capture_slot_types: vec![],
+            param_types: vec![],
+        });
+
+        assert!(matches!(
+            Module::deserialize(&module.serialize()),
+            Err(SerializeError::InvalidJitMetadata)
+        ));
+    }
+
+    #[test]
     fn test_serialize_deserialize_loop_end_metadata() {
         let mut writer = ByteWriter::new();
         let metadata = JitInstructionMetadata::LoopEnd { end_pc: 300 };
@@ -1313,6 +1351,55 @@ mod tests {
             let mut writer = ByteWriter::new();
             write_jit_instruction_metadata(&mut writer, &expected);
             let bytes = writer.into_bytes();
+            let mut reader = ByteReader::new(&bytes);
+            assert_eq!(
+                read_jit_instruction_metadata(&mut reader).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_map_metadata_is_reader_compat_surface() {
+        let mut legacy_v4_get = ByteWriter::new();
+        legacy_v4_get.write_u8(2);
+        legacy_v4_get.write_u16(2);
+        legacy_v4_get.write_u16(3);
+        legacy_v4_get.write_u8(1);
+        let bytes = legacy_v4_get.into_bytes();
+        let mut reader = ByteReader::new(&bytes);
+        assert_eq!(
+            read_jit_instruction_metadata_for_version(&mut reader, 4).unwrap(),
+            JitInstructionMetadata::LegacyMapGet {
+                key_slots: 2,
+                val_slots: 3,
+                has_ok: true,
+            }
+        );
+
+        for (expected_tag, expected) in [
+            (
+                6,
+                JitInstructionMetadata::LegacyMapGet {
+                    key_slots: 1,
+                    val_slots: 2,
+                    has_ok: false,
+                },
+            ),
+            (
+                7,
+                JitInstructionMetadata::LegacyMapSet {
+                    key_slots: 3,
+                    val_slots: 4,
+                },
+            ),
+            (8, JitInstructionMetadata::LegacyMapDelete { key_slots: 5 }),
+        ] {
+            let mut writer = ByteWriter::new();
+            write_jit_instruction_metadata(&mut writer, &expected);
+            let bytes = writer.into_bytes();
+            assert_eq!(bytes[0], expected_tag);
+
             let mut reader = ByteReader::new(&bytes);
             assert_eq!(
                 read_jit_instruction_metadata(&mut reader).unwrap(),

@@ -222,6 +222,78 @@ pub fn map_delete_key_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Opt
     facts.map_delete_key_slots()
 }
 
+pub fn ptr_value_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<Vec<SlotType>> {
+    match metadata {
+        JitInstructionMetadata::PtrLayout { value_layout } => Some(value_layout.clone()),
+        _ => None,
+    }
+}
+
+pub fn slot_elem_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<Vec<SlotType>> {
+    match metadata {
+        JitInstructionMetadata::SlotLayout { elem_layout } => Some(elem_layout.clone()),
+        _ => None,
+    }
+}
+
+pub fn call_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<(Vec<SlotType>, Vec<SlotType>)> {
+    match metadata {
+        JitInstructionMetadata::CallLayout {
+            arg_layout,
+            ret_layout,
+        } => Some((arg_layout.clone(), ret_layout.clone())),
+        _ => None,
+    }
+}
+
+pub fn call_extern_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<(Vec<SlotType>, Vec<SlotType>)> {
+    match metadata {
+        JitInstructionMetadata::CallExternLayout {
+            arg_layout,
+            ret_layout,
+        } => Some((arg_layout.clone(), ret_layout.clone())),
+        _ => None,
+    }
+}
+
+pub fn queue_elem_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<Vec<SlotType>> {
+    match metadata {
+        JitInstructionMetadata::QueueLayout { elem_layout } => Some(elem_layout.clone()),
+        _ => None,
+    }
+}
+
+pub fn map_iter_next_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<(Vec<SlotType>, Vec<SlotType>)> {
+    match metadata {
+        JitInstructionMetadata::MapIterNext {
+            key_layout,
+            val_layout,
+        } => Some((key_layout.clone(), val_layout.clone())),
+        _ => None,
+    }
+}
+
+pub fn iface_assert_result_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<Vec<SlotType>> {
+    match metadata {
+        JitInstructionMetadata::IfaceAssertLayout { result_layout } => Some(result_layout.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +394,73 @@ mod tests {
             indexed_get_result_slots(&slice_get, MetadataFacts::none()),
             None
         );
+    }
+
+    #[test]
+    fn typed_accessors_cover_all_current_strict_metadata_layouts() {
+        let value = vec![SlotType::Value];
+        let pair = vec![SlotType::Interface0, SlotType::Interface1];
+        let gc_float = vec![SlotType::GcRef, SlotType::Float];
+
+        assert_eq!(
+            ptr_value_layout_from_instruction(&JitInstructionMetadata::PtrLayout {
+                value_layout: pair.clone(),
+            }),
+            Some(pair.clone())
+        );
+        assert_eq!(
+            slot_elem_layout_from_instruction(&JitInstructionMetadata::SlotLayout {
+                elem_layout: gc_float.clone(),
+            }),
+            Some(gc_float.clone())
+        );
+        assert_eq!(
+            call_layout_from_instruction(&JitInstructionMetadata::CallLayout {
+                arg_layout: value.clone(),
+                ret_layout: pair.clone(),
+            }),
+            Some((value.clone(), pair.clone()))
+        );
+        assert_eq!(
+            call_extern_layout_from_instruction(&JitInstructionMetadata::CallExternLayout {
+                arg_layout: pair.clone(),
+                ret_layout: value.clone(),
+            }),
+            Some((pair.clone(), value.clone()))
+        );
+        assert_eq!(
+            queue_elem_layout_from_instruction(&JitInstructionMetadata::QueueLayout {
+                elem_layout: gc_float.clone(),
+            }),
+            Some(gc_float.clone())
+        );
+        assert_eq!(
+            map_iter_next_layout_from_instruction(&JitInstructionMetadata::MapIterNext {
+                key_layout: value.clone(),
+                val_layout: gc_float.clone(),
+            }),
+            Some((value.clone(), gc_float.clone()))
+        );
+        assert_eq!(
+            iface_assert_result_layout_from_instruction(
+                &JitInstructionMetadata::IfaceAssertLayout {
+                    result_layout: pair.clone(),
+                }
+            ),
+            Some(pair.clone())
+        );
+    }
+
+    #[test]
+    fn typed_accessors_do_not_decode_legacy_metadata() {
+        let legacy = JitInstructionMetadata::LegacyMapGet {
+            key_slots: 1,
+            val_slots: 1,
+            has_ok: false,
+        };
+
+        assert_eq!(map_get_layout_from_instruction(&legacy), None);
+        assert_eq!(ptr_value_layout_from_instruction(&legacy), None);
+        assert_eq!(call_layout_from_instruction(&legacy), None);
     }
 }

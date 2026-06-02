@@ -239,11 +239,7 @@ pub fn run_with_output_interruptible_observed(
 
 #[cfg(feature = "jit")]
 fn run_observation(vm: &Vm) -> RunObservation {
-    let stats = vm
-        .jit_mgr
-        .as_ref()
-        .map(|mgr| mgr.execution_stats())
-        .unwrap_or_default();
+    let stats = vm.jit_execution_stats();
     RunObservation {
         jit_function_entries: stats.function_entries,
         jit_loop_entries: stats.loop_entries,
@@ -321,7 +317,9 @@ mod tests {
             .expect("JIT should initialize"),
         };
         vm.state.output = CaptureSink::new();
-        vm.load(compiled.module).unwrap();
+        if let Err(err) = vm.load(compiled.module) {
+            return err;
+        }
         match vm.run() {
             Err(err) => err,
             Ok(outcome) => panic!("expected runtime error, VM returned {outcome:?}"),
@@ -331,7 +329,9 @@ mod tests {
     fn vm_error_for_compiled(compiled: CompileOutput, config: vo_vm::JitConfig) -> VmError {
         let mut vm = Vm::try_with_jit_config(config).expect("JIT should initialize");
         vm.state.output = CaptureSink::new();
-        vm.load(compiled.module).unwrap();
+        if let Err(err) = vm.load(compiled.module) {
+            return err;
+        }
         match vm.run() {
             Err(err) => err,
             Ok(outcome) => panic!("expected runtime error, VM returned {outcome:?}"),
@@ -872,8 +872,9 @@ func main() {
         let VmError::Jit(msg) = err else {
             panic!("expected strict OSR JIT error, got {err:?}");
         };
-        assert!(msg.contains("JIT OSR compilation failed"), "{msg}");
-        assert!(msg.contains("loop analysis failed"), "{msg}");
+        assert!(msg.contains("invalid JIT metadata"), "{msg}");
+        assert!(msg.contains("LoopEnd"), "{msg}");
+        assert!(msg.contains("loopHot"), "{msg}");
     }
 
     #[test]
@@ -923,12 +924,8 @@ func main() {
         let VmError::Jit(msg) = err else {
             panic!("expected strict dynamic callee JIT error, got {err:?}");
         };
-        assert!(
-            msg.contains("prepared dynamic callee compilation")
-                || msg.contains("callee compilation"),
-            "{msg}"
-        );
         assert!(msg.contains("invalid JIT metadata"), "{msg}");
+        assert!(msg.contains("target"), "{msg}");
     }
 }
 

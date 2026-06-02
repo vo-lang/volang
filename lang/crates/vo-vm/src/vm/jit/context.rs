@@ -69,7 +69,7 @@ pub fn build_jit_context(
 ) -> Result<JitContextWrapper, String> {
     // Extract jit_mgr values first to avoid borrow conflicts
     let (jit_func_table, jit_func_count, direct_call_table, direct_call_count) = {
-        let jit_mgr = vm.jit_mgr.as_ref().ok_or_else(|| {
+        let jit_mgr = vm.jit.manager().ok_or_else(|| {
             "JIT context requested without an initialized JIT manager".to_string()
         })?;
         (

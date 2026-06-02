@@ -673,6 +673,17 @@ impl FuncBuilder {
         self.next_slot
     }
 
+    pub fn emit_fallthrough_return(&mut self) {
+        if self.ret_slots == 0 {
+            self.emit_op(Opcode::Return, 0, 0, 0);
+            return;
+        }
+
+        let ret_slot_types = self.ret_slot_types.clone();
+        let ret_start = self.alloc_slots(&ret_slot_types);
+        self.emit_op(Opcode::Return, ret_start, self.ret_slots, 0);
+    }
+
     fn checked_u8_count(slots: usize, context: &str) -> u8 {
         if slots <= u8::MAX as usize {
             return slots as u8;
@@ -711,6 +722,13 @@ impl FuncBuilder {
             Instruction::with_flags(op, flags, a, b, c),
             JitInstructionMetadata::None,
         );
+    }
+
+    /// Emit the VM/JIT canonical zero bit-pattern for a contiguous slot range.
+    pub fn emit_zero_slots(&mut self, start: u16, slots: u16) {
+        for i in 0..slots {
+            self.emit_op(Opcode::LoadInt, start + i, 0, 0);
+        }
     }
 
     pub fn emit_global_get(&mut self, dst: u16, index: u16, slots: u16) {
@@ -762,6 +780,24 @@ impl FuncBuilder {
                 arg_layout,
                 ret_layout: ret_slot_types.to_vec(),
             },
+        );
+    }
+
+    pub fn emit_static_call(
+        &mut self,
+        func_id: u32,
+        args_start: u16,
+        arg_slots: u16,
+        ret_slots: u16,
+    ) {
+        let packed_shape = crate::type_info::encode_static_call_args(arg_slots, ret_slots);
+        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
+        self.emit_with_flags(
+            Opcode::Call,
+            func_id_high,
+            func_id_low,
+            args_start,
+            packed_shape,
         );
     }
 
@@ -961,6 +997,16 @@ impl FuncBuilder {
     fn emit_with_metadata(&mut self, inst: Instruction, metadata: JitInstructionMetadata) {
         self.code.push(inst);
         self.jit_metadata.push(metadata);
+    }
+
+    fn patch_loop_end_metadata(&mut self, hint_pc: usize, end_pc: usize) {
+        let metadata = self
+            .jit_metadata
+            .get_mut(hint_pc)
+            .unwrap_or_else(|| panic!("patch_loop_end_metadata: hint_pc {} out of range", hint_pc));
+        *metadata = JitInstructionMetadata::LoopEnd {
+            end_pc: u32::try_from(end_pc).expect("loop end pc exceeds u32"),
+        };
     }
 
     fn emit_with_flags_and_metadata(
@@ -1883,9 +1929,7 @@ impl FuncBuilder {
         let (b, c) = Self::encode_jump_offset(exit_pc as i32);
         self.code[hint_pc].b = b;
         self.code[hint_pc].c = c;
-        self.jit_metadata[hint_pc] = JitInstructionMetadata::LoopEnd {
-            end_pc: u32::try_from(end_pc).expect("loop end pc exceeds u32"),
-        };
+        self.patch_loop_end_metadata(hint_pc, end_pc);
     }
 
     /// Get the depth of the current innermost loop.
@@ -2052,10 +2096,7 @@ impl FuncBuilder {
     /// * `dst` - Destination start register
     /// * `result_slots` - Number of result slots to fill with nil
     pub fn emit_error_propagation(&mut self, error_src: u16, dst: u16, result_slots: u16) -> usize {
-        // Fill result slots with nil
-        for i in 0..result_slots {
-            self.emit_op(Opcode::LoadInt, dst + i, 0, 0);
-        }
+        self.emit_zero_slots(dst, result_slots);
         // Copy error (2 slots) after result slots
         self.emit_op(Opcode::Copy, dst + result_slots, error_src, 0);
         self.emit_op(Opcode::Copy, dst + result_slots + 1, error_src + 1, 0);
@@ -2253,6 +2294,7 @@ mod tests {
     #[test]
     fn packed_operand_slot_counts_use_checked_encoders() {
         let audited_sources = [
+            ("context.rs", include_str!("context.rs")),
             ("stmt/for_range.rs", include_str!("stmt/for_range.rs")),
             ("stmt/mod.rs", include_str!("stmt/mod.rs")),
             ("stmt/select.rs", include_str!("stmt/select.rs")),
@@ -2285,9 +2327,12 @@ mod tests {
             "total_arg_slots as u8",
             "arg_slots as u8",
             "emit_with_flags(Opcode::CallExtern",
+            "emit_with_flags(Opcode::Call,",
             "emit_with_flags(\n        Opcode::CallExtern",
             "emit_with_flags(\n            Opcode::CallExtern",
+            "emit_with_flags(\n            Opcode::Call,",
             "emit_with_flags(\n                Opcode::CallExtern",
+            "emit_with_flags(\n                Opcode::Call,",
             "emit_with_flags(\n            Opcode::GoIsland",
         ];
 

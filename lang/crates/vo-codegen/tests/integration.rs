@@ -6,6 +6,7 @@ use vo_analysis::importer::NullImporter;
 use vo_analysis::{AnalysisError, Checker, Project};
 use vo_codegen::compile_project;
 use vo_common::SourceMap;
+use vo_common_core::bytecode::{RETURN_FLAG_ERROR_RETURN, RETURN_FLAG_HEAP_RETURNS};
 use vo_runtime::{SlotType, ValueKind, ValueMeta};
 use vo_syntax::parser;
 use vo_vm::bytecode::{FunctionDef, JitInstructionMetadata};
@@ -402,7 +403,11 @@ func main() int {
     let error_return = func
         .code
         .iter()
-        .find(|inst| inst.opcode() == Opcode::Return && (inst.flags & 1) != 0 && inst.b >= 2)
+        .find(|inst| {
+            inst.opcode() == Opcode::Return
+                && (inst.flags & RETURN_FLAG_ERROR_RETURN) != 0
+                && inst.b >= 2
+        })
         .expect("fail should lower to an error Return");
     let ret_error_start = error_return.a + error_return.b - 2;
     let error_copy = func
@@ -421,6 +426,73 @@ func main() int {
             vo_runtime::SlotType::Interface1
         ],
         "the propagated fail error temp must use the Interface0/Interface1 GC layout"
+    );
+}
+
+#[test]
+fn fail_error_return_zero_values_keep_declared_typed_layout() {
+    let source = r#"
+package main
+
+type MyError struct {
+    msg string
+}
+
+func (e MyError) Error() string {
+    return e.msg
+}
+
+func makeErr() error {
+    return MyError{msg: "boom"}
+}
+
+func f() (float64, error) {
+    fail makeErr()
+}
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    let func = module
+        .functions
+        .iter()
+        .find(|func| func.name == "f")
+        .expect("f function should be compiled");
+    let error_return = func
+        .code
+        .iter()
+        .find(|inst| {
+            inst.opcode() == Opcode::Return
+                && (inst.flags & RETURN_FLAG_ERROR_RETURN) != 0
+                && inst.b == 3
+        })
+        .expect("fail should lower to a typed three-slot error return");
+    let ret_start = error_return.a as usize;
+
+    assert_eq!(
+        &func.slot_types[ret_start..ret_start + 3],
+        &[SlotType::Float, SlotType::Interface0, SlotType::Interface1],
+        "fail zero-value return buffers must keep the declared result slot layout"
+    );
+}
+
+#[test]
+fn codegen_error_zeroing_goes_through_func_builder_helper() {
+    let return_stmt = include_str!("../src/stmt/return_stmt.rs");
+    let func_builder = include_str!("../src/func.rs");
+
+    assert!(
+        return_stmt.contains("func.emit_zero_slots(ret_start, total_ret_slots);"),
+        "fail error returns must use FuncBuilder's zero-slot helper"
+    );
+    assert!(
+        !return_stmt.contains("Opcode::LoadInt"),
+        "return statement lowering must not grow a second zero-slot emission loop"
+    );
+    assert!(
+        func_builder.contains("self.emit_zero_slots(dst, result_slots);"),
+        "error propagation must share the same zero-slot helper"
     );
 }
 
@@ -920,6 +992,186 @@ func main() int {
             "{} has_call_extern drifted",
             func.name
         );
+        for (pc, inst) in func.code.iter().enumerate() {
+            if inst.opcode() == Opcode::Call {
+                let callee_id = inst.static_call_func_id();
+                let callee = module.functions.get(callee_id as usize).unwrap_or_else(|| {
+                    panic!(
+                        "{} Call at pc {} targets missing function {}",
+                        func.name, pc, callee_id
+                    )
+                });
+                if callee.param_slots <= u8::MAX as u16 && callee.ret_slots <= u8::MAX as u16 {
+                    assert_eq!(
+                        inst.packed_arg_slots(),
+                        callee.param_slots,
+                        "{} Call at pc {} must mirror callee {} param_slots",
+                        func.name,
+                        pc,
+                        callee.name
+                    );
+                    assert_eq!(
+                        inst.packed_ret_slots(),
+                        callee.ret_slots,
+                        "{} Call at pc {} must mirror callee {} ret_slots",
+                        func.name,
+                        pc,
+                        callee.name
+                    );
+                } else {
+                    assert_eq!(
+                        inst.c, 0,
+                        "{} large Call at pc {} must use zero legacy shape mirror",
+                        func.name, pc
+                    );
+                }
+            }
+            if inst.opcode() == Opcode::Return && (inst.flags & RETURN_FLAG_HEAP_RETURNS) == 0 {
+                assert_eq!(
+                    inst.b, func.ret_slots,
+                    "{} Return at pc {} must encode the declared ret_slots",
+                    func.name, pc
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn fallthrough_return_for_typed_result_preserves_slot_layout() {
+    let source = r#"
+package main
+
+func pi() float64 {
+    return 1.5
+}
+
+func main() {
+    _ = pi()
+}
+"#;
+
+    let module = compile_source(source);
+    let pi = module
+        .functions
+        .iter()
+        .find(|func| func.name == "pi")
+        .expect("pi function should be compiled");
+    assert_eq!(pi.ret_slot_types, vec![SlotType::Float]);
+
+    let fallthrough = pi
+        .code
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, inst)| inst.opcode() == Opcode::Return)
+        .expect("pi must have a fallthrough Return");
+    assert_eq!(
+        pi.slot_types.get(fallthrough.1.a as usize),
+        Some(&SlotType::Float),
+        "fallthrough Return must use a Float return buffer"
+    );
+    if let Some(prev) = fallthrough
+        .0
+        .checked_sub(1)
+        .and_then(|pc| pi.code.get(pc).map(|inst| (pc, inst)))
+    {
+        assert!(
+            !(prev.1.opcode() == Opcode::LoadInt && prev.1.a == fallthrough.1.a),
+            "fallthrough Return at pc {} must not be preceded by slot-agnostic LoadInt initialization at pc {}",
+            fallthrough.0,
+            prev.0
+        );
+    }
+    for (pc, inst) in pi.code.iter().enumerate() {
+        if inst.opcode() == Opcode::LoadInt && inst.a == fallthrough.1.a {
+            assert!(
+                pc + 1 != fallthrough.0,
+                "fallthrough Return at pc {} must not use LoadInt zero at pc {pc} to initialize its typed return slot",
+                fallthrough.0
+            );
+        }
+    }
+}
+
+#[test]
+fn entry_call_to_returning_main_uses_exact_static_call_shape() {
+    let source = r#"
+package main
+
+func main() int {
+    return 1
+}
+"#;
+
+    let module = compile_source(source);
+    let (main_id, main_func) = module
+        .functions
+        .iter()
+        .enumerate()
+        .find(|(_, func)| func.name == "main")
+        .expect("main function should be compiled");
+    let entry = module
+        .functions
+        .iter()
+        .find(|func| func.name == "__entry__")
+        .expect("__entry__ function should be compiled");
+    let call = entry
+        .code
+        .iter()
+        .find(|inst| inst.opcode() == Opcode::Call && inst.static_call_func_id() == main_id as u32)
+        .expect("__entry__ must call main");
+
+    assert_eq!(call.packed_arg_slots(), main_func.param_slots);
+    assert_eq!(call.packed_ret_slots(), main_func.ret_slots);
+    assert_eq!(
+        &entry.slot_types[call.b as usize..call.b as usize + main_func.ret_slots as usize],
+        main_func.ret_slot_types.as_slice(),
+        "__entry__ must allocate a discard return buffer with main's exact slot layout"
+    );
+}
+
+#[test]
+fn conditional_tail_terminator_keeps_valid_fallthrough_return_target() {
+    let source = r#"
+package main
+
+func assert(cond bool) {
+    if !cond {
+        panic("fail")
+    }
+}
+
+func main() {
+    assert(true)
+}
+"#;
+
+    let module = compile_source(source);
+    let assert_func = module
+        .functions
+        .iter()
+        .find(|func| func.name == "assert")
+        .expect("assert function should be compiled");
+    assert_eq!(
+        assert_func.code.last().map(|inst| inst.opcode()),
+        Some(Opcode::Return),
+        "conditional tail terminators still need a concrete fallthrough return"
+    );
+
+    let code_len = assert_func.code.len() as i64;
+    for (pc, inst) in assert_func.code.iter().enumerate() {
+        if matches!(
+            inst.opcode(),
+            Opcode::Jump | Opcode::JumpIf | Opcode::JumpIfNot
+        ) {
+            let target = pc as i64 + i64::from(inst.imm32());
+            assert!(
+                (0..code_len).contains(&target),
+                "{} branch at pc {pc} targets {target}, outside code length {code_len}",
+                assert_func.name
+            );
+        }
     }
 }
 

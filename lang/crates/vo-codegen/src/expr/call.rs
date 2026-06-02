@@ -221,9 +221,7 @@ fn emit_direct_func_call(
 
     compile_method_args(call, &param_types, is_variadic, args_start, ctx, func, info)?;
 
-    let c = crate::type_info::encode_static_call_args(total_arg_slots, ret_slots);
-    let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
-    func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
+    func.emit_static_call(func_idx, args_start, total_arg_slots, ret_slots);
 
     let ret_start = args_start + total_arg_slots;
     if ret_slots > 0 && dst != ret_start {
@@ -798,9 +796,7 @@ fn emit_static_method_call(
         info,
     )?;
 
-    let c = crate::type_info::encode_static_call_args(total_slots, ret_slots);
-    let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
-    func.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
+    func.emit_static_call(func_id, args_start, total_slots, ret_slots);
 
     let ret_start = args_start + total_slots;
     if ret_slots > 0 && dst != ret_start {

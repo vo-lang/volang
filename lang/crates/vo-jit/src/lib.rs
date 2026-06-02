@@ -4,6 +4,7 @@
 mod analysis;
 mod call_helpers;
 mod capability;
+mod compile_common;
 mod contract;
 mod contract_graph;
 mod effects;
@@ -13,7 +14,10 @@ mod intrinsics;
 pub mod loop_analysis;
 mod loop_compiler;
 mod metadata;
+mod metadata_contract;
 mod semantics;
+#[cfg(test)]
+mod test_fixtures;
 mod translate;
 mod translator;
 mod verifier;
@@ -25,7 +29,7 @@ pub use loop_analysis::LoopInfo;
 pub use loop_compiler::{CompiledLoop, LoopCompiler, LoopFunc};
 pub use semantics::{opcode_semantic_matrix, opcode_semantics, OpcodeSemantics};
 pub use translator::{HelperFuncs, IrEmitter, TranslateResult};
-pub use verifier::{verify_jit_metadata, JitMetadataError};
+pub use verifier::{verify_jit_metadata, verify_module, JitMetadataError, VerifiedModule};
 
 use std::collections::HashMap;
 
@@ -189,6 +193,7 @@ pub struct JitCompiler {
     func_decl_ids: HashMap<u32, FuncId>,
     callee_func_refs_buf: Vec<Option<FuncRef>>,
     helper_funcs: HelperFuncIds,
+    verified_module: Option<VerifiedModule>,
     debug_ir: bool,
 }
 
@@ -226,12 +231,24 @@ impl JitCompiler {
             func_decl_ids: HashMap::new(),
             callee_func_refs_buf: Vec::new(),
             helper_funcs,
+            verified_module: None,
             debug_ir,
         })
     }
 
     fn get_helper_refs(&mut self) -> HelperFuncs {
         helpers::get_helper_refs(&mut self.module, &mut self.ctx.func, &self.helper_funcs)
+    }
+
+    fn verify_module_once(&mut self, vo_module: &VoModule) -> Result<(), JitError> {
+        if self
+            .verified_module
+            .is_some_and(|verified| verified.matches(vo_module))
+        {
+            return Ok(());
+        }
+        self.verified_module = Some(verifier::verify_module(vo_module)?);
+        Ok(())
     }
 
     fn rebuild_callee_func_refs(
@@ -295,11 +312,11 @@ impl JitCompiler {
         vo_module: &VoModule,
         available_direct_callees: &[u32],
     ) -> Result<(), JitError> {
+        self.verify_module_once(vo_module)?;
+
         if self.cache.contains(func_id) {
             return Ok(());
         }
-
-        verifier::verify_jit_metadata(func, vo_module)?;
 
         // Clear any residual state from previous compilation
         self.ctx.clear();
@@ -375,10 +392,11 @@ impl JitCompiler {
     ) -> Result<(), JitError> {
         validate_loop_info(func, loop_info)?;
         let begin_pc = loop_info.begin_pc;
+        self.verify_module_once(vo_module)?;
+
         if self.cache.contains_loop(func_id, begin_pc) {
             return Ok(());
         }
-        verifier::verify_jit_metadata(func, vo_module)?;
 
         // Clear any residual state from previous compilation
         self.ctx.clear();
@@ -512,7 +530,7 @@ mod tests {
     use vo_runtime::SlotType;
 
     fn make_func(code: Vec<Instruction>, local_slots: u16) -> FunctionDef {
-        make_func_with_sig(code, 0, 0, local_slots, 0)
+        crate::test_fixtures::function(code, local_slots)
     }
 
     fn make_func_with_sig(
@@ -522,17 +540,17 @@ mod tests {
         local_slots: u16,
         ret_slots: u16,
     ) -> FunctionDef {
-        make_func_with_slot_types_and_sig(
+        crate::test_fixtures::function_with_sig(
             code,
-            vec![SlotType::Value; local_slots as usize],
             param_count,
             param_slots,
+            local_slots,
             ret_slots,
         )
     }
 
     fn make_func_with_slot_types(code: Vec<Instruction>, slot_types: Vec<SlotType>) -> FunctionDef {
-        make_func_with_slot_types_and_sig(code, slot_types, 0, 0, 0)
+        crate::test_fixtures::function_with_slot_types(code, slot_types)
     }
 
     fn make_func_with_slot_types_and_sig(
@@ -542,36 +560,13 @@ mod tests {
         param_slots: u16,
         ret_slots: u16,
     ) -> FunctionDef {
-        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&code);
-        let local_slots = slot_types.len() as u16;
-        let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&slot_types);
-        let borrowed_scan_slots_prefix =
-            FunctionDef::compute_borrowed_scan_slots_prefix(&slot_types);
-        FunctionDef {
-            name: "test".into(),
-            param_count,
-            param_slots,
-            local_slots,
-            gc_scan_slots,
-            ret_slots,
-            ret_slot_types: vec![SlotType::Value; ret_slots as usize],
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: false,
-            error_ret_slot: -1,
-            has_defer: false,
-            has_calls,
-            has_call_extern,
-            jit_metadata: vec![Default::default(); code.len()],
+        crate::test_fixtures::function_with_slot_types_and_sig(
             code,
             slot_types,
-            borrowed_scan_slots_prefix,
-            capture_types: Vec::new(),
-            capture_slot_types: Vec::new(),
-            param_types: Vec::new(),
-        }
+            param_count,
+            param_slots,
+            ret_slots,
+        )
     }
 
     fn jump_if_not(cond: u16, offset: i32) -> Instruction {

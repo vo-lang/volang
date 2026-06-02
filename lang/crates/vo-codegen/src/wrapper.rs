@@ -108,19 +108,6 @@ fn tuple_slot_count(tuple_key: TypeKey, tc_objs: &vo_analysis::objects::TCObject
         .sum()
 }
 
-/// Emit a function call instruction.
-fn emit_call(
-    builder: &mut FuncBuilder,
-    func_id: u32,
-    args_start: u16,
-    arg_slots: u16,
-    ret_slots: u16,
-) {
-    let c = crate::type_info::encode_static_call_args(arg_slots, ret_slots);
-    let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
-    builder.emit_with_flags(Opcode::Call, func_id_high, func_id_low, args_start, c);
-}
-
 /// Emit call and return - common wrapper epilogue.
 /// With the new call buffer layout [Value×arg_slots | ret_slots], return values
 /// live at args_start + arg_slots, not at args_start.
@@ -132,7 +119,7 @@ fn emit_call_and_return(
     ret_slot_types: &[SlotType],
 ) {
     let ret_slots = ret_slot_types.len() as u16;
-    emit_call(builder, func_id, args_start, arg_slots, ret_slots);
+    builder.emit_static_call(func_id, args_start, arg_slots, ret_slots);
     builder.set_ret_slot_types(ret_slot_types.to_vec());
     let ret_start = args_start + arg_slots;
     builder.emit_op(Opcode::Return, ret_start, ret_slots, 0);

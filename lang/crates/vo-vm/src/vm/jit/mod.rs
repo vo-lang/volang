@@ -191,6 +191,20 @@ fn frame_materialize_exec_result(
     }
 }
 
+fn record_jit_fallback(vm: &mut Vm, reason: JitFallbackReason) {
+    if let Some(jit_mgr) = vm.jit.manager_mut() {
+        jit_mgr.record_fallback(reason);
+    }
+}
+
+fn call_kind_fallback_reason(call_kind: u8) -> Option<JitFallbackReason> {
+    match call_kind {
+        JitContext::CALL_KIND_YIELD => Some(JitFallbackReason::Yield),
+        JitContext::CALL_KIND_BLOCK => Some(JitFallbackReason::QueueBlock),
+        _ => None,
+    }
+}
+
 fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: FiberCapacityError) {
     let msg = err.message();
     fiber.capture_panic_source_loc();
@@ -200,6 +214,45 @@ fn set_stack_overflow_panic(vm: &mut Vm, fiber: &mut Fiber, err: FiberCapacityEr
         RuntimeTrapKind::StackOverflow,
         &msg,
     );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JitBridgeMode {
+    FullFunction,
+    LoopOsr,
+}
+
+impl JitBridgeMode {
+    fn call_error_prefix(self) -> &'static str {
+        match self {
+            Self::FullFunction => "JIT requested call",
+            Self::LoopOsr => "JIT OSR requested call",
+        }
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn wait_io_error(self) -> &'static str {
+        match self {
+            Self::FullFunction => "JIT returned WaitIo but std feature is not enabled",
+            Self::LoopOsr => "Loop OSR returned WaitIo but std feature is not enabled",
+        }
+    }
+
+    fn resolve_regular_callee(self) -> bool {
+        matches!(self, Self::FullFunction)
+    }
+}
+
+enum JitBridgeTransition {
+    Panic,
+    FrameChanged,
+    TimesliceExpired,
+    QueueBlock,
+    #[cfg(feature = "std")]
+    WaitIo(u64),
+    WaitQueue,
+    FrameMaterializeError(JitFrameMaterializeError),
+    JitError(String),
 }
 
 /// Shared JIT panic setup: materialize frames, capture source location, resolve panic message.
@@ -260,6 +313,207 @@ fn setup_jit_panic(
         trap_kind,
         msg: panic_msg,
     })
+}
+
+fn handle_jit_non_ok_transition(
+    mode: JitBridgeMode,
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+    result: JitResult,
+    ctx: &JitContextWrapper,
+) -> JitBridgeTransition {
+    match result {
+        JitResult::Ok => JitBridgeTransition::JitError(
+            "JIT Ok result was routed through non-Ok bridge handling".into(),
+        ),
+        JitResult::Panic => {
+            let panic_info = match setup_jit_panic(ctx, fiber, &mut vm.state.gc, module) {
+                Ok(info) => info,
+                Err(SetupJitPanicError::Capacity(err)) => {
+                    return JitBridgeTransition::FrameMaterializeError(
+                        JitFrameMaterializeError::Capacity(err),
+                    );
+                }
+                Err(SetupJitPanicError::MaterializationInvariant(err)) => {
+                    return JitBridgeTransition::JitError(format!(
+                        "JIT frame materialization invariant failed: {err}"
+                    ));
+                }
+                Err(SetupJitPanicError::MissingPayload) => {
+                    return JitBridgeTransition::JitError(
+                        "JIT returned Panic without user panic or typed runtime trap payload"
+                            .to_string(),
+                    );
+                }
+                Err(SetupJitPanicError::MissingLocation(field)) => {
+                    return JitBridgeTransition::JitError(format!(
+                        "JIT returned Panic without required {field} location"
+                    ));
+                }
+            };
+            if let Some(kind) = panic_info.trap_kind {
+                fiber.set_recoverable_trap(kind, panic_info.msg);
+            } else {
+                fiber.set_recoverable_panic(panic_info.msg);
+            }
+            JitBridgeTransition::Panic
+        }
+        JitResult::Call => {
+            let call_kind = ctx.ctx.call_kind;
+            if let Some(reason) = call_kind_fallback_reason(call_kind) {
+                record_jit_fallback(vm, reason);
+                return match mode {
+                    JitBridgeMode::FullFunction => match call_kind {
+                        JitContext::CALL_KIND_YIELD => JitBridgeTransition::TimesliceExpired,
+                        JitContext::CALL_KIND_BLOCK => JitBridgeTransition::QueueBlock,
+                        _ => JitBridgeTransition::JitError(format!(
+                            "JIT returned unknown special call kind {call_kind}"
+                        )),
+                    },
+                    JitBridgeMode::LoopOsr => {
+                        let resume_pc = ctx.call_resume_pc();
+                        match materialize_jit_frames(fiber, module, resume_pc) {
+                            Ok(()) => JitBridgeTransition::FrameChanged,
+                            Err(err) => JitBridgeTransition::FrameMaterializeError(err),
+                        }
+                    }
+                };
+            }
+
+            let callee_func_id = ctx.call_func_id();
+            let call_arg_start = ctx.call_arg_start() as usize;
+            let Some(callee_func_def) = module.functions.get(callee_func_id as usize) else {
+                return JitBridgeTransition::JitError(format!(
+                    "{} to missing function id {callee_func_id}",
+                    mode.call_error_prefix()
+                ));
+            };
+            let callee_ret_slots = callee_func_def.ret_slots;
+            let call_ret_reg = ctx.call_ret_reg();
+
+            if call_kind == JitContext::CALL_KIND_PREPARED {
+                record_jit_fallback(vm, JitFallbackReason::PreparedDynamicCall);
+                if let Some(jit_mgr) = vm.jit.manager_mut() {
+                    if let Err(err) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module)
+                    {
+                        return JitBridgeTransition::JitError(jit_error_message(
+                            "prepared dynamic callee compilation",
+                            &callee_func_def.name,
+                            &err,
+                        ));
+                    }
+                }
+                let callee_bp = ctx.call_resume_pc() as usize;
+                let caller_resume_pc = ctx.call_arg_start() as u32;
+                return match setup_prepared_call(
+                    fiber,
+                    module,
+                    callee_func_id,
+                    callee_ret_slots,
+                    call_ret_reg,
+                    callee_bp,
+                    caller_resume_pc,
+                ) {
+                    Ok(()) => JitBridgeTransition::FrameChanged,
+                    Err(err) => JitBridgeTransition::FrameMaterializeError(err),
+                };
+            }
+
+            record_jit_fallback(vm, JitFallbackReason::RegularCall);
+            let resume_pc = ctx.call_resume_pc();
+            if let Err(err) = setup_regular_call(
+                fiber,
+                module,
+                callee_func_id,
+                callee_ret_slots,
+                call_ret_reg,
+                call_arg_start,
+                resume_pc,
+            ) {
+                return JitBridgeTransition::FrameMaterializeError(err);
+            }
+
+            if mode.resolve_regular_callee() {
+                if let Some(jit_mgr) = vm.jit.manager_mut() {
+                    match jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
+                        Ok(Some(_)) | Ok(None) => {}
+                        Err(err) => {
+                            return JitBridgeTransition::JitError(jit_error_message(
+                                "callee compilation",
+                                &callee_func_def.name,
+                                &err,
+                            ));
+                        }
+                    }
+                }
+            }
+            JitBridgeTransition::FrameChanged
+        }
+        JitResult::WaitIo => {
+            record_jit_fallback(vm, JitFallbackReason::WaitIo);
+            let resume_pc = ctx.call_resume_pc();
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                return JitBridgeTransition::FrameMaterializeError(err);
+            }
+
+            #[cfg(feature = "std")]
+            {
+                let io_token = ctx.wait_io_token();
+                fiber.resume_io_token = Some(io_token);
+                JitBridgeTransition::WaitIo(io_token)
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                JitBridgeTransition::JitError(mode.wait_io_error().into())
+            }
+        }
+        JitResult::WaitQueue => {
+            record_jit_fallback(vm, JitFallbackReason::WaitQueue);
+            let resume_pc = ctx.call_resume_pc();
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                return JitBridgeTransition::FrameMaterializeError(err);
+            }
+            JitBridgeTransition::WaitQueue
+        }
+        JitResult::Replay => {
+            record_jit_fallback(vm, JitFallbackReason::Replay);
+            let resume_pc = ctx.call_resume_pc();
+            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                return JitBridgeTransition::FrameMaterializeError(err);
+            }
+            JitBridgeTransition::FrameChanged
+        }
+        JitResult::JitError => {
+            JitBridgeTransition::JitError(jit_context_error_message(ctx, module))
+        }
+    }
+}
+
+fn exec_result_from_bridge_transition(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    module: &Module,
+    transition: JitBridgeTransition,
+) -> ExecResult {
+    match transition {
+        JitBridgeTransition::Panic => {
+            let stack_ptr = fiber.stack_ptr();
+            helpers::panic_unwind(&mut vm.state.gc, fiber, stack_ptr, module)
+        }
+        JitBridgeTransition::FrameChanged => ExecResult::FrameChanged,
+        JitBridgeTransition::TimesliceExpired => ExecResult::TimesliceExpired,
+        JitBridgeTransition::QueueBlock => ExecResult::Block(crate::fiber::BlockReason::Queue),
+        #[cfg(feature = "std")]
+        JitBridgeTransition::WaitIo(token) => {
+            ExecResult::Block(crate::fiber::BlockReason::Io(token))
+        }
+        JitBridgeTransition::WaitQueue => ExecResult::Block(crate::fiber::BlockReason::Queue),
+        JitBridgeTransition::FrameMaterializeError(err) => {
+            frame_materialize_exec_result(vm, fiber, module, err)
+        }
+        JitBridgeTransition::JitError(err) => ExecResult::JitError(err),
+    }
 }
 
 /// Execute a JIT-compiled function call.
@@ -357,7 +611,7 @@ fn invoke_jit_and_handle(
     jit_bp: usize,
     ret_slots: usize,
 ) -> ExecResult {
-    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+    if let Some(jit_mgr) = vm.jit.manager_mut() {
         jit_mgr.record_function_entry();
     }
     let mut ctx = match build_jit_context(vm, fiber, module) {
@@ -473,176 +727,17 @@ fn handle_jit_result(
                 include_errdefers,
             )
         }
-        JitResult::Panic => {
-            let panic_info = match setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module) {
-                Ok(info) => info,
-                Err(SetupJitPanicError::Capacity(err)) => {
-                    return stack_overflow_exec_result(vm, fiber, module, err);
-                }
-                Err(SetupJitPanicError::MaterializationInvariant(err)) => {
-                    return ExecResult::JitError(format!(
-                        "JIT frame materialization invariant failed: {err}"
-                    ));
-                }
-                Err(SetupJitPanicError::MissingPayload) => {
-                    return ExecResult::JitError(
-                        "JIT returned Panic without user panic or typed runtime trap payload"
-                            .to_string(),
-                    );
-                }
-                Err(SetupJitPanicError::MissingLocation(field)) => {
-                    return ExecResult::JitError(format!(
-                        "JIT returned Panic without required {field} location"
-                    ));
-                }
-            };
-            if let Some(kind) = panic_info.trap_kind {
-                fiber.set_recoverable_trap(kind, panic_info.msg);
-            } else {
-                fiber.set_recoverable_panic(panic_info.msg);
-            }
-            let stack_ptr = fiber.stack_ptr();
-            helpers::panic_unwind(&mut vm.state.gc, fiber, stack_ptr, module)
-        }
-        JitResult::Call => {
-            // Check for special call_kind values that don't need frame setup
-            let call_kind = ctx.ctx.call_kind;
-            match call_kind {
-                JitContext::CALL_KIND_YIELD => {
-                    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                        jit_mgr.record_fallback(JitFallbackReason::Yield);
-                    }
-                    return ExecResult::TimesliceExpired;
-                }
-                JitContext::CALL_KIND_BLOCK => {
-                    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                        jit_mgr.record_fallback(JitFallbackReason::QueueBlock);
-                    }
-                    return ExecResult::Block(crate::fiber::BlockReason::Queue);
-                }
-                _ => {} // Regular or Prepared call - continue to frame setup
-            }
-
-            let callee_func_id = ctx.call_func_id();
-            let call_arg_start = ctx.call_arg_start() as usize;
-            let Some(callee_func_def) = module.functions.get(callee_func_id as usize) else {
-                return ExecResult::JitError(format!(
-                    "JIT requested call to missing function id {callee_func_id}"
-                ));
-            };
-            let callee_ret_slots = callee_func_def.ret_slots as usize;
-
-            if call_kind == JitContext::CALL_KIND_PREPARED {
-                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                    jit_mgr.record_fallback(JitFallbackReason::PreparedDynamicCall);
-                    if let Err(err) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module)
-                    {
-                        return ExecResult::JitError(jit_error_message(
-                            "prepared dynamic callee compilation",
-                            &callee_func_def.name,
-                            &err,
-                        ));
-                    }
-                }
-                let callee_bp = ctx.call_resume_pc() as usize;
-                let caller_resume_pc = ctx.call_arg_start() as u32;
-                let call_ret_reg = ctx.call_ret_reg();
-                if let Err(err) = setup_prepared_call(
-                    fiber,
-                    module,
-                    callee_func_id,
-                    callee_ret_slots as u16,
-                    call_ret_reg,
-                    callee_bp,
-                    caller_resume_pc,
-                ) {
-                    return frame_materialize_exec_result(vm, fiber, module, err);
-                }
-                return ExecResult::FrameChanged;
-            }
-
-            // Regular call: JIT requests VM to execute a non-JIT function.
-            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                jit_mgr.record_fallback(JitFallbackReason::RegularCall);
-            }
-            let resume_pc = ctx.call_resume_pc();
-            let call_ret_reg = ctx.call_ret_reg();
-            if let Err(err) = setup_regular_call(
+        non_ok => {
+            let transition = handle_jit_non_ok_transition(
+                JitBridgeMode::FullFunction,
+                vm,
                 fiber,
                 module,
-                callee_func_id,
-                callee_ret_slots as u16,
-                call_ret_reg,
-                call_arg_start,
-                resume_pc,
-            ) {
-                return frame_materialize_exec_result(vm, fiber, module, err);
-            }
-
-            // Return to the VM scheduler after materializing the callee frame.
-            // Re-entering a compiled callee recursively here can overflow the
-            // host stack before the fiber frame limit turns recursion into a
-            // recoverable Vo stack panic. Resolve now so strict JIT compile or
-            // metadata failures remain fail-fast; the compiled callee runs from
-            // the next VM frame-entry dispatch.
-            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                match jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
-                    Ok(Some(_)) | Ok(None) => {}
-                    Err(err) => {
-                        return ExecResult::JitError(jit_error_message(
-                            "callee compilation",
-                            &callee_func_def.name,
-                            &err,
-                        ));
-                    }
-                }
-            }
-            ExecResult::FrameChanged
+                non_ok,
+                &ctx,
+            );
+            exec_result_from_bridge_transition(vm, fiber, module, transition)
         }
-        JitResult::WaitIo => {
-            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                jit_mgr.record_fallback(JitFallbackReason::WaitIo);
-            }
-            let resume_pc = ctx.call_resume_pc();
-            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return frame_materialize_exec_result(vm, fiber, module, err);
-            }
-
-            #[cfg(feature = "std")]
-            {
-                let io_token = ctx.wait_io_token();
-                fiber.resume_io_token = Some(io_token);
-                ExecResult::Block(crate::fiber::BlockReason::Io(io_token))
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                ExecResult::JitError("JIT returned WaitIo but std feature is not enabled".into())
-            }
-        }
-        JitResult::WaitQueue => {
-            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                jit_mgr.record_fallback(JitFallbackReason::WaitQueue);
-            }
-            let resume_pc = ctx.call_resume_pc();
-            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return frame_materialize_exec_result(vm, fiber, module, err);
-            }
-            ExecResult::Block(crate::fiber::BlockReason::Queue)
-        }
-        JitResult::Replay => {
-            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                jit_mgr.record_fallback(JitFallbackReason::Replay);
-            }
-            // Extern returned CallClosure — exit JIT and let VM handle it.
-            // resume_pc points at the CallExtern instruction itself, so VM will
-            // re-execute it and go through the suspend/replay path.
-            let resume_pc = ctx.call_resume_pc();
-            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return frame_materialize_exec_result(vm, fiber, module, err);
-            }
-            ExecResult::FrameChanged
-        }
-        JitResult::JitError => ExecResult::JitError(jit_context_error_message(&ctx, module)),
     }
 }
 
@@ -1195,6 +1290,27 @@ fn osr_result_from_frame_materialize_error(
     }
 }
 
+fn osr_result_from_bridge_transition(
+    vm: &mut Vm,
+    fiber: &mut Fiber,
+    transition: JitBridgeTransition,
+) -> OsrResult {
+    match transition {
+        JitBridgeTransition::Panic => OsrResult::Panic,
+        JitBridgeTransition::FrameChanged => OsrResult::FrameChanged,
+        JitBridgeTransition::TimesliceExpired | JitBridgeTransition::QueueBlock => {
+            OsrResult::FrameChanged
+        }
+        #[cfg(feature = "std")]
+        JitBridgeTransition::WaitIo(_) => OsrResult::WaitIo,
+        JitBridgeTransition::WaitQueue => OsrResult::WaitQueue,
+        JitBridgeTransition::FrameMaterializeError(err) => {
+            osr_result_from_frame_materialize_error(vm, fiber, err)
+        }
+        JitBridgeTransition::JitError(err) => OsrResult::JitError(err),
+    }
+}
+
 /// Execute a compiled loop via OSR.
 pub fn dispatch_loop_osr(
     vm: &mut Vm,
@@ -1214,7 +1330,7 @@ pub fn dispatch_loop_osr(
         let module = &*module_ptr;
         let fiber = &mut *fiber_ptr;
 
-        if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
+        if let Some(jit_mgr) = vm.jit.manager_mut() {
             jit_mgr.record_loop_entry();
         }
 
@@ -1249,159 +1365,17 @@ pub fn dispatch_loop_osr(
             fiber.resume_stack.clear();
             OsrResult::ExitPc(ctx.ctx.loop_exit_pc as usize)
         }
-        JitResult::Panic => {
-            let panic_info = match setup_jit_panic(&ctx, fiber, &mut vm.state.gc, module) {
-                Ok(info) => info,
-                Err(SetupJitPanicError::Capacity(err)) => {
-                    set_stack_overflow_panic(vm, fiber, err);
-                    return OsrResult::Panic;
-                }
-                Err(SetupJitPanicError::MaterializationInvariant(err)) => {
-                    return OsrResult::JitError(format!(
-                        "JIT frame materialization invariant failed: {err}"
-                    ));
-                }
-                Err(SetupJitPanicError::MissingPayload) => {
-                    return OsrResult::JitError(
-                        "JIT returned Panic without user panic or typed runtime trap payload"
-                            .to_string(),
-                    );
-                }
-                Err(SetupJitPanicError::MissingLocation(field)) => {
-                    return OsrResult::JitError(format!(
-                        "JIT returned Panic without required {field} location"
-                    ));
-                }
-            };
-            if let Some(kind) = panic_info.trap_kind {
-                fiber.set_recoverable_trap(kind, panic_info.msg);
-            } else {
-                fiber.set_recoverable_panic(panic_info.msg);
-            }
-            OsrResult::Panic
+        non_ok => {
+            let transition = handle_jit_non_ok_transition(
+                JitBridgeMode::LoopOsr,
+                vm,
+                fiber,
+                module,
+                non_ok,
+                &ctx,
+            );
+            osr_result_from_bridge_transition(vm, fiber, transition)
         }
-        JitResult::Call => {
-            let call_kind = ctx.ctx.call_kind;
-            let call_ret_reg = ctx.call_ret_reg();
-
-            // Check for special call_kind values (Yield/Block)
-            match call_kind {
-                JitContext::CALL_KIND_YIELD | JitContext::CALL_KIND_BLOCK => {
-                    if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                        jit_mgr.record_fallback(if call_kind == JitContext::CALL_KIND_YIELD {
-                            JitFallbackReason::Yield
-                        } else {
-                            JitFallbackReason::QueueBlock
-                        });
-                    }
-                    let resume_pc = ctx.call_resume_pc();
-                    if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                        return osr_result_from_frame_materialize_error(vm, fiber, err);
-                    }
-                    return OsrResult::FrameChanged;
-                }
-                _ => {}
-            }
-
-            let callee_func_id = ctx.call_func_id();
-            let call_arg_start = ctx.call_arg_start() as usize;
-            let Some(callee_func_def) = module.functions.get(callee_func_id as usize) else {
-                return OsrResult::JitError(format!(
-                    "JIT OSR requested call to missing function id {callee_func_id}"
-                ));
-            };
-            let callee_ret_slots = callee_func_def.ret_slots;
-
-            if call_kind == JitContext::CALL_KIND_PREPARED {
-                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                    jit_mgr.record_fallback(JitFallbackReason::PreparedDynamicCall);
-                    if let Err(err) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module)
-                    {
-                        return OsrResult::JitError(jit_error_message(
-                            "prepared dynamic callee compilation",
-                            &callee_func_def.name,
-                            &err,
-                        ));
-                    }
-                }
-                let callee_bp = ctx.call_resume_pc() as usize;
-                let caller_resume_pc = ctx.call_arg_start() as u32;
-                if let Err(err) = setup_prepared_call(
-                    fiber,
-                    module,
-                    callee_func_id,
-                    callee_ret_slots,
-                    call_ret_reg,
-                    callee_bp,
-                    caller_resume_pc,
-                ) {
-                    return osr_result_from_frame_materialize_error(vm, fiber, err);
-                }
-                OsrResult::FrameChanged
-            } else {
-                if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                    jit_mgr.record_fallback(JitFallbackReason::RegularCall);
-                }
-                let resume_pc = ctx.call_resume_pc();
-                if let Err(err) = setup_regular_call(
-                    fiber,
-                    module,
-                    callee_func_id,
-                    callee_ret_slots,
-                    call_ret_reg,
-                    call_arg_start,
-                    resume_pc,
-                ) {
-                    return osr_result_from_frame_materialize_error(vm, fiber, err);
-                }
-                OsrResult::FrameChanged
-            }
-        }
-        #[cfg(feature = "std")]
-        JitResult::WaitIo => {
-            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                jit_mgr.record_fallback(JitFallbackReason::WaitIo);
-            }
-            let token = ctx.wait_io_token();
-            let resume_pc = ctx.call_resume_pc();
-
-            // Materialize any intermediate JIT frames from nested calls.
-            // Without this, resume_stack entries are lost and the fiber
-            // resumes at the wrong PC (callee's PC in the loop function's frame).
-            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return osr_result_from_frame_materialize_error(vm, fiber, err);
-            }
-
-            // Store token for scheduler
-            fiber.resume_io_token = Some(token);
-
-            OsrResult::WaitIo
-        }
-        #[cfg(not(feature = "std"))]
-        JitResult::WaitIo => {
-            OsrResult::JitError("Loop OSR returned WaitIo but std feature is not enabled".into())
-        }
-        JitResult::WaitQueue => {
-            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                jit_mgr.record_fallback(JitFallbackReason::WaitQueue);
-            }
-            let resume_pc = ctx.call_resume_pc();
-            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return osr_result_from_frame_materialize_error(vm, fiber, err);
-            }
-            OsrResult::WaitQueue
-        }
-        JitResult::Replay => {
-            if let Some(jit_mgr) = vm.jit_mgr.as_mut() {
-                jit_mgr.record_fallback(JitFallbackReason::Replay);
-            }
-            let resume_pc = ctx.call_resume_pc();
-            if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
-                return osr_result_from_frame_materialize_error(vm, fiber, err);
-            }
-            OsrResult::FrameChanged
-        }
-        JitResult::JitError => OsrResult::JitError(jit_context_error_message(&ctx, module)),
     }
 }
 
@@ -1463,7 +1437,7 @@ fn get_or_compile_loop(
         .functions
         .get(func_id as usize)
         .ok_or(vo_jit::JitError::FunctionNotFound(func_id))?;
-    let Some(jit_mgr) = vm.jit_mgr.as_mut() else {
+    let Some(jit_mgr) = vm.jit.manager_mut() else {
         return Ok(None);
     };
 
@@ -1544,6 +1518,7 @@ mod tests {
     use crate::vm::JitConfig;
     use vo_runtime::bytecode::{ExternDef, FunctionDef, Module};
     use vo_runtime::ffi::{ExternCallContext, ExternResult};
+    use vo_runtime::SlotType;
 
     fn function(local_slots: u16, gc_scan_slots: u16) -> FunctionDef {
         FunctionDef {
@@ -1565,12 +1540,32 @@ mod tests {
             has_call_extern: false,
             code: Vec::new(),
             jit_metadata: Vec::new(),
-            slot_types: Vec::new(),
-            borrowed_scan_slots_prefix: vec![0],
+            slot_types: vec![SlotType::Value; local_slots as usize],
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&vec![
+                SlotType::Value;
+                local_slots as usize
+            ]),
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
         }
+    }
+
+    #[test]
+    fn call_kind_fallback_reasons_are_shared_by_full_and_osr_result_handling() {
+        assert_eq!(
+            call_kind_fallback_reason(JitContext::CALL_KIND_YIELD),
+            Some(JitFallbackReason::Yield)
+        );
+        assert_eq!(
+            call_kind_fallback_reason(JitContext::CALL_KIND_BLOCK),
+            Some(JitFallbackReason::QueueBlock)
+        );
+        assert_eq!(call_kind_fallback_reason(0), None);
+        assert_eq!(
+            call_kind_fallback_reason(JitContext::CALL_KIND_PREPARED),
+            None
+        );
     }
 
     extern "C" fn user_panic_without_location(

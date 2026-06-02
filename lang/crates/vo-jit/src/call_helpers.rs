@@ -5,96 +5,33 @@
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind,
-    Type, Value,
+    types, Block, InstBuilder, MemFlags, SigRef, StackSlotData, StackSlotKind, Value,
 };
 
-use vo_runtime::bytecode::FunctionDef;
 use vo_runtime::instruction::Instruction;
-use vo_runtime::jit_api::{
-    jit_callback_abi_fields, DynCallIC, JitAbiType, JitCallbackAbiField, JitCallbackReturnPolicy,
-    JitContext, JitContextDependencyKind, PreparedCall,
-};
+use vo_runtime::jit_api::{DynCallIC, JitContext, PreparedCall};
 use vo_runtime::objects::closure as closure_obj;
 
 use crate::intrinsics;
 use crate::translator::IrEmitter;
 
-// JitResult constants for readability
-pub const JIT_RESULT_OK: i32 = 0;
-pub const JIT_RESULT_CALL: i32 = 2;
+mod callback_abi;
+mod plan;
+mod result_flow;
 
-/// Emit a helper/callback wrapper that returns `JitResult`, and route every
-/// non-Ok result back to the VM before local execution can continue.
-pub fn emit_checked_jit_result_helper_call<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    func: FuncRef,
-    args: &[Value],
-    spill_vars: bool,
-) -> Value {
-    let call = crate::translator::emit_funcref_call(emitter, func, args);
-    let result = emitter.builder().inst_results(call)[0];
-    check_call_result(emitter, result, spill_vars);
-    result
-}
-
-/// Emit an indirect JitContext callback that returns `JitResult`, and route
-/// every non-Ok result back to the VM before local execution can continue.
-pub fn emit_checked_jit_result_indirect_callback_call<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    callsite: JitContextCallbackCallsite,
-    func_ptr: Value,
-    args: &[Value],
-    spill_vars: bool,
-) -> Value {
-    validate_callback_callsite(callsite, JitContextCallbackCallKind::CheckedJitResult);
-    emitter.spill_all_vars();
-    let sig = import_callback_sig(emitter, callsite.kind);
-    let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
-    let result = emitter.builder().inst_results(call)[0];
-    emitter.clear_reg_consts();
-    check_call_result(emitter, result, spill_vars);
-    result
-}
-
-/// Emit an indirect JitContext callback whose `JitResult` is the current JIT
-/// function's result, such as stack-overflow/runtime-trap callbacks.
-pub fn emit_returning_jit_result_indirect_callback_call<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    callsite: JitContextCallbackCallsite,
-    func_ptr: Value,
-    args: &[Value],
-) -> Value {
-    validate_callback_callsite(callsite, JitContextCallbackCallKind::ReturningJitResult);
-    emitter.spill_all_vars();
-    let sig = import_callback_sig(emitter, callsite.kind);
-    let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
-    let result = emitter.builder().inst_results(call)[0];
-    emitter.builder().ins().return_(&[result]);
-    result
-}
-
-/// Emit a raw JitContext callback (non-JitResult) through the callback ABI
-/// manifest. This is for frame-maintenance callbacks such as push/pop frame;
-/// control-flow-significant callbacks must use the checked JitResult wrappers.
-pub fn emit_raw_jit_context_callback_call<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    callsite: JitContextCallbackCallsite,
-    func_ptr: Value,
-    args: &[Value],
-) -> Option<Value> {
-    validate_callback_callsite(callsite, JitContextCallbackCallKind::Raw);
-    let needs_spill = callsite.requires_pre_call_spill();
-    if needs_spill {
-        emitter.spill_all_vars();
-    }
-    let sig = import_callback_sig(emitter, callsite.kind);
-    let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
-    if needs_spill {
-        emitter.clear_reg_consts();
-    }
-    emitter.builder().inst_results(call).first().copied()
-}
+pub use callback_abi::{
+    emit_checked_jit_result_indirect_callback_call, emit_raw_jit_context_callback_call,
+    emit_returning_jit_result_indirect_callback_call, jit_context_callback_callsites,
+    JitContextCallbackCallKind, CALL_DEPTH_OVERFLOW_CALLSITE, NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE,
+    NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE, PREPARED_CALL_POP_FRAME_CALLSITE,
+    PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE, PREPARE_CLOSURE_CALLSITE, PREPARE_IFACE_CALLSITE,
+    STACK_LIMIT_OVERFLOW_CALLSITE,
+};
+pub use plan::{CallPlan, CallRoute, CallViaVmConfig, DynamicCallPlan, JitCallWithFallbackConfig};
+pub use result_flow::{
+    check_call_result, emit_checked_jit_result_helper_call, emit_non_ok_slow_path,
+    NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
+};
 
 /// Maximum callee local_slots for IC native stack fast path.
 /// Callees with more locals fall through to prepare callback.
@@ -105,177 +42,8 @@ const MAX_IC_NATIVE_SLOTS: usize = 64;
 /// Larger frames use the VM path so fiber stack limits fire before host stack exhaustion.
 pub const MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JitContextCallbackCallKind {
-    CheckedJitResult,
-    ReturningJitResult,
-    Raw,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JitContextCallbackCallsite {
-    pub name: &'static str,
-    pub lowering: &'static str,
-    pub kind: JitContextDependencyKind,
-    pub call_kind: JitContextCallbackCallKind,
-}
-
-impl JitContextCallbackCallsite {
-    pub fn abi(self) -> &'static JitCallbackAbiField {
-        callback_abi(self.kind)
-    }
-
-    pub fn requires_pre_call_spill(self) -> bool {
-        let abi = self.abi();
-        abi.may_gc || abi.observes_frame
-    }
-}
-
-pub const STACK_LIMIT_OVERFLOW_CALLSITE: JitContextCallbackCallsite = JitContextCallbackCallsite {
-    name: "stack_limit_overflow_fn",
-    lowering: "emit_stack_limit_guard",
-    kind: JitContextDependencyKind::StackOverflowFn,
-    call_kind: JitContextCallbackCallKind::ReturningJitResult,
-};
-
-pub const CALL_DEPTH_OVERFLOW_CALLSITE: JitContextCallbackCallsite = JitContextCallbackCallsite {
-    name: "call_depth_overflow_fn",
-    lowering: "emit_call_depth_enter",
-    kind: JitContextDependencyKind::StackOverflowFn,
-    call_kind: JitContextCallbackCallKind::ReturningJitResult,
-};
-
-pub const PREPARE_CLOSURE_CALLSITE: JitContextCallbackCallsite = JitContextCallbackCallsite {
-    name: "prepare_closure_call_fn",
-    lowering: "emit_call_closure",
-    kind: JitContextDependencyKind::PrepareClosureCallFn,
-    call_kind: JitContextCallbackCallKind::CheckedJitResult,
-};
-
-pub const PREPARE_IFACE_CALLSITE: JitContextCallbackCallsite = JitContextCallbackCallsite {
-    name: "prepare_iface_call_fn",
-    lowering: "emit_call_iface",
-    kind: JitContextDependencyKind::PrepareIfaceCallFn,
-    call_kind: JitContextCallbackCallKind::CheckedJitResult,
-};
-
-pub const PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE: JitContextCallbackCallsite =
-    JitContextCallbackCallsite {
-        name: "prepared_call_push_resume_point_fn",
-        lowering: "emit_prepared_call",
-        kind: JitContextDependencyKind::PushResumePointFn,
-        call_kind: JitContextCallbackCallKind::CheckedJitResult,
-    };
-
-pub const PREPARED_CALL_POP_FRAME_CALLSITE: JitContextCallbackCallsite =
-    JitContextCallbackCallsite {
-        name: "prepared_call_pop_frame_fn",
-        lowering: "emit_prepared_call",
-        kind: JitContextDependencyKind::PopFrameFn,
-        call_kind: JitContextCallbackCallKind::Raw,
-    };
-
-pub const NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE: JitContextCallbackCallsite =
-    JitContextCallbackCallsite {
-        name: "non_ok_slow_path_push_frame_fn",
-        lowering: "emit_non_ok_slow_path",
-        kind: JitContextDependencyKind::PushFrameFn,
-        call_kind: JitContextCallbackCallKind::Raw,
-    };
-
-pub const NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE: JitContextCallbackCallsite =
-    JitContextCallbackCallsite {
-        name: "non_ok_slow_path_push_resume_point_fn",
-        lowering: "emit_non_ok_slow_path",
-        kind: JitContextDependencyKind::PushResumePointFn,
-        call_kind: JitContextCallbackCallKind::CheckedJitResult,
-    };
-
-pub fn jit_context_callback_callsites() -> &'static [JitContextCallbackCallsite] {
-    &[
-        STACK_LIMIT_OVERFLOW_CALLSITE,
-        CALL_DEPTH_OVERFLOW_CALLSITE,
-        PREPARE_CLOSURE_CALLSITE,
-        PREPARE_IFACE_CALLSITE,
-        PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
-        PREPARED_CALL_POP_FRAME_CALLSITE,
-        NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE,
-        NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE,
-    ]
-}
-
 fn current_call_conv<'a, E: IrEmitter<'a>>(emitter: &mut E) -> cranelift_codegen::isa::CallConv {
     emitter.builder().func.signature.call_conv
-}
-
-fn callback_abi(kind: JitContextDependencyKind) -> &'static JitCallbackAbiField {
-    jit_callback_abi_fields()
-        .iter()
-        .find(|field| field.kind == kind)
-        .unwrap_or_else(|| panic!("missing JitContext callback ABI manifest row for {kind:?}"))
-}
-
-fn validate_callback_callsite(
-    callsite: JitContextCallbackCallsite,
-    expected_kind: JitContextCallbackCallKind,
-) {
-    assert_eq!(
-        callsite.call_kind, expected_kind,
-        "{} routed through wrong callback lowering wrapper",
-        callsite.name
-    );
-    let abi = callsite.abi();
-    let is_jit_result = matches!(
-        abi.return_policy,
-        JitCallbackReturnPolicy::JitResult
-            | JitCallbackReturnPolicy::JitResultWithOutPointer
-            | JitCallbackReturnPolicy::PreparedCallOutPointer
-    );
-    match expected_kind {
-        JitContextCallbackCallKind::CheckedJitResult
-        | JitContextCallbackCallKind::ReturningJitResult => assert!(
-            is_jit_result,
-            "{} is routed as JitResult but ABI policy is {:?}",
-            callsite.name, abi.return_policy
-        ),
-        JitContextCallbackCallKind::Raw => assert!(
-            !is_jit_result,
-            "{} is routed as raw callback but ABI policy is {:?}",
-            callsite.name, abi.return_policy
-        ),
-    }
-}
-
-fn clif_type_for_abi(abi: JitAbiType, ptr: Type) -> Option<Type> {
-    match abi {
-        JitAbiType::Void => None,
-        JitAbiType::Ptr => Some(ptr),
-        JitAbiType::U8 => Some(types::I8),
-        JitAbiType::U16 => Some(types::I16),
-        JitAbiType::U32 | JitAbiType::I32 | JitAbiType::JitResult => Some(types::I32),
-        JitAbiType::U64 | JitAbiType::I64 => Some(types::I64),
-    }
-}
-
-fn import_callback_sig<'a, E: IrEmitter<'a>>(
-    emitter: &mut E,
-    kind: JitContextDependencyKind,
-) -> SigRef {
-    let abi = callback_abi(kind);
-    let call_conv = current_call_conv(emitter);
-    let ptr = types::I64;
-    emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-        for &param in abi.params {
-            let ty = clif_type_for_abi(param, ptr)
-                .unwrap_or_else(|| panic!("{} declares void parameter", abi.name));
-            sig.params.push(AbiParam::new(ty));
-        }
-        if let Some(ret) = clif_type_for_abi(abi.ret, ptr) {
-            sig.returns.push(AbiParam::new(ret));
-        }
-        sig
-    })
 }
 
 pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value, new_sp: Value) {
@@ -751,6 +519,170 @@ fn emit_ic_miss_update_and_dispatch<'a, E: IrEmitter<'a>>(
     Ok(())
 }
 
+struct DynamicCallScalarValues {
+    ret_reg_val: Value,
+    ret_slots_val: Value,
+    resume_pc_val: Value,
+    arg_count_val: Value,
+}
+
+fn read_dynamic_user_args<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    arg_start: usize,
+    arg_slots: usize,
+) -> Vec<Value> {
+    let mut user_arg_vals = Vec::with_capacity(arg_slots);
+    for i in 0..arg_slots {
+        user_arg_vals.push(emitter.read_var((arg_start + i) as u16));
+    }
+    user_arg_vals
+}
+
+fn explicit_stack_bytes<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    bytes: usize,
+) -> cranelift_codegen::ir::StackSlot {
+    emitter
+        .builder()
+        .create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            bytes as u32,
+            8,
+        ))
+}
+
+fn stack_addr<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    slot: cranelift_codegen::ir::StackSlot,
+) -> Value {
+    emitter.builder().ins().stack_addr(types::I64, slot, 0)
+}
+
+fn allocate_dynamic_call_scratch<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    ret_slots: usize,
+) -> (
+    cranelift_codegen::ir::StackSlot,
+    Value,
+    cranelift_codegen::ir::StackSlot,
+    Value,
+) {
+    let ic_args_slot = explicit_stack_bytes(emitter, MAX_IC_NATIVE_SLOTS * 8);
+    let ic_args_ptr = stack_addr(emitter, ic_args_slot);
+    let ret_slot = explicit_stack_bytes(emitter, ret_slots.max(1) * 8);
+    let ret_ptr = stack_addr(emitter, ret_slot);
+    (ic_args_slot, ic_args_ptr, ret_slot, ret_ptr)
+}
+
+fn dynamic_ic_entry<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    ctx: Value,
+    caller_func_id: u32,
+    callsite_pc: usize,
+) -> Value {
+    let ic_table = emitter.builder().ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_IC_TABLE,
+    );
+    let ic_index = ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc as u32))
+        & DynCallIC::TABLE_MASK;
+    let ic_byte_offset = (ic_index as usize) * DynCallIC::SIZE;
+    emitter
+        .builder()
+        .ins()
+        .iadd_imm(ic_table, ic_byte_offset as i64)
+}
+
+fn branch_on_dynamic_ic_hit<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    key_match: Value,
+    ic_jit_ptr: Value,
+    zero: Value,
+) -> (Block, Block, Block) {
+    let ptr_ok = emitter
+        .builder()
+        .ins()
+        .icmp(IntCC::NotEqual, ic_jit_ptr, zero);
+    let ic_hit = emitter.builder().ins().band(key_match, ptr_ok);
+
+    let ic_hit_block = emitter.builder().create_block();
+    let ic_miss_block = emitter.builder().create_block();
+    let merge_block = emitter.builder().create_block();
+
+    emitter
+        .builder()
+        .ins()
+        .brif(ic_hit, ic_hit_block, &[], ic_miss_block, &[]);
+
+    (ic_hit_block, ic_miss_block, merge_block)
+}
+
+fn copy_user_args_to_stack<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    user_arg_vals: &[Value],
+) -> (cranelift_codegen::ir::StackSlot, Value) {
+    let user_args_slot = explicit_stack_bytes(emitter, user_arg_vals.len().max(1) * 8);
+    for (i, val) in user_arg_vals.iter().enumerate() {
+        emitter
+            .builder()
+            .ins()
+            .stack_store(*val, user_args_slot, (i * 8) as i32);
+    }
+    let user_args_ptr = stack_addr(emitter, user_args_slot);
+    (user_args_slot, user_args_ptr)
+}
+
+fn allocate_prepared_call_out<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+) -> (cranelift_codegen::ir::StackSlot, Value) {
+    let out_slot = explicit_stack_bytes(emitter, PreparedCall::SIZE);
+    let out_ptr = stack_addr(emitter, out_slot);
+    (out_slot, out_ptr)
+}
+
+fn dynamic_call_scalar_values<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    plan: DynamicCallPlan,
+) -> DynamicCallScalarValues {
+    DynamicCallScalarValues {
+        ret_reg_val: emitter
+            .builder()
+            .ins()
+            .iconst(types::I32, plan.ret_reg as i64),
+        ret_slots_val: emitter
+            .builder()
+            .ins()
+            .iconst(types::I32, plan.ret_slots as i64),
+        resume_pc_val: emitter
+            .builder()
+            .ins()
+            .iconst(types::I32, plan.resume_pc as i64),
+        arg_count_val: emitter
+            .builder()
+            .ins()
+            .iconst(types::I32, plan.arg_slots as i64),
+    }
+}
+
+fn copy_dynamic_call_returns<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    arg_start: usize,
+    arg_slots: usize,
+    ret_slots: usize,
+    ret_slot: cranelift_codegen::ir::StackSlot,
+) {
+    emitter.refresh_stack_base_after_reallocation();
+    for i in 0..ret_slots {
+        let val = emitter
+            .builder()
+            .ins()
+            .stack_load(types::I64, ret_slot, (i * 8) as i32);
+        emitter.write_var((arg_start + arg_slots + i) as u16, val);
+    }
+}
+
 /// Emit a closure call instruction with monomorphic inline cache.
 ///
 /// CallClosure: inst.a = closure_slot, inst.b = arg_start, inst.c = (arg_slots << 8) | ret_slots
@@ -808,34 +740,11 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(continue_block);
     emitter.builder().seal_block(continue_block);
 
-    // Read user args into SSA values (before any branching)
-    let mut user_arg_vals = Vec::with_capacity(arg_slots);
-    for i in 0..arg_slots {
-        user_arg_vals.push(emitter.read_var((arg_start + i) as u16));
-    }
-
-    // Allocate stack slots and get their addresses BEFORE branching
-    // so SSA values dominate both IC hit and miss paths.
-    let ic_args_slot = emitter
-        .builder()
-        .create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (MAX_IC_NATIVE_SLOTS * 8) as u32,
-            8,
-        ));
-    let ic_args_ptr = emitter
-        .builder()
-        .ins()
-        .stack_addr(types::I64, ic_args_slot, 0);
-
-    let ret_slot = emitter
-        .builder()
-        .create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (ret_slots.max(1) * 8) as u32,
-            8,
-        ));
-    let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
+    // Read user args and allocate stack slots before branching so SSA values
+    // dominate both IC hit and miss paths.
+    let user_arg_vals = read_dynamic_user_args(emitter, arg_start, arg_slots);
+    let (ic_args_slot, ic_args_ptr, ret_slot, ret_ptr) =
+        allocate_dynamic_call_scratch(emitter, ret_slots);
 
     // Save call-boundary state before branching; the miss path may push a VM frame.
     let caller_bp = emitter.call_caller_bp();
@@ -852,20 +761,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
             .ins()
             .load(types::I32, MemFlags::trusted(), closure_ref, 0);
 
-    // Compute IC entry address: ic_table + ((caller_func_id * 97 + callsite_pc) & MASK) * IC_SIZE
-    let ic_table = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_IC_TABLE,
-    );
-    let ic_index = ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc as u32))
-        & DynCallIC::TABLE_MASK;
-    let ic_byte_offset = (ic_index as usize) * DynCallIC::SIZE;
-    let ic_entry = emitter
-        .builder()
-        .ins()
-        .iadd_imm(ic_table, ic_byte_offset as i64);
+    let ic_entry = dynamic_ic_entry(emitter, ctx, caller_func_id, callsite_pc);
 
     // Load tagged IC key and compare.
     let closure_func_id_u64 = emitter.builder().ins().uextend(types::I64, closure_func_id);
@@ -888,29 +784,14 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         .ins()
         .icmp(IntCC::Equal, closure_key, ic_key);
 
-    // Load IC jit_func_ptr and check non-null
     let ic_jit_ptr = emitter.builder().ins().load(
         types::I64,
         MemFlags::trusted(),
         ic_entry,
         DynCallIC::OFFSET_JIT_FUNC_PTR,
     );
-    let ptr_ok = emitter
-        .builder()
-        .ins()
-        .icmp(IntCC::NotEqual, ic_jit_ptr, zero);
-
-    // Both conditions must be true for IC hit
-    let ic_hit = emitter.builder().ins().band(key_match, ptr_ok);
-
-    let ic_hit_block = emitter.builder().create_block();
-    let ic_miss_block = emitter.builder().create_block();
-    let merge_block = emitter.builder().create_block();
-
-    emitter
-        .builder()
-        .ins()
-        .brif(ic_hit, ic_hit_block, &[], ic_miss_block, &[]);
+    let (ic_hit_block, ic_miss_block, merge_block) =
+        branch_on_dynamic_ic_hit(emitter, key_match, ic_jit_ptr, zero);
 
     // =====================================================================
     // IC HIT: native stack fast path (like emit_jit_call_with_fallback)
@@ -1034,34 +915,8 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(ic_miss_block);
     emitter.builder().seal_block(ic_miss_block);
 
-    // Copy user args to native stack for prepare callback
-    let user_args_slot = emitter
-        .builder()
-        .create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (arg_slots.max(1) * 8) as u32,
-            8,
-        ));
-    for (i, val) in user_arg_vals.iter().enumerate() {
-        emitter
-            .builder()
-            .ins()
-            .stack_store(*val, user_args_slot, (i * 8) as i32);
-    }
-    let user_args_ptr = emitter
-        .builder()
-        .ins()
-        .stack_addr(types::I64, user_args_slot, 0);
-
-    // Allocate PreparedCall output
-    let out_slot = emitter
-        .builder()
-        .create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            PreparedCall::SIZE as u32,
-            8,
-        ));
-    let out_ptr = emitter.builder().ins().stack_addr(types::I64, out_slot, 0);
+    let (_user_args_slot, user_args_ptr) = copy_user_args_to_stack(emitter, &user_arg_vals);
+    let (out_slot, out_ptr) = allocate_prepared_call_out(emitter);
 
     // Call prepare_closure_call callback
     let prepare_fn_ptr = emitter.builder().ins().load(
@@ -1070,14 +925,7 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         ctx,
         JitContext::OFFSET_PREPARE_CLOSURE_CALL_FN,
     );
-    // ret_reg = arg_start + arg_slots: return values live after the arg region.
-    let ret_reg_val = emitter
-        .builder()
-        .ins()
-        .iconst(types::I32, (arg_start + arg_slots) as i64);
-    let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
-    let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
-    let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
+    let scalar_values = dynamic_call_scalar_values(emitter, plan);
 
     emit_checked_jit_result_indirect_callback_call(
         emitter,
@@ -1086,11 +934,11 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
         &[
             ctx,
             closure_ref,
-            ret_reg_val,
-            ret_slots_val,
-            resume_pc_val,
+            scalar_values.ret_reg_val,
+            scalar_values.ret_slots_val,
+            scalar_values.resume_pc_val,
             user_args_ptr,
-            arg_count_val,
+            scalar_values.arg_count_val,
             ret_ptr,
             out_ptr,
         ],
@@ -1124,9 +972,9 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
             old_fiber_sp,
             arg_start,
             ret_slots,
-            resume_pc_val,
-            ret_reg_val,
-            ret_slots_val,
+            resume_pc_val: scalar_values.resume_pc_val,
+            ret_reg_val: scalar_values.ret_reg_val,
+            ret_slots_val: scalar_values.ret_slots_val,
             merge_block,
             ic_key_val,
         },
@@ -1135,18 +983,8 @@ pub fn emit_call_closure<'a, E: IrEmitter<'a>>(
     // =====================================================================
     // Merge: copy return values to SSA vars (shared by IC hit OK + prepared OK)
     // =====================================================================
-    // merge_block is already switched to and sealed by emit_prepared_call
-    // prepare_closure_call calls jit_push_frame which may reallocate fiber.stack.
-    // Refresh the cached base pointer before reading/writing any local vars.
-    emitter.refresh_stack_base_after_reallocation();
     // Return values live at arg_start + arg_slots (new call buffer layout).
-    for i in 0..ret_slots {
-        let val = emitter
-            .builder()
-            .ins()
-            .stack_load(types::I64, ret_slot, (i * 8) as i32);
-        emitter.write_var((arg_start + arg_slots + i) as u16, val);
-    }
+    copy_dynamic_call_returns(emitter, arg_start, arg_slots, ret_slots, ret_slot);
     Ok(())
 }
 
@@ -1191,34 +1029,11 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         None,
     );
 
-    // Read user args into SSA values (before any branching)
-    let mut user_arg_vals = Vec::with_capacity(arg_slots);
-    for i in 0..arg_slots {
-        user_arg_vals.push(emitter.read_var((arg_start + i) as u16));
-    }
-
-    // Allocate stack slots and get their addresses BEFORE branching
-    // so SSA values dominate both IC hit and miss paths.
-    let ic_args_slot = emitter
-        .builder()
-        .create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (MAX_IC_NATIVE_SLOTS * 8) as u32,
-            8,
-        ));
-    let ic_args_ptr = emitter
-        .builder()
-        .ins()
-        .stack_addr(types::I64, ic_args_slot, 0);
-
-    let ret_slot = emitter
-        .builder()
-        .create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (ret_slots.max(1) * 8) as u32,
-            8,
-        ));
-    let ret_ptr = emitter.builder().ins().stack_addr(types::I64, ret_slot, 0);
+    // Read user args and allocate stack slots before branching so SSA values
+    // dominate both IC hit and miss paths.
+    let user_arg_vals = read_dynamic_user_args(emitter, arg_start, arg_slots);
+    let (ic_args_slot, ic_args_ptr, ret_slot, ret_ptr) =
+        allocate_dynamic_call_scratch(emitter, ret_slots);
 
     // Save call-boundary state before branching; the miss path may push a VM frame.
     let caller_bp = emitter.call_caller_bp();
@@ -1249,20 +1064,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     let tagged_method_key = emitter.builder().ins().bor(iface_key_tag, method_key);
     let ic_key_val = emitter.builder().ins().bor(tagged_method_key, itab_id);
 
-    // Compute IC entry address
-    let ic_table = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_IC_TABLE,
-    );
-    let ic_index = ((caller_func_id.wrapping_mul(97)).wrapping_add(callsite_pc as u32))
-        & DynCallIC::TABLE_MASK;
-    let ic_byte_offset = (ic_index as usize) * DynCallIC::SIZE;
-    let ic_entry = emitter
-        .builder()
-        .ins()
-        .iadd_imm(ic_table, ic_byte_offset as i64);
+    let ic_entry = dynamic_ic_entry(emitter, ctx, caller_func_id, callsite_pc);
 
     // Load tagged IC key and compare.
     let ic_stored_key = emitter.builder().ins().load(
@@ -1276,29 +1078,14 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         .ins()
         .icmp(IntCC::Equal, ic_key_val, ic_stored_key);
 
-    // Load IC jit_func_ptr and check non-null
     let ic_jit_ptr = emitter.builder().ins().load(
         types::I64,
         MemFlags::trusted(),
         ic_entry,
         DynCallIC::OFFSET_JIT_FUNC_PTR,
     );
-    let ptr_ok = emitter
-        .builder()
-        .ins()
-        .icmp(IntCC::NotEqual, ic_jit_ptr, zero);
-
-    // Both conditions must be true for IC hit
-    let ic_hit = emitter.builder().ins().band(key_match, ptr_ok);
-
-    let ic_hit_block = emitter.builder().create_block();
-    let ic_miss_block = emitter.builder().create_block();
-    let merge_block = emitter.builder().create_block();
-
-    emitter
-        .builder()
-        .ins()
-        .brif(ic_hit, ic_hit_block, &[], ic_miss_block, &[]);
+    let (ic_hit_block, ic_miss_block, merge_block) =
+        branch_on_dynamic_ic_hit(emitter, key_match, ic_jit_ptr, zero);
 
     // =====================================================================
     // IC HIT: native stack fast path
@@ -1356,34 +1143,8 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(ic_miss_block);
     emitter.builder().seal_block(ic_miss_block);
 
-    // Copy user args for prepare callback
-    let user_args_slot = emitter
-        .builder()
-        .create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            (arg_slots.max(1) * 8) as u32,
-            8,
-        ));
-    for (i, val) in user_arg_vals.iter().enumerate() {
-        emitter
-            .builder()
-            .ins()
-            .stack_store(*val, user_args_slot, (i * 8) as i32);
-    }
-    let user_args_ptr = emitter
-        .builder()
-        .ins()
-        .stack_addr(types::I64, user_args_slot, 0);
-
-    // Allocate PreparedCall output
-    let out_slot = emitter
-        .builder()
-        .create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            PreparedCall::SIZE as u32,
-            8,
-        ));
-    let out_ptr = emitter.builder().ins().stack_addr(types::I64, out_slot, 0);
+    let (_user_args_slot, user_args_ptr) = copy_user_args_to_stack(emitter, &user_arg_vals);
+    let (out_slot, out_ptr) = allocate_prepared_call_out(emitter);
 
     // Call prepare_iface_call callback
     let prepare_fn_ptr = emitter.builder().ins().load(
@@ -1396,14 +1157,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         .builder()
         .ins()
         .iconst(types::I32, method_idx as i64);
-    // ret_reg = arg_start + arg_slots: return values live after the arg region.
-    let ret_reg_val = emitter
-        .builder()
-        .ins()
-        .iconst(types::I32, (arg_start + arg_slots) as i64);
-    let ret_slots_val = emitter.builder().ins().iconst(types::I32, ret_slots as i64);
-    let resume_pc_val = emitter.builder().ins().iconst(types::I32, resume_pc as i64);
-    let arg_count_val = emitter.builder().ins().iconst(types::I32, arg_slots as i64);
+    let scalar_values = dynamic_call_scalar_values(emitter, plan);
 
     emit_checked_jit_result_indirect_callback_call(
         emitter,
@@ -1414,11 +1168,11 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
             slot0,
             slot1,
             method_idx_val,
-            ret_reg_val,
-            ret_slots_val,
-            resume_pc_val,
+            scalar_values.ret_reg_val,
+            scalar_values.ret_slots_val,
+            scalar_values.resume_pc_val,
             user_args_ptr,
-            arg_count_val,
+            scalar_values.arg_count_val,
             ret_ptr,
             out_ptr,
         ],
@@ -1436,9 +1190,9 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
             old_fiber_sp,
             arg_start,
             ret_slots,
-            resume_pc_val,
-            ret_reg_val,
-            ret_slots_val,
+            resume_pc_val: scalar_values.resume_pc_val,
+            ret_reg_val: scalar_values.ret_reg_val,
+            ret_slots_val: scalar_values.ret_slots_val,
             merge_block,
             ic_key_val,
         },
@@ -1447,17 +1201,8 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
     // =====================================================================
     // Merge: copy return values
     // =====================================================================
-    // prepare_iface_call calls jit_push_frame which may reallocate fiber.stack.
-    // Refresh the cached base pointer before reading/writing any local vars.
-    emitter.refresh_stack_base_after_reallocation();
     // Return values live at arg_start + arg_slots (new call buffer layout).
-    for i in 0..ret_slots {
-        let val = emitter
-            .builder()
-            .ins()
-            .stack_load(types::I64, ret_slot, (i * 8) as i32);
-        emitter.write_var((arg_start + arg_slots + i) as u16, val);
-    }
+    copy_dynamic_call_returns(emitter, arg_start, arg_slots, ret_slots, ret_slot);
     Ok(())
 }
 
@@ -1921,162 +1666,6 @@ pub fn emit_call_via_vm<'a, E: IrEmitter<'a>>(
     Ok(())
 }
 
-/// Configuration for call via VM.
-pub struct CallViaVmConfig {
-    pub func_id: u32,
-    pub arg_start: usize,
-    pub ret_reg: usize,
-    pub resume_pc: usize,
-    pub ret_slots: usize,
-}
-
-/// Lowering route selected for a bytecode call site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallRoute {
-    /// Callee has a known Cranelift FuncRef at compile time.
-    KnownDirectJit,
-    /// Callee may be compiled at runtime; generated code checks jit_func_table.
-    DynamicJitTable,
-    /// Closure/interface call with a monomorphic inline cache and prepare fallback.
-    DynamicInlineCache,
-    /// Return JitResult::Call so the VM owns frame setup and dispatch.
-    VmFallback,
-}
-
-/// Static bytecode call shape after decoding the target FunctionDef.
-#[derive(Clone, Copy)]
-pub struct CallPlan {
-    pub func_id: u32,
-    pub arg_start: usize,
-    pub arg_slots: usize,
-    pub ret_reg: usize,
-    pub call_ret_slots: usize,
-    pub func_ret_slots: usize,
-    pub callee_local_slots: usize,
-    pub can_elide_frame: bool,
-    pub callee_func_ref: Option<FuncRef>,
-}
-
-impl CallPlan {
-    pub fn new(
-        func_id: u32,
-        arg_start: usize,
-        target_func: &FunctionDef,
-        callee_func_ref: Option<FuncRef>,
-    ) -> Self {
-        let arg_slots = target_func.param_slots as usize;
-        let call_ret_slots = target_func.ret_slots as usize;
-        Self {
-            func_id,
-            arg_start,
-            arg_slots,
-            ret_reg: arg_start + arg_slots,
-            call_ret_slots,
-            func_ret_slots: target_func.ret_slots as usize,
-            callee_local_slots: target_func.local_slots as usize,
-            can_elide_frame: crate::can_elide_frame_for_direct_jit(target_func),
-            callee_func_ref,
-        }
-    }
-
-    pub fn is_self_recursive(self, current_func_id: u32) -> bool {
-        self.func_id == current_func_id
-    }
-
-    pub fn fits_direct_native_frame(self) -> bool {
-        self.callee_local_slots <= MAX_DIRECT_JIT_NATIVE_FRAME_SLOTS
-    }
-
-    pub fn can_use_direct_jit(self) -> bool {
-        self.can_elide_frame && self.fits_direct_native_frame()
-    }
-
-    pub fn route_for_full_function(self, current_func_id: u32) -> CallRoute {
-        if self.is_self_recursive(current_func_id) {
-            return CallRoute::VmFallback;
-        }
-        self.route_non_recursive()
-    }
-
-    pub fn route_for_loop(self) -> CallRoute {
-        self.route_non_recursive()
-    }
-
-    fn route_non_recursive(self) -> CallRoute {
-        if !self.can_use_direct_jit() {
-            return CallRoute::VmFallback;
-        }
-        if self.callee_func_ref.is_some() {
-            CallRoute::KnownDirectJit
-        } else {
-            CallRoute::DynamicJitTable
-        }
-    }
-
-    pub fn jit_config(self) -> JitCallWithFallbackConfig {
-        JitCallWithFallbackConfig {
-            func_id: self.func_id,
-            arg_start: self.arg_start,
-            ret_reg: self.ret_reg,
-            arg_slots: self.arg_slots,
-            call_ret_slots: self.call_ret_slots,
-            func_ret_slots: self.func_ret_slots,
-            callee_local_slots: self.callee_local_slots,
-            callee_func_ref: self.callee_func_ref,
-        }
-    }
-
-    pub fn vm_config(self, resume_pc: usize) -> CallViaVmConfig {
-        CallViaVmConfig {
-            func_id: self.func_id,
-            arg_start: self.arg_start,
-            ret_reg: self.ret_reg,
-            resume_pc,
-            ret_slots: self.call_ret_slots,
-        }
-    }
-}
-
-/// Dynamic closure/interface call shape after decoding the packed call operand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DynamicCallPlan {
-    pub arg_start: usize,
-    pub arg_slots: usize,
-    pub ret_slots: usize,
-    pub ret_reg: usize,
-    pub resume_pc: usize,
-    pub route: CallRoute,
-}
-
-impl DynamicCallPlan {
-    pub fn new(inst: &Instruction, callsite_pc: usize) -> Self {
-        let arg_start = inst.b as usize;
-        let arg_slots = inst.packed_arg_slots() as usize;
-        Self {
-            arg_start,
-            arg_slots,
-            ret_slots: inst.packed_ret_slots() as usize,
-            ret_reg: arg_start + arg_slots,
-            resume_pc: callsite_pc + 1,
-            route: CallRoute::DynamicInlineCache,
-        }
-    }
-}
-
-/// Configuration for JIT-to-JIT call with fallback.
-pub struct JitCallWithFallbackConfig {
-    pub func_id: u32,
-    pub arg_start: usize,
-    pub ret_reg: usize,
-    pub arg_slots: usize,
-    pub call_ret_slots: usize,
-    pub func_ret_slots: usize,
-    /// Callee's local_slots (from FunctionDef.local_slots)
-    pub callee_local_slots: usize,
-    /// Optional FuncRef for direct call (if callee is known at compile time)
-    pub callee_func_ref: Option<FuncRef>,
-}
-
 /// Emit a JIT-to-JIT call with runtime check for compiled callee.
 ///
 /// Fast path (JIT-to-JIT):
@@ -2445,172 +2034,11 @@ pub fn emit_jit_call_with_fallback<'a, E: IrEmitter<'a>>(
     Ok(())
 }
 
-/// Parameters for the non-OK slow path (shared by direct/indirect/self-recursive calls).
-///
-/// When a JIT callee returns non-OK (Call/WaitIo/Panic), the caller must:
-/// 1. Restore ctx.jit_bp and ctx.fiber_sp to caller's values
-/// 2. Spill SSA variables to fiber.stack
-/// 3. push_frame to materialize callee frame
-/// 4. Optionally copy args from native stack to fiber.stack
-/// 5. push_resume_point for frame chain
-/// 6. Return the JIT result
-pub struct NonOkSlowPathParams {
-    pub jit_result: Value,
-    pub ctx: Value,
-    pub caller_bp: Value,
-    pub old_fiber_sp: Value,
-    /// CALLEE's func_id — used in push_resume_point to create CallFrame(callee_func_id, callee_bp).
-    /// materialize_jit_frames uses (func_id, bp) from the resume_point to build the VM frame chain.
-    pub callee_func_id_val: Value,
-    pub local_slots_val: Value,
-    pub ret_reg_val: Value,
-    pub ret_slots_val: Value,
-    pub caller_resume_pc_val: Value,
-    /// Optional: (args_slot, arg_count) to copy args from native stack to fiber.stack after push_frame.
-    /// Used by self-recursive calls where args are on native stack, not yet in fiber.stack.
-    /// Regular/indirect calls don't need this because callee already spilled to fiber.stack.
-    pub copy_args: Option<(cranelift_codegen::ir::StackSlot, usize)>,
-}
-
-/// Emit the non-OK slow path: restore ctx, spill, push_frame, push_resume_point, return.
-///
-/// Caller is responsible for creating/switching to the non-OK block before calling this.
-pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(emitter: &mut E, p: NonOkSlowPathParams) {
-    let ctx = p.ctx;
-
-    // 1. Restore ctx.jit_bp and ctx.fiber_sp before push_frame.
-    // The inline update set fiber_sp = old_fiber_sp + callee_local_slots;
-    // push_frame uses fiber_sp as new_bp, so without restore it allocates at wrong position.
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        p.caller_bp,
-        ctx,
-        JitContext::OFFSET_JIT_BP,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        p.old_fiber_sp,
-        ctx,
-        JitContext::OFFSET_FIBER_SP,
-    );
-
-    // 2. Spill SSA-only vars to fiber.stack so VM can see caller state.
-    emitter.spill_all_vars();
-
-    // 3. Push frame to materialize callee frame in fiber.stack.
-    let push_frame_fn_ptr = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_PUSH_FRAME_FN,
-    );
-    let callee_fiber_args_ptr = emit_raw_jit_context_callback_call(
-        emitter,
-        NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE,
-        push_frame_fn_ptr,
-        &[
-            ctx,
-            p.callee_func_id_val,
-            p.local_slots_val,
-            p.ret_reg_val,
-            p.ret_slots_val,
-            p.caller_resume_pc_val,
-        ],
-    )
-    .unwrap_or_else(|| panic!("push_frame_fn returns callee args pointer"));
-    crate::contract::emit_return_if_runtime_trap_recorded(emitter);
-
-    // 4. Optional: copy args from native stack to fiber.stack.
-    // Self-recursive calls pass args via native stack slot, so we must copy them.
-    // Regular/indirect calls: callee already spilled its state to fiber.stack before
-    // returning Call, so copying would overwrite the callee's modified state.
-    if let Some((args_slot, arg_count)) = p.copy_args {
-        for i in 0..arg_count {
-            let val = emitter
-                .builder()
-                .ins()
-                .stack_load(types::I64, args_slot, (i * 8) as i32);
-            emitter.builder().ins().store(
-                MemFlags::trusted(),
-                val,
-                callee_fiber_args_ptr,
-                (i * 8) as i32,
-            );
-        }
-    }
-
-    // 5. Push resume point for frame chain.
-    let push_resume_point_fn_ptr = emitter.builder().ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_PUSH_RESUME_POINT_FN,
-    );
-    let callee_bp = emitter.builder().ins().load(
-        types::I32,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_JIT_BP,
-    );
-    emit_checked_jit_result_indirect_callback_call(
-        emitter,
-        NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE,
-        push_resume_point_fn_ptr,
-        &[
-            ctx,
-            p.callee_func_id_val,
-            p.caller_resume_pc_val,
-            callee_bp,
-            p.caller_bp,
-            p.ret_reg_val,
-            p.ret_slots_val,
-        ],
-        true,
-    );
-
-    // 6. Return the JIT result.
-    emitter.builder().ins().return_(&[p.jit_result]);
-}
-
-/// Check call result and handle non-Ok cases.
-///
-/// JitResult: Ok=0, Panic=1, Call=2, WaitIo=3, WaitQueue=4
-///
-/// For non-Ok results:
-/// - If spill_vars is true: spill all variables to memory before returning
-/// - Return the JitResult directly for VM to handle
-pub fn check_call_result<'a, E: IrEmitter<'a>>(emitter: &mut E, result: Value, spill_vars: bool) {
-    let ok_block = emitter.builder().create_block();
-    let non_ok_block = emitter.builder().create_block();
-
-    let ok_val = emitter
-        .builder()
-        .ins()
-        .iconst(types::I32, JIT_RESULT_OK as i64);
-    let is_ok = emitter.builder().ins().icmp(IntCC::Equal, result, ok_val);
-    emitter
-        .builder()
-        .ins()
-        .brif(is_ok, ok_block, &[], non_ok_block, &[]);
-
-    // Non-Ok path
-    emitter.builder().switch_to_block(non_ok_block);
-    emitter.builder().seal_block(non_ok_block);
-
-    if spill_vars {
-        emitter.spill_all_vars();
-    }
-
-    emitter.builder().ins().return_(&[result]);
-
-    // Ok path - continue execution
-    emitter.builder().switch_to_block(ok_block);
-    emitter.builder().seal_block(ok_block);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cranelift_codegen::ir::FuncRef;
+    use vo_runtime::bytecode::FunctionDef;
 
     fn func(local_slots: u16, has_defer: bool) -> FunctionDef {
         FunctionDef {

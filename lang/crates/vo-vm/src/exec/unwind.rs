@@ -42,6 +42,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::string::ToString;
 
+use vo_common_core::bytecode::ReturnFlags;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::closure;
 
@@ -355,7 +356,7 @@ fn compute_include_errdefers(
     let bp = frame.bp;
     let stack = fiber.stack.as_ptr();
 
-    let error_slot0 = if (inst.flags & vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS) != 0 {
+    let error_slot0 = if ReturnFlags::from_bits_truncate(inst.flags).has_heap_returns() {
         // heap_returns: each return value is a GcRef, error is always the last one
         // inst.a = gcref_start, inst.b = gcref_count
         let gcref_count = inst.b as usize;
@@ -525,7 +526,7 @@ fn handle_initial_return(
         return ExecResult::FrameChanged;
     }
 
-    let heap_returns = (inst.flags & vo_common_core::bytecode::RETURN_FLAG_HEAP_RETURNS) != 0;
+    let heap_returns = ReturnFlags::from_bits_truncate(inst.flags).has_heap_returns();
     let has_defers = fiber
         .defer_stack
         .last()

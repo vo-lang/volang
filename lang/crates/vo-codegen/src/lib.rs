@@ -1277,8 +1277,7 @@ fn compile_func_body(
         stmt::compile_block(body, ctx, &mut builder, info)?;
     }
 
-    // Add return if not present at end
-    builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
+    builder.emit_fallthrough_return();
 
     // Build and return FunctionDef
     Ok(builder.build())
@@ -1489,9 +1488,9 @@ fn compile_init_and_entry(
 
     // 3. Generate __island_init__ function (init only, no main - for island VMs)
     let mut island_init_builder = FuncBuilder::new("__island_init__");
-    island_init_builder.emit_op(vo_vm::instruction::Opcode::Call, init_func_id as u16, 0, 0);
+    emit_entry_static_call(&mut island_init_builder, ctx, init_func_id)?;
     for &user_init_id in ctx.init_functions() {
-        island_init_builder.emit_op(vo_vm::instruction::Opcode::Call, user_init_id as u16, 0, 0);
+        emit_entry_static_call(&mut island_init_builder, ctx, user_init_id)?;
     }
     island_init_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
     let island_init_func = island_init_builder.build();
@@ -1502,16 +1501,16 @@ fn compile_init_and_entry(
     let mut entry_builder = FuncBuilder::new("__entry__");
 
     // Call __init__ for global variable initialization
-    entry_builder.emit_op(vo_vm::instruction::Opcode::Call, init_func_id as u16, 0, 0);
+    emit_entry_static_call(&mut entry_builder, ctx, init_func_id)?;
 
     // Call user-defined init() functions in declaration order
     for &user_init_id in ctx.init_functions() {
-        entry_builder.emit_op(vo_vm::instruction::Opcode::Call, user_init_id as u16, 0, 0);
+        emit_entry_static_call(&mut entry_builder, ctx, user_init_id)?;
     }
 
     // Call main
     if let Some(main_id) = main_func_id {
-        entry_builder.emit_op(vo_vm::instruction::Opcode::Call, main_id as u16, 0, 0);
+        emit_entry_static_call(&mut entry_builder, ctx, main_id)?;
     }
 
     // Return
@@ -1521,5 +1520,27 @@ fn compile_init_and_entry(
     let entry_func_id = ctx.add_function(entry_func);
     ctx.set_entry_func(entry_func_id);
 
+    Ok(())
+}
+
+fn emit_entry_static_call(
+    builder: &mut FuncBuilder,
+    ctx: &CodegenContext,
+    func_id: u32,
+) -> Result<(), CodegenError> {
+    let callee = ctx
+        .module()
+        .functions
+        .get(func_id as usize)
+        .ok_or_else(|| CodegenError::FunctionNotFound(format!("function id {func_id}")))?;
+    if callee.param_slots != 0 {
+        return Err(CodegenError::Internal(format!(
+            "entry function cannot call {} with {} parameter slots",
+            callee.name, callee.param_slots
+        )));
+    }
+
+    let args_start = builder.alloc_call_buffer(&[], &callee.ret_slot_types);
+    builder.emit_static_call(func_id, args_start, 0, callee.ret_slots);
     Ok(())
 }

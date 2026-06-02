@@ -158,16 +158,12 @@ impl<'a> LoopCompiler<'a> {
     }
 
     fn declare_variables(&mut self) {
-        self.vars = crate::translator::declare_variables(
-            &mut self.builder,
-            self.func_def.local_slots as usize,
-            &self.func_def.slot_types,
-        );
+        self.vars = crate::compile_common::declare_variables(&mut self.builder, self.func_def);
     }
 
     #[inline]
     fn is_float_slot(&self, slot: u16) -> bool {
-        crate::translator::is_float_slot(&self.func_def.slot_types, slot)
+        crate::compile_common::is_float_slot(self.func_def, slot)
     }
 
     fn scan_jump_targets(&mut self) -> Result<(), JitError> {
@@ -226,39 +222,23 @@ impl<'a> LoopCompiler<'a> {
         offset: i32,
         opcode: Opcode,
     ) -> Result<usize, JitError> {
-        let target = pc as i64 + offset as i64;
-        if target >= 0 && (target as usize) < self.func_def.code.len() {
-            Ok(target as usize)
-        } else {
-            Err(JitError::Internal(format!(
-                "{opcode:?} at pc {pc} targets invalid pc {target} (code_len={})",
-                self.func_def.code.len()
-            )))
-        }
+        crate::compile_common::checked_branch_target(self.func_def.code.len(), pc, offset, opcode)
     }
 
     fn checked_forloop_target(&self, pc: usize, inst: &Instruction) -> Result<usize, JitError> {
-        let target = pc as i64 + 1 + i64::from(inst.c as i16);
-        if target >= 0 && (target as usize) < self.func_def.code.len() {
-            Ok(target as usize)
-        } else {
-            Err(JitError::Internal(format!(
-                "ForLoop at pc {pc} targets invalid pc {target} (code_len={})",
-                self.func_def.code.len()
-            )))
-        }
+        crate::compile_common::checked_forloop_target(self.func_def.code.len(), pc, inst)
     }
 
     fn clear_flow_facts(&mut self) {
-        self.checked_non_nil.clear();
-        self.reg_consts.clear();
+        crate::compile_common::clear_flow_facts(&mut self.checked_non_nil, &mut self.reg_consts);
     }
 
     fn apply_reg_const_facts(&mut self, pc: usize) -> Result<(), JitError> {
-        self.reg_consts = self.reg_const_facts.get(pc).cloned().ok_or_else(|| {
-            JitError::Internal(format!("missing per-PC register-constant facts at pc {pc}"))
-        })?;
-        Ok(())
+        crate::compile_common::apply_reg_const_facts(
+            &mut self.reg_consts,
+            &self.reg_const_facts,
+            pc,
+        )
     }
 
     fn emit_prologue(&mut self) {
