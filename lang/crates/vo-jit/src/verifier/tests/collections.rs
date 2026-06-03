@@ -261,7 +261,7 @@ fn rejects_map_get_output_range_overflow() {
     assert!(matches!(
         verify_jit_metadata(&module.functions[0], &module),
         Err(JitMetadataError::SlotRangeOverflow {
-            access: "MapGet destination",
+            access: "write",
             ..
         })
     ));

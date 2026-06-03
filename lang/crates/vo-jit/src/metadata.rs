@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_dynamic_layout_has_no_register_fallback() {
+    fn missing_dynamic_layout_has_no_register_substitute() {
         let map_get = Instruction::new(Opcode::MapGet, 10, 2, 5);
         let slice_get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
 

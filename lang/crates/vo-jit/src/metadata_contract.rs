@@ -170,25 +170,7 @@ pub fn metadata_kind(metadata: &JitInstructionMetadata) -> JitMetadataKind {
 }
 
 pub fn opcode_metadata_requirement(opcode: Opcode) -> JitMetadataRequirement {
-    use Opcode::*;
-
-    match opcode {
-        ArrayNew | ArrayGet | ArraySet | ArrayAddr | SliceNew | SliceGet | SliceSet | SliceAddr
-        | SliceAppend => JitMetadataRequirement::ElemLayoutWhenFlagsZero,
-        MapGet => JitMetadataRequirement::MapGet,
-        MapSet => JitMetadataRequirement::MapSet,
-        MapDelete => JitMetadataRequirement::MapDelete,
-        PtrGet | PtrGetN | PtrSet | PtrSetN => JitMetadataRequirement::PtrLayout,
-        SlotGet | SlotGetN | SlotSet | SlotSetN => JitMetadataRequirement::SlotLayout,
-        CallClosure | CallIface | GoIsland => JitMetadataRequirement::CallLayout,
-        GoStart | DeferPush | ErrDeferPush => JitMetadataRequirement::CallLayoutWhenClosureShape,
-        CallExtern => JitMetadataRequirement::CallExternLayout,
-        QueueSend | QueueRecv | SelectSend | SelectRecv => JitMetadataRequirement::QueueLayout,
-        MapIterNext => JitMetadataRequirement::MapIterNext,
-        IfaceAssert => JitMetadataRequirement::IfaceAssertLayout,
-        Hint => JitMetadataRequirement::LoopEndForHintLoop,
-        _ => JitMetadataRequirement::None,
-    }
+    crate::semantics::opcode_metadata_requirement_from_semantics(opcode)
 }
 
 pub fn strict_metadata_contract_violation(

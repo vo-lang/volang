@@ -47,7 +47,7 @@ fn rejects_single_copy_source_destination_layout_mismatch() {
 fn rejects_integer_control_and_len_ops_on_root_typed_slots() {
     let mut module = VoModule::new("verify".to_string());
     module.functions.push(make_func_with_slot_types(
-        vec![Instruction::new(Opcode::JumpIf, 0, 1, 0)],
+        vec![Instruction::new(Opcode::JumpIf, 0, 0, 0)],
         vec![JitInstructionMetadata::None],
         vec![SlotType::GcRef],
         0,

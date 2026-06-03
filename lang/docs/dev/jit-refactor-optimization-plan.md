@@ -1,5 +1,16 @@
 # JIT Refactor & Optimization Plan
 
+Status, 2026-06-03: this document is now a historical performance backlog and
+architecture snapshot, not the source of truth for current JIT correctness
+contracts. Current opcode facts, verifier derivation, fail-fast policy, runtime
+path naming, and maintenance rules live in
+[`jit-fact-source.md`](jit-fact-source.md).
+
+The fact-source, metadata-contract, capability/effect-contract sync, verifier
+module split, and call-helper module split described in older refactor notes
+have been implemented. Treat remaining optimization ideas below as candidates
+that need fresh measurement before work starts.
+
 ## Baseline Performance (2026-02-20)
 
 ```
@@ -25,11 +36,13 @@ Key benchmarks:
 ```
 vo-jit/src/
 ├── lib.rs              JitCompiler, JitCache, JitFunc signature
+├── semantics.rs        Named opcode fact rows: capability, effects, verifier, metadata, fail-fast
 ├── translator.rs       IrEmitter trait, HelperFuncs, compute_memory_only_start
 ├── translate.rs        ~120 opcodes → Cranelift IR (shared by func+loop compilers)
 ├── func_compiler.rs    Full function compilation (FunctionCompiler)
 ├── loop_compiler.rs    Loop OSR compilation (LoopCompiler)
-├── call_helpers.rs     Call emission: static/closure/iface/extern/IC
+├── call_helpers.rs     Shared call ABI/frame helpers and call lowering exports
+├── call_helpers/       Dynamic IC, prepared call, extern, VM materialization modules
 ├── helpers.rs          HelperFuncIds, register_symbols, declare_helpers
 ├── intrinsics.rs       Math intrinsics (Sqrt, Floor, Ceil, Trunc, FMA)
 └── loop_analysis.rs    Loop detection from HINT_LOOP instructions
@@ -62,12 +75,12 @@ vo-runtime/src/jit_api.rs JitContext, JitResult, DynCallIC, PreparedCall, all vo
 
 | Call Type | Fast Path | Slow Path |
 |-----------|-----------|-----------|
-| **Static (Call)** | Direct FuncRef if callee compiled; otherwise jit_func_table[id] indirect | VM fallback via set_call_request + return Call |
-| **Self-recursive** | Direct FuncRef, native stack args | Same as static non-OK |
+| **Static (Call)** | Direct FuncRef if callee compiled; otherwise jit_func_table[id] indirect | VM call materialization via set_call_request + return Call |
+| **Self-recursive** | VM-owned frame required | VM call materialization preserves recoverable stack/defer semantics |
 | **Closure (CallClosure)** | IC hit → native stack, direct JIT call | IC miss → prepare_closure_call → PreparedCall |
 | **Interface (CallIface)** | IC hit → native stack, direct JIT call | IC miss → prepare_iface_call → PreparedCall |
 | **Extern (CallExtern)** | Intrinsics bypass FFI | vo_call_extern → jit_call_extern |
-| **has_defer callee** | — (always VM) | emit_call_via_vm → return Call |
+| **has_defer callee** | VM-owned frame required | emit_call_via_vm -> return Call |
 
 ---
 
@@ -101,6 +114,12 @@ vo-runtime/src/jit_api.rs JitContext, JitResult, DynCallIC, PreparedCall, all vo
 
 ### O4. Unify FunctionCompiler and LoopCompiler Code Paths (MEDIUM IMPACT, ARCHITECTURE)
 
+Current note: full-function and OSR compilers now share analysis and
+translation contracts, but their entry/exit and stack-base semantics remain
+intentionally different. Extracting a shared compiler core is still possible,
+but it should be justified by a concrete duplication reduction and must keep
+native-stack direct-call state separate from OSR locals-pointer state.
+
 **Problem**: FunctionCompiler and LoopCompiler have significant code duplication:
 - Both implement `IrEmitter` with nearly identical read_var/write_var/read_var_f64/write_var_f64
 - Both implement `compile()` with similar scan_jump_targets → emit_prologue → translate loop
@@ -133,13 +152,13 @@ This trades one additional function call on IC hit for dramatically smaller IR p
 
 ### O6. Static Call Deferred Compilation (LOW IMPACT, LOW RISK)
 
-**Problem**: emit_jit_call_with_fallback generates two complete code paths for every static Call:
+**Problem**: `emit_jit_call_with_vm_materialization` can generate two complete code paths for static `Call`:
 1. Direct call path (callee compiled) + OK/non-OK handling
-2. VM fallback path (callee not compiled) + set_call_request + return Call
+2. VM call materialization path (callee not compiled) + set_call_request + return Call
 
-When callee_func_ref is known at compile time (already compiled), the VM fallback path is dead code that still increases IR size and compilation time.
+When callee_func_ref is known at compile time (already compiled), the VM materialization path is dead code that still increases IR size and compilation time.
 
-**Solution**: When callee_func_ref is Some (compile-time known callee), skip generating the VM fallback path entirely. The callee is guaranteed compiled, null check is unnecessary.
+**Solution**: When callee_func_ref is Some (compile-time known callee), skip generating the VM materialization path entirely. The callee is guaranteed compiled, null check is unnecessary.
 
 When callee_func_ref is None, the indirect path already handles both JIT and VM cases correctly.
 
@@ -210,7 +229,7 @@ The GC alloc inline is the highest-value optimization here. The bump allocator c
 **Risk**: Low. Functional semantics unchanged.
 **Testing**: All existing tests must pass. Benchmark before/after.
 
-### Phase B: Compiler Unification (O4)
+### Phase B: Compiler Unification (O4, Historical Sketch)
 
 **Goal**: Reduce code duplication, improve maintainability.
 

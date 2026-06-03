@@ -208,7 +208,7 @@ pub fn alloc_ic_table() -> Vec<DynCallIC> {
 
 /// Result of preparing a closure or interface call.
 /// Note: SIZE must match core::mem::size_of::<PreparedCall>() (checked below).
-/// Contains information needed for JIT-to-JIT direct call or trampoline fallback.
+/// Contains information needed for JIT-to-JIT direct call or VM call materialization.
 #[repr(C)]
 pub struct PreparedCall {
     /// JIT function pointer for direct call. Null if callee should use trampoline.
@@ -220,7 +220,7 @@ pub struct PreparedCall {
     pub ret_ptr: *mut u64,
     /// Callee's local_slots (for caller_bp restoration).
     pub callee_local_slots: u32,
-    /// Resolved func_id (for trampoline fallback).
+    /// Resolved func_id (for VM call materialization).
     pub func_id: u32,
     /// Offset where user args start in callee frame.
     pub arg_offset: u32,
@@ -241,8 +241,8 @@ impl PreparedCall {
     pub const OFFSET_IS_LEAF: i32 = 40;
     pub const SIZE: usize = 48;
 
-    /// Create a fallback result (callee should use trampoline).
-    pub fn fallback(func_id: u32, callee_local_slots: u32) -> Self {
+    /// Create a result whose callee must be materialized through the VM call trampoline.
+    pub fn vm_materialization(func_id: u32, callee_local_slots: u32) -> Self {
         PreparedCall {
             jit_func_ptr: core::ptr::null(),
             callee_args_ptr: core::ptr::null_mut(),

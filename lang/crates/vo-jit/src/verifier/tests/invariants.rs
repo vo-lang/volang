@@ -92,17 +92,25 @@ fn rejects_function_def_derived_flag_drift() {
 }
 
 #[test]
-fn verifier_slot_contract_has_no_wildcard_allowlist() {
+fn verifier_slot_contract_dispatches_from_semantics_domain() {
     let src = include_str!("../instruction_contracts.rs");
-    let start = src.find("fn verify_slot_contract").unwrap();
+    let start = src.find("verify_slot_contract").unwrap();
     let end = src[start..]
-        .find("\nfn verify_map_iter_next_contract")
+        .find("\nfn verify_requirement_preflight")
         .map(|offset| start + offset)
         .unwrap();
     let body = &src[start..end];
 
     assert!(
+        body.contains("opcode_semantics(ctx.opcode)") && body.contains("row.verifier_domain"),
+        "verify_slot_contract must derive verifier dispatch from the semantics row"
+    );
+    assert!(
+        !body.contains("Opcode::"),
+        "verify_slot_contract must not restore a root opcode-to-verifier-family table"
+    );
+    assert!(
         !body.contains("_ => Ok(())"),
-        "verify_slot_contract must explicitly name every opcode it accepts; wildcard Ok lets new opcodes bypass JIT contract review"
+        "verify_slot_contract must not wildcard-accept opcodes outside the semantics row domain"
     );
 }

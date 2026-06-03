@@ -11,7 +11,7 @@
 当前实现把 JIT correctness 拆成以下源文件共同约束：
 
 - `lang/crates/vo-jit/src/semantics.rs`：每个 opcode 的全局语义矩阵。
-- `lang/crates/vo-jit/src/capability.rs`：full-function JIT、OSR、fallback policy 的显式能力声明。
+- `lang/crates/vo-jit/src/capability.rs`：full-function JIT、OSR、runtime path policy 的显式能力声明。
 - `lang/crates/vo-jit/src/contract.rs`：may_gc、may_alloc、may_panic、may_unwind、may_schedule、observe_frame、needs_frame、slot/type metadata、write barrier、interface/closure effect。
 - `lang/crates/vo-jit/src/contract_graph.rs`：opcode、packed operand、metadata、runtime helper、callback、callback callsite、GC entry、JIT entry policy 的可枚举合同图。
 - `lang/crates/vo-jit/src/effects.rs`：输入/输出 slot、memory sync、call effect。

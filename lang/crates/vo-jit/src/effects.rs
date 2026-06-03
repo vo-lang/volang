@@ -5,6 +5,10 @@ use vo_runtime::instruction::{Instruction, Opcode};
 
 use crate::metadata;
 pub use crate::metadata::{MapGetLayout, MapSetLayout, MetadataFacts as EffectFacts};
+use crate::semantics::{
+    opcode_register_effects, DynamicRegisterReadEffect, DynamicRegisterWriteEffect, MemorySyncSpec,
+    RegisterCondition, RegisterCount, RegisterEffectOperand, RegisterOperand, RegisterRangeStart,
+};
 
 pub const MAP_ITER_SLOTS: u16 = vo_runtime::objects::map::MAP_ITER_SLOTS as u16;
 
@@ -99,28 +103,21 @@ pub fn try_instruction_effects_with_module_context(
 }
 
 pub fn may_call(inst: &Instruction) -> bool {
-    matches!(
-        inst.opcode(),
-        Opcode::Call | Opcode::CallClosure | Opcode::CallIface | Opcode::CallExtern
-    )
+    opcode_register_effects(inst.opcode()).may_call
 }
 
 pub fn try_memory_sync_effect(inst: &Instruction) -> Result<MemorySyncEffect, SlotRangeError> {
-    match inst.opcode() {
-        Opcode::SlotSet | Opcode::SlotSetN => Ok(MemorySyncEffect::From(inst.a)),
-        Opcode::SlotGet | Opcode::SlotGetN => Ok(MemorySyncEffect::From(inst.b)),
-        Opcode::QueueSend => Ok(MemorySyncEffect::From(inst.b)),
-        Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
-            Ok(MemorySyncEffect::From(inst.b))
+    match opcode_register_effects(inst.opcode()).memory_sync {
+        MemorySyncSpec::None => Ok(MemorySyncEffect::None),
+        MemorySyncSpec::All => Ok(MemorySyncEffect::All),
+        MemorySyncSpec::FromOperand(operand) => {
+            Ok(MemorySyncEffect::From(operand_slot(inst, operand)))
         }
-        Opcode::GoIsland => Ok(MemorySyncEffect::From(inst.c)),
-        Opcode::SliceAppend => {
+        MemorySyncSpec::SliceAppendValueStart => {
             let elem_slot =
                 checked_slot_offset(inst.c, if inst.flags == 0 { 2 } else { 1 }, "memory")?;
             Ok(MemorySyncEffect::From(elem_slot))
         }
-        Opcode::SelectSend | Opcode::SelectRecv | Opcode::SelectExec => Ok(MemorySyncEffect::All),
-        _ => Ok(MemorySyncEffect::None),
     }
 }
 
@@ -132,6 +129,147 @@ fn checked_slot_offset(
     start
         .checked_add(offset)
         .ok_or_else(|| SlotRangeError::new(access, start, offset.saturating_add(1)))
+}
+
+fn operand_slot(inst: &Instruction, operand: RegisterOperand) -> u16 {
+    match operand {
+        RegisterOperand::A => inst.a,
+        RegisterOperand::B => inst.b,
+        RegisterOperand::C => inst.c,
+        RegisterOperand::Zero => 0,
+    }
+}
+
+fn condition_matches(inst: &Instruction, condition: RegisterCondition) -> bool {
+    match condition {
+        RegisterCondition::FlagSet(mask) => (inst.flags & mask) != 0,
+        RegisterCondition::FlagsEq(expected) => inst.flags == expected,
+    }
+}
+
+fn register_count(
+    inst: &Instruction,
+    count: RegisterCount,
+    access: &'static str,
+) -> Result<u16, EffectError> {
+    match count {
+        RegisterCount::Fixed(slots) => Ok(slots),
+        RegisterCount::OperandB => Ok(inst.b),
+        RegisterCount::OperandC => Ok(inst.c),
+        RegisterCount::Flags => Ok(inst.flags as u16),
+        RegisterCount::CopyNCount => Ok(inst.copy_n_count()),
+        RegisterCount::PackedArgSlots => Ok(inst.packed_arg_slots()),
+        RegisterCount::PackedRetSlots => Ok(inst.packed_ret_slots()),
+        RegisterCount::ElemSlotsFromFlags => {
+            if inst.flags == 0 {
+                Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"))
+            } else {
+                Ok(slice_elem_slots_from_flags(inst.flags))
+            }
+        }
+        RegisterCount::MapIterSlots => Ok(MAP_ITER_SLOTS),
+        RegisterCount::MapIterKeyValueSlots => {
+            let key_slots = inst.map_iter_key_slots();
+            key_slots
+                .checked_add(inst.map_iter_val_slots())
+                .ok_or_else(|| SlotRangeError::new(access, inst.a, key_slots).into())
+        }
+        RegisterCount::RecvResult {
+            normalize_zero_elem_slots,
+        } => Ok(recv_result_slots(inst.flags, normalize_zero_elem_slots)),
+        RegisterCount::IfaceAssertResult => {
+            let target_slots = (inst.flags >> 3) as u16;
+            let has_ok = ((inst.flags >> 2) & 1) != 0;
+            let assert_kind = inst.flags & 0x3;
+            let dst_slots = if assert_kind == 1 {
+                2
+            } else {
+                target_slots.max(1)
+            };
+            dst_slots
+                .checked_add(u16::from(has_ok))
+                .ok_or_else(|| SlotRangeError::new(access, inst.a, dst_slots).into())
+        }
+        RegisterCount::SelectSendElemSlots => Ok(if inst.flags == 0 {
+            1
+        } else {
+            inst.flags as u16
+        }),
+    }
+}
+
+fn register_range_start(
+    inst: &Instruction,
+    start: RegisterRangeStart,
+    access: &'static str,
+) -> Result<u16, EffectError> {
+    match start {
+        RegisterRangeStart::Operand(operand) => Ok(operand_slot(inst, operand)),
+        RegisterRangeStart::OperandOffset(operand, offset) => {
+            checked_slot_offset(operand_slot(inst, operand), offset, access).map_err(Into::into)
+        }
+        RegisterRangeStart::BPlusPackedArgSlots => {
+            checked_slot_offset(inst.b, inst.packed_arg_slots(), access).map_err(Into::into)
+        }
+        RegisterRangeStart::SliceAppendValueStart => {
+            let offset = if inst.flags == 0 { 2 } else { 1 };
+            checked_slot_offset(inst.c, offset, access).map_err(Into::into)
+        }
+    }
+}
+
+fn push_register_effect_operand(
+    regs: &mut Vec<u16>,
+    inst: &Instruction,
+    operand: RegisterEffectOperand,
+    access: &'static str,
+) -> Result<(), EffectError> {
+    match operand {
+        RegisterEffectOperand::Slot(operand) => regs.push(operand_slot(inst, operand)),
+        RegisterEffectOperand::SlotOffset(operand, offset) => {
+            regs.push(checked_slot_offset(
+                operand_slot(inst, operand),
+                offset,
+                access,
+            )?);
+        }
+        RegisterEffectOperand::ConditionalSlot { condition, operand } => {
+            if condition_matches(inst, condition) {
+                regs.push(operand_slot(inst, operand));
+            }
+        }
+        RegisterEffectOperand::ConditionalSlotOffset {
+            condition,
+            operand,
+            offset,
+        } => {
+            if condition_matches(inst, condition) {
+                regs.push(checked_slot_offset(
+                    operand_slot(inst, operand),
+                    offset,
+                    access,
+                )?);
+            }
+        }
+        RegisterEffectOperand::Range { start, count } => {
+            let start = register_range_start(inst, start, access)?;
+            let count = register_count(inst, count, access)?;
+            try_push_slot_range(regs, start, count, access)?;
+        }
+    }
+    Ok(())
+}
+
+fn push_register_effect_operands(
+    regs: &mut Vec<u16>,
+    inst: &Instruction,
+    operands: &'static [RegisterEffectOperand],
+    access: &'static str,
+) -> Result<(), EffectError> {
+    for &operand in operands {
+        push_register_effect_operand(regs, inst, operand, access)?;
+    }
+    Ok(())
 }
 
 pub fn try_push_slot_range(
@@ -240,320 +378,88 @@ pub fn recv_result_slots(flags: u8, normalize_zero_elem_slots: bool) -> u16 {
     elem_slots + u16::from(inst.recv_has_ok())
 }
 
-fn try_push_recv_result_slots(
-    regs: &mut Vec<u16>,
-    dst_start: u16,
-    flags: u8,
-    normalize_zero: bool,
-) -> Result<(), SlotRangeError> {
-    let count = recv_result_slots(flags, normalize_zero);
-    try_push_slot_range(regs, dst_start, count, "write")
+fn try_dynamic_read_regs(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    functions: &[FunctionDef],
+) -> Result<Option<Vec<u16>>, EffectError> {
+    let dynamic = opcode_register_effects(inst.opcode()).dynamic_reads;
+    let mut regs = Vec::new();
+    match dynamic {
+        DynamicRegisterReadEffect::None => Ok(None),
+        DynamicRegisterReadEffect::StaticCallSignature => {
+            if let Some(callee) = functions.get(inst.static_call_func_id() as usize) {
+                try_push_slot_range(&mut regs, inst.b, callee.param_slots, "read")?;
+                Ok(Some(regs))
+            } else {
+                Ok(None)
+            }
+        }
+        DynamicRegisterReadEffect::IndexedSetValueLayout => {
+            if !facts.has_facts() {
+                return Ok(None);
+            }
+            let value_slots = required_indexed_set_value_slots(inst, facts)?;
+            regs.push(inst.a);
+            regs.push(inst.b);
+            try_push_slot_range(&mut regs, inst.c, value_slots, "read")?;
+            Ok(Some(regs))
+        }
+        DynamicRegisterReadEffect::SliceAppendValueLayout => {
+            if !facts.has_facts() {
+                return Ok(None);
+            }
+            let value_slots = required_slice_append_value_slots(inst, facts)?;
+            regs.push(inst.b);
+            regs.push(inst.c);
+            let value_start =
+                checked_slot_offset(inst.c, if inst.flags == 0 { 2 } else { 1 }, "read")?;
+            try_push_slot_range(&mut regs, value_start, value_slots, "read")?;
+            Ok(Some(regs))
+        }
+        DynamicRegisterReadEffect::MapGetLayout => {
+            let layout = required_map_get_layout(inst, facts)?;
+            regs.push(inst.b);
+            regs.push(inst.c);
+            try_push_slot_range(
+                &mut regs,
+                checked_slot_offset(inst.c, 1, "read")?,
+                layout.key_slots,
+                "read",
+            )?;
+            Ok(Some(regs))
+        }
+        DynamicRegisterReadEffect::MapSetLayout => {
+            let layout = required_map_set_layout(inst, facts)?;
+            regs.push(inst.a);
+            regs.push(inst.b);
+            try_push_slot_range(
+                &mut regs,
+                checked_slot_offset(inst.b, 1, "read")?,
+                layout.key_slots,
+                "read",
+            )?;
+            try_push_slot_range(&mut regs, inst.c, layout.val_slots, "read")?;
+            Ok(Some(regs))
+        }
+        DynamicRegisterReadEffect::MapDeleteLayout => {
+            let key_slots = required_map_delete_key_slots(inst, facts)?;
+            regs.push(inst.a);
+            regs.push(inst.b);
+            try_push_slot_range(
+                &mut regs,
+                checked_slot_offset(inst.b, 1, "read")?,
+                key_slots,
+                "read",
+            )?;
+            Ok(Some(regs))
+        }
+    }
 }
 
+#[allow(dead_code)]
 pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
-    let mut regs = Vec::new();
-
-    match inst.opcode() {
-        Opcode::Copy
-        | Opcode::Not
-        | Opcode::BoolNot
-        | Opcode::NegI
-        | Opcode::NegF
-        | Opcode::ConvI2F
-        | Opcode::ConvF2I
-        | Opcode::ConvF64F32
-        | Opcode::ConvF32F64
-        | Opcode::Trunc => {
-            regs.push(inst.b);
-        }
-        Opcode::CopyN => {
-            try_push_slot_range(&mut regs, inst.b, inst.copy_n_count(), "read")?;
-        }
-        Opcode::AddI
-        | Opcode::SubI
-        | Opcode::MulI
-        | Opcode::DivI
-        | Opcode::DivU
-        | Opcode::ModI
-        | Opcode::ModU
-        | Opcode::AddF
-        | Opcode::SubF
-        | Opcode::MulF
-        | Opcode::DivF
-        | Opcode::And
-        | Opcode::Or
-        | Opcode::Xor
-        | Opcode::AndNot
-        | Opcode::Shl
-        | Opcode::ShrS
-        | Opcode::ShrU
-        | Opcode::EqI
-        | Opcode::NeI
-        | Opcode::LtI
-        | Opcode::LeI
-        | Opcode::GtI
-        | Opcode::GeI
-        | Opcode::LtU
-        | Opcode::LeU
-        | Opcode::GtU
-        | Opcode::GeU
-        | Opcode::EqF
-        | Opcode::NeF
-        | Opcode::LtF
-        | Opcode::LeF
-        | Opcode::GtF
-        | Opcode::GeF => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::JumpIf | Opcode::JumpIfNot => {
-            regs.push(inst.a);
-        }
-        Opcode::GlobalSet => {
-            regs.push(inst.b);
-        }
-        Opcode::GlobalSetN => {
-            try_push_slot_range(&mut regs, inst.b, inst.flags as u16, "read")?;
-        }
-        Opcode::PtrNew => {
-            regs.push(inst.b);
-        }
-        Opcode::PtrGet | Opcode::PtrGetN => {
-            regs.push(inst.b);
-        }
-        Opcode::PtrSet => {
-            regs.push(inst.a);
-            regs.push(inst.c);
-        }
-        Opcode::PtrSetN => {
-            regs.push(inst.a);
-            try_push_slot_range(&mut regs, inst.c, inst.flags as u16, "read")?;
-        }
-        Opcode::PtrAdd => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::SlotGet => {
-            regs.push(inst.c);
-        }
-        Opcode::SlotSet => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::SlotGetN => {
-            regs.push(inst.c);
-        }
-        Opcode::SlotSetN => {
-            regs.push(inst.b);
-            try_push_slot_range(&mut regs, inst.c, inst.flags as u16, "read")?;
-        }
-        Opcode::ArrayNew => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::ArrayGet | Opcode::ArrayAddr => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::ArraySet => {
-            regs.push(inst.a);
-            regs.push(inst.b);
-            if inst.flags == 0 {
-                return Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"));
-            }
-            try_push_slot_range(
-                &mut regs,
-                inst.c,
-                slice_elem_slots_from_flags(inst.flags),
-                "read",
-            )?;
-        }
-        Opcode::SliceNew => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-            regs.push(checked_slot_offset(inst.c, 1, "read")?);
-        }
-        Opcode::SliceGet | Opcode::SliceAddr => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::SliceSet => {
-            regs.push(inst.a);
-            regs.push(inst.b);
-            if inst.flags == 0 {
-                return Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"));
-            }
-            try_push_slot_range(
-                &mut regs,
-                inst.c,
-                slice_elem_slots_from_flags(inst.flags),
-                "read",
-            )?;
-        }
-        Opcode::SliceLen | Opcode::SliceCap => {
-            regs.push(inst.b);
-        }
-        Opcode::SliceSlice => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-            regs.push(checked_slot_offset(inst.c, 1, "read")?);
-            if (inst.flags & 0b10) != 0 {
-                regs.push(checked_slot_offset(inst.c, 2, "read")?);
-            }
-        }
-        Opcode::SliceAppend => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-            if inst.flags == 0 {
-                return Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"));
-            } else {
-                try_push_slot_range(
-                    &mut regs,
-                    checked_slot_offset(inst.c, 1, "read")?,
-                    slice_elem_slots_from_flags(inst.flags),
-                    "read",
-                )?;
-            }
-        }
-        Opcode::StrLen => {
-            regs.push(inst.b);
-        }
-        Opcode::StrIndex
-        | Opcode::StrConcat
-        | Opcode::StrEq
-        | Opcode::StrNe
-        | Opcode::StrLt
-        | Opcode::StrLe
-        | Opcode::StrGt
-        | Opcode::StrGe
-        | Opcode::StrDecodeRune => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::StrSlice => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-            regs.push(checked_slot_offset(inst.c, 1, "read")?);
-        }
-        Opcode::MapNew => {
-            regs.push(inst.b);
-            regs.push(checked_slot_offset(inst.b, 1, "read")?);
-        }
-        Opcode::MapGet => {
-            return Err(EffectError::missing_layout(inst.opcode(), "MapGet"));
-        }
-        Opcode::MapSet => {
-            return Err(EffectError::missing_layout(inst.opcode(), "MapSet"));
-        }
-        Opcode::MapDelete => {
-            return Err(EffectError::missing_layout(inst.opcode(), "MapDelete"));
-        }
-        Opcode::MapLen => {
-            regs.push(inst.b);
-        }
-        Opcode::MapIterInit => {
-            regs.push(inst.b);
-        }
-        Opcode::MapIterNext => {
-            try_push_slot_range(&mut regs, inst.b, MAP_ITER_SLOTS, "read")?;
-        }
-        Opcode::QueueNew => {
-            regs.push(inst.b);
-            regs.push(inst.c);
-        }
-        Opcode::QueueLen | Opcode::QueueCap => {
-            regs.push(inst.b);
-        }
-        Opcode::QueueClose => {
-            regs.push(inst.a);
-        }
-        Opcode::QueueSend => {
-            regs.push(inst.a);
-            try_push_slot_range(&mut regs, inst.b, inst.flags as u16, "read")?;
-        }
-        Opcode::QueueRecv => {
-            regs.push(inst.b);
-        }
-        Opcode::SelectSend => {
-            regs.push(inst.a);
-            let elem_slots = if inst.flags == 0 {
-                1
-            } else {
-                inst.flags as u16
-            };
-            try_push_slot_range(&mut regs, inst.b, elem_slots, "read")?;
-        }
-        Opcode::SelectRecv => {
-            regs.push(inst.b);
-        }
-        Opcode::ClosureGet => {
-            regs.push(0);
-        }
-        Opcode::GoStart | Opcode::DeferPush | Opcode::ErrDeferPush => {
-            if inst.call_shape_is_closure() {
-                regs.push(inst.a);
-            }
-            try_push_slot_range(&mut regs, inst.b, inst.c, "read")?;
-        }
-        Opcode::GoIsland => {
-            regs.push(inst.a);
-            regs.push(inst.b);
-            try_push_slot_range(&mut regs, inst.c, inst.flags as u16, "read")?;
-        }
-        Opcode::Panic => {
-            regs.push(inst.a);
-            regs.push(checked_slot_offset(inst.a, 1, "read")?);
-        }
-        Opcode::IfaceAssign => {
-            let vk = inst.flags;
-            if vk == 16 {
-                regs.push(inst.b);
-                regs.push(checked_slot_offset(inst.b, 1, "read")?);
-            } else {
-                regs.push(inst.b);
-            }
-        }
-        Opcode::IfaceAssert => {
-            regs.push(inst.b);
-            regs.push(checked_slot_offset(inst.b, 1, "read")?);
-        }
-        Opcode::IfaceEq => {
-            regs.push(inst.b);
-            regs.push(checked_slot_offset(inst.b, 1, "read")?);
-            regs.push(inst.c);
-            regs.push(checked_slot_offset(inst.c, 1, "read")?);
-        }
-        Opcode::IndexCheck => {
-            regs.push(inst.a);
-            regs.push(inst.b);
-        }
-        Opcode::IslandNew => {}
-        Opcode::ForLoop => {
-            regs.push(inst.a);
-            regs.push(inst.b);
-        }
-        Opcode::Return => {
-            try_push_slot_range(&mut regs, inst.a, inst.b, "read")?;
-        }
-        Opcode::Call => {
-            try_push_slot_range(&mut regs, inst.b, inst.packed_arg_slots(), "read")?;
-        }
-        Opcode::CallClosure => {
-            regs.push(inst.a);
-            try_push_slot_range(&mut regs, inst.b, inst.packed_arg_slots(), "read")?;
-        }
-        Opcode::CallExtern => {
-            try_push_slot_range(&mut regs, inst.c, inst.flags as u16, "read")?;
-        }
-        Opcode::CallIface => {
-            regs.push(inst.a);
-            regs.push(checked_slot_offset(inst.a, 1, "read")?);
-            try_push_slot_range(&mut regs, inst.b, inst.packed_arg_slots(), "read")?;
-        }
-        _ => {}
-    }
-
-    Ok(regs)
+    try_read_regs_with_module_context(inst, EffectFacts::none(), &[])
 }
 
 #[allow(dead_code)]
@@ -569,255 +475,33 @@ pub fn try_read_regs_with_module_context(
     facts: EffectFacts<'_>,
     functions: &[FunctionDef],
 ) -> Result<Vec<u16>, EffectError> {
-    if inst.opcode() == Opcode::Call {
-        if let Some(callee) = functions.get(inst.static_call_func_id() as usize) {
-            let mut regs = Vec::new();
-            try_push_slot_range(&mut regs, inst.b, callee.param_slots, "read")?;
-            return Ok(regs);
-        }
-    }
-
-    if !facts.has_facts() {
-        return try_read_regs(inst);
-    }
-
     let mut regs = Vec::new();
-
-    match inst.opcode() {
-        Opcode::ArraySet | Opcode::SliceSet => {
-            let value_slots = required_indexed_set_value_slots(inst, facts)?;
-            regs.push(inst.a);
-            regs.push(inst.b);
-            try_push_slot_range(&mut regs, inst.c, value_slots, "read")?;
-            return Ok(regs);
-        }
-        Opcode::SliceAppend => {
-            let value_slots = required_slice_append_value_slots(inst, facts)?;
-            regs.push(inst.b);
-            regs.push(inst.c);
-            if inst.flags == 0 {
-                try_push_slot_range(
-                    &mut regs,
-                    checked_slot_offset(inst.c, 2, "read")?,
-                    value_slots,
-                    "read",
-                )?;
-            } else {
-                try_push_slot_range(
-                    &mut regs,
-                    checked_slot_offset(inst.c, 1, "read")?,
-                    value_slots,
-                    "read",
-                )?;
-            }
-            return Ok(regs);
-        }
-        Opcode::MapGet => {
-            let layout = required_map_get_layout(inst, facts)?;
-            regs.push(inst.b);
-            regs.push(inst.c);
-            try_push_slot_range(
-                &mut regs,
-                checked_slot_offset(inst.c, 1, "read")?,
-                layout.key_slots,
-                "read",
-            )?;
-            return Ok(regs);
-        }
-        Opcode::MapSet => {
-            let layout = required_map_set_layout(inst, facts)?;
-            regs.push(inst.a);
-            regs.push(inst.b);
-            try_push_slot_range(
-                &mut regs,
-                checked_slot_offset(inst.b, 1, "read")?,
-                layout.key_slots,
-                "read",
-            )?;
-            try_push_slot_range(&mut regs, inst.c, layout.val_slots, "read")?;
-            return Ok(regs);
-        }
-        Opcode::MapDelete => {
-            let key_slots = required_map_delete_key_slots(inst, facts)?;
-            regs.push(inst.a);
-            regs.push(inst.b);
-            try_push_slot_range(
-                &mut regs,
-                checked_slot_offset(inst.b, 1, "read")?,
-                key_slots,
-                "read",
-            )?;
-            return Ok(regs);
-        }
-        _ => {}
+    if let Some(dynamic) = try_dynamic_read_regs(inst, facts, functions)? {
+        return Ok(dynamic);
     }
 
-    try_read_regs(inst)
+    let row = opcode_register_effects(inst.opcode());
+    push_register_effect_operands(&mut regs, inst, row.reads, "read")?;
+    Ok(regs)
 }
 
 pub fn single_write_reg(inst: &Instruction) -> Option<u16> {
-    match inst.opcode() {
-        Opcode::Copy
-        | Opcode::Not
-        | Opcode::BoolNot
-        | Opcode::NegI
-        | Opcode::NegF
-        | Opcode::AddI
-        | Opcode::SubI
-        | Opcode::MulI
-        | Opcode::DivI
-        | Opcode::DivU
-        | Opcode::ModI
-        | Opcode::ModU
-        | Opcode::AddF
-        | Opcode::SubF
-        | Opcode::MulF
-        | Opcode::DivF
-        | Opcode::And
-        | Opcode::Or
-        | Opcode::Xor
-        | Opcode::AndNot
-        | Opcode::Shl
-        | Opcode::ShrS
-        | Opcode::ShrU
-        | Opcode::EqI
-        | Opcode::NeI
-        | Opcode::LtI
-        | Opcode::LeI
-        | Opcode::GtI
-        | Opcode::GeI
-        | Opcode::LtU
-        | Opcode::LeU
-        | Opcode::GtU
-        | Opcode::GeU
-        | Opcode::EqF
-        | Opcode::NeF
-        | Opcode::LtF
-        | Opcode::LeF
-        | Opcode::GtF
-        | Opcode::GeF
-        | Opcode::LoadInt
-        | Opcode::LoadConst
-        | Opcode::GlobalGet
-        | Opcode::PtrGet
-        | Opcode::PtrAdd
-        | Opcode::PtrNew
-        | Opcode::SlotGet
-        | Opcode::ArrayNew
-        | Opcode::ArrayGet
-        | Opcode::ArrayAddr
-        | Opcode::SliceGet
-        | Opcode::SliceNew
-        | Opcode::SliceLen
-        | Opcode::SliceCap
-        | Opcode::SliceSlice
-        | Opcode::SliceAppend
-        | Opcode::SliceAddr
-        | Opcode::StrNew
-        | Opcode::StrLen
-        | Opcode::StrIndex
-        | Opcode::StrConcat
-        | Opcode::StrSlice
-        | Opcode::StrEq
-        | Opcode::StrNe
-        | Opcode::StrLt
-        | Opcode::StrLe
-        | Opcode::StrGt
-        | Opcode::StrGe
-        | Opcode::MapNew
-        | Opcode::MapLen
-        | Opcode::ClosureNew
-        | Opcode::ClosureGet
-        | Opcode::QueueNew
-        | Opcode::QueueLen
-        | Opcode::QueueCap
-        | Opcode::IslandNew
-        | Opcode::SelectExec
-        | Opcode::IfaceEq
-        | Opcode::ForLoop
-        | Opcode::ConvI2F
-        | Opcode::ConvF2I
-        | Opcode::ConvF64F32
-        | Opcode::ConvF32F64
-        | Opcode::Trunc => Some(inst.a),
-        _ => None,
-    }
+    opcode_register_effects(inst.opcode())
+        .single_write
+        .map(|operand| operand_slot(inst, operand))
 }
 
 pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
-
-    match inst.opcode() {
-        Opcode::Call | Opcode::CallClosure | Opcode::CallIface => {
-            let ret_start = checked_slot_offset(inst.b, inst.packed_arg_slots(), "write")?;
-            let ret_slots = inst.packed_ret_slots();
-            try_push_slot_range(&mut regs, ret_start, ret_slots, "write")?;
-        }
-        Opcode::CallExtern => {
-            regs.push(inst.a);
-        }
-        Opcode::CopyN => {
-            try_push_slot_range(&mut regs, inst.a, inst.copy_n_count(), "write")?;
-        }
-        Opcode::IfaceAssign => {
-            try_push_slot_range(&mut regs, inst.a, 2, "write")?;
-        }
-        Opcode::IfaceAssert => {
-            let target_slots = (inst.flags >> 3) as u16;
-            let has_ok = ((inst.flags >> 2) & 1) != 0;
-            let assert_kind = inst.flags & 0x3;
-            let dst_slots = if assert_kind == 1 {
-                2
-            } else {
-                target_slots.max(1)
-            };
-            let total_slots = dst_slots
-                .checked_add(u16::from(has_ok))
-                .ok_or_else(|| SlotRangeError::new("write", inst.a, dst_slots))?;
-            try_push_slot_range(&mut regs, inst.a, total_slots, "write")?;
-        }
-        Opcode::GlobalGetN | Opcode::PtrGetN | Opcode::SlotGetN => {
-            try_push_slot_range(&mut regs, inst.a, inst.flags as u16, "write")?;
-        }
-        Opcode::ArrayGet | Opcode::SliceGet => {
-            if inst.flags == 0 {
-                return Err(EffectError::missing_layout(inst.opcode(), "ElemLayout"));
-            }
-            try_push_slot_range(
-                &mut regs,
-                inst.a,
-                slice_elem_slots_from_flags(inst.flags),
-                "write",
-            )?;
-        }
-        Opcode::MapGet => {
-            return Err(EffectError::missing_layout(inst.opcode(), "MapGet"));
-        }
-        Opcode::MapIterInit => {
-            try_push_slot_range(&mut regs, inst.a, MAP_ITER_SLOTS, "write")?;
-        }
-        Opcode::MapIterNext => {
-            let key_slots = inst.map_iter_key_slots();
-            let val_slots = inst.map_iter_val_slots();
-            let out_slots = key_slots
-                .checked_add(val_slots)
-                .ok_or_else(|| SlotRangeError::new("write", inst.a, key_slots))?;
-            try_push_slot_range(&mut regs, inst.b, MAP_ITER_SLOTS, "write")?;
-            try_push_slot_range(&mut regs, inst.a, out_slots, "write")?;
-            regs.push(inst.c);
-        }
-        Opcode::QueueRecv => {
-            try_push_recv_result_slots(&mut regs, inst.a, inst.flags, false)?;
-        }
-        Opcode::SelectRecv => {
-            try_push_recv_result_slots(&mut regs, inst.a, inst.flags, true)?;
-        }
-        Opcode::StrDecodeRune | Opcode::Recover => {
-            try_push_slot_range(&mut regs, inst.a, 2, "write")?;
-        }
-        _ => {}
+    if let Some(dynamic) = try_dynamic_multi_write_regs(inst, EffectFacts::none(), &[], &[])? {
+        return Ok(dynamic);
     }
-
+    push_register_effect_operands(
+        &mut regs,
+        inst,
+        opcode_register_effects(inst.opcode()).writes,
+        "write",
+    )?;
     Ok(regs)
 }
 
@@ -830,6 +514,55 @@ pub fn try_multi_write_regs_with_context(
     try_multi_write_regs_with_module_context(inst, facts, externs, &[])
 }
 
+fn try_dynamic_multi_write_regs(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+    externs: &[ExternDef],
+    functions: &[FunctionDef],
+) -> Result<Option<Vec<u16>>, EffectError> {
+    let dynamic = opcode_register_effects(inst.opcode()).dynamic_writes;
+    let mut regs = Vec::new();
+    match dynamic {
+        DynamicRegisterWriteEffect::None => Ok(None),
+        DynamicRegisterWriteEffect::StaticCallSignature => {
+            if let Some(callee) = functions.get(inst.static_call_func_id() as usize) {
+                let ret_start = checked_slot_offset(inst.b, callee.param_slots, "write")?;
+                try_push_slot_range(&mut regs, ret_start, callee.ret_slots, "write")?;
+                Ok(Some(regs))
+            } else {
+                Ok(None)
+            }
+        }
+        DynamicRegisterWriteEffect::ExternSignature => {
+            if externs.is_empty() {
+                return Ok(None);
+            }
+            let ret_slots = externs
+                .get(inst.b as usize)
+                .map(|extern_def| extern_def.ret_slots)
+                .ok_or_else(|| EffectError::missing_extern(inst.b))?;
+            try_push_slot_range(&mut regs, inst.a, ret_slots, "write")?;
+            Ok(Some(regs))
+        }
+        DynamicRegisterWriteEffect::IndexedGetResultLayout => {
+            if !facts.has_facts() {
+                return Ok(None);
+            }
+            let slots = required_indexed_get_result_slots(inst, facts)?;
+            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
+            Ok(Some(regs))
+        }
+        DynamicRegisterWriteEffect::MapGetLayout => {
+            let layout = required_map_get_layout(inst, facts)?;
+            let slots = layout
+                .output_slots()
+                .ok_or_else(|| SlotRangeError::new("write", inst.a, layout.val_slots))?;
+            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
+            Ok(Some(regs))
+        }
+    }
+}
+
 pub fn try_multi_write_regs_with_module_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -837,40 +570,16 @@ pub fn try_multi_write_regs_with_module_context(
     functions: &[FunctionDef],
 ) -> Result<Vec<u16>, EffectError> {
     let mut regs = Vec::new();
-
-    match inst.opcode() {
-        Opcode::Call => {
-            if let Some(callee) = functions.get(inst.static_call_func_id() as usize) {
-                let ret_start = checked_slot_offset(inst.b, callee.param_slots, "write")?;
-                try_push_slot_range(&mut regs, ret_start, callee.ret_slots, "write")?;
-                return Ok(regs);
-            }
-        }
-        Opcode::CallExtern => {
-            let ret_slots = externs
-                .get(inst.b as usize)
-                .map(|extern_def| extern_def.ret_slots)
-                .ok_or_else(|| EffectError::missing_extern(inst.b))?;
-            try_push_slot_range(&mut regs, inst.a, ret_slots, "write")?;
-            return Ok(regs);
-        }
-        Opcode::ArrayGet | Opcode::SliceGet => {
-            let slots = required_indexed_get_result_slots(inst, facts)?;
-            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
-            return Ok(regs);
-        }
-        Opcode::MapGet => {
-            let layout = required_map_get_layout(inst, facts)?;
-            let slots = layout
-                .output_slots()
-                .ok_or_else(|| SlotRangeError::new("write", inst.a, layout.val_slots))?;
-            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
-            return Ok(regs);
-        }
-        _ => {}
+    if let Some(dynamic) = try_dynamic_multi_write_regs(inst, facts, externs, functions)? {
+        return Ok(dynamic);
     }
-
-    try_multi_write_regs(inst)
+    push_register_effect_operands(
+        &mut regs,
+        inst,
+        opcode_register_effects(inst.opcode()).writes,
+        "write",
+    )?;
+    Ok(regs)
 }
 
 pub fn try_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
@@ -902,8 +611,11 @@ pub fn try_write_regs_with_module_context(
     }
 
     let mut regs = Vec::new();
-    let has_single_write = match inst.opcode() {
-        Opcode::ArrayGet | Opcode::SliceGet => required_indexed_get_result_slots(inst, facts)? > 0,
+    let row = opcode_register_effects(inst.opcode());
+    let has_single_write = match row.dynamic_writes {
+        DynamicRegisterWriteEffect::IndexedGetResultLayout if facts.has_facts() => {
+            required_indexed_get_result_slots(inst, facts)? > 0
+        }
         _ => true,
     };
     if has_single_write {

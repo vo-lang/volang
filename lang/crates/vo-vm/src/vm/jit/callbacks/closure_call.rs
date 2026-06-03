@@ -45,7 +45,7 @@ fn record_runtime_trap(ctx: &mut JitContext, kind: JitRuntimeTrapKind, pc: u32) 
 #[inline]
 unsafe fn write_trapped_prepared_call(out: *mut PreparedCall) {
     if !out.is_null() {
-        *out = PreparedCall::fallback(0, 0);
+        *out = PreparedCall::vm_materialization(0, 0);
     }
 }
 
@@ -555,7 +555,7 @@ mod tests {
         );
         let user_args = [11_u64];
         let mut returns = [0_u64; 1];
-        let mut out = PreparedCall::fallback(0, 0);
+        let mut out = PreparedCall::vm_materialization(0, 0);
 
         let result = jit_prepare_closure_call(
             &mut ctx,
@@ -608,7 +608,7 @@ mod tests {
             &output,
             &mut host_output,
         );
-        let mut out = PreparedCall::fallback(0, 0);
+        let mut out = PreparedCall::vm_materialization(0, 0);
 
         let result = jit_prepare_closure_call(
             &mut ctx,
@@ -668,7 +668,7 @@ mod tests {
         let slot0 = interface::pack_slot0(0, 0, ValueKind::Pointer);
         let user_args = [22_u64];
         let mut returns = [0_u64; 1];
-        let mut out = PreparedCall::fallback(0, 0);
+        let mut out = PreparedCall::vm_materialization(0, 0);
 
         let result = jit_prepare_iface_call(
             &mut ctx,

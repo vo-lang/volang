@@ -44,14 +44,14 @@ pub enum BackendStatus {
     /// Lowered through a runtime helper/callback while staying in JIT code.
     RuntimeHelper,
     /// Compiled with an explicit runtime side-exit or VM call materialization path.
-    VmFallback,
+    VmCallMaterialization,
     /// Not a valid JIT input.
     Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FallbackPolicy {
-    /// No runtime exit or helper downgrade is expected.
+pub enum RuntimePathPolicy {
+    /// No runtime exit or helper call path is expected.
     None,
     /// Generated code records a language panic through the runtime trap path.
     RuntimePanic,
@@ -60,8 +60,8 @@ pub enum FallbackPolicy {
     /// Generated code may return a semantic side exit such as wait/replay/yield.
     VmSideExit,
     /// Generated code may materialize a VM call frame and return `JitResult::Call`.
-    VmFallback,
-    /// Invalid opcode is a strict compile/verification failure, not a runtime fallback.
+    VmCallMaterialization,
+    /// Invalid opcode is a strict compile/verification failure, not a runtime path.
     InvalidOpcode,
 }
 
@@ -71,7 +71,7 @@ pub struct OpcodeCapability {
     pub family: OpcodeFamily,
     pub full_jit: BackendStatus,
     pub osr: BackendStatus,
-    pub fallback: FallbackPolicy,
+    pub runtime_path: RuntimePathPolicy,
     pub reason: &'static str,
 }
 
@@ -114,7 +114,7 @@ mod tests {
         let capability = opcode_capability(Opcode::Invalid);
         assert_eq!(capability.full_jit, BackendStatus::Unsupported);
         assert_eq!(capability.osr, BackendStatus::Unsupported);
-        assert_eq!(capability.fallback, FallbackPolicy::InvalidOpcode);
+        assert_eq!(capability.runtime_path, RuntimePathPolicy::InvalidOpcode);
     }
 
     #[test]
@@ -154,7 +154,10 @@ mod tests {
         let capability = opcode_capability(Opcode::Call);
         assert_eq!(capability.full_jit, BackendStatus::CompilerSpecific);
         assert_eq!(capability.osr, BackendStatus::CompilerSpecific);
-        assert_eq!(capability.fallback, FallbackPolicy::VmFallback);
+        assert_eq!(
+            capability.runtime_path,
+            RuntimePathPolicy::VmCallMaterialization
+        );
 
         let direct = CallPlan::new(8, 2, &func(8, false), Some(FuncRef::from_u32(3)));
         assert_eq!(direct.route_for_full_function(7), CallRoute::KnownDirectJit);
@@ -181,7 +184,10 @@ mod tests {
         for capability in [closure, iface] {
             assert_eq!(capability.full_jit, BackendStatus::RuntimeHelper);
             assert_eq!(capability.osr, BackendStatus::RuntimeHelper);
-            assert_eq!(capability.fallback, FallbackPolicy::VmFallback);
+            assert_eq!(
+                capability.runtime_path,
+                RuntimePathPolicy::VmCallMaterialization
+            );
         }
     }
 
@@ -191,13 +197,13 @@ mod tests {
         assert_eq!(array.family, OpcodeFamily::Array);
         assert_eq!(array.full_jit, BackendStatus::Native);
         assert_eq!(array.osr, BackendStatus::Native);
-        assert_eq!(array.fallback, FallbackPolicy::RuntimePanic);
+        assert_eq!(array.runtime_path, RuntimePathPolicy::RuntimePanic);
 
         let slice = opcode_capability(Opcode::SliceAddr);
         assert_eq!(slice.family, OpcodeFamily::Slice);
         assert_eq!(slice.full_jit, BackendStatus::Native);
         assert_eq!(slice.osr, BackendStatus::Native);
-        assert_eq!(slice.fallback, FallbackPolicy::RuntimePanic);
+        assert_eq!(slice.runtime_path, RuntimePathPolicy::RuntimePanic);
     }
 
     #[test]
@@ -210,13 +216,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_panic_fallback_is_not_used_for_non_panicking_ops() {
+    fn runtime_panic_path_is_not_used_for_non_panicking_ops() {
         for capability in capability_matrix() {
-            if capability.fallback == FallbackPolicy::RuntimePanic {
+            if capability.runtime_path == RuntimePathPolicy::RuntimePanic {
                 assert!(
                     crate::contract::opcode_contract(capability.opcode).may_panic
                         || matches!(capability.opcode, Opcode::ConvF2I),
-                    "{:?} has RuntimePanic fallback but its effect contract is non-panicking",
+                    "{:?} has RuntimePanic runtime path but its effect contract is non-panicking",
                     capability.opcode
                 );
             }
@@ -234,8 +240,8 @@ mod tests {
             Opcode::IfaceAssign,
         ] {
             assert_ne!(
-                opcode_capability(opcode).fallback,
-                FallbackPolicy::RuntimePanic,
+                opcode_capability(opcode).runtime_path,
+                RuntimePathPolicy::RuntimePanic,
                 "{opcode:?} is lowered through a non-panicking helper"
             );
         }

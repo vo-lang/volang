@@ -9,9 +9,8 @@ use vo_runtime::instruction::Opcode;
 #[cfg(test)]
 use vo_runtime::jit_api::{JitRuntimeHelperPanicPolicy, JitRuntimeHelperReturnPolicy};
 
-use crate::capability::{BackendStatus, FallbackPolicy, OpcodeCapability, OpcodeFamily};
+use crate::capability::{BackendStatus, OpcodeCapability, OpcodeFamily, RuntimePathPolicy};
 use crate::contract::EffectContract;
-use crate::metadata_contract::opcode_metadata_requirement;
 pub use crate::metadata_contract::JitMetadataRequirement;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +69,18 @@ pub enum VerifierRequirement {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierDomain {
+    None,
+    Scalar,
+    Control,
+    Memory,
+    Collections,
+    Calls,
+    Interface,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterEffectShape {
     None,
     FixedOperands,
@@ -83,10 +94,108 @@ pub enum RegisterEffectShape {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterOperand {
+    A,
+    B,
+    C,
+    Zero,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterCondition {
+    FlagSet(u8),
+    FlagsEq(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterRangeStart {
+    Operand(RegisterOperand),
+    OperandOffset(RegisterOperand, u16),
+    BPlusPackedArgSlots,
+    SliceAppendValueStart,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterCount {
+    Fixed(u16),
+    OperandB,
+    OperandC,
+    Flags,
+    CopyNCount,
+    PackedArgSlots,
+    PackedRetSlots,
+    ElemSlotsFromFlags,
+    MapIterSlots,
+    MapIterKeyValueSlots,
+    RecvResult { normalize_zero_elem_slots: bool },
+    IfaceAssertResult,
+    SelectSendElemSlots,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterEffectOperand {
+    Slot(RegisterOperand),
+    SlotOffset(RegisterOperand, u16),
+    ConditionalSlot {
+        condition: RegisterCondition,
+        operand: RegisterOperand,
+    },
+    ConditionalSlotOffset {
+        condition: RegisterCondition,
+        operand: RegisterOperand,
+        offset: u16,
+    },
+    Range {
+        start: RegisterRangeStart,
+        count: RegisterCount,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicRegisterReadEffect {
+    None,
+    StaticCallSignature,
+    IndexedSetValueLayout,
+    SliceAppendValueLayout,
+    MapGetLayout,
+    MapSetLayout,
+    MapDeleteLayout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicRegisterWriteEffect {
+    None,
+    StaticCallSignature,
+    ExternSignature,
+    IndexedGetResultLayout,
+    MapGetLayout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySyncRequirement {
     None,
     FromOperand,
     All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemorySyncSpec {
+    None,
+    FromOperand(RegisterOperand),
+    SliceAppendValueStart,
+    All,
+}
+
+impl MemorySyncSpec {
+    pub const fn requirement(self) -> MemorySyncRequirement {
+        match self {
+            Self::None => MemorySyncRequirement::None,
+            Self::FromOperand(_) | Self::SliceAppendValueStart => {
+                MemorySyncRequirement::FromOperand
+            }
+            Self::All => MemorySyncRequirement::All,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -493,13 +602,91 @@ pub enum FailFastCondition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpcodeRegisterEffects {
-    pub reads: RegisterEffectShape,
-    pub writes: RegisterEffectShape,
-    pub memory_sync: MemorySyncRequirement,
+    pub reads: &'static [RegisterEffectOperand],
+    pub single_write: Option<RegisterOperand>,
+    pub writes: &'static [RegisterEffectOperand],
+    pub dynamic_reads: DynamicRegisterReadEffect,
+    pub dynamic_writes: DynamicRegisterWriteEffect,
+    pub memory_sync: MemorySyncSpec,
     pub may_call: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl OpcodeRegisterEffects {
+    pub fn has_read_effects(self) -> bool {
+        !self.reads.is_empty() || self.dynamic_reads != DynamicRegisterReadEffect::None
+    }
+
+    pub fn has_write_effects(self) -> bool {
+        self.single_write.is_some()
+            || !self.writes.is_empty()
+            || self.dynamic_writes != DynamicRegisterWriteEffect::None
+    }
+
+    pub fn read_shape(self) -> RegisterEffectShape {
+        match self.dynamic_reads {
+            DynamicRegisterReadEffect::StaticCallSignature => RegisterEffectShape::ModuleSignature,
+            DynamicRegisterReadEffect::IndexedSetValueLayout
+            | DynamicRegisterReadEffect::SliceAppendValueLayout
+            | DynamicRegisterReadEffect::MapGetLayout
+            | DynamicRegisterReadEffect::MapSetLayout
+            | DynamicRegisterReadEffect::MapDeleteLayout => RegisterEffectShape::MetadataLayout,
+            DynamicRegisterReadEffect::None => register_effect_shape(self.reads),
+        }
+    }
+
+    pub fn write_shape(self) -> RegisterEffectShape {
+        match self.dynamic_writes {
+            DynamicRegisterWriteEffect::StaticCallSignature => RegisterEffectShape::ModuleSignature,
+            DynamicRegisterWriteEffect::ExternSignature => RegisterEffectShape::ExternSignature,
+            DynamicRegisterWriteEffect::IndexedGetResultLayout
+            | DynamicRegisterWriteEffect::MapGetLayout => RegisterEffectShape::MetadataLayout,
+            DynamicRegisterWriteEffect::None => {
+                if self.single_write.is_some() {
+                    RegisterEffectShape::FixedOperands
+                } else {
+                    register_effect_shape(self.writes)
+                }
+            }
+        }
+    }
+}
+
+fn register_effect_shape(operands: &[RegisterEffectOperand]) -> RegisterEffectShape {
+    if operands.is_empty() {
+        return RegisterEffectShape::None;
+    }
+    let mut has_counted = false;
+    for operand in operands {
+        let RegisterEffectOperand::Range { count, .. } = operand else {
+            continue;
+        };
+        match count {
+            RegisterCount::PackedArgSlots | RegisterCount::PackedRetSlots => {
+                return RegisterEffectShape::PackedCallShape;
+            }
+            RegisterCount::ElemSlotsFromFlags => return RegisterEffectShape::MetadataLayout,
+            RegisterCount::MapIterSlots | RegisterCount::MapIterKeyValueSlots => {
+                return RegisterEffectShape::IteratorShape;
+            }
+            RegisterCount::RecvResult { .. } => return RegisterEffectShape::RecvFlags,
+            RegisterCount::Fixed(1) => {}
+            RegisterCount::Fixed(_)
+            | RegisterCount::OperandB
+            | RegisterCount::OperandC
+            | RegisterCount::Flags
+            | RegisterCount::CopyNCount
+            | RegisterCount::IfaceAssertResult
+            | RegisterCount::SelectSendElemSlots => has_counted = true,
+        }
+    }
+    if has_counted {
+        RegisterEffectShape::CountedOperands
+    } else {
+        RegisterEffectShape::FixedOperands
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpcodeSemantics {
     pub opcode: Opcode,
     pub packed_operands: &'static [PackedOperand],
@@ -507,6 +694,7 @@ pub struct OpcodeSemantics {
     pub lowering_owner: LoweringOwner,
     pub metadata: JitMetadataRequirement,
     pub verifier_requirements: &'static [VerifierRequirement],
+    pub verifier_domain: VerifierDomain,
     pub register_effects: OpcodeRegisterEffects,
     pub runtime_dependencies: &'static [RuntimeDependency],
     pub helper_return: HelperReturnPolicy,
@@ -885,12 +1073,631 @@ const FF_BRANCH_LAYOUT: &[FailFastCondition] = &[
 ];
 const FF_INVALID: &[FailFastCondition] = &[FailFastCondition::UnsupportedOpcode];
 
+const fn reg_slot(operand: RegisterOperand) -> RegisterEffectOperand {
+    RegisterEffectOperand::Slot(operand)
+}
+
+const fn reg_slot_offset(operand: RegisterOperand, offset: u16) -> RegisterEffectOperand {
+    RegisterEffectOperand::SlotOffset(operand, offset)
+}
+
+const fn cond_slot(
+    condition: RegisterCondition,
+    operand: RegisterOperand,
+) -> RegisterEffectOperand {
+    RegisterEffectOperand::ConditionalSlot { condition, operand }
+}
+
+const fn cond_slot_offset(
+    condition: RegisterCondition,
+    operand: RegisterOperand,
+    offset: u16,
+) -> RegisterEffectOperand {
+    RegisterEffectOperand::ConditionalSlotOffset {
+        condition,
+        operand,
+        offset,
+    }
+}
+
+const fn operand_range(operand: RegisterOperand, count: RegisterCount) -> RegisterEffectOperand {
+    RegisterEffectOperand::Range {
+        start: RegisterRangeStart::Operand(operand),
+        count,
+    }
+}
+
+const fn special_range(start: RegisterRangeStart, count: RegisterCount) -> RegisterEffectOperand {
+    RegisterEffectOperand::Range { start, count }
+}
+
+const R_NONE: &[RegisterEffectOperand] = &[];
+const R_A: &[RegisterEffectOperand] = &[reg_slot(RegisterOperand::A)];
+const R_B: &[RegisterEffectOperand] = &[reg_slot(RegisterOperand::B)];
+const R_B_C: &[RegisterEffectOperand] =
+    &[reg_slot(RegisterOperand::B), reg_slot(RegisterOperand::C)];
+const R_A_B: &[RegisterEffectOperand] =
+    &[reg_slot(RegisterOperand::A), reg_slot(RegisterOperand::B)];
+const R_A_C: &[RegisterEffectOperand] =
+    &[reg_slot(RegisterOperand::A), reg_slot(RegisterOperand::C)];
+const R_B_C_C1: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::B),
+    reg_slot(RegisterOperand::C),
+    reg_slot_offset(RegisterOperand::C, 1),
+];
+const R_SLICE_SLICE: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::B),
+    reg_slot(RegisterOperand::C),
+    reg_slot_offset(RegisterOperand::C, 1),
+    cond_slot_offset(RegisterCondition::FlagSet(0b10), RegisterOperand::C, 2),
+];
+const R_COPY_N: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::B, RegisterCount::CopyNCount)];
+const R_GLOBAL_SET_N: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::B, RegisterCount::Flags)];
+const R_PTR_SET_N: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::A),
+    operand_range(RegisterOperand::C, RegisterCount::Flags),
+];
+const R_SLOT_SET_N: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::B),
+    operand_range(RegisterOperand::C, RegisterCount::Flags),
+];
+const R_INDEXED_SET: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::A),
+    reg_slot(RegisterOperand::B),
+    operand_range(RegisterOperand::C, RegisterCount::ElemSlotsFromFlags),
+];
+const R_SLICE_APPEND: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::B),
+    reg_slot(RegisterOperand::C),
+    special_range(
+        RegisterRangeStart::SliceAppendValueStart,
+        RegisterCount::ElemSlotsFromFlags,
+    ),
+];
+const R_MAP_NEW: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::B),
+    reg_slot_offset(RegisterOperand::B, 1),
+];
+const R_MAP_ITER: &[RegisterEffectOperand] = &[operand_range(
+    RegisterOperand::B,
+    RegisterCount::MapIterSlots,
+)];
+const R_QUEUE_SEND: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::A),
+    operand_range(RegisterOperand::B, RegisterCount::Flags),
+];
+const R_SELECT_SEND: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::A),
+    operand_range(RegisterOperand::B, RegisterCount::SelectSendElemSlots),
+];
+const R_CLOSURE_GET: &[RegisterEffectOperand] = &[reg_slot(RegisterOperand::Zero)];
+const R_GO_SHARED: &[RegisterEffectOperand] = &[
+    cond_slot(RegisterCondition::FlagSet(1), RegisterOperand::A),
+    operand_range(RegisterOperand::B, RegisterCount::OperandC),
+];
+const R_GO_ISLAND: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::A),
+    reg_slot(RegisterOperand::B),
+    operand_range(RegisterOperand::C, RegisterCount::Flags),
+];
+const R_INTERFACE_A: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::A),
+    reg_slot_offset(RegisterOperand::A, 1),
+];
+const R_INTERFACE_B: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::B),
+    reg_slot_offset(RegisterOperand::B, 1),
+];
+const R_IFACE_ASSIGN: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::B),
+    cond_slot_offset(RegisterCondition::FlagsEq(16), RegisterOperand::B, 1),
+];
+const R_IFACE_EQ: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::B),
+    reg_slot_offset(RegisterOperand::B, 1),
+    reg_slot(RegisterOperand::C),
+    reg_slot_offset(RegisterOperand::C, 1),
+];
+const R_RETURN: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::A, RegisterCount::OperandB)];
+const R_CALL: &[RegisterEffectOperand] = &[operand_range(
+    RegisterOperand::B,
+    RegisterCount::PackedArgSlots,
+)];
+const R_CALL_CLOSURE: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::A),
+    operand_range(RegisterOperand::B, RegisterCount::PackedArgSlots),
+];
+const R_CALL_IFACE: &[RegisterEffectOperand] = &[
+    reg_slot(RegisterOperand::A),
+    reg_slot_offset(RegisterOperand::A, 1),
+    operand_range(RegisterOperand::B, RegisterCount::PackedArgSlots),
+];
+const R_CALL_EXTERN: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::C, RegisterCount::Flags)];
+
+const W_NONE: &[RegisterEffectOperand] = &[];
+const W_COPY_N: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::A, RegisterCount::CopyNCount)];
+const W_FLAGS_A: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::A, RegisterCount::Flags)];
+const W_CALL_RET: &[RegisterEffectOperand] = &[special_range(
+    RegisterRangeStart::BPlusPackedArgSlots,
+    RegisterCount::PackedRetSlots,
+)];
+const W_CALL_EXTERN_DEFAULT: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::A, RegisterCount::Fixed(1))];
+const W_IFACE_ASSIGN: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::A, RegisterCount::Fixed(2))];
+const W_IFACE_ASSERT: &[RegisterEffectOperand] = &[operand_range(
+    RegisterOperand::A,
+    RegisterCount::IfaceAssertResult,
+)];
+const W_INDEXED_GET: &[RegisterEffectOperand] = &[operand_range(
+    RegisterOperand::A,
+    RegisterCount::ElemSlotsFromFlags,
+)];
+const W_MAP_ITER_INIT: &[RegisterEffectOperand] = &[operand_range(
+    RegisterOperand::A,
+    RegisterCount::MapIterSlots,
+)];
+const W_MAP_ITER_NEXT: &[RegisterEffectOperand] = &[
+    operand_range(RegisterOperand::B, RegisterCount::MapIterSlots),
+    operand_range(RegisterOperand::A, RegisterCount::MapIterKeyValueSlots),
+    reg_slot(RegisterOperand::C),
+];
+const W_QUEUE_RECV: &[RegisterEffectOperand] = &[operand_range(
+    RegisterOperand::A,
+    RegisterCount::RecvResult {
+        normalize_zero_elem_slots: false,
+    },
+)];
+const W_SELECT_RECV: &[RegisterEffectOperand] = &[operand_range(
+    RegisterOperand::A,
+    RegisterCount::RecvResult {
+        normalize_zero_elem_slots: true,
+    },
+)];
+const W_TWO_A: &[RegisterEffectOperand] =
+    &[operand_range(RegisterOperand::A, RegisterCount::Fixed(2))];
+
+const fn reg_effects(
+    reads: &'static [RegisterEffectOperand],
+    single_write: Option<RegisterOperand>,
+    writes: &'static [RegisterEffectOperand],
+    dynamic_reads: DynamicRegisterReadEffect,
+    dynamic_writes: DynamicRegisterWriteEffect,
+    memory_sync: MemorySyncSpec,
+    may_call: bool,
+) -> OpcodeRegisterEffects {
+    OpcodeRegisterEffects {
+        reads,
+        single_write,
+        writes,
+        dynamic_reads,
+        dynamic_writes,
+        memory_sync,
+        may_call,
+    }
+}
+
+const REG_NONE: OpcodeRegisterEffects = reg_effects(
+    R_NONE,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_WRITE_A: OpcodeRegisterEffects = reg_effects(
+    R_NONE,
+    Some(RegisterOperand::A),
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_READ_A: OpcodeRegisterEffects = reg_effects(
+    R_A,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_READ_B_WRITE_A: OpcodeRegisterEffects = reg_effects(
+    R_B,
+    Some(RegisterOperand::A),
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_READ_B_C_WRITE_A: OpcodeRegisterEffects = reg_effects(
+    R_B_C,
+    Some(RegisterOperand::A),
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_COPY_N: OpcodeRegisterEffects = reg_effects(
+    R_COPY_N,
+    None,
+    W_COPY_N,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_GLOBAL_SET_N: OpcodeRegisterEffects = reg_effects(
+    R_GLOBAL_SET_N,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_WRITE_N_FLAGS: OpcodeRegisterEffects = reg_effects(
+    R_NONE,
+    None,
+    W_FLAGS_A,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_PTR_SET: OpcodeRegisterEffects = reg_effects(
+    R_A_C,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_PTR_SET_N: OpcodeRegisterEffects = reg_effects(
+    R_PTR_SET_N,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_SLOT_GET: OpcodeRegisterEffects = reg_effects(
+    &[reg_slot(RegisterOperand::C)],
+    Some(RegisterOperand::A),
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::FromOperand(RegisterOperand::B),
+    false,
+);
+const REG_SLOT_SET: OpcodeRegisterEffects = reg_effects(
+    &[reg_slot(RegisterOperand::B), reg_slot(RegisterOperand::C)],
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::FromOperand(RegisterOperand::A),
+    false,
+);
+const REG_SLOT_GET_N: OpcodeRegisterEffects = reg_effects(
+    &[reg_slot(RegisterOperand::C)],
+    None,
+    W_FLAGS_A,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::FromOperand(RegisterOperand::B),
+    false,
+);
+const REG_SLOT_SET_N: OpcodeRegisterEffects = reg_effects(
+    R_SLOT_SET_N,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::FromOperand(RegisterOperand::A),
+    false,
+);
+const REG_INDEXED_GET: OpcodeRegisterEffects = reg_effects(
+    R_B_C,
+    Some(RegisterOperand::A),
+    W_INDEXED_GET,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::IndexedGetResultLayout,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_INDEXED_SET: OpcodeRegisterEffects = reg_effects(
+    R_INDEXED_SET,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::IndexedSetValueLayout,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_SLICE_APPEND: OpcodeRegisterEffects = reg_effects(
+    R_SLICE_APPEND,
+    Some(RegisterOperand::A),
+    W_NONE,
+    DynamicRegisterReadEffect::SliceAppendValueLayout,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::SliceAppendValueStart,
+    false,
+);
+const REG_MAP_GET: OpcodeRegisterEffects = reg_effects(
+    R_NONE,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::MapGetLayout,
+    DynamicRegisterWriteEffect::MapGetLayout,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_MAP_SET: OpcodeRegisterEffects = reg_effects(
+    R_NONE,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::MapSetLayout,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_MAP_DELETE: OpcodeRegisterEffects = reg_effects(
+    R_NONE,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::MapDeleteLayout,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    false,
+);
+const REG_QUEUE_SEND: OpcodeRegisterEffects = reg_effects(
+    R_QUEUE_SEND,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::FromOperand(RegisterOperand::B),
+    false,
+);
+const REG_SELECT_SEND: OpcodeRegisterEffects = reg_effects(
+    R_SELECT_SEND,
+    None,
+    W_NONE,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::All,
+    false,
+);
+const REG_SELECT_RECV: OpcodeRegisterEffects = reg_effects(
+    R_B,
+    None,
+    W_SELECT_RECV,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::All,
+    false,
+);
+const REG_CALL: OpcodeRegisterEffects = reg_effects(
+    R_CALL,
+    None,
+    W_CALL_RET,
+    DynamicRegisterReadEffect::StaticCallSignature,
+    DynamicRegisterWriteEffect::StaticCallSignature,
+    MemorySyncSpec::None,
+    true,
+);
+const REG_CALL_EXTERN: OpcodeRegisterEffects = reg_effects(
+    R_CALL_EXTERN,
+    None,
+    W_CALL_EXTERN_DEFAULT,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::ExternSignature,
+    MemorySyncSpec::None,
+    true,
+);
+const REG_CALL_CLOSURE: OpcodeRegisterEffects = reg_effects(
+    R_CALL_CLOSURE,
+    None,
+    W_CALL_RET,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    true,
+);
+const REG_CALL_IFACE: OpcodeRegisterEffects = reg_effects(
+    R_CALL_IFACE,
+    None,
+    W_CALL_RET,
+    DynamicRegisterReadEffect::None,
+    DynamicRegisterWriteEffect::None,
+    MemorySyncSpec::None,
+    true,
+);
+
+const C_PURE: EffectContract = EffectContract::PURE;
+const C_PANIC: EffectContract = EffectContract {
+    may_panic: true,
+    ..EffectContract::PURE
+};
+const C_SLOT_META_PANIC: EffectContract = EffectContract {
+    may_panic: true,
+    needs_slot_metadata: true,
+    ..EffectContract::PURE
+};
+const C_PTR_SET: EffectContract = EffectContract {
+    may_panic: true,
+    needs_write_barrier: true,
+    ..EffectContract::PURE
+};
+const C_INDEXED_SET: EffectContract = EffectContract {
+    may_panic: true,
+    needs_slot_metadata: true,
+    needs_write_barrier: true,
+    ..EffectContract::PURE
+};
+const C_ALLOC_TYPED: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    needs_type_metadata: true,
+    ..EffectContract::PURE
+};
+const C_ALLOC_TYPED_PANIC: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    may_panic: true,
+    needs_type_metadata: true,
+    ..EffectContract::PURE
+};
+const C_ALLOC_TYPED_SLOT: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    needs_type_metadata: true,
+    needs_slot_metadata: true,
+    ..EffectContract::PURE
+};
+const C_MAP_HELPER: EffectContract = EffectContract {
+    needs_slot_metadata: true,
+    needs_type_metadata: true,
+    touches_interface: true,
+    ..EffectContract::PURE
+};
+const C_MAP_PANIC: EffectContract = EffectContract {
+    may_panic: true,
+    needs_slot_metadata: true,
+    needs_type_metadata: true,
+    touches_interface: true,
+    ..EffectContract::PURE
+};
+const C_MAP_SET: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    may_panic: true,
+    needs_slot_metadata: true,
+    needs_type_metadata: true,
+    needs_write_barrier: true,
+    touches_interface: true,
+    ..EffectContract::PURE
+};
+const C_QUEUE_FRAME: EffectContract = EffectContract {
+    may_gc: true,
+    may_panic: true,
+    may_schedule: true,
+    may_observe_frame: true,
+    needs_frame: true,
+    needs_slot_metadata: true,
+    ..EffectContract::PURE
+};
+const C_GO_FRAME: EffectContract = EffectContract {
+    may_gc: true,
+    may_panic: true,
+    may_call: true,
+    may_schedule: true,
+    may_observe_frame: true,
+    needs_frame: true,
+    needs_slot_metadata: true,
+    ..EffectContract::PURE
+};
+const C_CLOSURE_NEW: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    needs_slot_metadata: true,
+    materializes_closure: true,
+    ..EffectContract::PURE
+};
+const C_CALL: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    may_panic: true,
+    may_unwind: true,
+    may_call: true,
+    may_observe_frame: true,
+    needs_frame: true,
+    needs_slot_metadata: true,
+    ..EffectContract::PURE
+};
+const C_CALL_EXTERN: EffectContract = EffectContract {
+    may_schedule: true,
+    ..C_CALL
+};
+const C_CALL_CLOSURE: EffectContract = EffectContract {
+    materializes_closure: true,
+    ..C_CALL
+};
+const C_CALL_IFACE: EffectContract = EffectContract {
+    touches_interface: true,
+    ..C_CALL
+};
+const C_DEFER: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    may_panic: true,
+    may_unwind: true,
+    may_observe_frame: true,
+    needs_frame: true,
+    needs_slot_metadata: true,
+    materializes_closure: true,
+    ..EffectContract::PURE
+};
+const C_RECOVER: EffectContract = EffectContract {
+    may_gc: true,
+    may_panic: true,
+    may_unwind: true,
+    may_observe_frame: true,
+    needs_frame: true,
+    needs_slot_metadata: true,
+    ..EffectContract::PURE
+};
+const C_PANIC_CONTROL: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    may_panic: true,
+    may_unwind: true,
+    may_observe_frame: true,
+    needs_frame: true,
+    needs_slot_metadata: true,
+    ..EffectContract::PURE
+};
+const C_IFACE_ASSIGN: EffectContract = EffectContract {
+    may_gc: true,
+    may_alloc: true,
+    needs_slot_metadata: true,
+    needs_type_metadata: true,
+    touches_interface: true,
+    ..EffectContract::PURE
+};
+const C_IFACE_PANIC: EffectContract = EffectContract {
+    may_panic: true,
+    needs_slot_metadata: true,
+    needs_type_metadata: true,
+    touches_interface: true,
+    ..EffectContract::PURE
+};
+const C_INVALID: EffectContract = EffectContract {
+    may_panic: true,
+    may_unwind: true,
+    needs_frame: true,
+    ..EffectContract::PURE
+};
+
 const fn cap(
     opcode: Opcode,
     family: OpcodeFamily,
     full_jit: BackendStatus,
     osr: BackendStatus,
-    fallback: FallbackPolicy,
+    runtime_path: RuntimePathPolicy,
     reason: &'static str,
 ) -> OpcodeCapability {
     OpcodeCapability {
@@ -898,1088 +1705,3153 @@ const fn cap(
         family,
         full_jit,
         osr,
-        fallback,
+        runtime_path,
         reason,
     }
 }
 
-pub(crate) fn opcode_capability_contract(opcode: Opcode) -> OpcodeCapability {
-    use Opcode::*;
-
-    match opcode {
-        Hint => cap(
-            Hint,
-            OpcodeFamily::Hint,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "JIT loop marker/NOP",
-        ),
-        LoadInt | LoadConst => cap(
-            opcode,
-            OpcodeFamily::Load,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "constant load",
-        ),
-        Copy | CopyN => cap(
-            opcode,
-            OpcodeFamily::Copy,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "slot copy",
-        ),
-        SlotGet | SlotSet | SlotGetN | SlotSetN => cap(
-            opcode,
-            OpcodeFamily::Slot,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "stack slot indexing",
-        ),
-        GlobalGet | GlobalGetN | GlobalSet | GlobalSetN => cap(
-            opcode,
-            OpcodeFamily::Global,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "global slot access",
-        ),
-        PtrNew => cap(
-            opcode,
-            OpcodeFamily::Pointer,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "GC allocation",
-        ),
-        PtrGet | PtrSet | PtrGetN | PtrSetN => cap(
-            opcode,
-            OpcodeFamily::Pointer,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "heap pointer access",
-        ),
-        PtrAdd => cap(
-            PtrAdd,
-            OpcodeFamily::Pointer,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "pointer arithmetic",
-        ),
-        AddI | SubI | MulI | NegI | AddF | SubF | MulF | DivF | NegF => cap(
-            opcode,
-            OpcodeFamily::Arithmetic,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "numeric operation",
-        ),
-        DivI | DivU | ModI | ModU => cap(
-            opcode,
-            OpcodeFamily::Arithmetic,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "checked integer division or modulo",
-        ),
-        EqI | NeI | LtI | LtU | LeI | LeU | GtI | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF
-        | GeF => cap(
-            opcode,
-            OpcodeFamily::Comparison,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "comparison",
-        ),
-        And | Or | Xor | AndNot | Not => cap(
-            opcode,
-            OpcodeFamily::Bitwise,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "bit operation",
-        ),
-        Shl | ShrS | ShrU => cap(
-            opcode,
-            OpcodeFamily::Bitwise,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "checked shift operation",
-        ),
-        BoolNot => cap(
-            opcode,
-            OpcodeFamily::Logic,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "boolean operation",
-        ),
-        Jump | JumpIf | JumpIfNot | Return | Panic | ForLoop => cap(
-            opcode,
-            OpcodeFamily::Control,
-            BackendStatus::CompilerSpecific,
-            BackendStatus::CompilerSpecific,
-            FallbackPolicy::VmSideExit,
-            "compiler-owned control flow",
-        ),
-        Call => cap(
-            opcode,
-            OpcodeFamily::Call,
-            BackendStatus::CompilerSpecific,
-            BackendStatus::CompilerSpecific,
-            FallbackPolicy::VmFallback,
-            "compiler route chooses self/direct/dynamic JIT or VM call materialization",
-        ),
-        CallExtern => cap(
-            opcode,
-            OpcodeFamily::Call,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::VmSideExit,
-            "extern helper may suspend, replay, or panic",
-        ),
-        CallClosure | CallIface => cap(
-            opcode,
-            OpcodeFamily::Call,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::VmFallback,
-            "dynamic IC with prepare callback slow path",
-        ),
-        StrLen => cap(
-            StrLen,
-            OpcodeFamily::String,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "inline string length",
-        ),
-        StrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrDecodeRune => cap(
-            opcode,
-            OpcodeFamily::String,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "non-panicking string helper",
-        ),
-        StrIndex | StrSlice => cap(
-            opcode,
-            OpcodeFamily::String,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "string helper with checked runtime trap",
-        ),
-        ArrayNew => cap(
-            ArrayNew,
-            OpcodeFamily::Array,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "array allocation helper",
-        ),
-        ArrayGet | ArraySet | ArrayAddr => cap(
-            opcode,
-            OpcodeFamily::Array,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "inline array access with bounds checks and typed element layout",
-        ),
-        SliceNew | SliceSlice => cap(
-            opcode,
-            OpcodeFamily::Slice,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "slice allocation or reslicing helper",
-        ),
-        SliceAppend => cap(
-            SliceAppend,
-            OpcodeFamily::Slice,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "slice append helper with JitError sentinel",
-        ),
-        SliceGet | SliceSet | SliceAddr => cap(
-            opcode,
-            OpcodeFamily::Slice,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "inline slice access with nil-aware bounds checks and typed element layout",
-        ),
-        SliceLen | SliceCap => cap(
-            opcode,
-            OpcodeFamily::Slice,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "inline nil-aware slice metadata access",
-        ),
-        MapNew | MapGet | MapDelete | MapLen | MapIterInit | MapIterNext => cap(
-            opcode,
-            OpcodeFamily::Map,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "non-panicking map helper",
-        ),
-        MapSet => cap(
-            MapSet,
-            OpcodeFamily::Map,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "map set helper with checked runtime trap",
-        ),
-        QueueNew => cap(
-            QueueNew,
-            OpcodeFamily::Queue,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "queue allocation helper with checked runtime trap",
-        ),
-        QueueSend | QueueRecv | QueueClose => cap(
-            opcode,
-            OpcodeFamily::Queue,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::VmSideExit,
-            "queue helper may block or panic",
-        ),
-        QueueLen | QueueCap => cap(
-            opcode,
-            OpcodeFamily::Queue,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "non-blocking queue helper",
-        ),
-        SelectBegin | SelectSend | SelectRecv | SelectExec => cap(
-            opcode,
-            OpcodeFamily::Select,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::VmSideExit,
-            "select callback may block or panic",
-        ),
-        ClosureNew | ClosureGet => cap(
-            opcode,
-            OpcodeFamily::Closure,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::None,
-            "closure operation",
-        ),
-        GoStart => cap(
-            opcode,
-            OpcodeFamily::Goroutine,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "go start",
-        ),
-        GoIsland | IslandNew => cap(
-            opcode,
-            OpcodeFamily::Island,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "island runtime callback",
-        ),
-        DeferPush | ErrDeferPush | Recover => cap(
-            opcode,
-            OpcodeFamily::Defer,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "defer/recover callback",
-        ),
-        IfaceAssign => cap(
-            IfaceAssign,
-            OpcodeFamily::Interface,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimeHelper,
-            "interface assignment helper",
-        ),
-        IfaceAssert | IfaceEq => cap(
-            opcode,
-            OpcodeFamily::Interface,
-            BackendStatus::RuntimeHelper,
-            BackendStatus::RuntimeHelper,
-            FallbackPolicy::RuntimePanic,
-            "interface helper",
-        ),
-        ConvI2F | ConvF64F32 | ConvF32F64 | Trunc => cap(
-            opcode,
-            OpcodeFamily::Conversion,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::None,
-            "conversion",
-        ),
-        ConvF2I | IndexCheck => cap(
-            opcode,
-            OpcodeFamily::Conversion,
-            BackendStatus::Native,
-            BackendStatus::Native,
-            FallbackPolicy::RuntimePanic,
-            "checked conversion or bounds check",
-        ),
-        Invalid => cap(
-            Invalid,
-            OpcodeFamily::Invalid,
-            BackendStatus::Unsupported,
-            BackendStatus::Unsupported,
-            FallbackPolicy::InvalidOpcode,
-            "invalid opcode sentinel",
-        ),
+const fn verifier_domain_for_family(family: OpcodeFamily) -> VerifierDomain {
+    match family {
+        OpcodeFamily::Hint => VerifierDomain::None,
+        OpcodeFamily::Load
+        | OpcodeFamily::Copy
+        | OpcodeFamily::Arithmetic
+        | OpcodeFamily::Comparison
+        | OpcodeFamily::Bitwise
+        | OpcodeFamily::Logic
+        | OpcodeFamily::Conversion => VerifierDomain::Scalar,
+        OpcodeFamily::Control => VerifierDomain::Control,
+        OpcodeFamily::Slot | OpcodeFamily::Global | OpcodeFamily::Pointer => VerifierDomain::Memory,
+        OpcodeFamily::String
+        | OpcodeFamily::Array
+        | OpcodeFamily::Slice
+        | OpcodeFamily::Map
+        | OpcodeFamily::Queue
+        | OpcodeFamily::Select
+        | OpcodeFamily::Island => VerifierDomain::Collections,
+        OpcodeFamily::Call
+        | OpcodeFamily::Closure
+        | OpcodeFamily::Goroutine
+        | OpcodeFamily::Defer => VerifierDomain::Calls,
+        OpcodeFamily::Interface => VerifierDomain::Interface,
+        OpcodeFamily::Invalid => VerifierDomain::Invalid,
     }
+}
+
+macro_rules! semantic_row {
+    (
+        opcode: $opcode:expr,
+        packed_operands: $packed_operands:expr,
+        vm_source: $vm_source:expr,
+        lowering_owner: $lowering_owner:expr,
+        metadata: $metadata:expr,
+        verifier_requirements: $verifier_requirements:expr,
+        register_effects: $register_effects:expr,
+        runtime_dependencies: $runtime_dependencies:expr,
+        helper_return: $helper_return:expr,
+        frame_policy: $frame_policy:expr,
+        trap_policy: $trap_policy:expr,
+        fail_fast: $fail_fast:expr,
+        verifier_domain: $verifier_domain:expr,
+        capability: {
+            family: $family:expr,
+            full_jit: $full_jit:expr,
+            osr: $osr:expr,
+            runtime_path: $runtime_path:expr,
+            reason: $reason:expr,
+        },
+        contract: $contract:expr $(,)?
+    ) => {
+        OpcodeSemantics {
+            opcode: $opcode,
+            packed_operands: $packed_operands,
+            vm_source: $vm_source,
+            lowering_owner: $lowering_owner,
+            metadata: $metadata,
+            verifier_requirements: $verifier_requirements,
+            verifier_domain: $verifier_domain,
+            register_effects: $register_effects,
+            runtime_dependencies: $runtime_dependencies,
+            helper_return: $helper_return,
+            frame_policy: $frame_policy,
+            trap_policy: $trap_policy,
+            fail_fast: $fail_fast,
+            capability: cap($opcode, $family, $full_jit, $osr, $runtime_path, $reason),
+            contract: $contract,
+        }
+    };
+    (
+        opcode: $opcode:expr,
+        packed_operands: $packed_operands:expr,
+        vm_source: $vm_source:expr,
+        lowering_owner: $lowering_owner:expr,
+        metadata: $metadata:expr,
+        verifier_requirements: $verifier_requirements:expr,
+        register_effects: $register_effects:expr,
+        runtime_dependencies: $runtime_dependencies:expr,
+        helper_return: $helper_return:expr,
+        frame_policy: $frame_policy:expr,
+        trap_policy: $trap_policy:expr,
+        fail_fast: $fail_fast:expr,
+        capability: {
+            family: $family:expr,
+            full_jit: $full_jit:expr,
+            osr: $osr:expr,
+            runtime_path: $runtime_path:expr,
+            reason: $reason:expr,
+        },
+        contract: $contract:expr $(,)?
+    ) => {
+        semantic_row! {
+            opcode: $opcode,
+            packed_operands: $packed_operands,
+            vm_source: $vm_source,
+            lowering_owner: $lowering_owner,
+            metadata: $metadata,
+            verifier_requirements: $verifier_requirements,
+            register_effects: $register_effects,
+            runtime_dependencies: $runtime_dependencies,
+            helper_return: $helper_return,
+            frame_policy: $frame_policy,
+            trap_policy: $trap_policy,
+            fail_fast: $fail_fast,
+            verifier_domain: verifier_domain_for_family($family),
+            capability: {
+                family: $family,
+                full_jit: $full_jit,
+                osr: $osr,
+                runtime_path: $runtime_path,
+                reason: $reason,
+            },
+            contract: $contract,
+        }
+    };
+}
+
+const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
+    semantic_row! {
+        opcode: Opcode::Hint,
+        packed_operands: HINT_LOOP,
+        vm_source: VmSemanticSource::JitOnlyHint,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::LoopEndForHintLoop,
+        verifier_requirements: REQ_LOOP_METADATA,
+        register_effects: REG_NONE,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Hint,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "JIT loop marker/NOP",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::LoadInt,
+        packed_operands: IMM32,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Load,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "constant load",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::LoadConst,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/load.rs"),
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_CONST_LAYOUT,
+        register_effects: REG_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_CONSTANT_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Load,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "constant load",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::Copy,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Copy,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "slot copy",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::CopyN,
+        packed_operands: COPY_N,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_COPY_N,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Copy,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "slot copy",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::SlotGet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::SlotLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_SLOT_GET,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Slot,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "stack slot indexing",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::SlotSet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::SlotLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_SLOT_SET,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Slot,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "stack slot indexing",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::SlotGetN,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::SlotLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_SLOT_GET_N,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Slot,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "stack slot indexing",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::SlotSetN,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::SlotLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_SLOT_SET_N,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Slot,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "stack slot indexing",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::GlobalGet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/global.rs"),
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_GLOBAL_READ,
+        register_effects: REG_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Global,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "global slot access",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GlobalGetN,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/global.rs"),
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_GLOBAL_READ,
+        register_effects: REG_WRITE_N_FLAGS,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Global,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "global slot access",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GlobalSet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/global.rs"),
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_GLOBAL_WRITE,
+        register_effects: reg_effects(
+            R_B,
+            None,
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Global,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "global slot access",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GlobalSetN,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/global.rs"),
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_GLOBAL_WRITE,
+        register_effects: REG_GLOBAL_SET_N,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Global,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "global slot access",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::PtrNew,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/heap.rs"),
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_PTR_NEW,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::Pointer,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "GC allocation",
+        },
+        contract: C_ALLOC_TYPED,
+    },
+    semantic_row! {
+        opcode: Opcode::PtrGet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::PtrLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Pointer,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "heap pointer access",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::PtrSet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::PtrLayout,
+        verifier_requirements: REQ_METADATA_WRITE_BARRIER,
+        register_effects: REG_PTR_SET,
+        runtime_dependencies: DEP_PTR_SET,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Pointer,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "heap pointer access",
+        },
+        contract: C_PTR_SET,
+    },
+    semantic_row! {
+        opcode: Opcode::PtrGetN,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::PtrLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: reg_effects(
+            R_B,
+            None,
+            W_FLAGS_A,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Pointer,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "heap pointer access",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::PtrSetN,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::PtrLayout,
+        verifier_requirements: REQ_METADATA_WRITE_BARRIER,
+        register_effects: REG_PTR_SET_N,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Pointer,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "heap pointer access",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::PtrAdd,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateMemory,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Pointer,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "pointer arithmetic",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::AddI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::SubI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::MulI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::DivI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked integer division or modulo",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::DivU,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked integer division or modulo",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::ModI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked integer division or modulo",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::ModU,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked integer division or modulo",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::NegI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::AddF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::SubF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::MulF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::DivF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::NegF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Arithmetic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "numeric operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::EqI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::NeI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::LtI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::LtU,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::LeI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::LeU,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GtI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GtU,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GeI,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GeU,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::EqF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::NeF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::LtF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::LeF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GtF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GeF,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Comparison,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "comparison",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::And,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Bitwise,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "bit operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::Or,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Bitwise,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "bit operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::Xor,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Bitwise,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "bit operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::AndNot,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Bitwise,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "bit operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::Not,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Bitwise,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "bit operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::Shl,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Bitwise,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked shift operation",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::ShrS,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Bitwise,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked shift operation",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::ShrU,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Bitwise,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked shift operation",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::BoolNot,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateScalar,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Logic,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "boolean operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::Jump,
+        packed_operands: IMM32,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::FunctionCompiler,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_BRANCH,
+        register_effects: REG_NONE,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::CompilerOwnedEntryExit,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_BRANCH,
+        capability: {
+            family: OpcodeFamily::Control,
+            full_jit: BackendStatus::CompilerSpecific,
+            osr: BackendStatus::CompilerSpecific,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "compiler-owned control flow",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::JumpIf,
+        packed_operands: IMM32,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::FunctionCompiler,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_COND_BRANCH,
+        register_effects: REG_READ_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::CompilerOwnedEntryExit,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_BRANCH_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Control,
+            full_jit: BackendStatus::CompilerSpecific,
+            osr: BackendStatus::CompilerSpecific,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "compiler-owned control flow",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::JumpIfNot,
+        packed_operands: IMM32,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::FunctionCompiler,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_COND_BRANCH,
+        register_effects: REG_READ_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::CompilerOwnedEntryExit,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_BRANCH_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Control,
+            full_jit: BackendStatus::CompilerSpecific,
+            osr: BackendStatus::CompilerSpecific,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "compiler-owned control flow",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::Call,
+        packed_operands: STATIC_CALL,
+        vm_source: VmSemanticSource::VmExec("exec/call.rs"),
+        lowering_owner: LoweringOwner::CallHelpers,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_STATIC_CALL,
+        register_effects: REG_CALL,
+        runtime_dependencies: DEP_CALL,
+        helper_return: HelperReturnPolicy::DirectJitCall,
+        frame_policy: FramePolicy::CompilerOwnedEntryExit,
+        trap_policy: TrapPolicy::VmSideExit,
+        fail_fast: FF_CALL,
+        capability: {
+            family: OpcodeFamily::Call,
+            full_jit: BackendStatus::CompilerSpecific,
+            osr: BackendStatus::CompilerSpecific,
+            runtime_path: RuntimePathPolicy::VmCallMaterialization,
+            reason: "compiler route chooses self/direct/dynamic JIT or VM call materialization",
+        },
+        contract: C_CALL,
+    },
+    semantic_row! {
+        opcode: Opcode::CallExtern,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/call.rs"),
+        lowering_owner: LoweringOwner::CallHelpers,
+        metadata: JitMetadataRequirement::CallExternLayout,
+        verifier_requirements: REQ_EXTERN_CALL,
+        register_effects: REG_CALL_EXTERN,
+        runtime_dependencies: DEP_CALL_EXTERN,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_EXTERN_CALLBACK,
+        capability: {
+            family: OpcodeFamily::Call,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "extern helper may suspend, replay, or panic",
+        },
+        contract: C_CALL_EXTERN,
+    },
+    semantic_row! {
+        opcode: Opcode::CallClosure,
+        packed_operands: DYNAMIC_CALL,
+        vm_source: VmSemanticSource::VmExec("exec/call.rs"),
+        lowering_owner: LoweringOwner::CallHelpers,
+        metadata: JitMetadataRequirement::CallLayout,
+        verifier_requirements: REQ_DYNAMIC_CALL,
+        register_effects: REG_CALL_CLOSURE,
+        runtime_dependencies: DEP_CALL_CLOSURE,
+        helper_return: HelperReturnPolicy::DirectJitCall,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::VmSideExit,
+        fail_fast: FF_CALL_METADATA,
+        capability: {
+            family: OpcodeFamily::Call,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmCallMaterialization,
+            reason: "dynamic IC with prepare callback slow path",
+        },
+        contract: C_CALL_CLOSURE,
+    },
+    semantic_row! {
+        opcode: Opcode::CallIface,
+        packed_operands: DYNAMIC_CALL,
+        vm_source: VmSemanticSource::VmExec("exec/call.rs"),
+        lowering_owner: LoweringOwner::CallHelpers,
+        metadata: JitMetadataRequirement::CallLayout,
+        verifier_requirements: REQ_DYNAMIC_CALL,
+        register_effects: REG_CALL_IFACE,
+        runtime_dependencies: DEP_CALL_IFACE,
+        helper_return: HelperReturnPolicy::DirectJitCall,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::VmSideExit,
+        fail_fast: FF_CALL_METADATA,
+        capability: {
+            family: OpcodeFamily::Call,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmCallMaterialization,
+            reason: "dynamic IC with prepare callback slow path",
+        },
+        contract: C_CALL_IFACE,
+    },
+    semantic_row! {
+        opcode: Opcode::Return,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::FunctionCompiler,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_RETURN,
+            None,
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::CompilerOwnedEntryExit,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Control,
+            full_jit: BackendStatus::CompilerSpecific,
+            osr: BackendStatus::CompilerSpecific,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "compiler-owned control flow",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::StrNew,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_STRING_CONST_LAYOUT,
+        register_effects: REG_WRITE_A,
+        runtime_dependencies: DEP_STR_NEW,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_CONSTANT_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_ALLOC_TYPED,
+    },
+    semantic_row! {
+        opcode: Opcode::StrLen,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "inline string length",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::StrIndex,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_STR_INDEX,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "string helper with checked runtime trap",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::StrConcat,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_STR_CONCAT,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_ALLOC_TYPED,
+    },
+    semantic_row! {
+        opcode: Opcode::StrSlice,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_B_C_C1,
+            Some(RegisterOperand::A),
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_STR_SLICE,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "string helper with checked runtime trap",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::StrEq,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_STR_EQ,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::StrNe,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_STR_EQ,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::StrLt,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_STR_CMP,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::StrLe,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_STR_CMP,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::StrGt,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_STR_CMP,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::StrGe,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_STR_CMP,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::StrDecodeRune,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/string.rs"),
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_B_C,
+            None,
+            W_TWO_A,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_STR_DECODE_RUNE,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::String,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking string helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::ArrayNew,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_ARRAY_NEW,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Array,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "array allocation helper",
+        },
+        contract: C_ALLOC_TYPED_SLOT,
+    },
+    semantic_row! {
+        opcode: Opcode::ArrayGet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_INDEXED_GET,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Array,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "inline array access with bounds checks and typed element layout",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::ArraySet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_WRITE_BARRIER,
+        register_effects: REG_INDEXED_SET,
+        runtime_dependencies: DEP_ARRAY_BARRIER,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Array,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "inline array access with bounds checks and typed element layout",
+        },
+        contract: C_INDEXED_SET,
+    },
+    semantic_row! {
+        opcode: Opcode::ArrayAddr,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Array,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "inline array access with bounds checks and typed element layout",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::SliceNew,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: reg_effects(
+            R_B_C_C1,
+            Some(RegisterOperand::A),
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_SLICE_NEW,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Slice,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "slice allocation or reslicing helper",
+        },
+        contract: C_ALLOC_TYPED_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::SliceGet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_INDEXED_GET,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Slice,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "inline slice access with nil-aware bounds checks and typed element layout",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::SliceSet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_WRITE_BARRIER,
+        register_effects: REG_INDEXED_SET,
+        runtime_dependencies: DEP_ARRAY_BARRIER,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Slice,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "inline slice access with nil-aware bounds checks and typed element layout",
+        },
+        contract: C_INDEXED_SET,
+    },
+    semantic_row! {
+        opcode: Opcode::SliceLen,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Slice,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "inline nil-aware slice metadata access",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::SliceCap,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Slice,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "inline nil-aware slice metadata access",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::SliceSlice,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_SLICE_SLICE,
+            Some(RegisterOperand::A),
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_SLICE_SLICE,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Slice,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "slice allocation or reslicing helper",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::SliceAppend,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_WRITE_BARRIER,
+        register_effects: REG_SLICE_APPEND,
+        runtime_dependencies: DEP_SLICE_APPEND,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Slice,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "slice append helper with JitError sentinel",
+        },
+        contract: C_ALLOC_TYPED_SLOT,
+    },
+    semantic_row! {
+        opcode: Opcode::SliceAddr,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::ElemLayoutWhenFlagsZero,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Slice,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "inline slice access with nil-aware bounds checks and typed element layout",
+        },
+        contract: C_SLOT_META_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::MapNew,
+        packed_operands: MAP_NEW,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_MAP_NEW,
+            Some(RegisterOperand::A),
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_MAP_NEW,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::Map,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking map helper",
+        },
+        contract: C_ALLOC_TYPED,
+    },
+    semantic_row! {
+        opcode: Opcode::MapGet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::MapGet,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_MAP_GET,
+        runtime_dependencies: DEP_MAP_GET,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Map,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking map helper",
+        },
+        contract: C_MAP_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::MapSet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::MapSet,
+        verifier_requirements: REQ_METADATA_WRITE_BARRIER,
+        register_effects: REG_MAP_SET,
+        runtime_dependencies: DEP_MAP_SET,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Map,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "map set helper with checked runtime trap",
+        },
+        contract: C_MAP_SET,
+    },
+    semantic_row! {
+        opcode: Opcode::MapDelete,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::MapDelete,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_MAP_DELETE,
+        runtime_dependencies: DEP_MAP_DELETE,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Map,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking map helper",
+        },
+        contract: C_MAP_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::MapLen,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_MAP_LEN,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::Map,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking map helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::MapIterInit,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_B,
+            None,
+            W_MAP_ITER_INIT,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_MAP_ITER_INIT,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::Map,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking map helper",
+        },
+        contract: C_MAP_HELPER,
+    },
+    semantic_row! {
+        opcode: Opcode::MapIterNext,
+        packed_operands: MAP_ITER,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateCollections,
+        metadata: JitMetadataRequirement::MapIterNext,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: reg_effects(
+            R_MAP_ITER,
+            None,
+            W_MAP_ITER_NEXT,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_MAP_ITER_NEXT,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_META_HELPER,
+        capability: {
+            family: OpcodeFamily::Map,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-panicking map helper",
+        },
+        contract: C_MAP_HELPER,
+    },
+    semantic_row! {
+        opcode: Opcode::QueueNew,
+        packed_operands: QUEUE_NEW,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_C_WRITE_A,
+        runtime_dependencies: DEP_QUEUE_NEW,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::Queue,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "queue allocation helper with checked runtime trap",
+        },
+        contract: C_ALLOC_TYPED_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::QueueSend,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::QueueLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_QUEUE_SEND,
+        runtime_dependencies: DEP_QUEUE_SEND,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_META_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Queue,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "queue helper may block or panic",
+        },
+        contract: C_QUEUE_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::QueueRecv,
+        packed_operands: RECV,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::QueueLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: reg_effects(
+            R_B,
+            None,
+            W_QUEUE_RECV,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_QUEUE_RECV,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_META_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Queue,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "queue helper may block or panic",
+        },
+        contract: C_QUEUE_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::QueueClose,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_A,
+        runtime_dependencies: DEP_QUEUE_CLOSE,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Queue,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "queue helper may block or panic",
+        },
+        contract: C_QUEUE_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::QueueLen,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_QUEUE_LEN,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::Queue,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-blocking queue helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::QueueCap,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_QUEUE_CAP,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::Queue,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "non-blocking queue helper",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::SelectBegin,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_NONE,
+        runtime_dependencies: DEP_SELECT_BEGIN,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Select,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "select callback may block or panic",
+        },
+        contract: C_QUEUE_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::SelectSend,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::QueueLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_SELECT_SEND,
+        runtime_dependencies: DEP_SELECT_SEND,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_META_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Select,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "select callback may block or panic",
+        },
+        contract: C_QUEUE_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::SelectRecv,
+        packed_operands: RECV,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::QueueLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
+        register_effects: REG_SELECT_RECV,
+        runtime_dependencies: DEP_SELECT_RECV,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_META_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Select,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "select callback may block or panic",
+        },
+        contract: C_QUEUE_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::SelectExec,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_NONE,
+            Some(RegisterOperand::A),
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::All,
+            false,
+        ),
+        runtime_dependencies: DEP_SELECT_EXEC,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Select,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "select callback may block or panic",
+        },
+        contract: C_QUEUE_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::ClosureNew,
+        packed_operands: CLOSURE_NEW,
+        vm_source: VmSemanticSource::VmExec("exec/closure.rs"),
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_CLOSURE_NEW,
+        register_effects: REG_WRITE_A,
+        runtime_dependencies: DEP_CLOSURE_NEW,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_FUNCTION_HELPER,
+        capability: {
+            family: OpcodeFamily::Closure,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "closure operation",
+        },
+        contract: C_CLOSURE_NEW,
+    },
+    semantic_row! {
+        opcode: Opcode::ClosureGet,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/closure.rs"),
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_CLOSURE_GET,
+            Some(RegisterOperand::A),
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Closure,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "closure operation",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::GoStart,
+        packed_operands: SHARED_CALL,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::CallLayoutWhenClosureShape,
+        verifier_requirements: REQ_SHARED_STATIC_CALL,
+        register_effects: reg_effects(
+            R_GO_SHARED,
+            None,
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::FromOperand(RegisterOperand::B),
+            false,
+        ),
+        runtime_dependencies: DEP_GO_START,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_FUNCTION_CALLBACK,
+        capability: {
+            family: OpcodeFamily::Goroutine,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "go start",
+        },
+        contract: C_GO_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::DeferPush,
+        packed_operands: SHARED_CALL,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::CallLayoutWhenClosureShape,
+        verifier_requirements: REQ_SHARED_STATIC_CALL,
+        register_effects: reg_effects(
+            R_GO_SHARED,
+            None,
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::FromOperand(RegisterOperand::B),
+            false,
+        ),
+        runtime_dependencies: DEP_DEFER_PUSH,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_FUNCTION_CALLBACK,
+        capability: {
+            family: OpcodeFamily::Defer,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "defer/recover callback",
+        },
+        contract: C_DEFER,
+    },
+    semantic_row! {
+        opcode: Opcode::ErrDeferPush,
+        packed_operands: SHARED_CALL,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::CallLayoutWhenClosureShape,
+        verifier_requirements: REQ_SHARED_STATIC_CALL,
+        register_effects: reg_effects(
+            R_GO_SHARED,
+            None,
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::FromOperand(RegisterOperand::B),
+            false,
+        ),
+        runtime_dependencies: DEP_DEFER_PUSH,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_FUNCTION_CALLBACK,
+        capability: {
+            family: OpcodeFamily::Defer,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "defer/recover callback",
+        },
+        contract: C_DEFER,
+    },
+    semantic_row! {
+        opcode: Opcode::Panic,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::FunctionCompiler,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_INTERFACE_PAIR,
+        register_effects: reg_effects(
+            R_INTERFACE_A,
+            None,
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_PANIC,
+        helper_return: HelperReturnPolicy::UserPanicReturn,
+        frame_policy: FramePolicy::CompilerOwnedEntryExit,
+        trap_policy: TrapPolicy::UserPanic,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Control,
+            full_jit: BackendStatus::CompilerSpecific,
+            osr: BackendStatus::CompilerSpecific,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "compiler-owned control flow",
+        },
+        contract: C_PANIC_CONTROL,
+    },
+    semantic_row! {
+        opcode: Opcode::Recover,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_INTERFACE_PAIR,
+        register_effects: reg_effects(
+            R_NONE,
+            None,
+            W_TWO_A,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_RECOVER,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_CALLBACK_FRAME,
+        verifier_domain: VerifierDomain::Interface,
+        capability: {
+            family: OpcodeFamily::Defer,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "defer/recover callback",
+        },
+        contract: C_RECOVER,
+    },
+    semantic_row! {
+        opcode: Opcode::IfaceAssign,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/iface.rs"),
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_IFACE_CONST,
+        register_effects: reg_effects(
+            R_IFACE_ASSIGN,
+            None,
+            W_IFACE_ASSIGN,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_IFACE_ASSIGN,
+        helper_return: HelperReturnPolicy::RawValue,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_CONSTANT_HELPER,
+        capability: {
+            family: OpcodeFamily::Interface,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "interface assignment helper",
+        },
+        contract: C_IFACE_ASSIGN,
+    },
+    semantic_row! {
+        opcode: Opcode::IfaceAssert,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/iface.rs"),
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::IfaceAssertLayout,
+        verifier_requirements: REQ_METADATA_INTERFACE_PAIR,
+        register_effects: reg_effects(
+            R_INTERFACE_B,
+            None,
+            W_IFACE_ASSERT,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_IFACE_ASSERT,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_META_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Interface,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "interface helper",
+        },
+        contract: C_IFACE_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::IfaceEq,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmExec("exec/iface.rs"),
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_INTERFACE_PAIR,
+        register_effects: reg_effects(
+            R_IFACE_EQ,
+            Some(RegisterOperand::A),
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_IFACE_EQ,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER,
+        capability: {
+            family: OpcodeFamily::Interface,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "interface helper",
+        },
+        contract: C_IFACE_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::ConvI2F,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateConversions,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Conversion,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "conversion",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::ConvF2I,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateConversions,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::HostTrapGuarded,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Conversion,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked conversion or bounds check",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::ConvF64F32,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateConversions,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Conversion,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "conversion",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::ConvF32F64,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateConversions,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Conversion,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "conversion",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::Trunc,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateConversions,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_READ_B_WRITE_A,
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::NoSpill,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Conversion,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::None,
+            reason: "conversion",
+        },
+        contract: C_PURE,
+    },
+    semantic_row! {
+        opcode: Opcode::IndexCheck,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateConversions,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: reg_effects(
+            R_A_B,
+            None,
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_RUNTIME_TRAP,
+        helper_return: HelperReturnPolicy::RuntimeTrapReturn,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::RuntimeTrap,
+        fail_fast: FF_HELPER_FRAME,
+        capability: {
+            family: OpcodeFamily::Conversion,
+            full_jit: BackendStatus::Native,
+            osr: BackendStatus::Native,
+            runtime_path: RuntimePathPolicy::RuntimePanic,
+            reason: "checked conversion or bounds check",
+        },
+        contract: C_PANIC,
+    },
+    semantic_row! {
+        opcode: Opcode::IslandNew,
+        packed_operands: NO_PACKED,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_LOCAL_LAYOUT,
+        register_effects: REG_WRITE_A,
+        runtime_dependencies: DEP_ISLAND_NEW,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::SpillBeforeHelper,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_CALLBACK_FRAME,
+        capability: {
+            family: OpcodeFamily::Island,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "island runtime callback",
+        },
+        contract: C_ALLOC_TYPED,
+    },
+    semantic_row! {
+        opcode: Opcode::GoIsland,
+        packed_operands: SHARED_CALL,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::TranslateRuntimeOps,
+        metadata: JitMetadataRequirement::CallLayout,
+        verifier_requirements: REQ_DYNAMIC_CALL,
+        register_effects: reg_effects(
+            R_GO_ISLAND,
+            None,
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::FromOperand(RegisterOperand::C),
+            false,
+        ),
+        runtime_dependencies: DEP_GO_ISLAND,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_META_CALLBACK_FRAME,
+        verifier_domain: VerifierDomain::Calls,
+        capability: {
+            family: OpcodeFamily::Island,
+            full_jit: BackendStatus::RuntimeHelper,
+            osr: BackendStatus::RuntimeHelper,
+            runtime_path: RuntimePathPolicy::RuntimeHelper,
+            reason: "island runtime callback",
+        },
+        contract: C_GO_FRAME,
+    },
+    semantic_row! {
+        opcode: Opcode::ForLoop,
+        packed_operands: FOR_LOOP,
+        vm_source: VmSemanticSource::VmDispatch,
+        lowering_owner: LoweringOwner::LoopCompiler,
+        metadata: JitMetadataRequirement::None,
+        verifier_requirements: REQ_FOR_LOOP,
+        register_effects: reg_effects(
+            R_A_B,
+            Some(RegisterOperand::A),
+            W_NONE,
+            DynamicRegisterReadEffect::None,
+            DynamicRegisterWriteEffect::None,
+            MemorySyncSpec::None,
+            false,
+        ),
+        runtime_dependencies: DEP_NONE,
+        helper_return: HelperReturnPolicy::None,
+        frame_policy: FramePolicy::CompilerOwnedEntryExit,
+        trap_policy: TrapPolicy::None,
+        fail_fast: FF_BRANCH_LAYOUT,
+        capability: {
+            family: OpcodeFamily::Control,
+            full_jit: BackendStatus::CompilerSpecific,
+            osr: BackendStatus::CompilerSpecific,
+            runtime_path: RuntimePathPolicy::VmSideExit,
+            reason: "compiler-owned control flow",
+        },
+        contract: C_PURE,
+    },
+];
+
+const INVALID_SEMANTICS: OpcodeSemantics = semantic_row! {
+    opcode: Opcode::Invalid,
+    packed_operands: NO_PACKED,
+    vm_source: VmSemanticSource::Invalid,
+    lowering_owner: LoweringOwner::Invalid,
+    metadata: JitMetadataRequirement::None,
+    verifier_requirements: REQ_NONE,
+    register_effects: REG_NONE,
+    runtime_dependencies: DEP_NONE,
+    helper_return: HelperReturnPolicy::None,
+    frame_policy: FramePolicy::MaterializedFrameRequired,
+    trap_policy: TrapPolicy::CompileFailFast,
+    fail_fast: FF_INVALID,
+    capability: {
+        family: OpcodeFamily::Invalid,
+        full_jit: BackendStatus::Unsupported,
+        osr: BackendStatus::Unsupported,
+        runtime_path: RuntimePathPolicy::InvalidOpcode,
+        reason: "invalid opcode sentinel",
+    },
+    contract: C_INVALID,
+};
+
+pub(crate) fn opcode_semantics_row(opcode: Opcode) -> &'static OpcodeSemantics {
+    if opcode == Opcode::Invalid {
+        return &INVALID_SEMANTICS;
+    }
+    let idx = opcode as usize;
+    match OPCODE_SEMANTICS.get(idx) {
+        Some(row) if row.opcode == opcode => row,
+        _ => &INVALID_SEMANTICS,
+    }
+}
+
+pub(crate) fn opcode_capability_contract(opcode: Opcode) -> OpcodeCapability {
+    opcode_semantics_row(opcode).capability
 }
 
 pub(crate) fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
-    use Opcode::*;
-
-    match opcode {
-        Hint | LoadInt | LoadConst | Copy | CopyN | GlobalGet | GlobalGetN | AddI | SubI | MulI
-        | NegI | AddF | SubF | MulF | DivF | NegF | EqI | NeI | LtI | LtU | LeI | LeU | GtI
-        | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF | GeF | And | Or | Xor | AndNot | Not
-        | BoolNot | ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | Jump | JumpIf
-        | JumpIfNot | ForLoop | PtrAdd | StrLen | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe
-        | StrDecodeRune | SliceLen | SliceCap | MapLen | QueueLen | QueueCap | ClosureGet
-        | Return => EffectContract::PURE,
-
-        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | StrIndex | StrSlice
-        | ArrayGet | ArrayAddr | SliceGet | SliceSlice | SliceAddr => EffectContract {
-            may_panic: true,
-            needs_slot_metadata: matches!(opcode, ArrayGet | ArrayAddr | SliceGet | SliceAddr),
-            ..EffectContract::PURE
-        },
-
-        SlotGet | SlotGetN | SlotSet | SlotSetN => EffectContract {
-            may_panic: true,
-            needs_slot_metadata: true,
-            ..EffectContract::PURE
-        },
-
-        GlobalSet | GlobalSetN | PtrSet | PtrSetN | ArraySet | SliceSet => EffectContract {
-            may_panic: matches!(opcode, PtrSet | PtrSetN | ArraySet | SliceSet),
-            needs_slot_metadata: matches!(opcode, ArraySet | SliceSet),
-            needs_write_barrier: matches!(opcode, PtrSet | ArraySet | SliceSet),
-            ..EffectContract::PURE
-        },
-
-        PtrGet | PtrGetN => EffectContract {
-            may_panic: true,
-            needs_slot_metadata: true,
-            ..EffectContract::PURE
-        },
-
-        PtrNew | StrNew | StrConcat | ArrayNew | SliceNew | SliceAppend | MapNew | QueueNew
-        | IslandNew => EffectContract {
-            may_gc: true,
-            may_alloc: true,
-            may_panic: matches!(opcode, SliceNew | QueueNew),
-            needs_type_metadata: true,
-            needs_slot_metadata: matches!(opcode, ArrayNew | SliceAppend),
-            ..EffectContract::PURE
-        },
-
-        MapGet | MapSet | MapDelete | MapIterInit | MapIterNext => EffectContract {
-            may_gc: matches!(opcode, MapSet),
-            may_alloc: matches!(opcode, MapSet),
-            may_panic: matches!(opcode, MapGet | MapSet | MapDelete),
-            needs_slot_metadata: true,
-            needs_type_metadata: true,
-            needs_write_barrier: matches!(opcode, MapSet),
-            touches_interface: true,
-            ..EffectContract::PURE
-        },
-
-        QueueSend | QueueRecv | QueueClose | SelectBegin | SelectSend | SelectRecv | SelectExec
-        | GoStart | GoIsland => EffectContract {
-            may_gc: true,
-            may_panic: true,
-            may_call: matches!(opcode, GoStart | GoIsland),
-            may_schedule: true,
-            may_observe_frame: true,
-            needs_frame: true,
-            needs_slot_metadata: true,
-            ..EffectContract::PURE
-        },
-
-        ClosureNew => EffectContract {
-            may_gc: true,
-            may_alloc: true,
-            needs_slot_metadata: true,
-            materializes_closure: true,
-            ..EffectContract::PURE
-        },
-
-        Call | CallExtern | CallClosure | CallIface => EffectContract {
-            may_gc: true,
-            may_alloc: true,
-            may_panic: true,
-            may_unwind: true,
-            may_call: true,
-            may_schedule: matches!(opcode, CallExtern),
-            may_observe_frame: true,
-            needs_frame: true,
-            needs_slot_metadata: true,
-            touches_interface: matches!(opcode, CallIface),
-            materializes_closure: matches!(opcode, CallClosure),
-            ..EffectContract::PURE
-        },
-
-        DeferPush | ErrDeferPush | Panic | Recover => EffectContract {
-            may_gc: true,
-            may_alloc: matches!(opcode, DeferPush | ErrDeferPush | Panic),
-            may_panic: true,
-            may_unwind: true,
-            may_observe_frame: true,
-            needs_frame: true,
-            needs_slot_metadata: true,
-            materializes_closure: matches!(opcode, DeferPush | ErrDeferPush),
-            ..EffectContract::PURE
-        },
-
-        IfaceAssign | IfaceAssert | IfaceEq => EffectContract {
-            may_gc: matches!(opcode, IfaceAssign),
-            may_alloc: matches!(opcode, IfaceAssign),
-            may_panic: matches!(opcode, IfaceAssert | IfaceEq),
-            needs_slot_metadata: true,
-            needs_type_metadata: true,
-            touches_interface: true,
-            ..EffectContract::PURE
-        },
-
-        Invalid => EffectContract {
-            may_panic: true,
-            may_unwind: true,
-            needs_frame: true,
-            ..EffectContract::PURE
-        },
-    }
-}
-
-const fn reg_effects(
-    reads: RegisterEffectShape,
-    writes: RegisterEffectShape,
-    memory_sync: MemorySyncRequirement,
-    may_call: bool,
-) -> OpcodeRegisterEffects {
-    OpcodeRegisterEffects {
-        reads,
-        writes,
-        memory_sync,
-        may_call,
-    }
+    opcode_semantics_row(opcode).contract
 }
 
 pub fn opcode_register_effects(opcode: Opcode) -> OpcodeRegisterEffects {
-    use MemorySyncRequirement as Mem;
-    use Opcode::*;
-    use RegisterEffectShape as Reg;
-
-    match opcode {
-        Hint | Jump | SelectBegin | Invalid => reg_effects(Reg::None, Reg::None, Mem::None, false),
-
-        LoadInt | LoadConst | StrNew | ClosureNew | IslandNew => {
-            reg_effects(Reg::None, Reg::FixedOperands, Mem::None, false)
-        }
-
-        Copy | Not | BoolNot | NegI | NegF | ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64
-        | Trunc | PtrNew | PtrGet | PtrAdd | ArrayNew | SliceNew | SliceLen | SliceCap
-        | SliceSlice | SliceAddr | StrLen | StrIndex | StrConcat | StrSlice | StrEq | StrNe
-        | StrLt | StrLe | StrGt | StrGe | MapNew | MapLen | QueueNew | QueueLen | QueueCap
-        | ClosureGet | ForLoop => {
-            reg_effects(Reg::FixedOperands, Reg::FixedOperands, Mem::None, false)
-        }
-
-        AddI | SubI | MulI | DivI | DivU | ModI | ModU | AddF | SubF | MulF | DivF | And | Or
-        | Xor | AndNot | Shl | ShrS | ShrU | EqI | NeI | LtI | LeI | GtI | GeI | LtU | LeU
-        | GtU | GeU | EqF | NeF | LtF | LeF | GtF | GeF => {
-            reg_effects(Reg::FixedOperands, Reg::FixedOperands, Mem::None, false)
-        }
-
-        JumpIf | JumpIfNot => reg_effects(Reg::FixedOperands, Reg::None, Mem::None, false),
-        IndexCheck | QueueClose => reg_effects(Reg::FixedOperands, Reg::None, Mem::None, false),
-
-        CopyN => reg_effects(Reg::CountedOperands, Reg::CountedOperands, Mem::None, false),
-
-        GlobalGet => reg_effects(Reg::None, Reg::FixedOperands, Mem::None, false),
-        GlobalGetN => reg_effects(Reg::None, Reg::CountedOperands, Mem::None, false),
-        GlobalSet => reg_effects(Reg::FixedOperands, Reg::None, Mem::None, false),
-        GlobalSetN => reg_effects(Reg::CountedOperands, Reg::None, Mem::None, false),
-
-        SlotGet => reg_effects(
-            Reg::FixedOperands,
-            Reg::FixedOperands,
-            Mem::FromOperand,
-            false,
-        ),
-        SlotSet => reg_effects(Reg::FixedOperands, Reg::None, Mem::FromOperand, false),
-        SlotGetN => reg_effects(
-            Reg::FixedOperands,
-            Reg::CountedOperands,
-            Mem::FromOperand,
-            false,
-        ),
-        SlotSetN => reg_effects(Reg::CountedOperands, Reg::None, Mem::FromOperand, false),
-
-        PtrGetN => reg_effects(Reg::FixedOperands, Reg::CountedOperands, Mem::None, false),
-        PtrSet => reg_effects(Reg::FixedOperands, Reg::None, Mem::None, false),
-        PtrSetN => reg_effects(Reg::CountedOperands, Reg::None, Mem::None, false),
-
-        ArrayGet | SliceGet => {
-            reg_effects(Reg::FixedOperands, Reg::MetadataLayout, Mem::None, false)
-        }
-        ArraySet | SliceSet => reg_effects(Reg::MetadataLayout, Reg::None, Mem::None, false),
-        ArrayAddr => reg_effects(Reg::FixedOperands, Reg::FixedOperands, Mem::None, false),
-        SliceAppend => reg_effects(
-            Reg::MetadataLayout,
-            Reg::FixedOperands,
-            Mem::FromOperand,
-            false,
-        ),
-
-        MapGet => reg_effects(Reg::MetadataLayout, Reg::MetadataLayout, Mem::None, false),
-        MapSet => reg_effects(Reg::MetadataLayout, Reg::None, Mem::None, false),
-        MapDelete => reg_effects(Reg::MetadataLayout, Reg::None, Mem::None, false),
-        MapIterInit => reg_effects(Reg::FixedOperands, Reg::IteratorShape, Mem::None, false),
-        MapIterNext => reg_effects(Reg::IteratorShape, Reg::IteratorShape, Mem::None, false),
-
-        QueueSend => reg_effects(Reg::CountedOperands, Reg::None, Mem::FromOperand, false),
-        QueueRecv => reg_effects(Reg::FixedOperands, Reg::RecvFlags, Mem::None, false),
-        SelectSend => reg_effects(Reg::CountedOperands, Reg::None, Mem::All, false),
-        SelectRecv => reg_effects(Reg::FixedOperands, Reg::RecvFlags, Mem::All, false),
-        SelectExec => reg_effects(Reg::None, Reg::FixedOperands, Mem::All, false),
-
-        GoStart | DeferPush | ErrDeferPush => {
-            reg_effects(Reg::CountedOperands, Reg::None, Mem::FromOperand, false)
-        }
-        GoIsland => reg_effects(Reg::CountedOperands, Reg::None, Mem::FromOperand, false),
-        Panic => reg_effects(Reg::FixedOperands, Reg::None, Mem::None, false),
-        Return => reg_effects(Reg::CountedOperands, Reg::None, Mem::None, false),
-        Recover => reg_effects(Reg::None, Reg::CountedOperands, Mem::None, false),
-        StrDecodeRune => reg_effects(Reg::FixedOperands, Reg::CountedOperands, Mem::None, false),
-
-        IfaceAssign => reg_effects(Reg::FixedOperands, Reg::CountedOperands, Mem::None, false),
-        IfaceAssert => reg_effects(Reg::FixedOperands, Reg::CountedOperands, Mem::None, false),
-        IfaceEq => reg_effects(Reg::FixedOperands, Reg::FixedOperands, Mem::None, false),
-
-        Call => reg_effects(Reg::ModuleSignature, Reg::ModuleSignature, Mem::None, true),
-        CallExtern => reg_effects(Reg::CountedOperands, Reg::ExternSignature, Mem::None, true),
-        CallClosure | CallIface => {
-            reg_effects(Reg::PackedCallShape, Reg::PackedCallShape, Mem::None, true)
-        }
-    }
+    opcode_semantics_row(opcode).register_effects
 }
 
+#[allow(dead_code)]
 pub fn opcode_runtime_dependencies(opcode: Opcode) -> &'static [RuntimeDependency] {
-    use Opcode::*;
-
-    match opcode {
-        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | PtrGet | PtrGetN
-        | ArrayGet | ArrayAddr | SliceGet | SliceAddr => DEP_RUNTIME_TRAP,
-        Panic => DEP_PANIC,
-        PtrNew => DEP_PTR_NEW,
-        PtrSet => DEP_PTR_SET,
-        PtrSetN => DEP_RUNTIME_TRAP,
-        ArraySet | SliceSet => DEP_ARRAY_BARRIER,
-        SliceAppend => DEP_SLICE_APPEND,
-        StrNew => DEP_STR_NEW,
-        StrIndex => DEP_STR_INDEX,
-        StrConcat => DEP_STR_CONCAT,
-        StrSlice => DEP_STR_SLICE,
-        StrEq | StrNe => DEP_STR_EQ,
-        StrLt | StrLe | StrGt | StrGe => DEP_STR_CMP,
-        StrDecodeRune => DEP_STR_DECODE_RUNE,
-        ArrayNew => DEP_ARRAY_NEW,
-        SliceNew => DEP_SLICE_NEW,
-        SliceSlice => DEP_SLICE_SLICE,
-        MapNew => DEP_MAP_NEW,
-        MapLen => DEP_MAP_LEN,
-        MapGet => DEP_MAP_GET,
-        MapSet => DEP_MAP_SET,
-        MapDelete => DEP_MAP_DELETE,
-        MapIterInit => DEP_MAP_ITER_INIT,
-        MapIterNext => DEP_MAP_ITER_NEXT,
-        QueueNew => DEP_QUEUE_NEW,
-        QueueLen => DEP_QUEUE_LEN,
-        QueueCap => DEP_QUEUE_CAP,
-        QueueClose => DEP_QUEUE_CLOSE,
-        QueueSend => DEP_QUEUE_SEND,
-        QueueRecv => DEP_QUEUE_RECV,
-        SelectBegin => DEP_SELECT_BEGIN,
-        SelectSend => DEP_SELECT_SEND,
-        SelectRecv => DEP_SELECT_RECV,
-        SelectExec => DEP_SELECT_EXEC,
-        ClosureNew => DEP_CLOSURE_NEW,
-        IfaceAssign => DEP_IFACE_ASSIGN,
-        IfaceAssert => DEP_IFACE_ASSERT,
-        IfaceEq => DEP_IFACE_EQ,
-        Call => DEP_CALL,
-        CallExtern => DEP_CALL_EXTERN,
-        CallClosure => DEP_CALL_CLOSURE,
-        CallIface => DEP_CALL_IFACE,
-        GoStart => DEP_GO_START,
-        GoIsland => DEP_GO_ISLAND,
-        DeferPush | ErrDeferPush => DEP_DEFER_PUSH,
-        Recover => DEP_RECOVER,
-        IslandNew => DEP_ISLAND_NEW,
-        _ => DEP_NONE,
-    }
+    opcode_semantics_row(opcode).runtime_dependencies
 }
 
+#[allow(dead_code)]
 pub fn opcode_helper_return_policy(opcode: Opcode) -> HelperReturnPolicy {
-    use HelperReturnPolicy as Ret;
-    use Opcode::*;
-
-    match opcode {
-        Call => Ret::DirectJitCall,
-        CallClosure | CallIface => Ret::DirectJitCall,
-        CallExtern | QueueClose | QueueSend | QueueRecv | SelectBegin | SelectSend | SelectRecv
-        | SelectExec | GoStart | GoIsland | DeferPush | ErrDeferPush | Recover | IfaceAssert
-        | IslandNew => Ret::JitResultChecked,
-        QueueNew | SliceNew | SliceSlice | IfaceEq | IndexCheck | DivI | DivU | ModI | ModU
-        | Shl | ShrS | ShrU | PtrGet | PtrGetN | ArrayGet | ArrayAddr | SliceGet | SliceAddr
-        | StrIndex | StrSlice => Ret::RuntimeTrapReturn,
-        Panic => Ret::UserPanicReturn,
-        SliceAppend | MapGet | MapSet | MapDelete | MapIterNext => Ret::U64JitErrorSentinel,
-        ArrayNew => Ret::RawValue,
-        PtrNew | StrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe
-        | StrDecodeRune | MapNew | MapLen | MapIterInit | QueueLen | QueueCap | ClosureNew
-        | IfaceAssign => Ret::RawValue,
-        _ => Ret::None,
-    }
+    opcode_semantics_row(opcode).helper_return
 }
 
+#[allow(dead_code)]
 pub fn opcode_frame_policy(opcode: Opcode) -> FramePolicy {
-    use FramePolicy as Frame;
-    use Opcode::*;
-
-    if matches!(
-        opcode,
-        Jump | JumpIf | JumpIfNot | Return | Panic | ForLoop | Call
-    ) {
-        return Frame::CompilerOwnedEntryExit;
-    }
-    let contract = opcode_effect_contract(opcode);
-    if contract.needs_frame || contract.may_observe_frame {
-        Frame::MaterializedFrameRequired
-    } else if contract.may_gc
-        || contract.may_alloc
-        || contract.may_panic
-        || contract.needs_write_barrier
-    {
-        Frame::SpillBeforeHelper
-    } else {
-        Frame::NoSpill
-    }
+    opcode_semantics_row(opcode).frame_policy
 }
 
+#[allow(dead_code)]
 pub fn opcode_trap_policy(opcode: Opcode) -> TrapPolicy {
-    use Opcode::*;
-    use TrapPolicy as Trap;
-
-    match opcode {
-        Invalid => Trap::CompileFailFast,
-        Panic => Trap::UserPanic,
-        Call | CallClosure | CallIface => Trap::VmSideExit,
-        CallExtern | QueueClose | QueueSend | QueueRecv | SelectBegin | SelectSend | SelectRecv
-        | SelectExec | GoStart | GoIsland | DeferPush | ErrDeferPush | Recover | IfaceAssert
-        | IslandNew => Trap::CallbackJitResult,
-        ConvF2I => Trap::HostTrapGuarded,
-        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | PtrGet | PtrGetN | PtrSet
-        | PtrSetN | ArrayGet | ArraySet | ArrayAddr | SliceNew | SliceGet | SliceSet
-        | SliceSlice | SliceAddr | StrIndex | StrSlice | MapSet | QueueNew | IfaceEq => {
-            Trap::RuntimeTrap
-        }
-        _ => Trap::None,
-    }
+    opcode_semantics_row(opcode).trap_policy
 }
 
+#[allow(dead_code)]
 pub fn opcode_fail_fast_conditions(opcode: Opcode) -> &'static [FailFastCondition] {
-    use Opcode::*;
+    opcode_semantics_row(opcode).fail_fast
+}
 
-    match opcode {
-        Invalid => FF_INVALID,
-        LoadConst => FF_CONSTANT_LAYOUT,
-        StrNew | IfaceAssign => FF_CONSTANT_HELPER,
-        ClosureNew => FF_FUNCTION_HELPER,
-        GoStart | DeferPush | ErrDeferPush => FF_FUNCTION_CALLBACK,
-        Panic => FF_HELPER_FRAME,
-        Call => FF_CALL,
-        CallExtern => FF_EXTERN_CALLBACK,
-        CallClosure | CallIface => FF_CALL_METADATA,
-        Jump => FF_BRANCH,
-        JumpIf | JumpIfNot | ForLoop => FF_BRANCH_LAYOUT,
-        Hint => FF_META_LAYOUT,
-        ArrayNew | ArrayGet | ArraySet | ArrayAddr | SliceNew | SliceGet | SliceSet | SliceAddr
-        | SliceAppend | MapGet | MapSet | MapDelete => FF_META_HELPER,
-        DivI | DivU | ModI | ModU | Shl | ShrS | ShrU | IndexCheck | StrIndex | StrSlice
-        | SliceSlice => FF_HELPER_FRAME,
-        PtrGet | PtrGetN | PtrSetN => FF_META_HELPER_FRAME,
-        SlotGet | SlotGetN | SlotSet | SlotSetN => FF_META_LAYOUT,
-        PtrAdd => FF_LAYOUT,
-        PtrNew | StrConcat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrDecodeRune
-        | MapNew | MapLen | MapIterInit | QueueNew | QueueLen | QueueCap | IfaceEq => FF_HELPER,
-        MapIterNext => FF_META_HELPER,
-        PtrSet => FF_META_HELPER_FRAME,
-        QueueClose | SelectBegin | SelectExec | Recover | IslandNew => FF_CALLBACK_FRAME,
-        QueueSend | QueueRecv | SelectSend | SelectRecv | GoIsland | IfaceAssert => {
-            FF_META_CALLBACK_FRAME
-        }
-        opcode if opcode_effect_contract(opcode).needs_slot_metadata => FF_LAYOUT,
-        LoadInt | Copy | CopyN | GlobalGet | GlobalGetN | GlobalSet | GlobalSetN | AddI | SubI
-        | MulI | NegI | AddF | SubF | MulF | DivF | NegF | EqI | NeI | LtI | LtU | LeI | LeU
-        | GtI | GtU | GeI | GeU | EqF | NeF | LtF | LeF | GtF | GeF | And | Or | Xor | AndNot
-        | Not | BoolNot | ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | Return | StrLen
-        | SliceLen | SliceCap | ClosureGet => FF_LAYOUT,
-    }
+pub(crate) fn opcode_metadata_requirement_from_semantics(opcode: Opcode) -> JitMetadataRequirement {
+    opcode_semantics_row(opcode).metadata
 }
 
 pub fn opcode_semantics(opcode: Opcode) -> OpcodeSemantics {
-    use LoweringOwner as Lowering;
-    use Opcode::*;
-    use VmSemanticSource as Vm;
-
-    let metadata = opcode_metadata_requirement(opcode);
-    let (packed_operands, vm_source, lowering_owner, verifier_requirements) = match opcode {
-        Hint => (
-            HINT_LOOP,
-            Vm::JitOnlyHint,
-            Lowering::TranslateScalar,
-            REQ_LOOP_METADATA,
-        ),
-        LoadInt => (
-            IMM32,
-            Vm::VmDispatch,
-            Lowering::TranslateScalar,
-            REQ_LOCAL_LAYOUT,
-        ),
-        LoadConst => (
-            NO_PACKED,
-            Vm::VmExec("exec/load.rs"),
-            Lowering::TranslateScalar,
-            REQ_CONST_LAYOUT,
-        ),
-        Copy => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateScalar,
-            REQ_LOCAL_LAYOUT,
-        ),
-        CopyN => (
-            COPY_N,
-            Vm::VmDispatch,
-            Lowering::TranslateScalar,
-            REQ_LOCAL_LAYOUT,
-        ),
-        SlotGet | SlotGetN => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateMemory,
-            REQ_METADATA_LOCAL,
-        ),
-        SlotSet | SlotSetN => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateMemory,
-            REQ_METADATA_LOCAL,
-        ),
-        GlobalGet | GlobalGetN => (
-            NO_PACKED,
-            Vm::VmExec("exec/global.rs"),
-            Lowering::TranslateMemory,
-            REQ_GLOBAL_READ,
-        ),
-        GlobalSet | GlobalSetN => (
-            NO_PACKED,
-            Vm::VmExec("exec/global.rs"),
-            Lowering::TranslateMemory,
-            REQ_GLOBAL_WRITE,
-        ),
-        PtrNew => (
-            NO_PACKED,
-            Vm::VmExec("exec/heap.rs"),
-            Lowering::TranslateRuntimeOps,
-            REQ_LOCAL_LAYOUT,
-        ),
-        PtrGet | PtrGetN | PtrAdd => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateMemory,
-            if matches!(opcode, PtrAdd) {
-                REQ_LOCAL_LAYOUT
-            } else {
-                REQ_METADATA_LOCAL
-            },
-        ),
-        PtrSet | PtrSetN => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateMemory,
-            REQ_METADATA_WRITE_BARRIER,
-        ),
-        AddI | SubI | MulI | DivI | DivU | ModI | ModU | NegI | AddF | SubF | MulF | DivF
-        | NegF | EqI | NeI | LtI | LtU | LeI | LeU | GtI | GtU | GeI | GeU | EqF | NeF | LtF
-        | LeF | GtF | GeF | And | Or | Xor | AndNot | Not | Shl | ShrS | ShrU | BoolNot => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateScalar,
-            REQ_LOCAL_LAYOUT,
-        ),
-        Jump => (
-            IMM32,
-            Vm::VmDispatch,
-            Lowering::FunctionCompiler,
-            REQ_BRANCH,
-        ),
-        JumpIf | JumpIfNot => (
-            IMM32,
-            Vm::VmDispatch,
-            Lowering::FunctionCompiler,
-            REQ_COND_BRANCH,
-        ),
-        Return => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::FunctionCompiler,
-            REQ_LOCAL_LAYOUT,
-        ),
-        Panic => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::FunctionCompiler,
-            REQ_INTERFACE_PAIR,
-        ),
-        Call => (
-            STATIC_CALL,
-            Vm::VmExec("exec/call.rs"),
-            Lowering::CallHelpers,
-            REQ_STATIC_CALL,
-        ),
-        CallExtern => (
-            NO_PACKED,
-            Vm::VmExec("exec/call.rs"),
-            Lowering::CallHelpers,
-            REQ_EXTERN_CALL,
-        ),
-        CallClosure | CallIface => (
-            DYNAMIC_CALL,
-            Vm::VmExec("exec/call.rs"),
-            Lowering::CallHelpers,
-            REQ_DYNAMIC_CALL,
-        ),
-        StrNew => (
-            NO_PACKED,
-            Vm::VmExec("exec/string.rs"),
-            Lowering::TranslateRuntimeOps,
-            REQ_STRING_CONST_LAYOUT,
-        ),
-        StrLen | StrIndex | StrConcat | StrSlice | StrEq | StrNe | StrLt | StrLe | StrGt
-        | StrGe | StrDecodeRune => (
-            NO_PACKED,
-            Vm::VmExec("exec/string.rs"),
-            Lowering::TranslateCollections,
-            REQ_LOCAL_LAYOUT,
-        ),
-        ArrayNew | ArrayGet | ArraySet | ArrayAddr | SliceNew | SliceGet | SliceSet | SliceAddr
-        | SliceAppend => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            if matches!(opcode, ArraySet | SliceSet | SliceAppend) {
-                REQ_METADATA_WRITE_BARRIER
-            } else {
-                REQ_METADATA_LOCAL
-            },
-        ),
-        SliceLen | SliceCap | SliceSlice => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            REQ_LOCAL_LAYOUT,
-        ),
-        MapNew => (
-            MAP_NEW,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            REQ_LOCAL_LAYOUT,
-        ),
-        MapGet => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            REQ_METADATA_LOCAL,
-        ),
-        MapSet => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            REQ_METADATA_WRITE_BARRIER,
-        ),
-        MapDelete => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            REQ_METADATA_LOCAL,
-        ),
-        MapLen => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            REQ_LOCAL_LAYOUT,
-        ),
-        MapIterInit => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            REQ_LOCAL_LAYOUT,
-        ),
-        MapIterNext => (
-            MAP_ITER,
-            Vm::VmDispatch,
-            Lowering::TranslateCollections,
-            REQ_METADATA_LOCAL,
-        ),
-        QueueNew => (
-            QUEUE_NEW,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_LOCAL_LAYOUT,
-        ),
-        QueueSend | QueueRecv => (
-            if matches!(opcode, QueueRecv) {
-                RECV
-            } else {
-                NO_PACKED
-            },
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_METADATA_LOCAL,
-        ),
-        QueueClose | QueueLen | QueueCap => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_LOCAL_LAYOUT,
-        ),
-        SelectBegin | SelectExec => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_LOCAL_LAYOUT,
-        ),
-        SelectSend => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_METADATA_LOCAL,
-        ),
-        SelectRecv => (
-            RECV,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_METADATA_LOCAL,
-        ),
-        ClosureNew => (
-            CLOSURE_NEW,
-            Vm::VmExec("exec/closure.rs"),
-            Lowering::TranslateRuntimeOps,
-            REQ_CLOSURE_NEW,
-        ),
-        ClosureGet => (
-            NO_PACKED,
-            Vm::VmExec("exec/closure.rs"),
-            Lowering::TranslateRuntimeOps,
-            REQ_LOCAL_LAYOUT,
-        ),
-        GoStart | DeferPush | ErrDeferPush => (
-            SHARED_CALL,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_SHARED_STATIC_CALL,
-        ),
-        GoIsland => (
-            SHARED_CALL,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_DYNAMIC_CALL,
-        ),
-        Recover => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_INTERFACE_PAIR,
-        ),
-        IfaceAssign => (
-            NO_PACKED,
-            Vm::VmExec("exec/iface.rs"),
-            Lowering::TranslateRuntimeOps,
-            REQ_IFACE_CONST,
-        ),
-        IfaceAssert => (
-            NO_PACKED,
-            Vm::VmExec("exec/iface.rs"),
-            Lowering::TranslateRuntimeOps,
-            REQ_METADATA_INTERFACE_PAIR,
-        ),
-        IfaceEq => (
-            NO_PACKED,
-            Vm::VmExec("exec/iface.rs"),
-            Lowering::TranslateRuntimeOps,
-            REQ_INTERFACE_PAIR,
-        ),
-        ConvI2F | ConvF2I | ConvF64F32 | ConvF32F64 | Trunc | IndexCheck => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateConversions,
-            REQ_LOCAL_LAYOUT,
-        ),
-        IslandNew => (
-            NO_PACKED,
-            Vm::VmDispatch,
-            Lowering::TranslateRuntimeOps,
-            REQ_LOCAL_LAYOUT,
-        ),
-        ForLoop => (
-            FOR_LOOP,
-            Vm::VmDispatch,
-            Lowering::LoopCompiler,
-            REQ_FOR_LOOP,
-        ),
-        Invalid => (NO_PACKED, Vm::Invalid, Lowering::Invalid, REQ_NONE),
-    };
-
-    OpcodeSemantics {
-        opcode,
-        packed_operands,
-        vm_source,
-        lowering_owner,
-        metadata,
-        verifier_requirements,
-        register_effects: opcode_register_effects(opcode),
-        runtime_dependencies: opcode_runtime_dependencies(opcode),
-        helper_return: opcode_helper_return_policy(opcode),
-        frame_policy: opcode_frame_policy(opcode),
-        trap_policy: opcode_trap_policy(opcode),
-        fail_fast: opcode_fail_fast_conditions(opcode),
-        capability: opcode_capability_contract(opcode),
-        contract: opcode_effect_contract(opcode),
-    }
+    *opcode_semantics_row(opcode)
 }
 
 pub fn opcode_semantic_matrix() -> Vec<OpcodeSemantics> {
@@ -1992,7 +4864,7 @@ pub fn opcode_semantic_matrix() -> Vec<OpcodeSemantics> {
 mod tests {
     use super::*;
     use crate::call_helpers::{jit_context_callback_callsites, JitContextCallbackCallKind};
-    use crate::capability::{BackendStatus, FallbackPolicy};
+    use crate::capability::{BackendStatus, RuntimePathPolicy};
     use crate::effects::{
         try_instruction_effects_with_module_context, EffectError, EffectFacts, MemorySyncEffect,
     };
@@ -2009,9 +4881,50 @@ mod tests {
             assert_eq!(row.opcode, opcode);
             assert_ne!(row.vm_source, VmSemanticSource::Invalid);
             assert_ne!(row.lowering_owner, LoweringOwner::Invalid);
+            assert_ne!(row.verifier_domain, VerifierDomain::Invalid);
             assert_ne!(row.capability.full_jit, BackendStatus::Unsupported);
             assert_ne!(row.capability.osr, BackendStatus::Unsupported);
         }
+    }
+
+    #[test]
+    fn semantic_matrix_uses_named_row_dsl() {
+        let src = include_str!("semantics.rs");
+        let impl_src = src.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(src);
+        assert!(
+            impl_src.contains("macro_rules! semantic_row"),
+            "opcode facts should be declared through the named semantics row DSL"
+        );
+        assert!(
+            !impl_src.contains("const fn row("),
+            "opcode facts must not go back to a long positional row constructor"
+        );
+        let table = impl_src
+            .split("const OPCODE_SEMANTICS")
+            .nth(1)
+            .expect("semantic matrix table");
+        assert!(
+            table.contains("opcode:") && table.contains("capability:"),
+            "semantic rows should use named fields for opcode and capability facts"
+        );
+    }
+
+    #[test]
+    fn verifier_domain_is_part_of_the_semantic_row() {
+        assert_eq!(
+            opcode_semantics(Opcode::GoIsland).verifier_domain,
+            VerifierDomain::Calls,
+            "GoIsland has island capability facts but call verifier layout"
+        );
+        assert_eq!(
+            opcode_semantics(Opcode::Recover).verifier_domain,
+            VerifierDomain::Interface,
+            "Recover has defer runtime semantics but interface-pair verifier layout"
+        );
+        assert_eq!(
+            opcode_semantics(Opcode::Hint).verifier_domain,
+            VerifierDomain::None
+        );
     }
 
     #[test]
@@ -2021,7 +4934,7 @@ mod tests {
         assert_eq!(row.trap_policy, TrapPolicy::None);
         assert_eq!(row.frame_policy, FramePolicy::NoSpill);
         assert!(!row.contract.may_panic);
-        assert_ne!(row.capability.fallback, FallbackPolicy::RuntimePanic);
+        assert_ne!(row.capability.runtime_path, RuntimePathPolicy::RuntimePanic);
         assert_eq!(
             row.runtime_dependencies,
             &[RuntimeDependency::RuntimeHelper("vo_str_decode_rune")]
@@ -2246,22 +5159,18 @@ mod tests {
     }
 
     #[test]
-    fn semantic_matrix_uses_metadata_contract_as_requirement_source() {
-        let src = include_str!("semantics.rs");
-        let body = src
-            .split("pub fn opcode_semantics")
-            .nth(1)
-            .expect("opcode_semantics body")
-            .split("pub fn opcode_semantic_matrix")
-            .next()
-            .expect("opcode_semantics end");
+    fn metadata_contract_uses_semantic_rows_as_requirement_source() {
+        let src = include_str!("metadata_contract.rs");
         assert!(
-            body.contains("let metadata = opcode_metadata_requirement(opcode);"),
-            "OpcodeSemantics.metadata must come from metadata_contract"
+            src.contains("opcode_metadata_requirement_from_semantics(opcode)"),
+            "strict metadata contract must read opcode requirements from semantic rows"
         );
         assert!(
-            !body.contains("JitMetadataRequirement::") && !body.contains("Meta::"),
-            "opcode_semantics must not hand-maintain a second metadata requirement matrix"
+            !src.split("pub fn opcode_metadata_requirement")
+                .nth(1)
+                .expect("opcode_metadata_requirement body")
+                .contains("match opcode"),
+            "metadata_contract must not hand-maintain a second opcode metadata matrix"
         );
     }
 
@@ -2333,7 +5242,7 @@ mod tests {
 
     #[test]
     fn dangerous_native_ops_declare_runtime_panic_or_helper_policy() {
-        use crate::capability::FallbackPolicy;
+        use crate::capability::RuntimePathPolicy;
 
         for opcode in [
             Opcode::DivI,
@@ -2348,7 +5257,8 @@ mod tests {
         ] {
             let row = opcode_semantics(opcode);
             assert!(
-                row.contract.may_panic || row.capability.fallback == FallbackPolicy::RuntimePanic,
+                row.contract.may_panic
+                    || row.capability.runtime_path == RuntimePathPolicy::RuntimePanic,
                 "{opcode:?} can trap in host IR and must declare VM panic semantics"
             );
         }
@@ -2542,7 +5452,7 @@ mod tests {
             .unwrap_or_else(|err| panic!("{opcode:?} representative effect failed: {err:?}"));
 
             assert_eq!(
-                row.register_effects.memory_sync,
+                row.register_effects.memory_sync.requirement(),
                 memory_requirement(effects.memory_sync),
                 "{opcode:?} matrix memory-sync shape drifted from effect analysis"
             );
@@ -2551,12 +5461,12 @@ mod tests {
                 "{opcode:?} matrix may_call drifted from effect analysis"
             );
             assert_eq!(
-                row.register_effects.reads == RegisterEffectShape::None,
+                !row.register_effects.has_read_effects(),
                 effects.reads.is_empty(),
                 "{opcode:?} matrix read shape drifted from effect analysis"
             );
             assert_eq!(
-                row.register_effects.writes == RegisterEffectShape::None,
+                !row.register_effects.has_write_effects(),
                 effects.writes.is_empty(),
                 "{opcode:?} matrix write shape drifted from effect analysis"
             );
@@ -2672,8 +5582,8 @@ mod tests {
             ) {
                 assert!(
                     row.contract.may_panic
-                        || row.capability.fallback == FallbackPolicy::RuntimePanic,
-                    "{opcode:?} trap policy {:?} must be backed by panic/fallback contract",
+                        || row.capability.runtime_path == RuntimePathPolicy::RuntimePanic,
+                    "{opcode:?} trap policy {:?} must be backed by panic runtime path contract",
                     row.trap_policy
                 );
             }

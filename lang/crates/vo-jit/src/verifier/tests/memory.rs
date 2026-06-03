@@ -256,10 +256,7 @@ fn rejects_slot_effects_outside_locals() {
 
     assert!(matches!(
         verify_jit_metadata(&module.functions[0], &module),
-        Err(JitMetadataError::SlotOutOfRange {
-            access: "Copy source",
-            ..
-        })
+        Err(JitMetadataError::SlotOutOfRange { access: "read", .. })
     ));
 }
 
@@ -274,10 +271,7 @@ fn rejects_slot_range_overflow_without_wrapping() {
 
     assert!(matches!(
         verify_jit_metadata(&module.functions[0], &module),
-        Err(JitMetadataError::SlotRangeOverflow {
-            access: "CopyN source",
-            ..
-        })
+        Err(JitMetadataError::SlotRangeOverflow { access: "read", .. })
     ));
 }
 
@@ -298,9 +292,6 @@ fn rejects_operand_offset_overflow_without_wrapping() {
 
     assert!(matches!(
         verify_jit_metadata(&module.functions[0], &module),
-        Err(JitMetadataError::SlotRangeOverflow {
-            access: "ArrayNew length/elem_bytes",
-            ..
-        })
+        Err(JitMetadataError::SlotOutOfRange { access: "read", .. })
     ));
 }

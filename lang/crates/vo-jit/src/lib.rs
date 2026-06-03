@@ -22,7 +22,7 @@ mod translate;
 mod translator;
 mod verifier;
 
-pub use capability::{capability_matrix, opcode_capability, BackendStatus, FallbackPolicy};
+pub use capability::{capability_matrix, opcode_capability, BackendStatus, RuntimePathPolicy};
 pub use contract_graph::{jit_contract_graph, ContractEdge};
 pub use func_compiler::FunctionCompiler;
 pub use loop_analysis::LoopInfo;
@@ -626,7 +626,7 @@ mod tests {
         );
         assert!(
             src.contains("other => Err(JitError::UnsupportedOpcode(other))"),
-            "loop compiler must keep an explicit strict fallback arm for unsupported opcodes"
+            "loop compiler must keep an explicit strict catch-all error arm for unsupported opcodes"
         );
     }
 
@@ -1026,11 +1026,11 @@ mod tests {
     }
 
     #[test]
-    fn elem_bytes_lowering_has_no_dynamic_register_fallback() {
+    fn elem_bytes_lowering_has_no_dynamic_register_substitute() {
         let src = include_str!("translate/collections.rs");
         assert!(
             !src.contains("e.read_var(eb_reg)"),
-            "dynamic elem_bytes must come from verified JIT metadata, not from a runtime register fallback"
+            "dynamic elem_bytes must come from verified JIT metadata, not from a runtime register substitute"
         );
     }
 

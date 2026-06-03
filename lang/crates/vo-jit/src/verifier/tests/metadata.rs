@@ -60,16 +60,27 @@ fn verified_module_token_detects_metadata_mutation() {
 
 #[test]
 fn verifier_metadata_layouts_use_typed_accessors() {
-    let src = include_str!("../instruction_contracts.rs");
+    let root = include_str!("../instruction_contracts.rs");
+    let concrete_modules = [
+        include_str!("../instruction_contracts/calls.rs"),
+        include_str!("../instruction_contracts/collections.rs"),
+        include_str!("../instruction_contracts/interface.rs"),
+        include_str!("../instruction_contracts/memory.rs"),
+    ];
     assert!(
-        src.contains("decode_metadata_layout("),
+        root.contains("fn decode_metadata_layout")
+            && concrete_modules
+                .iter()
+                .any(|src| src.contains("decode_metadata_layout(")),
         "verifier must route metadata payloads through its typed accessor gate"
     );
-    assert!(
-        !src.contains("Some(JitInstructionMetadata::")
-            && !src.contains("match func.jit_metadata.get(pc)"),
-        "verifier must not maintain a second metadata enum decoding table"
-    );
+    for src in concrete_modules {
+        assert!(
+            !src.contains("Some(JitInstructionMetadata::")
+                && !src.contains("match func.jit_metadata.get(pc)"),
+            "concrete verifier modules must not maintain a second metadata enum decoding table"
+        );
+    }
 }
 
 #[test]

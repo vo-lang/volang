@@ -631,7 +631,7 @@ fn reg_const_effect_from_instruction_effects(
 
 fn reg_const_effect_for_unknown_effects(inst: &Instruction) -> RegConstEffect {
     let shape = crate::semantics::opcode_register_effects(inst.opcode());
-    if shape.writes == crate::semantics::RegisterEffectShape::None {
+    if !shape.has_write_effects() {
         RegConstEffect::Preserve
     } else {
         RegConstEffect::Clear

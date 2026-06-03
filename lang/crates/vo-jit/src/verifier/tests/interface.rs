@@ -68,6 +68,7 @@ fn rejects_iface_assign_invalid_flags_and_reference_source_drift() {
 #[test]
 fn rejects_iface_assign_and_panic_without_interface_pairs() {
     let mut module = VoModule::new("verify".to_string());
+    module.constants.push(Constant::Int(0));
     module.functions.push(make_func_with_slot_types(
         vec![Instruction::with_flags(Opcode::IfaceAssign, 2, 0, 1, 0)],
         vec![JitInstructionMetadata::None],
