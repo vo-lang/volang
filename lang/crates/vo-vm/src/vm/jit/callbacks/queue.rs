@@ -224,3 +224,18 @@ pub extern "C" fn jit_queue_recv(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn queue_jit_callbacks_return_jit_error_instead_of_unreachable_panics() {
+        let src = include_str!("queue.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("queue callback source should contain production section");
+        assert!(
+            !src.contains("unreachable!("),
+            "JIT queue callbacks must surface impossible queue states as JitError"
+        );
+    }
+}

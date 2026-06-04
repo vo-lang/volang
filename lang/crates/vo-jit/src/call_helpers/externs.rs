@@ -137,17 +137,3 @@ pub fn emit_call_extern<'a, E: IrEmitter<'a>>(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn extern_lowering_is_not_inlined_back_into_call_helpers_root() {
-        let root = include_str!("../call_helpers.rs");
-        let root_impl = root.split("#[cfg(test)]").next().unwrap_or(root);
-        assert!(root_impl.contains("mod externs;"));
-        assert!(
-            !root_impl.contains("pub struct CallExternConfig"),
-            "extern call lowering belongs in call_helpers/externs.rs"
-        );
-    }
-}

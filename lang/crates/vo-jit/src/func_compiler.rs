@@ -8,7 +8,7 @@ use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFla
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
 use crate::translate::translate_inst;
-use crate::translator::{HelperFuncs, IrEmitter, SelectSyncCase, TranslateResult};
+use crate::translator::{HelperFuncs, SelectSyncCase, SlotAccess, TranslateResult};
 use crate::JitError;
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
@@ -172,33 +172,12 @@ impl<'a> FunctionCompiler<'a> {
     fn emit_variable_spill(&mut self) {
         let dst_ptr = self.fiber_stack_args_ptr();
         let args_ptr = self.current_memory_base_ptr();
-        let num_slots = self.vars.len();
-        let mem_start = (self.memory_only_start as usize).min(num_slots);
-
-        // SSA-only slots (< memory_only_start): spill from SSA to fiber.stack.
-        for i in 0..mem_start {
-            let offset = (i * 8) as i32;
-            let val = self.builder.use_var(self.vars[i]);
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, dst_ptr, offset);
-        }
-
-        // Memory-aliased slots (>= memory_only_start): copy from args_ptr to fiber.stack.
-        // In JIT-to-JIT direct calls, args_ptr points to native stack, not fiber.stack.
-        // The VM reads from fiber.stack when a JIT call materializes a VM frame,
-        // so we must sync these slots.
-        // SlotSet writes go through args_ptr, so args_ptr is the source of truth.
-        for i in mem_start..num_slots {
-            let offset = (i * 8) as i32;
-            let val = self
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), args_ptr, offset);
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, dst_ptr, offset);
-        }
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .spill_for_materialized_frame(&mut self.builder, args_ptr, dst_ptr);
     }
 
     fn current_memory_base_ptr(&mut self) -> Value {
@@ -275,21 +254,18 @@ impl<'a> FunctionCompiler<'a> {
             let slot_count = elem_slots + if has_ok { 1 } else { 0 };
             for slot_offset in 0..slot_count {
                 let slot = dst_reg + slot_offset as u16;
-                let byte_offset = (slot as i32) * 8;
                 if self.is_float_slot(slot) {
-                    let val = self.builder.ins().load(
-                        types::F64,
-                        MemFlags::trusted(),
+                    let val = crate::compile_common::load_memory_slot_f64(
+                        &mut self.builder,
                         stack_args_ptr,
-                        byte_offset,
+                        slot,
                     );
                     self.write_var_f64(slot, val);
                 } else {
-                    let val = self.builder.ins().load(
-                        types::I64,
-                        MemFlags::trusted(),
+                    let val = crate::compile_common::load_memory_slot_i64(
+                        &mut self.builder,
                         stack_args_ptr,
-                        byte_offset,
+                        slot,
                     );
                     self.store_local(slot, val);
                 }
@@ -314,30 +290,24 @@ impl<'a> FunctionCompiler<'a> {
         if slot_count == 0 {
             return Ok(());
         }
-        let end_slot = start_slot.checked_add(slot_count).ok_or_else(|| {
-            JitError::Internal(format!(
-                "select sync slot range overflow at slot {start_slot} count {slot_count}"
-            ))
-        })?;
-        let end_slot = end_slot.min(self.vars.len() as u16);
-        if start_slot >= end_slot {
-            return Ok(());
-        }
         let args_ptr = self.current_memory_base_ptr();
-        for slot in start_slot..end_slot {
-            let offset = (slot as i32) * 8;
-            if self.is_float_slot(slot) {
-                let val =
-                    self.builder
-                        .ins()
-                        .load(types::F64, MemFlags::trusted(), args_ptr, offset);
-                self.write_var_f64(slot, val);
+        let slots = crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .load_memory_slot_range(
+            &mut self.builder,
+            args_ptr,
+            start_slot,
+            slot_count,
+            "select sync",
+        )?;
+        for slot in slots {
+            if slot.is_float {
+                self.write_var_f64(slot.slot, slot.value);
             } else {
-                let val =
-                    self.builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), args_ptr, offset);
-                self.store_local(slot, val);
+                self.store_local(slot.slot, slot.value);
             }
         }
         Ok(())
@@ -397,12 +367,12 @@ impl<'a> FunctionCompiler<'a> {
 
         // Load params from args_ptr into SSA vars (params already in args_ptr from caller)
         for i in 0..param_slots {
-            let offset = (i * 8) as i32;
-            let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self
-                .builder
-                .ins()
-                .load(ty, MemFlags::trusted(), args_ptr, offset);
+            let slot = i as u16;
+            let val = if self.is_float_slot(slot) {
+                crate::compile_common::load_memory_slot_f64(&mut self.builder, args_ptr, slot)
+            } else {
+                crate::compile_common::load_memory_slot_i64(&mut self.builder, args_ptr, slot)
+            };
             self.builder.def_var(self.vars[i], val);
         }
 
@@ -417,10 +387,12 @@ impl<'a> FunctionCompiler<'a> {
                 self.builder.def_var(self.vars[i], zero_i64);
             }
             if i as u16 >= self.memory_only_start {
-                let offset = (i * 8) as i32;
-                self.builder
-                    .ins()
-                    .store(MemFlags::trusted(), zero_i64, args_ptr, offset);
+                crate::compile_common::store_memory_slot(
+                    &mut self.builder,
+                    args_ptr,
+                    i as u16,
+                    zero_i64,
+                );
             }
         }
     }
@@ -498,37 +470,26 @@ impl<'a> FunctionCompiler<'a> {
 
     /// Read variable as I64: SSA when safe, memory when slot may be aliased by SlotSet/SlotSetN.
     fn load_local(&mut self, slot: u16) -> Value {
-        if slot < self.memory_only_start {
-            let val = self.builder.use_var(self.vars[slot as usize]);
-            if self.is_float_slot(slot) {
-                self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
-            } else {
-                val
-            }
-        } else {
-            let args_ptr = self.current_memory_base_ptr();
-            self.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
-        }
+        let args_ptr = self.current_memory_base_ptr();
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .load_i64(&mut self.builder, args_ptr, slot)
     }
 
     /// Write I64 value to variable slot.
     /// SSA-only slots (< memory_only_start): only update SSA variable (memory synced on slow path by spill).
     /// Memory-aliased slots (>= memory_only_start): write both SSA and memory.
     fn store_local(&mut self, slot: u16, val: Value) {
-        if self.is_float_slot(slot) {
-            let f64_val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
-            self.builder.def_var(self.vars[slot as usize], f64_val);
-        } else {
-            self.builder.def_var(self.vars[slot as usize], val);
-        }
-        if slot >= self.memory_only_start {
-            let args_ptr = self.current_memory_base_ptr();
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
-        }
+        let args_ptr = self.current_memory_base_ptr();
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .store_i64(&mut self.builder, args_ptr, slot, val);
         // Writes invalidate local compile-time facts for the slot.
         self.checked_non_nil.remove(&slot);
         self.reg_consts.remove(&slot);
@@ -642,17 +603,17 @@ impl<'a> FunctionCompiler<'a> {
                 for i in 0..gcref_count {
                     let slot = (inst.a as usize + i) as u16;
                     if slot < self.memory_only_start {
-                        let val = self.builder.use_var(self.vars[slot as usize]);
-                        let val_i64 = if self.is_float_slot(slot) {
-                            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
-                        } else {
-                            val
-                        };
-                        self.builder.ins().store(
-                            MemFlags::trusted(),
-                            val_i64,
+                        let val_i64 = crate::compile_common::read_ssa_slot_i64(
+                            &mut self.builder,
+                            &self.vars,
+                            &self.func_def.slot_types,
+                            slot,
+                        );
+                        crate::compile_common::store_memory_slot(
+                            &mut self.builder,
                             args_ptr,
-                            (slot as i32) * 8,
+                            slot,
+                            val_i64,
                         );
                     }
                 }
@@ -824,16 +785,77 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
     }
 }
 
-impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
+impl<'a> crate::translator::IrBuilder<'a> for FunctionCompiler<'a> {
     fn builder(&mut self) -> &mut FunctionBuilder<'a> {
         &mut self.builder
     }
+}
+
+impl<'a> crate::translator::SlotAccess<'a> for FunctionCompiler<'a> {
     fn read_var(&mut self, slot: u16) -> Value {
         self.load_local(slot)
     }
     fn write_var(&mut self, slot: u16, val: Value) {
         self.store_local(slot, val);
     }
+    fn var_addr(&mut self, slot: u16) -> Value {
+        let args_ptr = self.current_memory_base_ptr();
+        self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
+    }
+    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
+        let args_ptr = self.current_memory_base_ptr();
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .sync_ssa_slots_to_memory(
+            &mut self.builder,
+            args_ptr,
+            start_slot,
+            slot_count,
+            "memory sync",
+        )
+    }
+    fn local_slot_count(&self) -> usize {
+        self.vars.len()
+    }
+    fn read_var_f64(&mut self, slot: u16) -> Value {
+        let args_ptr = self.current_memory_base_ptr();
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .load_f64(&mut self.builder, args_ptr, slot)
+    }
+    fn write_var_f64(&mut self, slot: u16, val: Value) {
+        let args_ptr = self.current_memory_base_ptr();
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .store_f64(&mut self.builder, args_ptr, slot, val);
+        self.checked_non_nil.remove(&slot);
+        self.reg_consts.remove(&slot);
+    }
+    fn reload_all_vars_from_memory(&mut self) {
+        let args_ptr = self.current_memory_base_ptr();
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .reload_all_from_memory(&mut self.builder, args_ptr);
+        self.clear_flow_facts();
+    }
+    fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
+        self.sync_written_slots_precise(start_slot, slot_count)
+    }
+}
+
+impl<'a> crate::translator::RuntimeContext<'a> for FunctionCompiler<'a> {
     fn ctx_param(&mut self) -> Value {
         self.builder.block_params(self.entry_block)[0]
     }
@@ -849,18 +871,30 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
             .ins()
             .load(types::I64, MemFlags::trusted(), ctx, 8)
     }
+}
+
+impl crate::translator::MetadataAccess for FunctionCompiler<'_> {
     fn vo_module(&self) -> &VoModule {
         self.vo_module
     }
     fn current_pc(&self) -> usize {
         self.current_pc
     }
+    fn func_id(&self) -> u32 {
+        self.func_id
+    }
     fn current_jit_metadata(&self) -> Option<&vo_runtime::bytecode::JitInstructionMetadata> {
         self.func_def.jit_metadata.get(self.current_pc)
     }
+}
+
+impl crate::translator::HelperAccess for FunctionCompiler<'_> {
     fn helpers(&self) -> &HelperFuncs {
         &self.helpers
     }
+}
+
+impl crate::translator::RegConstAccess for FunctionCompiler<'_> {
     fn set_reg_const(&mut self, reg: u16, val: i64) {
         self.reg_consts.insert(reg, val);
     }
@@ -873,91 +907,18 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
     fn clear_reg_consts(&mut self) {
         self.reg_consts.clear();
     }
+}
+
+impl crate::translator::FrameBoundary for FunctionCompiler<'_> {
     fn panic_return_value(&self) -> i32 {
         1
-    }
-    fn var_addr(&mut self, slot: u16) -> Value {
-        let args_ptr = self.current_memory_base_ptr();
-        self.builder.ins().iadd_imm(args_ptr, (slot as i64) * 8)
     }
     fn spill_all_vars(&mut self) {
         self.emit_variable_spill();
     }
-    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
-        if slot_count == 0 {
-            return Ok(());
-        }
-        let local_count = self.vars.len() as u16;
-        let end_slot = start_slot.checked_add(slot_count).ok_or_else(|| {
-            JitError::Internal(format!(
-                "memory sync slot range overflow at slot {start_slot} count {slot_count}"
-            ))
-        })?;
-        let end_slot = end_slot.min(local_count);
-        let spill_end = end_slot.min(self.memory_only_start);
-        if start_slot >= spill_end {
-            return Ok(());
-        }
-        let args_ptr = self.current_memory_base_ptr();
-        for slot in start_slot..spill_end {
-            let offset = (slot as i32) * 8;
-            let val = self.builder.use_var(self.vars[slot as usize]);
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, args_ptr, offset);
-        }
-        Ok(())
-    }
-    fn local_slot_count(&self) -> usize {
-        self.vars.len()
-    }
-    fn func_id(&self) -> u32 {
-        self.func_id
-    }
-    fn read_var_f64(&mut self, slot: u16) -> Value {
-        if slot < self.memory_only_start {
-            let val = self.builder.use_var(self.vars[slot as usize]);
-            if self.is_float_slot(slot) {
-                val
-            } else {
-                self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
-            }
-        } else {
-            let args_ptr = self.current_memory_base_ptr();
-            self.builder
-                .ins()
-                .load(types::F64, MemFlags::trusted(), args_ptr, (slot as i32) * 8)
-        }
-    }
-    fn write_var_f64(&mut self, slot: u16, val: Value) {
-        if self.is_float_slot(slot) {
-            self.builder.def_var(self.vars[slot as usize], val);
-        } else {
-            let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
-            self.builder.def_var(self.vars[slot as usize], i64_val);
-        }
-        if slot >= self.memory_only_start {
-            let args_ptr = self.current_memory_base_ptr();
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, args_ptr, (slot as i32) * 8);
-        }
-        self.checked_non_nil.remove(&slot);
-        self.reg_consts.remove(&slot);
-    }
-    fn reload_all_vars_from_memory(&mut self) {
-        let args_ptr = self.current_memory_base_ptr();
-        for i in 0..self.vars.len() {
-            let offset = (i * 8) as i32;
-            let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self
-                .builder
-                .ins()
-                .load(ty, MemFlags::trusted(), args_ptr, offset);
-            self.builder.def_var(self.vars[i], val);
-        }
-        self.clear_flow_facts();
-    }
+}
+
+impl<'a> crate::translator::SelectSync<'a> for FunctionCompiler<'a> {
     fn begin_select_tracking(&mut self) {
         self.pending_select_cases.clear();
     }
@@ -975,20 +936,26 @@ impl<'a> IrEmitter<'a> for FunctionCompiler<'a> {
         self.sync_select_exec_state_precise(result_reg);
         Ok(())
     }
-    fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
-        self.sync_written_slots_precise(start_slot, slot_count)
-    }
+}
+
+impl crate::translator::FlowFacts for FunctionCompiler<'_> {
     fn is_checked_non_nil(&self, slot: u16) -> bool {
         self.checked_non_nil.contains(&slot)
     }
     fn mark_checked_non_nil(&mut self, slot: u16) {
         self.checked_non_nil.insert(slot);
     }
+}
+
+impl<'a> crate::translator::CallBoundary<'a> for FunctionCompiler<'a> {
     fn call_caller_bp(&mut self) -> Value {
         self.saved_caller_bp
     }
     fn call_old_fiber_sp(&mut self) -> Value {
         self.saved_fiber_sp
     }
+}
+
+impl crate::translator::StackRefresh for FunctionCompiler<'_> {
     fn refresh_stack_base_after_reallocation(&mut self) {}
 }

@@ -59,28 +59,66 @@ fn verified_module_token_detects_metadata_mutation() {
 }
 
 #[test]
-fn verifier_metadata_layouts_use_typed_accessors() {
-    let root = include_str!("../instruction_contracts.rs");
-    let concrete_modules = [
-        include_str!("../instruction_contracts/calls.rs"),
-        include_str!("../instruction_contracts/collections.rs"),
-        include_str!("../instruction_contracts/interface.rs"),
-        include_str!("../instruction_contracts/memory.rs"),
-    ];
-    assert!(
-        root.contains("fn decode_metadata_layout")
-            && concrete_modules
-                .iter()
-                .any(|src| src.contains("decode_metadata_layout(")),
-        "verifier must route metadata payloads through its typed accessor gate"
-    );
-    for src in concrete_modules {
-        assert!(
-            !src.contains("Some(JitInstructionMetadata::")
-                && !src.contains("match func.jit_metadata.get(pc)"),
-            "concrete verifier modules must not maintain a second metadata enum decoding table"
-        );
-    }
+fn verifier_metadata_layouts_are_consumed_by_slot_contracts() {
+    let mut module = VoModule::new("verify".to_string());
+    module.functions.push(make_func_with_slot_types(
+        vec![Instruction::with_flags(Opcode::ArrayGet, 0, 0, 1, 2)],
+        vec![JitInstructionMetadata::ElemLayout {
+            elem_bytes: 8,
+            needs_sign_extend: false,
+            slot_layout: vec![SlotType::Float],
+        }],
+        vec![SlotType::Value, SlotType::GcRef, SlotType::Value],
+        0,
+    ));
+    module.functions.push(make_func_with_slot_types(
+        vec![Instruction::new(Opcode::MapGet, 0, 1, 2)],
+        vec![JitInstructionMetadata::MapGet {
+            key_layout: vec![SlotType::Float],
+            val_layout: vec![SlotType::Value],
+            has_ok: false,
+        }],
+        vec![
+            SlotType::Value,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+        ],
+        0,
+    ));
+    module.functions.push(make_func_with_slot_types(
+        vec![Instruction::new(Opcode::PtrGet, 0, 1, 0)],
+        vec![JitInstructionMetadata::PtrLayout {
+            value_layout: vec![SlotType::Float],
+        }],
+        vec![SlotType::Value, SlotType::GcRef],
+        0,
+    ));
+
+    assert!(matches!(
+        verify_jit_metadata(&module.functions[0], &module),
+        Err(JitMetadataError::SlotTypeMismatch {
+            opcode: Opcode::ArrayGet,
+            access: "ArrayGet destination",
+            ..
+        })
+    ));
+    assert!(matches!(
+        verify_jit_metadata(&module.functions[1], &module),
+        Err(JitMetadataError::SlotTypeMismatch {
+            opcode: Opcode::MapGet,
+            access: "MapGet key",
+            ..
+        })
+    ));
+    assert!(matches!(
+        verify_jit_metadata(&module.functions[2], &module),
+        Err(JitMetadataError::SlotTypeMismatch {
+            opcode: Opcode::PtrGet,
+            access: "PtrGet destination",
+            ..
+        })
+    ));
 }
 
 #[test]

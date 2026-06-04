@@ -114,10 +114,11 @@ The capability API uses `RuntimePathPolicy`:
 entry and must return through the VM call trampoline. It is not a silent legacy
 fallback.
 
-The VM may still expose execution statistics named `JitFallbackReason`; those
-statistics count semantic side exits such as cold/not-hot execution, WaitIo,
-Replay, queue blocking, and regular/prepared VM call materialization. They are
-not a source of opcode lowering facts.
+The VM exposes execution statistics as `JitSideExitReason`; those statistics
+count semantic side exits such as cold/not-hot execution, WaitIo, Replay, queue
+blocking, and regular/prepared VM call materialization. Legacy manifest keys
+that still contain "fallback" are parsed only at the language-test boundary and
+must map into side-exit observation fields before they reach runtime APIs.
 
 ## Fail-Fast Rules
 

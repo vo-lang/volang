@@ -2014,7 +2014,7 @@ impl Vm {
                             }
                         }
                     }
-                    // VM fallback path
+                    // VM continuation for cold or side-exiting calls.
                     handle_panic_result!(exec::exec_call(&mut self.state.gc, fiber, &inst, module));
                 }
                 Opcode::CallExtern => {

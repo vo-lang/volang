@@ -148,7 +148,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     emitter.builder().switch_to_block(jit_call_block);
     emitter.builder().seal_block(jit_call_block);
 
-    let old_call_depth = emit_call_depth_enter(emitter, ctx);
+    let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
     let jit_func_sig = import_jit_func_sig(emitter);
     let jit_call = emitter.builder().ins().call_indirect(
         jit_func_sig,
@@ -228,7 +228,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
             p.ret_slots_val,
         ],
         true,
-    );
+    )?;
     emitter.builder().ins().return_(&[jit_result]);
 
     // OK: pop_frame, jump to merge.
@@ -239,7 +239,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         PREPARED_CALL_POP_FRAME_CALLSITE,
         pop_frame_fn_ptr,
         &[ctx, caller_bp],
-    );
+    )?;
     emitter.builder().ins().jump(merge_block, &[]);
 
     // === Merge block ===
@@ -257,18 +257,4 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn prepared_dispatch_is_not_inlined_back_into_call_helpers_root() {
-        let root = include_str!("../call_helpers.rs");
-        let root_impl = root.split("#[cfg(test)]").next().unwrap_or(root);
-        assert!(root_impl.contains("mod prepared;"));
-        assert!(
-            !root_impl.contains("struct PreparedCallParams"),
-            "prepared call dispatch belongs in call_helpers/prepared.rs"
-        );
-    }
 }

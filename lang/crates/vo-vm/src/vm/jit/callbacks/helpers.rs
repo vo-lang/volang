@@ -6,13 +6,32 @@ use vo_runtime::objects::interface::InterfaceSlot;
 use crate::fiber::Fiber;
 use crate::vm::{RuntimeTrapKind, Vm};
 
-/// Extract VM and Fiber references from JitContext.
+pub struct JitCallbackBorrow<'a> {
+    pub vm: &'a mut Vm,
+    pub fiber: &'a mut Fiber,
+}
+
+/// Decode the VM/Fiber borrow carried by a JIT callback context.
+///
+/// # Safety
+///
+/// `ctx` must be a non-null pointer created by `build_jit_context` for the
+/// currently executing fiber. Its `vm` and `fiber` fields must still point to
+/// the same live VM and fiber, and the callback must not retain the returned
+/// references after it returns to JIT code.
 #[inline]
-pub unsafe fn extract_context(ctx: *mut JitContext) -> (&'static mut Vm, &'static mut Fiber) {
+pub unsafe fn borrow_context<'a>(ctx: *mut JitContext) -> JitCallbackBorrow<'a> {
     let ctx = &mut *ctx;
     let vm = &mut *(ctx.vm as *mut Vm);
     let fiber = &mut *(ctx.fiber as *mut Fiber);
-    (vm, fiber)
+    JitCallbackBorrow { vm, fiber }
+}
+
+/// Compatibility helper for callbacks that only need VM/Fiber.
+#[inline]
+pub unsafe fn extract_context<'a>(ctx: *mut JitContext) -> (&'a mut Vm, &'a mut Fiber) {
+    let borrow = borrow_context(ctx);
+    (borrow.vm, borrow.fiber)
 }
 
 /// Helper: set panic message on fiber and return JitResult::Panic.

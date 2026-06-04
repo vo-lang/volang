@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    forloop_target_i64, verify_interface_pair, verify_layout, verify_local_layout_matches,
+    VerifierCtx,
+};
+use crate::verifier::JitMetadataError;
+use vo_common_core::bytecode::ReturnFlags;
+use vo_runtime::bytecode::FunctionDef;
+use vo_runtime::instruction::Opcode;
+use vo_runtime::SlotType;
 
 pub(super) fn verify(ctx: VerifierCtx<'_>) -> Result<(), JitMetadataError> {
     let func = ctx.func;

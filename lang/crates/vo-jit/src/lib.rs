@@ -681,13 +681,15 @@ mod tests {
         }
 
         let memory_lowering = include_str!("translate/memory.rs");
-        let collection_lowering = include_str!("translate/collections.rs");
+        let array_lowering = include_str!("translate/collections/array.rs");
+        let slice_lowering = include_str!("translate/collections/slice.rs");
         assert!(
             memory_lowering.contains("require_helper(e.helpers().write_barrier"),
             "PtrSet lowering must use the write-barrier helper when flags require it"
         );
         assert!(
-            collection_lowering.contains("emit_array_write_barrier"),
+            array_lowering.contains("emit_array_write_barrier")
+                && slice_lowering.contains("emit_array_write_barrier_multi"),
             "Array/Slice element writes must route through write-barrier lowering"
         );
     }
@@ -994,7 +996,7 @@ mod tests {
 
     #[test]
     fn host_trap_denylist_for_array_bounds_checks_uses_nil_guarded_len() {
-        let src = include_str!("translate/collections.rs");
+        let src = include_str!("translate/collections/array.rs");
         assert_eq!(
             src.matches("emit_array_bounds_check(e, arr, idx);").count(),
             3,
@@ -1027,7 +1029,7 @@ mod tests {
 
     #[test]
     fn elem_bytes_lowering_has_no_dynamic_register_substitute() {
-        let src = include_str!("translate/collections.rs");
+        let src = include_str!("translate/collections/element.rs");
         assert!(
             !src.contains("e.read_var(eb_reg)"),
             "dynamic elem_bytes must come from verified JIT metadata, not from a runtime register substitute"
@@ -1036,7 +1038,7 @@ mod tests {
 
     #[test]
     fn array_slice_multi_slot_barriers_use_typed_metadata_helper() {
-        let lowering = include_str!("translate/collections.rs");
+        let lowering = include_str!("translate/collections/array.rs");
         let runtime = include_str!("../../vo-runtime/src/jit_api.rs");
         assert!(
             lowering.contains("typed_write_barrier_by_meta"),
@@ -1094,7 +1096,12 @@ mod tests {
             include_str!("contract.rs"),
             include_str!("func_compiler.rs"),
             include_str!("loop_compiler.rs"),
-            include_str!("translate/runtime_ops.rs"),
+            include_str!("translate/runtime_ops/mod.rs"),
+            include_str!("translate/runtime_ops/allocation.rs"),
+            include_str!("translate/runtime_ops/closure.rs"),
+            include_str!("translate/runtime_ops/goroutine.rs"),
+            include_str!("translate/runtime_ops/interface.rs"),
+            include_str!("translate/runtime_ops/queue_select.rs"),
         ] {
             collect_jit_context_offsets(src, &mut used);
         }
@@ -1122,12 +1129,52 @@ mod tests {
             ("call_helpers.rs", include_str!("call_helpers.rs")),
             ("translate/memory.rs", include_str!("translate/memory.rs")),
             (
-                "translate/collections.rs",
-                include_str!("translate/collections.rs"),
+                "translate/collections/mod.rs",
+                include_str!("translate/collections/mod.rs"),
             ),
             (
-                "translate/runtime_ops.rs",
-                include_str!("translate/runtime_ops.rs"),
+                "translate/collections/array.rs",
+                include_str!("translate/collections/array.rs"),
+            ),
+            (
+                "translate/collections/element.rs",
+                include_str!("translate/collections/element.rs"),
+            ),
+            (
+                "translate/collections/slice.rs",
+                include_str!("translate/collections/slice.rs"),
+            ),
+            (
+                "translate/collections/map.rs",
+                include_str!("translate/collections/map.rs"),
+            ),
+            (
+                "translate/collections/string.rs",
+                include_str!("translate/collections/string.rs"),
+            ),
+            (
+                "translate/runtime_ops/mod.rs",
+                include_str!("translate/runtime_ops/mod.rs"),
+            ),
+            (
+                "translate/runtime_ops/allocation.rs",
+                include_str!("translate/runtime_ops/allocation.rs"),
+            ),
+            (
+                "translate/runtime_ops/closure.rs",
+                include_str!("translate/runtime_ops/closure.rs"),
+            ),
+            (
+                "translate/runtime_ops/goroutine.rs",
+                include_str!("translate/runtime_ops/goroutine.rs"),
+            ),
+            (
+                "translate/runtime_ops/interface.rs",
+                include_str!("translate/runtime_ops/interface.rs"),
+            ),
+            (
+                "translate/runtime_ops/queue_select.rs",
+                include_str!("translate/runtime_ops/queue_select.rs"),
             ),
         ] {
             for needle in [

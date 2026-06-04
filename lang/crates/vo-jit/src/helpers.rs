@@ -38,7 +38,7 @@ fn runtime_helper_abi(name: &str) -> Result<&'static JitRuntimeHelperAbi, JitErr
         })
 }
 
-fn clif_type_for_abi(abi: JitAbiType, ptr: Type) -> Option<Type> {
+pub(crate) fn clif_type_for_abi(abi: JitAbiType, ptr: Type) -> Option<Type> {
     match abi {
         JitAbiType::Void => None,
         JitAbiType::Ptr => Some(ptr),

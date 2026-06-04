@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    constant_at, constant_kind, local_layout, verify_layout, verify_local_layout_matches,
+    verify_one_of_single_slot_layout, verify_structural_layout, VerifierCtx, ANY_SINGLE_SLOT,
+    FLOAT_STORAGE_SLOTS, RAW_I64_SLOTS,
+};
+use crate::verifier::JitMetadataError;
+use vo_runtime::bytecode::{Constant, FunctionDef, Module as VoModule};
+use vo_runtime::instruction::Opcode;
+use vo_runtime::SlotType;
 
 pub(super) fn verify(ctx: VerifierCtx<'_>) -> Result<(), JitMetadataError> {
     let func = ctx.func;

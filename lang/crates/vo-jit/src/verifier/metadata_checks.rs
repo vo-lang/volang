@@ -104,10 +104,21 @@ pub(super) fn verify_metadata_kind(
             validate_loop_end_backedge(func, pc, end_pc)?;
             Ok(())
         }
-        kind if kind.is_legacy_compat_only() => {
+        JitMetadataKind::LegacyMapGet
+        | JitMetadataKind::LegacyMapSet
+        | JitMetadataKind::LegacyMapDelete => {
             Err(unsupported_legacy_metadata(func, pc, opcode, kind.name()))
         }
-        _ => Ok(()),
+        JitMetadataKind::MapGet
+        | JitMetadataKind::MapSet
+        | JitMetadataKind::MapDelete
+        | JitMetadataKind::PtrLayout
+        | JitMetadataKind::SlotLayout
+        | JitMetadataKind::CallLayout
+        | JitMetadataKind::CallExternLayout
+        | JitMetadataKind::QueueLayout
+        | JitMetadataKind::MapIterNext
+        | JitMetadataKind::IfaceAssertLayout => Ok(()),
     }
 }
 

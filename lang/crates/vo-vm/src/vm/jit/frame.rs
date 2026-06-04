@@ -151,3 +151,38 @@ pub extern "C" fn jit_push_resume_point(
     }
     JitResult::Ok
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::context::build_jit_context;
+    use super::super::test_support::function;
+    use super::*;
+    use crate::fiber::{Fiber, MAX_STACK_CAPACITY};
+    use crate::vm::{JitConfig, Vm};
+    use vo_runtime::bytecode::Module;
+
+    #[test]
+    fn jit_push_frame_capacity_failure_records_recoverable_trap() {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-push-frame-contract-test".to_string());
+        module.functions.push(function(1, 0));
+        vm.load(module).unwrap();
+
+        let module_ptr = vm.module.as_ref().unwrap() as *const Module;
+        let mut fiber = Fiber::new(7);
+        fiber.push_frame(0, 1, 0, 0, 0);
+        let mut ctx =
+            unsafe { build_jit_context(&mut vm, &mut fiber, &*module_ptr) }.expect("jit context");
+        ctx.ctx.fiber_sp = MAX_STACK_CAPACITY as u32;
+
+        let args = jit_push_frame(ctx.as_ptr(), 0, 1, 0, 0, 12);
+
+        assert!(args.is_null());
+        assert!(fiber.jit_panic_flag);
+        assert_eq!(
+            ctx.ctx.runtime_trap_kind,
+            JitRuntimeTrapKind::StackOverflow as u8
+        );
+        assert_eq!(ctx.ctx.runtime_trap_pc, 11);
+    }
+}

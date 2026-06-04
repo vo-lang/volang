@@ -12,7 +12,7 @@ use vo_runtime::jit_api::{
     JIT_INFRA_ERROR_SENTINEL,
 };
 
-use crate::translator::{emit_funcref_call, IrEmitter};
+use crate::translator::{emit_funcref_call, SlotAccess, TrapEmitter};
 
 const MISSING_RUNTIME_TRAP_HELPER_ID: u32 = 1;
 const MISSING_PANIC_HELPER_ID: u32 = 2;
@@ -275,7 +275,7 @@ pub fn function_contract(func: &FunctionDef) -> EffectContract {
 }
 
 pub fn emit_runtime_trap_return<'a>(
-    e: &mut impl IrEmitter<'a>,
+    e: &mut impl TrapEmitter<'a>,
     kind: JitRuntimeTrapKind,
     arg0: Option<Value>,
     arg1: Option<Value>,
@@ -296,7 +296,10 @@ pub fn emit_runtime_trap_return<'a>(
     e.builder().ins().return_(&[panic_ret]);
 }
 
-pub fn emit_user_panic_return<'a>(e: &mut impl IrEmitter<'a>, msg_slot: u16) {
+pub fn emit_user_panic_return<'a, E>(e: &mut E, msg_slot: u16)
+where
+    E: TrapEmitter<'a> + SlotAccess<'a>,
+{
     let Some(panic_func) = e.helpers().panic else {
         emit_missing_helper_jit_error_return(e, MISSING_PANIC_HELPER_ID);
         return;
@@ -321,7 +324,7 @@ pub fn emit_user_panic_return<'a>(e: &mut impl IrEmitter<'a>, msg_slot: u16) {
     e.builder().ins().return_(&[panic_val]);
 }
 
-fn emit_missing_helper_jit_error_return<'a>(e: &mut impl IrEmitter<'a>, helper_id: u32) {
+fn emit_missing_helper_jit_error_return<'a>(e: &mut impl TrapEmitter<'a>, helper_id: u32) {
     let ctx = e.ctx_param();
     let sentinel = e
         .builder()
@@ -358,7 +361,7 @@ fn emit_missing_helper_jit_error_return<'a>(e: &mut impl IrEmitter<'a>, helper_i
 }
 
 pub fn emit_runtime_trap_if<'a>(
-    e: &mut impl IrEmitter<'a>,
+    e: &mut impl TrapEmitter<'a>,
     condition: Value,
     kind: JitRuntimeTrapKind,
     arg0: Option<Value>,
@@ -378,7 +381,7 @@ pub fn emit_runtime_trap_if<'a>(
     e.builder().seal_block(ok_block);
 }
 
-pub fn emit_return_if_runtime_trap_recorded<'a>(e: &mut impl IrEmitter<'a>) {
+pub fn emit_return_if_runtime_trap_recorded<'a>(e: &mut impl TrapEmitter<'a>) {
     let ctx = e.ctx_param();
     let kind = e.builder().ins().load(
         types::I8,
@@ -413,7 +416,7 @@ pub fn emit_return_if_runtime_trap_recorded<'a>(e: &mut impl IrEmitter<'a>) {
     e.builder().seal_block(ok_block);
 }
 
-pub fn emit_nil_func_trap_if<'a>(e: &mut impl IrEmitter<'a>, closure_ref: Value) {
+pub fn emit_nil_func_trap_if<'a>(e: &mut impl TrapEmitter<'a>, closure_ref: Value) {
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(
         cranelift_codegen::ir::condcodes::IntCC::Equal,
@@ -423,7 +426,7 @@ pub fn emit_nil_func_trap_if<'a>(e: &mut impl IrEmitter<'a>, closure_ref: Value)
     emit_runtime_trap_if(e, is_nil, JitRuntimeTrapKind::NilFuncCall, None, None);
 }
 
-pub fn mark_runtime_trap_pc<'a>(e: &mut impl IrEmitter<'a>) {
+pub fn mark_runtime_trap_pc<'a>(e: &mut impl TrapEmitter<'a>) {
     let ctx = e.ctx_param();
     let current_pc = e.current_pc();
     let pc_val = e.builder().ins().iconst(types::I32, current_pc as i64);

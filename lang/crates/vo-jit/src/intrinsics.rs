@@ -10,14 +10,14 @@ use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 
 use vo_runtime::instruction::Instruction;
 
-use crate::translator::IrEmitter;
+use crate::translator::ScalarEmitter;
 
 /// Try to emit an intrinsic for a CallExtern instruction.
 /// Returns `true` if the extern was handled as an intrinsic (caller should skip FFI).
 ///
 /// This runs at JIT compilation time (once per CallExtern instruction),
 /// so the string match cost is negligible.
-pub fn try_emit_for_extern<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -> bool {
+pub fn try_emit_for_extern<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) -> bool {
     let extern_id = inst.b as usize;
     let Some(extern_def) = e.vo_module().externs.get(extern_id) else {
         return false;
@@ -37,7 +37,7 @@ pub fn try_emit_for_extern<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) -
 
 /// Emit a unary f64 → f64 intrinsic.
 fn emit_unary<'a>(
-    e: &mut impl IrEmitter<'a>,
+    e: &mut impl ScalarEmitter<'a>,
     inst: &Instruction,
     op: impl FnOnce(&mut cranelift_frontend::FunctionBuilder, Value) -> Value,
 ) {
@@ -47,7 +47,7 @@ fn emit_unary<'a>(
 }
 
 /// Emit fused multiply-add: FMA(x, y, z) = x*y + z
-fn emit_fma<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+fn emit_fma<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let arg_start = inst.c;
     let a = read_f64_arg(e, arg_start);
     let b = read_f64_arg(e, arg_start + 1);
@@ -59,7 +59,7 @@ fn emit_fma<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
 /// Read an argument slot as F64. If the SSA variable is I64 (non-Float slot),
 /// bitcast to F64.
 #[inline]
-fn read_f64_arg<'a>(e: &mut impl IrEmitter<'a>, slot: u16) -> Value {
+fn read_f64_arg<'a>(e: &mut impl ScalarEmitter<'a>, slot: u16) -> Value {
     let val = e.read_var(slot);
     let ty = e.builder().func.dfg.value_type(val);
     if ty == types::F64 {

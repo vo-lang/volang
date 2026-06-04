@@ -1,28 +1,22 @@
-#![allow(unused_imports)]
-
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{
-    types, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, Value,
-};
+use cranelift_codegen::ir::{types, InstBuilder, Value};
 use vo_runtime::bytecode::Constant;
-use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
+use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
-use crate::translator::{
-    emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter,
-};
+use crate::translator::ScalarEmitter;
 use crate::JitError;
 
 use super::emit_runtime_trap_if;
 
-pub(super) fn load_int<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn load_int<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let val = e.builder().ins().iconst(types::I64, inst.imm32() as i64);
     e.write_var(inst.a, val);
     e.set_reg_const(inst.a, inst.imm32() as i64);
 }
 
 pub(super) fn load_const<'a>(
-    e: &mut impl IrEmitter<'a>,
+    e: &mut impl ScalarEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
     let const_idx = inst.b as usize;
@@ -71,7 +65,7 @@ pub(super) fn load_const<'a>(
     Ok(())
 }
 
-pub(super) fn copy<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn copy<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let const_val = e.get_reg_const(inst.b);
     let v = e.read_var(inst.b);
     e.write_var(inst.a, v);
@@ -80,7 +74,7 @@ pub(super) fn copy<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     }
 }
 
-pub(super) fn copy_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn copy_n<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let count = inst.copy_n_count();
     let mut values = Vec::with_capacity(count as usize);
     for i in 0..count {
@@ -94,28 +88,28 @@ pub(super) fn copy_n<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     }
 }
 
-pub(super) fn add_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn add_i<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let r = e.builder().ins().iadd(a, b);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn sub_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn sub_i<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let r = e.builder().ins().isub(a, b);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn mul_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn mul_i<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let r = e.builder().ins().imul(a, b);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn div_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn div_i<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
 
     // Constant divisor optimization: skip zero-check and overflow-check when divisor is known.
@@ -168,7 +162,7 @@ pub(super) fn div_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn mod_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn mod_i<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
 
     // Constant divisor optimization
@@ -216,7 +210,7 @@ pub(super) fn mod_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn div_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn div_u<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
 
     // Constant divisor optimization: skip zero-check
@@ -245,7 +239,7 @@ pub(super) fn div_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn mod_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn mod_u<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
 
     // Constant divisor optimization: skip zero-check
@@ -274,47 +268,47 @@ pub(super) fn mod_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn neg_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn neg_i<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let r = e.builder().ins().ineg(a);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn add_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn add_f<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let fa = e.read_var_f64(inst.b);
     let fb = e.read_var_f64(inst.c);
     let fr = e.builder().ins().fadd(fa, fb);
     e.write_var_f64(inst.a, fr);
 }
 
-pub(super) fn sub_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn sub_f<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let fa = e.read_var_f64(inst.b);
     let fb = e.read_var_f64(inst.c);
     let fr = e.builder().ins().fsub(fa, fb);
     e.write_var_f64(inst.a, fr);
 }
 
-pub(super) fn mul_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn mul_f<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let fa = e.read_var_f64(inst.b);
     let fb = e.read_var_f64(inst.c);
     let fr = e.builder().ins().fmul(fa, fb);
     e.write_var_f64(inst.a, fr);
 }
 
-pub(super) fn div_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn div_f<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let fa = e.read_var_f64(inst.b);
     let fb = e.read_var_f64(inst.c);
     let fr = e.builder().ins().fdiv(fa, fb);
     e.write_var_f64(inst.a, fr);
 }
 
-pub(super) fn neg_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn neg_f<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let fa = e.read_var_f64(inst.b);
     let fr = e.builder().ins().fneg(fa);
     e.write_var_f64(inst.a, fr);
 }
 
-pub(super) fn cmp_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntCC) {
+pub(super) fn cmp_i<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction, cc: IntCC) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let cmp = e.builder().ins().icmp(cc, a, b);
@@ -322,7 +316,7 @@ pub(super) fn cmp_i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: IntC
     e.write_var(inst.a, r);
 }
 
-pub(super) fn cmp_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: FloatCC) {
+pub(super) fn cmp_f<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction, cc: FloatCC) {
     let fa = e.read_var_f64(inst.b);
     let fb = e.read_var_f64(inst.c);
     let cmp = e.builder().ins().fcmp(cc, fa, fb);
@@ -331,13 +325,13 @@ pub(super) fn cmp_f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction, cc: Floa
     e.write_var(inst.a, r);
 }
 
-pub(super) fn bitwise_not<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn bitwise_not<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let r = e.builder().ins().bnot(a);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn bool_not<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn bool_not<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let zero = e.builder().ins().iconst(types::I64, 0);
     let cmp = e.builder().ins().icmp(IntCC::Equal, a, zero);
@@ -345,35 +339,38 @@ pub(super) fn bool_not<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn and<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn and<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let r = e.builder().ins().band(a, b);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn or<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn or<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let r = e.builder().ins().bor(a, b);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn xor<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn xor<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let r = e.builder().ins().bxor(a, b);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn and_not<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn and_not<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     let r = e.builder().ins().band_not(a, b);
     e.write_var(inst.a, r);
 }
 
-pub(super) fn shift_precheck<'a>(e: &mut impl IrEmitter<'a>, shift_amt: Value) -> (Value, Value) {
+pub(super) fn shift_precheck<'a>(
+    e: &mut impl ScalarEmitter<'a>,
+    shift_amt: Value,
+) -> (Value, Value) {
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_negative = e
         .builder()
@@ -394,7 +391,7 @@ pub(super) fn shift_precheck<'a>(e: &mut impl IrEmitter<'a>, shift_amt: Value) -
     (zero, is_large)
 }
 
-pub(super) fn shl<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn shl<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     // Constant shift optimization: skip precheck when shift amount is known valid
@@ -423,7 +420,7 @@ pub(super) fn shl<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn shr_s<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn shr_s<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     // Constant shift optimization
@@ -458,7 +455,7 @@ pub(super) fn shr_s<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn shr_u<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn shr_u<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let b = e.read_var(inst.c);
     // Constant shift optimization

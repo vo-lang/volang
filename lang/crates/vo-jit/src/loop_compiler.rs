@@ -9,7 +9,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
 use crate::loop_analysis::LoopInfo;
 use crate::translate::translate_inst;
-use crate::translator::{HelperFuncs, IrEmitter, TranslateResult};
+use crate::translator::{HelperFuncs, SlotAccess, TranslateResult};
 use crate::JitError;
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
@@ -117,11 +117,6 @@ impl<'a> LoopCompiler<'a> {
         self.vars = crate::compile_common::declare_variables(&mut self.builder, self.func_def);
     }
 
-    #[inline]
-    fn is_float_slot(&self, slot: u16) -> bool {
-        crate::compile_common::is_float_slot(self.func_def, slot)
-    }
-
     fn scan_jump_targets(&mut self) -> Result<(), JitError> {
         let policy = crate::compile_common::ControlPolicy::loop_osr(
             self.loop_info.begin_pc,
@@ -191,38 +186,22 @@ impl<'a> LoopCompiler<'a> {
         self.builder.declare_var(self.locals_ptr_var, types::I64);
         self.builder.def_var(self.locals_ptr_var, locals_ptr_init);
 
-        // Normal entry: load all variables from memory
-        for i in 0..self.vars.len() {
-            let offset = (i * 8) as i32;
-            let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self
-                .builder
-                .ins()
-                .load(ty, MemFlags::trusted(), locals_ptr_init, offset);
-            self.builder.def_var(self.vars[i], val);
-        }
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .reload_all_from_memory(&mut self.builder, locals_ptr_init);
     }
 
     fn store_vars_to_memory(&mut self) {
-        // Spill SSA-only slots (< memory_only_start) to locals_ptr.
-        // Memory-aliased slots (>= memory_only_start) are already up-to-date in memory.
-        let spill_count = (self.memory_only_start as usize).min(self.vars.len());
         let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        for i in 0..spill_count {
-            let offset = (i * 8) as i32;
-            let val = self.builder.use_var(self.vars[i]);
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, locals_ptr, offset);
-        }
-    }
-
-    fn load_var_from_memory(&mut self, slot: u16) -> Value {
-        let offset = (slot as i32) * 8;
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        self.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), locals_ptr, offset)
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .spill_ssa_prefix_to_memory(&mut self.builder, locals_ptr);
     }
 
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
@@ -518,39 +497,112 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
     }
 }
 
-impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
+impl<'a> crate::translator::IrBuilder<'a> for LoopCompiler<'a> {
     fn builder(&mut self) -> &mut FunctionBuilder<'a> {
         &mut self.builder
     }
+}
+
+impl<'a> crate::translator::SlotAccess<'a> for LoopCompiler<'a> {
     fn read_var(&mut self, slot: u16) -> Value {
-        if slot < self.memory_only_start {
-            let val = self.builder.use_var(self.vars[slot as usize]);
-            if self.is_float_slot(slot) {
-                self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
-            } else {
-                val
-            }
-        } else {
-            self.load_var_from_memory(slot)
-        }
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .load_i64(&mut self.builder, locals_ptr, slot)
     }
     fn write_var(&mut self, slot: u16, val: Value) {
-        if self.is_float_slot(slot) {
-            let f64_val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
-            self.builder.def_var(self.vars[slot as usize], f64_val);
-        } else {
-            self.builder.def_var(self.vars[slot as usize], val);
-        }
-        if slot >= self.memory_only_start {
-            let offset = (slot as i32) * 8;
-            let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, locals_ptr, offset);
-        }
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .store_i64(&mut self.builder, locals_ptr, slot, val);
         self.checked_non_nil.remove(&slot);
         self.reg_consts.remove(&slot);
     }
+    fn var_addr(&mut self, slot: u16) -> Value {
+        let offset = (slot as i64) * 8;
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+        self.builder.ins().iadd_imm(locals_ptr, offset)
+    }
+    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .sync_ssa_slots_to_memory(
+            &mut self.builder,
+            locals_ptr,
+            start_slot,
+            slot_count,
+            "memory sync",
+        )
+    }
+    fn local_slot_count(&self) -> usize {
+        self.vars.len()
+    }
+    fn read_var_f64(&mut self, slot: u16) -> Value {
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .load_f64(&mut self.builder, locals_ptr, slot)
+    }
+    fn write_var_f64(&mut self, slot: u16, val: Value) {
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .store_f64(&mut self.builder, locals_ptr, slot, val);
+        self.checked_non_nil.remove(&slot);
+        self.reg_consts.remove(&slot);
+    }
+    fn reload_all_vars_from_memory(&mut self) {
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+        crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .reload_all_from_memory(&mut self.builder, locals_ptr);
+        self.clear_flow_facts();
+    }
+    fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
+        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
+        let slots = crate::compile_common::CompilerStorage::for_function(
+            self.func_def,
+            &self.vars,
+            self.memory_only_start,
+        )
+        .load_memory_slot_range(
+            &mut self.builder,
+            locals_ptr,
+            start_slot,
+            slot_count,
+            "select sync",
+        )?;
+        for slot in slots {
+            if slot.is_float {
+                self.write_var_f64(slot.slot, slot.value);
+            } else {
+                self.write_var(slot.slot, slot.value);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> crate::translator::RuntimeContext<'a> for LoopCompiler<'a> {
     fn ctx_param(&mut self) -> Value {
         self.ctx_ptr
     }
@@ -564,18 +616,30 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
             .ins()
             .load(types::I64, MemFlags::trusted(), self.ctx_ptr, 8)
     }
+}
+
+impl crate::translator::MetadataAccess for LoopCompiler<'_> {
     fn vo_module(&self) -> &VoModule {
         self.vo_module
     }
     fn current_pc(&self) -> usize {
         self.current_pc
     }
+    fn func_id(&self) -> u32 {
+        self.func_id
+    }
     fn current_jit_metadata(&self) -> Option<&vo_runtime::bytecode::JitInstructionMetadata> {
         self.func_def.jit_metadata.get(self.current_pc)
     }
+}
+
+impl crate::translator::HelperAccess for LoopCompiler<'_> {
     fn helpers(&self) -> &HelperFuncs {
         &self.helpers
     }
+}
+
+impl crate::translator::RegConstAccess for LoopCompiler<'_> {
     fn set_reg_const(&mut self, reg: u16, val: i64) {
         self.reg_consts.insert(reg, val);
     }
@@ -588,132 +652,29 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
     fn clear_reg_consts(&mut self) {
         self.reg_consts.clear();
     }
+}
+
+impl crate::translator::FrameBoundary for LoopCompiler<'_> {
     fn panic_return_value(&self) -> i32 {
         JitResult::Panic as i32
-    }
-    fn var_addr(&mut self, slot: u16) -> Value {
-        let offset = (slot as i64) * 8;
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        self.builder.ins().iadd_imm(locals_ptr, offset)
     }
     fn spill_all_vars(&mut self) {
         self.emit_variable_spill();
     }
-    fn sync_slots_to_memory(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
-        if slot_count == 0 {
-            return Ok(());
-        }
-        let local_count = self.vars.len() as u16;
-        let end_slot = start_slot.checked_add(slot_count).ok_or_else(|| {
-            JitError::Internal(format!(
-                "memory sync slot range overflow at slot {start_slot} count {slot_count}"
-            ))
-        })?;
-        let end_slot = end_slot.min(local_count);
-        let spill_end = end_slot.min(self.memory_only_start);
-        if start_slot >= spill_end {
-            return Ok(());
-        }
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        for slot in start_slot..spill_end {
-            let offset = (slot as i32) * 8;
-            let val = self.builder.use_var(self.vars[slot as usize]);
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, locals_ptr, offset);
-        }
-        Ok(())
-    }
-    fn local_slot_count(&self) -> usize {
-        self.vars.len()
-    }
-    fn func_id(&self) -> u32 {
-        self.func_id
-    }
-    fn read_var_f64(&mut self, slot: u16) -> Value {
-        if slot < self.memory_only_start {
-            let val = self.builder.use_var(self.vars[slot as usize]);
-            if self.is_float_slot(slot) {
-                val
-            } else {
-                self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
-            }
-        } else {
-            let offset = (slot as i32) * 8;
-            let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-            self.builder
-                .ins()
-                .load(types::F64, MemFlags::trusted(), locals_ptr, offset)
-        }
-    }
-    fn write_var_f64(&mut self, slot: u16, val: Value) {
-        if self.is_float_slot(slot) {
-            self.builder.def_var(self.vars[slot as usize], val);
-        } else {
-            let i64_val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
-            self.builder.def_var(self.vars[slot as usize], i64_val);
-        }
-        if slot >= self.memory_only_start {
-            let offset = (slot as i32) * 8;
-            let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-            self.builder
-                .ins()
-                .store(MemFlags::trusted(), val, locals_ptr, offset);
-        }
-        self.checked_non_nil.remove(&slot);
-        self.reg_consts.remove(&slot);
-    }
-    fn reload_all_vars_from_memory(&mut self) {
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        for i in 0..self.vars.len() {
-            let offset = (i * 8) as i32;
-            let ty = crate::translator::slot_ir_type(&self.func_def.slot_types, i as u16);
-            let val = self
-                .builder
-                .ins()
-                .load(ty, MemFlags::trusted(), locals_ptr, offset);
-            self.builder.def_var(self.vars[i], val);
-        }
-        self.clear_flow_facts();
-    }
-    fn sync_written_slots(&mut self, start_slot: u16, slot_count: u16) -> Result<(), JitError> {
-        if slot_count == 0 {
-            return Ok(());
-        }
-        let end_slot = start_slot.checked_add(slot_count).ok_or_else(|| {
-            JitError::Internal(format!(
-                "select sync slot range overflow at slot {start_slot} count {slot_count}"
-            ))
-        })?;
-        let end_slot = end_slot.min(self.vars.len() as u16);
-        if start_slot >= end_slot {
-            return Ok(());
-        }
-        let locals_ptr = self.builder.use_var(self.locals_ptr_var);
-        for slot in start_slot..end_slot {
-            let offset = (slot as i32) * 8;
-            if self.is_float_slot(slot) {
-                let val =
-                    self.builder
-                        .ins()
-                        .load(types::F64, MemFlags::trusted(), locals_ptr, offset);
-                self.write_var_f64(slot, val);
-            } else {
-                let val =
-                    self.builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), locals_ptr, offset);
-                self.write_var(slot, val);
-            }
-        }
-        Ok(())
-    }
+}
+
+impl<'a> crate::translator::SelectSync<'a> for LoopCompiler<'a> {}
+
+impl crate::translator::FlowFacts for LoopCompiler<'_> {
     fn is_checked_non_nil(&self, slot: u16) -> bool {
         self.checked_non_nil.contains(&slot)
     }
     fn mark_checked_non_nil(&mut self, slot: u16) {
         self.checked_non_nil.insert(slot);
     }
+}
+
+impl<'a> crate::translator::CallBoundary<'a> for LoopCompiler<'a> {
     fn call_caller_bp(&mut self) -> Value {
         self.builder.ins().load(
             types::I32,
@@ -730,6 +691,9 @@ impl<'a> IrEmitter<'a> for LoopCompiler<'a> {
             JitContext::OFFSET_FIBER_SP,
         )
     }
+}
+
+impl crate::translator::StackRefresh for LoopCompiler<'_> {
     fn refresh_stack_base_after_reallocation(&mut self) {
         let stack_ptr = self.builder.ins().load(
             types::I64,

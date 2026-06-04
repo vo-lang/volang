@@ -175,7 +175,7 @@ OSR 不再只依赖普通 JIT 编译成功：
 - full-function JIT 和 loop OSR。
 - JIT-to-JIT static direct call。
 - dynamic closure/interface inline cache。
-- prepared VM-frame call fallback。
+- prepared VM-frame call materialization。
 - extern call wait/replay。
 - defer/recover、select/channel、go/island、map/container/pointer lowering。
 

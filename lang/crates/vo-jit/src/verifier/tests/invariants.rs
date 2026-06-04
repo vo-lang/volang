@@ -92,25 +92,21 @@ fn rejects_function_def_derived_flag_drift() {
 }
 
 #[test]
-fn verifier_slot_contract_dispatches_from_semantics_domain() {
-    let src = include_str!("../instruction_contracts.rs");
-    let start = src.find("verify_slot_contract").unwrap();
-    let end = src[start..]
-        .find("\nfn verify_requirement_preflight")
-        .map(|offset| start + offset)
-        .unwrap();
-    let body = &src[start..end];
+fn verifier_slot_contract_dispatches_from_supplied_semantics_row() {
+    let mut module = VoModule::new("verify".to_string());
+    module.functions.push(make_func_with_slot_types(
+        vec![Instruction::new(Opcode::AddI, 0, 1, 2)],
+        vec![JitInstructionMetadata::None],
+        vec![SlotType::Value, SlotType::Value, SlotType::Value],
+        0,
+    ));
+    let ctx =
+        crate::verifier::instruction_contracts::VerifierCtx::new(&module.functions[0], &module, 0);
+    let mut row = crate::semantics::opcode_semantics(Opcode::AddI);
+    row.verifier_domain = crate::semantics::VerifierDomain::Invalid;
 
-    assert!(
-        body.contains("opcode_semantics(ctx.opcode)") && body.contains("row.verifier_domain"),
-        "verify_slot_contract must derive verifier dispatch from the semantics row"
-    );
-    assert!(
-        !body.contains("Opcode::"),
-        "verify_slot_contract must not restore a root opcode-to-verifier-family table"
-    );
-    assert!(
-        !body.contains("_ => Ok(())"),
-        "verify_slot_contract must not wildcard-accept opcodes outside the semantics row domain"
-    );
+    assert!(matches!(
+        crate::verifier::instruction_contracts::verify_slot_contract_with_row(ctx, &row),
+        Err(JitMetadataError::InvalidOpcode { raw, .. }) if raw == Opcode::AddI as u8
+    ));
 }

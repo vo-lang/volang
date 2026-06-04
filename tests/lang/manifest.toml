@@ -746,7 +746,7 @@ id = "bugs.2026-05-28-jit-osr-large-frame-direct-call-fallback"
 kind = "file"
 path = "cases/bugs/2026_05_28_jit_osr_large_frame_direct_call_fallback.vo"
 targets = ["vm", "jit", "osr", "nostd", "wasm"]
-expect = { kind = "pass", jit_regular_call_fallbacks_min = 3 }
+expect = { kind = "pass", jit_regular_call_side_exits_min = 3 }
 
 [[case]]
 id = "bugs.2026-05-28-jit-stack-array-field-bounds"

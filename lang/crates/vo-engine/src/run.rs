@@ -23,7 +23,7 @@ pub enum RunMode {
 pub struct RunObservation {
     pub jit_function_entries: u64,
     pub jit_loop_entries: u64,
-    pub jit_regular_call_fallbacks: u64,
+    pub jit_regular_call_side_exits: u64,
 }
 
 impl RunObservation {
@@ -243,8 +243,8 @@ fn run_observation(vm: &Vm) -> RunObservation {
     RunObservation {
         jit_function_entries: stats.function_entries,
         jit_loop_entries: stats.loop_entries,
-        jit_regular_call_fallbacks: stats
-            .fallback_count(vo_vm::vm::jit_mgr::JitFallbackReason::RegularCall),
+        jit_regular_call_side_exits: stats
+            .side_exit_count(vo_vm::vm::jit_mgr::JitSideExitReason::RegularCall),
     }
 }
 

@@ -151,7 +151,8 @@ struct Expect {
     #[serde(default)]
     patterns: Vec<String>,
     pattern: Option<String>,
-    jit_regular_call_fallbacks_min: Option<u64>,
+    #[serde(alias = "jit_regular_call_fallbacks_min")]
+    jit_regular_call_side_exits_min: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -611,11 +612,11 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
         );
     }
     if mode == vo_engine::RunMode::Jit {
-        if let Some(min) = job.expect.jit_regular_call_fallbacks_min {
-            if observation.jit_regular_call_fallbacks < min {
+        if let Some(min) = job.expect.jit_regular_call_side_exits_min {
+            if observation.jit_regular_call_side_exits < min {
                 return Err(format!(
-                    "expected at least {min} JIT regular-call fallbacks, got {}",
-                    observation.jit_regular_call_fallbacks
+                    "expected at least {min} JIT regular-call side exits, got {}",
+                    observation.jit_regular_call_side_exits
                 ));
             }
         }

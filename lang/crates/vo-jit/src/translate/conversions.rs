@@ -1,28 +1,20 @@
-#![allow(unused_imports)]
-
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{
-    types, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, Value,
-};
-use vo_runtime::bytecode::Constant;
-use vo_runtime::instruction::{Instruction, Opcode, QUEUE_KIND_PORT_FLAG};
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
-use crate::translator::{
-    emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, IrEmitter,
-};
-use crate::JitError;
+use crate::translator::ScalarEmitter;
 
 use super::emit_runtime_trap_if;
 
-pub(super) fn conv_i2f<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn conv_i2f<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     // Input is I64 (int), output is F64 (float)
     let a = e.read_var(inst.b);
     let f = e.builder().ins().fcvt_from_sint(types::F64, a);
     e.write_var_f64(inst.a, f);
 }
 
-pub(super) fn conv_f2i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn conv_f2i<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     // Input is F64 (float), output is I64 (int)
     let f = e.read_var_f64(inst.b);
     // Rust/VM float-to-int casts saturate out-of-range values and convert NaN
@@ -32,7 +24,7 @@ pub(super) fn conv_f2i<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn conv_f64_f32<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn conv_f64_f32<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     // Input is F64, output is F32 stored as I64 (low 32 bits)
     let f64v = e.read_var_f64(inst.b);
     let f32v = e.builder().ins().fdemote(types::F32, f64v);
@@ -42,7 +34,7 @@ pub(super) fn conv_f64_f32<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, r);
 }
 
-pub(super) fn conv_f32_f64<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn conv_f32_f64<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     // Input is F32 stored as I64 (low 32 bits), output is F64
     let a = e.read_var(inst.b);
     let i32v = e.builder().ins().ireduce(types::I32, a);
@@ -51,7 +43,7 @@ pub(super) fn conv_f32_f64<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var_f64(inst.a, f64v);
 }
 
-pub(super) fn trunc<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn trunc<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let a = e.read_var(inst.b);
     let flags = inst.flags;
     let signed = (flags & 0x80) != 0;
@@ -75,7 +67,7 @@ pub(super) fn trunc<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
     e.write_var(inst.a, result);
 }
 
-pub(super) fn index_check<'a>(e: &mut impl IrEmitter<'a>, inst: &Instruction) {
+pub(super) fn index_check<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) {
     let idx = e.read_var(inst.a);
     let len = e.read_var(inst.b);
     let out_of_bounds = e

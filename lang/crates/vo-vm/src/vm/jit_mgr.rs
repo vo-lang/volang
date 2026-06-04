@@ -18,9 +18,10 @@ use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum JitFallbackReason {
-    // Only semantic exits from native execution belong here. Compile, metadata,
-    // and internal ABI failures return JitError and are not fallback reasons.
+pub enum JitSideExitReason {
+    // Explicit JIT/interpreter handoffs belong here: native side exits plus
+    // cold/not-hot interpreter handoffs. Compile, metadata, and internal ABI
+    // failures return JitError and are not side-exit reasons.
     InterpretedCold = 0,
     RegularCall = 1,
     PreparedDynamicCall = 2,
@@ -32,7 +33,7 @@ pub enum JitFallbackReason {
     LoopNotHot = 8,
 }
 
-impl JitFallbackReason {
+impl JitSideExitReason {
     pub const COUNT: usize = 9;
 
     #[inline]
@@ -42,13 +43,13 @@ impl JitFallbackReason {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct JitFallbackReasonStats {
-    counts: [u64; JitFallbackReason::COUNT],
+pub struct JitSideExitReasonStats {
+    counts: [u64; JitSideExitReason::COUNT],
 }
 
-impl JitFallbackReasonStats {
+impl JitSideExitReasonStats {
     #[inline]
-    pub fn get(self, reason: JitFallbackReason) -> u64 {
+    pub fn get(self, reason: JitSideExitReason) -> u64 {
         self.counts[reason.index()]
     }
 
@@ -58,7 +59,7 @@ impl JitFallbackReasonStats {
     }
 
     #[inline]
-    fn increment(&mut self, reason: JitFallbackReason) {
+    fn increment(&mut self, reason: JitSideExitReason) {
         self.counts[reason.index()] += 1;
     }
 }
@@ -67,7 +68,7 @@ impl JitFallbackReasonStats {
 pub struct JitExecutionStats {
     pub function_entries: u64,
     pub loop_entries: u64,
-    pub fallback_reasons: JitFallbackReasonStats,
+    pub side_exit_reasons: JitSideExitReasonStats,
 }
 
 impl JitExecutionStats {
@@ -75,8 +76,8 @@ impl JitExecutionStats {
         self.function_entries > 0 || self.loop_entries > 0
     }
 
-    pub fn fallback_count(self, reason: JitFallbackReason) -> u64 {
-        self.fallback_reasons.get(reason)
+    pub fn side_exit_count(self, reason: JitSideExitReason) -> u64 {
+        self.side_exit_reasons.get(reason)
     }
 }
 
@@ -285,8 +286,8 @@ impl JitManager {
     }
 
     #[inline]
-    pub fn record_fallback(&mut self, reason: JitFallbackReason) {
-        self.execution_stats.fallback_reasons.increment(reason);
+    pub fn record_side_exit(&mut self, reason: JitSideExitReason) {
+        self.execution_stats.side_exit_reasons.increment(reason);
     }
 
     fn rebuild_available_direct_callees(&self, out: &mut Vec<u32>) {
@@ -319,7 +320,7 @@ impl JitManager {
     }
 
     /// Resolve which version to use for a function call.
-    /// Returns Some(jit_func) if JIT version available, None for explicit cold fallback.
+    /// Returns Some(jit_func) if JIT version available, None for explicit cold interpreter handoff.
     /// Also handles hot tracking and triggers compilation when threshold reached.
     pub fn resolve_call(
         &mut self,
@@ -357,7 +358,7 @@ impl JitManager {
         }
 
         // 3. Fall back to VM only because the function is not hot yet.
-        self.record_fallback(JitFallbackReason::InterpretedCold);
+        self.record_side_exit(JitSideExitReason::InterpretedCold);
         Ok(None)
     }
 
@@ -628,30 +629,30 @@ mod tests {
     }
 
     #[test]
-    fn fallback_reason_stats_are_machine_readable() {
-        let mut stats = JitFallbackReasonStats::default();
-        stats.increment(JitFallbackReason::InterpretedCold);
-        stats.increment(JitFallbackReason::InterpretedCold);
-        stats.increment(JitFallbackReason::WaitIo);
+    fn side_exit_reason_stats_are_machine_readable() {
+        let mut stats = JitSideExitReasonStats::default();
+        stats.increment(JitSideExitReason::InterpretedCold);
+        stats.increment(JitSideExitReason::InterpretedCold);
+        stats.increment(JitSideExitReason::WaitIo);
 
-        assert_eq!(stats.get(JitFallbackReason::InterpretedCold), 2);
-        assert_eq!(stats.get(JitFallbackReason::WaitIo), 1);
+        assert_eq!(stats.get(JitSideExitReason::InterpretedCold), 2);
+        assert_eq!(stats.get(JitSideExitReason::WaitIo), 1);
         assert_eq!(stats.total(), 3);
     }
 
     #[test]
-    fn manager_records_fallback_reasons() {
+    fn manager_records_side_exit_reasons() {
         let mut manager = JitManager::new().expect("jit manager");
-        manager.record_fallback(JitFallbackReason::RegularCall);
-        manager.record_fallback(JitFallbackReason::Replay);
+        manager.record_side_exit(JitSideExitReason::RegularCall);
+        manager.record_side_exit(JitSideExitReason::Replay);
 
         let stats = manager.execution_stats();
-        assert_eq!(stats.fallback_count(JitFallbackReason::RegularCall), 1);
-        assert_eq!(stats.fallback_count(JitFallbackReason::Replay), 1);
+        assert_eq!(stats.side_exit_count(JitSideExitReason::RegularCall), 1);
+        assert_eq!(stats.side_exit_count(JitSideExitReason::Replay), 1);
     }
 
     #[test]
-    fn unsupported_function_error_is_not_counted_as_fallback() {
+    fn unsupported_function_error_is_not_counted_as_side_exit() {
         let func = empty_func();
         let mut module = VoModule::new("m".to_string());
         module.functions.push(func.clone());
@@ -667,7 +668,7 @@ mod tests {
             err.to_string().contains("cannot be JIT-compiled"),
             "unexpected error: {err}"
         );
-        assert_eq!(manager.execution_stats().fallback_reasons.total(), 0);
+        assert_eq!(manager.execution_stats().side_exit_reasons.total(), 0);
     }
 
     #[test]

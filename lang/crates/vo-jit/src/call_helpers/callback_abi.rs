@@ -1,11 +1,12 @@
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, SigRef, Type, Value};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, SigRef, Value};
 
 use vo_runtime::jit_api::{
-    jit_callback_abi_fields, JitAbiType, JitCallbackAbiField, JitCallbackReturnPolicy,
-    JitContextDependencyKind,
+    jit_callback_abi_fields, JitCallbackAbiField, JitCallbackReturnPolicy, JitContextDependencyKind,
 };
 
+use crate::helpers::clif_type_for_abi;
 use crate::translator::IrEmitter;
+use crate::JitError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitContextCallbackCallKind {
@@ -24,12 +25,22 @@ pub struct JitContextCallbackCallsite {
 
 impl JitContextCallbackCallsite {
     pub fn abi(self) -> &'static JitCallbackAbiField {
+        callback_abi(self.kind).expect("declared JitContext callback ABI manifest row")
+    }
+
+    fn try_abi(self) -> Result<&'static JitCallbackAbiField, JitError> {
         callback_abi(self.kind)
     }
 
+    #[cfg(test)]
     pub fn requires_pre_call_spill(self) -> bool {
         let abi = self.abi();
         abi.may_gc || abi.observes_frame
+    }
+
+    fn try_requires_pre_call_spill(self) -> Result<bool, JitError> {
+        let abi = self.try_abi()?;
+        Ok(abi.may_gc || abi.observes_frame)
     }
 }
 
@@ -114,15 +125,15 @@ pub fn emit_checked_jit_result_indirect_callback_call<'a, E: IrEmitter<'a>>(
     func_ptr: Value,
     args: &[Value],
     spill_vars: bool,
-) -> Value {
-    validate_callback_callsite(callsite, JitContextCallbackCallKind::CheckedJitResult);
+) -> Result<Value, JitError> {
+    validate_callback_callsite(callsite, JitContextCallbackCallKind::CheckedJitResult)?;
     emitter.spill_all_vars();
-    let sig = import_callback_sig(emitter, callsite.kind);
+    let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
     let result = emitter.builder().inst_results(call)[0];
     emitter.clear_reg_consts();
     super::check_call_result(emitter, result, spill_vars);
-    result
+    Ok(result)
 }
 
 /// Emit an indirect JitContext callback whose `JitResult` is the current JIT
@@ -132,14 +143,14 @@ pub fn emit_returning_jit_result_indirect_callback_call<'a, E: IrEmitter<'a>>(
     callsite: JitContextCallbackCallsite,
     func_ptr: Value,
     args: &[Value],
-) -> Value {
-    validate_callback_callsite(callsite, JitContextCallbackCallKind::ReturningJitResult);
+) -> Result<Value, JitError> {
+    validate_callback_callsite(callsite, JitContextCallbackCallKind::ReturningJitResult)?;
     emitter.spill_all_vars();
-    let sig = import_callback_sig(emitter, callsite.kind);
+    let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
     let result = emitter.builder().inst_results(call)[0];
     emitter.builder().ins().return_(&[result]);
-    result
+    Ok(result)
 }
 
 /// Emit a raw JitContext callback (non-JitResult) through the callback ABI
@@ -150,37 +161,42 @@ pub fn emit_raw_jit_context_callback_call<'a, E: IrEmitter<'a>>(
     callsite: JitContextCallbackCallsite,
     func_ptr: Value,
     args: &[Value],
-) -> Option<Value> {
-    validate_callback_callsite(callsite, JitContextCallbackCallKind::Raw);
-    let needs_spill = callsite.requires_pre_call_spill();
+) -> Result<Option<Value>, JitError> {
+    validate_callback_callsite(callsite, JitContextCallbackCallKind::Raw)?;
+    let needs_spill = callsite.try_requires_pre_call_spill()?;
     if needs_spill {
         emitter.spill_all_vars();
     }
-    let sig = import_callback_sig(emitter, callsite.kind);
+    let sig = import_callback_sig(emitter, callsite.kind)?;
     let call = emitter.builder().ins().call_indirect(sig, func_ptr, args);
     if needs_spill {
         emitter.clear_reg_consts();
     }
-    emitter.builder().inst_results(call).first().copied()
+    Ok(emitter.builder().inst_results(call).first().copied())
 }
 
-fn callback_abi(kind: JitContextDependencyKind) -> &'static JitCallbackAbiField {
+fn callback_abi(kind: JitContextDependencyKind) -> Result<&'static JitCallbackAbiField, JitError> {
     jit_callback_abi_fields()
         .iter()
         .find(|field| field.kind == kind)
-        .unwrap_or_else(|| panic!("missing JitContext callback ABI manifest row for {kind:?}"))
+        .ok_or_else(|| {
+            JitError::Internal(format!(
+                "missing JitContext callback ABI manifest row for {kind:?}"
+            ))
+        })
 }
 
 fn validate_callback_callsite(
     callsite: JitContextCallbackCallsite,
     expected_kind: JitContextCallbackCallKind,
-) {
-    assert_eq!(
-        callsite.call_kind, expected_kind,
-        "{} routed through wrong callback lowering wrapper",
-        callsite.name
-    );
-    let abi = callsite.abi();
+) -> Result<(), JitError> {
+    if callsite.call_kind != expected_kind {
+        return Err(JitError::Internal(format!(
+            "{} routed through wrong callback lowering wrapper",
+            callsite.name
+        )));
+    }
+    let abi = callsite.try_abi()?;
     let is_jit_result = matches!(
         abi.return_policy,
         JitCallbackReturnPolicy::JitResult
@@ -189,47 +205,74 @@ fn validate_callback_callsite(
     );
     match expected_kind {
         JitContextCallbackCallKind::CheckedJitResult
-        | JitContextCallbackCallKind::ReturningJitResult => assert!(
-            is_jit_result,
-            "{} is routed as JitResult but ABI policy is {:?}",
-            callsite.name, abi.return_policy
-        ),
-        JitContextCallbackCallKind::Raw => assert!(
-            !is_jit_result,
+        | JitContextCallbackCallKind::ReturningJitResult
+            if !is_jit_result =>
+        {
+            Err(JitError::Internal(format!(
+                "{} is routed as JitResult but ABI policy is {:?}",
+                callsite.name, abi.return_policy
+            )))
+        }
+        JitContextCallbackCallKind::Raw if is_jit_result => Err(JitError::Internal(format!(
             "{} is routed as raw callback but ABI policy is {:?}",
             callsite.name, abi.return_policy
-        ),
-    }
-}
-
-fn clif_type_for_abi(abi: JitAbiType, ptr: Type) -> Option<Type> {
-    match abi {
-        JitAbiType::Void => None,
-        JitAbiType::Ptr => Some(ptr),
-        JitAbiType::U8 => Some(types::I8),
-        JitAbiType::U16 => Some(types::I16),
-        JitAbiType::U32 | JitAbiType::I32 | JitAbiType::JitResult => Some(types::I32),
-        JitAbiType::U64 | JitAbiType::I64 => Some(types::I64),
+        ))),
+        _ => Ok(()),
     }
 }
 
 fn import_callback_sig<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     kind: JitContextDependencyKind,
-) -> SigRef {
-    let abi = callback_abi(kind);
+) -> Result<SigRef, JitError> {
+    let abi = callback_abi(kind)?;
     let call_conv = super::current_call_conv(emitter);
     let ptr = types::I64;
-    emitter.builder().func.import_signature({
-        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-        for &param in abi.params {
-            let ty = clif_type_for_abi(param, ptr)
-                .unwrap_or_else(|| panic!("{} declares void parameter", abi.name));
-            sig.params.push(AbiParam::new(ty));
-        }
-        if let Some(ret) = clif_type_for_abi(abi.ret, ptr) {
-            sig.returns.push(AbiParam::new(ret));
-        }
-        sig
-    })
+    let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+    for &param in abi.params {
+        let ty = clif_type_for_abi(param, ptr)
+            .ok_or_else(|| JitError::Internal(format!("{} declares void parameter", abi.name)))?;
+        sig.params.push(AbiParam::new(ty));
+    }
+    if let Some(ret) = clif_type_for_abi(abi.ret, ptr) {
+        sig.returns.push(AbiParam::new(ret));
+    }
+    Ok(emitter.builder().func.import_signature(sig))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callback_callsite_wrapper_mismatch_returns_jit_error() {
+        let err = validate_callback_callsite(
+            PREPARED_CALL_POP_FRAME_CALLSITE,
+            JitContextCallbackCallKind::CheckedJitResult,
+        )
+        .expect_err("wrong callback wrapper should be recoverable at lowering boundary");
+
+        assert!(
+            matches!(err, JitError::Internal(ref message) if message.contains("wrong callback lowering wrapper")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn callback_callsite_return_policy_mismatch_returns_jit_error() {
+        let raw_callsite_for_jit_result_abi = JitContextCallbackCallsite {
+            call_kind: JitContextCallbackCallKind::Raw,
+            ..PREPARE_CLOSURE_CALLSITE
+        };
+        let err = validate_callback_callsite(
+            raw_callsite_for_jit_result_abi,
+            JitContextCallbackCallKind::Raw,
+        )
+        .expect_err("JitResult callback routed as raw should be a lowering error");
+
+        assert!(
+            matches!(err, JitError::Internal(ref message) if message.contains("raw callback")),
+            "unexpected error: {err:?}"
+        );
+    }
 }

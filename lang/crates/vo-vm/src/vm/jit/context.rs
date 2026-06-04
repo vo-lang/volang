@@ -168,3 +168,27 @@ pub fn build_jit_context(
 
     Ok(JitContextWrapper { ctx })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::function;
+    use super::*;
+
+    #[test]
+    fn build_jit_context_without_manager_is_jit_error() {
+        let mut vm = Vm::new();
+        let mut module = Module::new("jit-context-missing-manager-test".to_string());
+        module.functions.push(function(1, 0));
+        let mut fiber = Fiber::new(7);
+
+        let err = match build_jit_context(&mut vm, &mut fiber, &module) {
+            Ok(_) => panic!("missing JIT manager must fail fast"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("initialized JIT manager"),
+            "unexpected error: {err}"
+        );
+    }
+}

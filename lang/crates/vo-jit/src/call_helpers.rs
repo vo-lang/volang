@@ -47,7 +47,11 @@ fn current_call_conv<'a, E: IrEmitter<'a>>(emitter: &mut E) -> cranelift_codegen
     emitter.builder().func.signature.call_conv
 }
 
-pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value, new_sp: Value) {
+pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    ctx: Value,
+    new_sp: Value,
+) -> Result<(), crate::JitError> {
     let limit = emitter.builder().ins().load(
         types::I32,
         MemFlags::trusted(),
@@ -80,10 +84,11 @@ pub fn emit_stack_limit_guard<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value,
         STACK_LIMIT_OVERFLOW_CALLSITE,
         stack_overflow_fn_ptr,
         &[ctx],
-    );
+    )?;
 
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
+    Ok(())
 }
 
 fn mark_stack_overflow_pc<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) {
@@ -101,8 +106,8 @@ pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
     emitter: &mut E,
     ctx: Value,
     new_sp: Value,
-) -> (Block, Block) {
-    emit_stack_limit_guard(emitter, ctx, new_sp);
+) -> Result<(Block, Block), crate::JitError> {
+    emit_stack_limit_guard(emitter, ctx, new_sp)?;
 
     let capacity = emitter.builder().ins().load(
         types::I32,
@@ -123,10 +128,13 @@ pub fn emit_stack_capacity_check<'a, E: IrEmitter<'a>>(
         .ins()
         .brif(exceeds_capacity, materialize_block, &[], ok_block, &[]);
 
-    (materialize_block, ok_block)
+    Ok((materialize_block, ok_block))
 }
 
-pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) -> Value {
+pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    ctx: Value,
+) -> Result<Value, crate::JitError> {
     let depth = emitter.builder().ins().load(
         types::I32,
         MemFlags::trusted(),
@@ -165,7 +173,7 @@ pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) 
         CALL_DEPTH_OVERFLOW_CALLSITE,
         stack_overflow_fn_ptr,
         &[ctx],
-    );
+    )?;
 
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
@@ -176,7 +184,7 @@ pub fn emit_call_depth_enter<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) 
         ctx,
         JitContext::OFFSET_CALL_DEPTH,
     );
-    depth
+    Ok(depth)
 }
 
 pub fn emit_call_depth_leave<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value, old_depth: Value) {
@@ -309,34 +317,5 @@ mod tests {
         assert_eq!(plan.ret_reg, 13);
         assert_eq!(plan.resume_pc, 42);
         assert_eq!(plan.route, CallRoute::DynamicInlineCache);
-    }
-
-    #[test]
-    fn call_helpers_root_keeps_only_shared_dispatch_surface() {
-        let root = include_str!("call_helpers.rs");
-        let root_impl = root.split("#[cfg(test)]").next().unwrap_or(root);
-        for module in [
-            "mod dynamic;",
-            "mod externs;",
-            "mod prepared;",
-            "mod vm_materialization;",
-        ] {
-            assert!(
-                root_impl.contains(module),
-                "missing call helper module {module}"
-            );
-        }
-        for concrete_helper in [
-            "struct DynamicCallLowering",
-            "struct PreparedCallParams",
-            "pub struct CallExternConfig",
-            "pub fn emit_call_via_vm",
-            "pub fn emit_jit_call_with_vm_materialization",
-        ] {
-            assert!(
-                !root_impl.contains(concrete_helper),
-                "{concrete_helper} should live in a focused call_helpers submodule"
-            );
-        }
     }
 }

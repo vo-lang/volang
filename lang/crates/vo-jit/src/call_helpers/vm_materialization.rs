@@ -152,7 +152,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         .ins()
         .iadd_imm(new_bp, config.callee_local_slots as i64);
     let (capacity_materialize_block, capacity_ok_block) =
-        emit_stack_capacity_check(emitter, ctx, new_sp);
+        emit_stack_capacity_check(emitter, ctx, new_sp)?;
     emitter
         .builder()
         .switch_to_block(capacity_materialize_block);
@@ -170,7 +170,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(capacity_ok_block);
     emitter.builder().seal_block(capacity_ok_block);
-    let old_call_depth = emit_call_depth_enter(emitter, ctx);
+    let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
     emitter
         .builder()
         .ins()
@@ -269,7 +269,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
                 caller_resume_pc_val,
                 copy_args: None,
             },
-        );
+        )?;
 
         emitter.builder().switch_to_block(jit_ok_block);
         emitter.builder().seal_block(jit_ok_block);
@@ -386,7 +386,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
             caller_resume_pc_val,
             copy_args: None,
         },
-    );
+    )?;
 
     emitter.builder().switch_to_block(jit_ok_block);
     emitter.builder().seal_block(jit_ok_block);
@@ -412,18 +412,4 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         emitter.write_var((config.ret_reg + i) as u16, val);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn vm_materialization_lives_in_dedicated_call_helpers_module() {
-        let root = include_str!("../call_helpers.rs");
-        let root_impl = root.split("#[cfg(test)]").next().unwrap_or(root);
-        assert!(root_impl.contains("mod vm_materialization;"));
-        assert!(
-            !root_impl.contains("pub fn emit_call_via_vm"),
-            "VM call materialization belongs in call_helpers/vm_materialization.rs"
-        );
-    }
 }

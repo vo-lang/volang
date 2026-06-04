@@ -159,13 +159,13 @@ impl Default for DynCallIC {
 
 impl DynCallIC {
     pub const SIZE: usize = core::mem::size_of::<DynCallIC>();
-    pub const OFFSET_KEY: i32 = 0;
-    pub const OFFSET_JIT_FUNC_PTR: i32 = 8;
-    pub const OFFSET_LOCAL_SLOTS: i32 = 16;
-    pub const OFFSET_ARG_OFFSET: i32 = 20;
-    pub const OFFSET_SLOT0_KIND: i32 = 24;
-    pub const OFFSET_FUNC_ID: i32 = 28;
-    pub const OFFSET_IS_LEAF: i32 = 32;
+    pub const OFFSET_KEY: i32 = core::mem::offset_of!(DynCallIC, key) as i32;
+    pub const OFFSET_JIT_FUNC_PTR: i32 = core::mem::offset_of!(DynCallIC, jit_func_ptr) as i32;
+    pub const OFFSET_LOCAL_SLOTS: i32 = core::mem::offset_of!(DynCallIC, local_slots) as i32;
+    pub const OFFSET_ARG_OFFSET: i32 = core::mem::offset_of!(DynCallIC, arg_offset) as i32;
+    pub const OFFSET_SLOT0_KIND: i32 = core::mem::offset_of!(DynCallIC, slot0_kind) as i32;
+    pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(DynCallIC, func_id) as i32;
+    pub const OFFSET_IS_LEAF: i32 = core::mem::offset_of!(DynCallIC, is_leaf) as i32;
 
     pub const SLOT0_NONE: u32 = 0;
     pub const SLOT0_CLOSURE_REF: u32 = 1;
@@ -231,15 +231,17 @@ pub struct PreparedCall {
 }
 
 impl PreparedCall {
-    pub const OFFSET_JIT_FUNC_PTR: i32 = 0;
-    pub const OFFSET_CALLEE_ARGS_PTR: i32 = 8;
-    pub const OFFSET_RET_PTR: i32 = 16;
-    pub const OFFSET_CALLEE_LOCAL_SLOTS: i32 = 24;
-    pub const OFFSET_FUNC_ID: i32 = 28;
-    pub const OFFSET_ARG_OFFSET: i32 = 32;
-    pub const OFFSET_SLOT0_KIND: i32 = 36;
-    pub const OFFSET_IS_LEAF: i32 = 40;
-    pub const SIZE: usize = 48;
+    pub const OFFSET_JIT_FUNC_PTR: i32 = core::mem::offset_of!(PreparedCall, jit_func_ptr) as i32;
+    pub const OFFSET_CALLEE_ARGS_PTR: i32 =
+        core::mem::offset_of!(PreparedCall, callee_args_ptr) as i32;
+    pub const OFFSET_RET_PTR: i32 = core::mem::offset_of!(PreparedCall, ret_ptr) as i32;
+    pub const OFFSET_CALLEE_LOCAL_SLOTS: i32 =
+        core::mem::offset_of!(PreparedCall, callee_local_slots) as i32;
+    pub const OFFSET_FUNC_ID: i32 = core::mem::offset_of!(PreparedCall, func_id) as i32;
+    pub const OFFSET_ARG_OFFSET: i32 = core::mem::offset_of!(PreparedCall, arg_offset) as i32;
+    pub const OFFSET_SLOT0_KIND: i32 = core::mem::offset_of!(PreparedCall, slot0_kind) as i32;
+    pub const OFFSET_IS_LEAF: i32 = core::mem::offset_of!(PreparedCall, is_leaf) as i32;
+    pub const SIZE: usize = core::mem::size_of::<PreparedCall>();
 
     /// Create a result whose callee must be materialized through the VM call trampoline.
     pub fn vm_materialization(func_id: u32, callee_local_slots: u32) -> Self {
@@ -257,6 +259,7 @@ impl PreparedCall {
 }
 
 const _: () = assert!(PreparedCall::SIZE == core::mem::size_of::<PreparedCall>());
+const _: () = assert!(PreparedCall::SIZE == 48);
 
 /// Function pointer type for preparing a closure call.
 /// Writes result to `out` pointer instead of returning struct (avoids ABI mismatch

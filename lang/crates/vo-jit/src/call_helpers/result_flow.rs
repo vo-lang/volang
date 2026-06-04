@@ -3,7 +3,8 @@ use cranelift_codegen::ir::{types, FuncRef, InstBuilder, MemFlags, StackSlot, Va
 
 use vo_runtime::jit_api::JitContext;
 
-use crate::translator::IrEmitter;
+use crate::translator::{HelperCallEmitter, IrEmitter};
+use crate::JitError;
 
 use super::{
     emit_checked_jit_result_indirect_callback_call, emit_raw_jit_context_callback_call,
@@ -16,7 +17,7 @@ pub const JIT_RESULT_CALL: i32 = 2;
 
 /// Emit a helper/callback wrapper that returns `JitResult`, and route every
 /// non-Ok result back to the VM before local execution can continue.
-pub fn emit_checked_jit_result_helper_call<'a, E: IrEmitter<'a>>(
+pub fn emit_checked_jit_result_helper_call<'a, E: HelperCallEmitter<'a>>(
     emitter: &mut E,
     func: FuncRef,
     args: &[Value],
@@ -55,7 +56,10 @@ pub struct NonOkSlowPathParams {
 /// Emit the non-OK slow path: restore ctx, spill, push_frame, push_resume_point, return.
 ///
 /// Caller is responsible for creating/switching to the non-OK block before calling this.
-pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(emitter: &mut E, p: NonOkSlowPathParams) {
+pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    p: NonOkSlowPathParams,
+) -> Result<(), JitError> {
     let ctx = p.ctx;
 
     // The inline update set fiber_sp = old_fiber_sp + callee_local_slots; push_frame
@@ -94,7 +98,11 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(emitter: &mut E, p: NonOkSlow
             p.caller_resume_pc_val,
         ],
     )
-    .unwrap_or_else(|| panic!("push_frame_fn returns callee args pointer"));
+    .and_then(|value| {
+        value.ok_or_else(|| {
+            JitError::Internal("push_frame_fn ABI did not return callee args pointer".into())
+        })
+    })?;
     crate::contract::emit_return_if_runtime_trap_recorded(emitter);
 
     // Self-recursive calls pass args via native stack slot. Regular/indirect
@@ -140,15 +148,20 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(emitter: &mut E, p: NonOkSlow
             p.ret_slots_val,
         ],
         true,
-    );
+    )?;
 
     emitter.builder().ins().return_(&[p.jit_result]);
+    Ok(())
 }
 
 /// Check call result and handle non-Ok cases.
 ///
 /// JitResult: Ok=0, Panic=1, Call=2, WaitIo=3, WaitQueue=4
-pub fn check_call_result<'a, E: IrEmitter<'a>>(emitter: &mut E, result: Value, spill_vars: bool) {
+pub fn check_call_result<'a, E: HelperCallEmitter<'a>>(
+    emitter: &mut E,
+    result: Value,
+    spill_vars: bool,
+) {
     let ok_block = emitter.builder().create_block();
     let non_ok_block = emitter.builder().create_block();
 
@@ -173,24 +186,4 @@ pub fn check_call_result<'a, E: IrEmitter<'a>>(emitter: &mut E, result: Value, s
 
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn result_flow_is_not_inlined_back_into_call_helpers_root() {
-        let root = include_str!("../call_helpers.rs");
-        assert!(
-            root.contains("mod result_flow;"),
-            "call_helpers root must delegate JitResult flow to result_flow"
-        );
-        assert!(
-            !root.contains("pub struct NonOkSlowPathParams {"),
-            "non-Ok materialization belongs in result_flow, not the lowering root"
-        );
-        assert!(
-            !root.contains("pub fn check_call_result"),
-            "common JitResult checks belong in result_flow, not the lowering root"
-        );
-    }
 }

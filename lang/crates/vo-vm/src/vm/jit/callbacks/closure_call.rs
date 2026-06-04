@@ -12,6 +12,8 @@ use vo_runtime::jit_api::{
 use vo_runtime::objects::closure;
 use vo_runtime::ValueKind;
 
+use super::helpers::record_runtime_trap;
+
 #[inline]
 fn can_use_direct_call_table_entry(func_def: &FunctionDef) -> bool {
     vo_jit::can_elide_frame_for_direct_jit(func_def)
@@ -28,18 +30,6 @@ fn lookup_direct_call_ptr(ctx: &JitContext, func_id: u32, func_def: &FunctionDef
     } else {
         core::ptr::null()
     }
-}
-
-#[inline]
-fn record_runtime_trap(ctx: &mut JitContext, kind: JitRuntimeTrapKind, pc: u32) {
-    unsafe {
-        *ctx.panic_flag = true;
-        *ctx.is_user_panic = false;
-    }
-    ctx.runtime_trap_kind = kind as u8;
-    ctx.runtime_trap_arg0 = 0;
-    ctx.runtime_trap_arg1 = 0;
-    ctx.runtime_trap_pc = pc;
 }
 
 #[inline]

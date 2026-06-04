@@ -36,7 +36,7 @@ pub(crate) struct ManifestCase {
 pub(crate) struct CaseExpect {
     pub(crate) kind: String,
     pub(crate) patterns: Vec<String>,
-    pub(crate) jit_regular_call_fallbacks_min: Option<u64>,
+    pub(crate) jit_regular_call_side_exits_min: Option<u64>,
 }
 
 pub(crate) fn load_manifest(root: &Path) -> Result<ManifestFile> {
@@ -80,14 +80,14 @@ pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
         return Ok(CaseExpect {
             kind: "pass".to_string(),
             patterns: Vec::new(),
-            jit_regular_call_fallbacks_min: None,
+            jit_regular_call_side_exits_min: None,
         });
     };
     match value {
         toml::Value::String(s) if s == "pass" => Ok(CaseExpect {
             kind: "pass".to_string(),
             patterns: Vec::new(),
-            jit_regular_call_fallbacks_min: None,
+            jit_regular_call_side_exits_min: None,
         }),
         toml::Value::Table(table) => {
             if let Some(fail) = table.get("fail") {
@@ -109,7 +109,7 @@ pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
                 return Ok(CaseExpect {
                     kind: "fail".to_string(),
                     patterns,
-                    jit_regular_call_fallbacks_min: None,
+                    jit_regular_call_side_exits_min: None,
                 });
             }
 
@@ -120,31 +120,49 @@ pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
             if kind != "pass" {
                 bail!("case {} has unsupported expect kind {kind}", case.id);
             }
-            let jit_regular_call_fallbacks_min = match table.get("jit_regular_call_fallbacks_min") {
-                Some(value) => {
-                    let raw = value.as_integer().ok_or_else(|| {
-                        anyhow!(
-                            "case {} jit_regular_call_fallbacks_min must be an integer",
-                            case.id
-                        )
-                    })?;
-                    Some(u64::try_from(raw).map_err(|_| {
-                        anyhow!(
-                            "case {} jit_regular_call_fallbacks_min must be non-negative",
-                            case.id
-                        )
-                    })?)
-                }
-                None => None,
-            };
+            let jit_regular_call_side_exits_min = parse_u64_expect_min(
+                case,
+                table,
+                "jit_regular_call_side_exits_min",
+                Some("jit_regular_call_fallbacks_min"),
+            )?;
             Ok(CaseExpect {
                 kind: "pass".to_string(),
                 patterns: Vec::new(),
-                jit_regular_call_fallbacks_min,
+                jit_regular_call_side_exits_min,
             })
         }
         other => bail!("case {} has invalid expect value {other:?}", case.id),
     }
+}
+
+fn parse_u64_expect_min(
+    case: &ManifestCase,
+    table: &toml::map::Map<String, toml::Value>,
+    key: &'static str,
+    legacy_key: Option<&'static str>,
+) -> Result<Option<u64>> {
+    let value = match (
+        table.get(key),
+        legacy_key.and_then(|legacy| table.get(legacy)),
+    ) {
+        (Some(_), Some(_)) => {
+            bail!(
+                "case {} must not set both {key} and legacy {legacy_key:?}",
+                case.id
+            )
+        }
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let raw = value
+        .as_integer()
+        .ok_or_else(|| anyhow!("case {} {key} must be an integer", case.id))?;
+    Some(u64::try_from(raw).map_err(|_| anyhow!("case {} {key} must be non-negative", case.id)))
+        .transpose()
 }
 
 pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {

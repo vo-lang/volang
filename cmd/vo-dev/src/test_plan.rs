@@ -243,7 +243,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 timeout_sec: case_timeout(case, target_name, target.default_timeout_sec),
                 expect: json!({
                     "kind": "pass",
-                    "jit_regular_call_fallbacks_min": expect.jit_regular_call_fallbacks_min,
+                    "jit_regular_call_side_exits_min": expect.jit_regular_call_side_exits_min,
                 }),
             });
         }
