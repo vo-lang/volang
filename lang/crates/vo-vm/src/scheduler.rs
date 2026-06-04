@@ -136,10 +136,24 @@ impl Scheduler {
         &self.fibers[id.0 as usize]
     }
 
+    /// Try to get fiber by FiberId. Use at host/island command boundaries
+    /// where a raw id may be stale or malformed.
+    #[inline]
+    pub fn try_get_fiber(&self, id: FiberId) -> Option<&Fiber> {
+        self.fibers.get(id.0 as usize).map(|fiber| &**fiber)
+    }
+
     /// Get mutable fiber by FiberId (O(1) index access).
     #[inline]
     pub fn get_fiber_mut(&mut self, id: FiberId) -> &mut Fiber {
         &mut self.fibers[id.0 as usize]
+    }
+
+    /// Try to get mutable fiber by FiberId. Use at host/island command
+    /// boundaries where a raw id may be stale or malformed.
+    #[inline]
+    pub fn try_get_fiber_mut(&mut self, id: FiberId) -> Option<&mut Fiber> {
+        self.fibers.get_mut(id.0 as usize).map(|fiber| &mut **fiber)
     }
 
     /// Wake a blocked fiber.
@@ -151,6 +165,21 @@ impl Scheduler {
             self.blocked_count -= 1;
             self.ready_queue.push_back(id);
         }
+    }
+
+    /// Try to wake a blocked fiber. Returns false if the id is unknown or the
+    /// fiber was not blocked.
+    pub fn try_wake_fiber(&mut self, id: FiberId) -> bool {
+        let Some(fiber) = self.fibers.get_mut(id.0 as usize) else {
+            return false;
+        };
+        if fiber.state.is_blocked() {
+            fiber.state = FiberState::Runnable;
+            self.blocked_count -= 1;
+            self.ready_queue.push_back(id);
+            return true;
+        }
+        false
     }
 
     /// Get current fiber reference.
@@ -455,6 +484,15 @@ mod tests {
         scheduler.wake_host_event(55);
 
         assert_eq!(scheduler.get_fiber(fid).resume_host_event_token, Some(55));
+    }
+
+    #[test]
+    fn try_wake_fiber_ignores_unknown_id() {
+        let mut scheduler = Scheduler::new();
+
+        assert!(!scheduler.try_wake_fiber(FiberId::from_raw(99)));
+        assert!(scheduler.ready_queue.is_empty());
+        assert_eq!(scheduler.blocked_count, 0);
     }
 }
 

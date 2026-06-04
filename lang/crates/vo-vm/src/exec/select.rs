@@ -13,6 +13,7 @@ use alloc::{
 #[cfg(feature = "std")]
 use std::string::{String, ToString};
 
+use crate::bytecode::Module;
 use vo_runtime::gc::GcRef;
 use vo_runtime::objects::queue;
 use vo_runtime::objects::queue::{RecvResult, SendResult};
@@ -109,6 +110,8 @@ pub fn exec_select_exec(
     bp: usize,
     island_id: u32,
     fiber_id: u32,
+    vm_state: &mut crate::vm::VmState,
+    module: Option<&Module>,
     select_state: &mut Option<SelectState>,
     result_reg: u16,
 ) -> SelectResult {
@@ -145,6 +148,8 @@ pub fn exec_select_exec(
             ch,
             elem_slots,
             val_reg,
+            vm_state,
+            module,
             select_state,
         ),
         ReadyCase::Recv {
@@ -184,7 +189,7 @@ pub fn exec_select_exec(
                     "SelectExec without active SelectBegin".to_string(),
                 );
             };
-            match register_select_waiters(stack, bp, island_id, fiber_id, state) {
+            match register_select_waiters(stack, bp, island_id, fiber_id, vm_state, module, state) {
                 Ok(()) => SelectResult::Block,
                 Err(msg) => {
                     *select_state = None;
@@ -279,6 +284,27 @@ fn find_ready_case(stack: *const Slot, bp: usize, state: &SelectState) -> ReadyC
 // Internal: Case execution
 // =============================================================================
 
+#[inline]
+fn barrier_select_send_value(
+    vm_state: &mut crate::vm::VmState,
+    ch: GcRef,
+    value: &[u64],
+    module: Option<&Module>,
+) -> Result<(), String> {
+    let elem_meta = queue_state::elem_meta(ch);
+    if elem_meta.value_kind().may_contain_gc_refs() {
+        vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+            &mut vm_state.gc,
+            ch,
+            value,
+            elem_meta,
+            module,
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
 fn complete_woken_case(
     stack: *mut Slot,
     bp: usize,
@@ -338,12 +364,18 @@ fn execute_send_case(
     ch: GcRef,
     elem_slots: usize,
     val_reg: u16,
+    vm_state: &mut crate::vm::VmState,
+    module: Option<&Module>,
     select_state: &mut Option<SelectState>,
 ) -> SelectResult {
     let val_start = bp + val_reg as usize;
     let value: QueueMessage = (0..elem_slots)
         .map(|i| stack_get(stack, val_start + i))
         .collect();
+    if let Err(msg) = barrier_select_send_value(vm_state, ch, value.as_ref(), module) {
+        *select_state = None;
+        return SelectResult::Malformed(msg);
+    }
 
     // Use try_send so that waiting receivers are properly woken.
     // Direct buffer push would leave waiting receivers blocked forever.
@@ -459,6 +491,8 @@ fn register_select_waiters(
     bp: usize,
     island_id: u32,
     fiber_id: u32,
+    vm_state: &mut crate::vm::VmState,
+    module: Option<&Module>,
     state: &mut SelectState,
 ) -> Result<(), String> {
     let select_id = state.select_id;
@@ -469,6 +503,7 @@ fn register_select_waiters(
             continue;
         }
         if queue::is_remote(ch) {
+            cancel_select_waiters(state);
             return Err("remote channel reached select waiter registration".to_string());
         }
 
@@ -479,6 +514,10 @@ fn register_select_waiters(
                 let value: QueueMessage = (0..elem_slots)
                     .map(|i| stack_get(stack, val_start + i))
                     .collect();
+                if let Err(msg) = barrier_select_send_value(vm_state, ch, value.as_ref(), module) {
+                    cancel_select_waiters(state);
+                    return Err(msg);
+                }
                 queue::register_sender(
                     ch,
                     QueueWaiter::selecting(island_id, fiber_id as u64, idx as u16, select_id),
@@ -545,11 +584,21 @@ mod tests {
         let (meta, rttid) = int_meta();
         let ch = queue::create_remote_proxy(&mut gc, QueueKind::Port, 9, 7, 1, meta, rttid, 1);
         QueueData::as_mut(ch).kind = QueueKind::Chan as u16;
-        let mut stack = vec![ch as u64, 123, 0, 0];
+        let mut stack = vec![ch as u64, 0, 0, 0];
+        let mut vm_state = crate::vm::VmState::new();
         let mut select_state = select_state_with_case(SelectCaseKind::Send);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            exec_select_exec(stack.as_mut_ptr(), 0, 0, 1, &mut select_state, 2)
+            exec_select_exec(
+                stack.as_mut_ptr(),
+                0,
+                0,
+                1,
+                &mut vm_state,
+                None,
+                &mut select_state,
+                2,
+            )
         }));
 
         match result {
@@ -569,11 +618,23 @@ mod tests {
         let mut gc = Gc::new();
         let (meta, rttid) = int_meta();
         let ch = queue::create(&mut gc, QueueKind::Chan, meta, rttid, 1, 0);
-        let mut stack = vec![ch as u64, 123, 0, 0];
+        let mut stack = vec![ch as u64, 0, 0, 0];
+        let mut vm_state = crate::vm::VmState::new();
         let mut select_state = select_state_with_case(SelectCaseKind::Send);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_send_case(stack.as_mut_ptr(), 0, 2, 0, ch, 1, 1, &mut select_state)
+            execute_send_case(
+                stack.as_mut_ptr(),
+                0,
+                2,
+                0,
+                ch,
+                1,
+                1,
+                &mut vm_state,
+                None,
+                &mut select_state,
+            )
         }));
 
         match result {
@@ -586,6 +647,68 @@ mod tests {
             Ok(other) => panic!("send case readiness mismatch should be malformed, got {other:?}"),
             Err(_) => panic!("send case readiness mismatch must not panic"),
         }
+    }
+
+    #[test]
+    fn select_send_missing_struct_metadata_is_malformed() {
+        let mut vm_state = crate::vm::VmState::new();
+        let ch = queue::create(
+            &mut vm_state.gc,
+            QueueKind::Chan,
+            ValueMeta::new(0, ValueKind::Struct),
+            ValueRttid::new(0, ValueKind::Struct),
+            1,
+            1,
+        );
+        let mut module = Module::new("test".to_string());
+        let mut stack = vec![ch as u64, 0, 0, 0];
+        let mut select_state = select_state_with_case(SelectCaseKind::Send);
+
+        let result = exec_select_exec(
+            stack.as_mut_ptr(),
+            0,
+            0,
+            1,
+            &mut vm_state,
+            Some(&module),
+            &mut select_state,
+            2,
+        );
+
+        match result {
+            SelectResult::Malformed(msg) => {
+                assert!(
+                    msg.contains("missing StructMeta id 0"),
+                    "expected missing StructMeta error, got {msg}"
+                );
+            }
+            other => {
+                panic!("select send without struct metadata should be malformed, got {other:?}")
+            }
+        }
+
+        module
+            .struct_metas
+            .push(vo_common_core::bytecode::StructMeta {
+                slot_types: vec![vo_common_core::types::SlotType::GcRef],
+                fields: Vec::new(),
+                field_index: Default::default(),
+            });
+        let mut select_state = select_state_with_case(SelectCaseKind::Send);
+        let result = exec_select_exec(
+            stack.as_mut_ptr(),
+            0,
+            0,
+            1,
+            &mut vm_state,
+            Some(&module),
+            &mut select_state,
+            2,
+        );
+        assert!(
+            matches!(result, SelectResult::Continue),
+            "select send should succeed once struct metadata is present, got {result:?}"
+        );
     }
 
     #[test]

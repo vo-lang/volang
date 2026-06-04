@@ -608,7 +608,7 @@ impl Fiber {
                 if *closed {
                     self.remote_send_closed = true;
                     if let Some(frame) = self.current_frame_mut() {
-                        frame.pc -= 1;
+                        frame.pc = frame.pc.saturating_sub(1);
                     }
                 }
             }

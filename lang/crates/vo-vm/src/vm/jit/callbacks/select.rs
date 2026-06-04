@@ -161,12 +161,15 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
     }
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
     let bp = unsafe { (*ctx).jit_bp as usize };
+    let module = unsafe { &*((*ctx).module) };
 
     match exec::exec_select_exec(
         stack,
         bp,
         vm.state.current_island_id,
         fiber.id,
+        &mut vm.state,
+        Some(module),
         &mut fiber.select_state,
         result_reg as u16,
     ) {

@@ -190,7 +190,7 @@ fn handle_command(vm: &mut Vm, cmd: IslandCommand) -> bool {
         }
         IslandCommand::WakeFiber { fiber_id } => {
             vm.scheduler
-                .wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+                .try_wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
             false
         }
         IslandCommand::EndpointRequest {

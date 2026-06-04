@@ -364,6 +364,12 @@ pub fn try_append(
 ) -> Result<GcRef, crate::gc_types::TypedWriteBarrierByMetaError> {
     if s.is_null() {
         let new_arr = array::create(gc, em, elem_bytes, 4);
+        if new_arr.is_null() {
+            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
+        }
+        if em.value_kind().may_contain_gc_refs() {
+            crate::gc_types::try_typed_write_barrier_by_meta(gc, new_arr, val, em, module)?;
+        }
         array::set_n(new_arr, 0, val, elem_bytes);
         if em.value_kind().may_contain_gc_refs() {
             gc.mark_allocated_for_scan(new_arr);
@@ -374,6 +380,12 @@ pub fn try_append(
     let cur_len = slot_to_usize(data.len);
     let cur_cap = slot_to_usize(data.cap);
     if cur_len < cur_cap {
+        if em.value_kind().may_contain_gc_refs() {
+            let arr_ref = slot_to_ptr::<u64>(data.array) as GcRef;
+            if !arr_ref.is_null() {
+                crate::gc_types::try_typed_write_barrier_by_meta(gc, arr_ref, val, em, module)?;
+            }
+        }
         // Write directly using data_ptr
         let ptr = unsafe { data_ptr(s).add(cur_len * elem_bytes) };
         match elem_bytes {
@@ -386,20 +398,24 @@ pub fn try_append(
                 unsafe { core::ptr::copy_nonoverlapping(src_bytes, ptr, elem_bytes) };
             }
         }
-        // Write barrier: reusing existing backing array that may be BLACK.
-        // Type-aware to avoid UB on mixed-slot types (e.g., struct with int + pointer).
-        if em.value_kind().may_contain_gc_refs() {
-            let arr_ref = slot_to_ptr::<u64>(data.array) as GcRef;
-            if !arr_ref.is_null() {
-                crate::gc_types::try_typed_write_barrier_by_meta(gc, arr_ref, val, em, module)?;
-            }
-        }
         // Go semantics: append never modifies original slice header
         Ok(with_new_len(gc, s, cur_len + 1))
     } else {
-        let new_cap = if cur_cap == 0 { 4 } else { cur_cap * 2 };
+        let new_cap = if cur_cap == 0 {
+            4
+        } else {
+            cur_cap
+                .checked_mul(2)
+                .ok_or(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)?
+        };
         let aem = elem_meta(s);
         let new_arr = array::create(gc, aem, elem_bytes, new_cap);
+        if new_arr.is_null() {
+            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
+        }
+        if aem.value_kind().may_contain_gc_refs() {
+            crate::gc_types::try_typed_write_barrier_by_meta(gc, new_arr, val, aem, module)?;
+        }
         // Copy from data_ptr directly
         let src_ptr = data_ptr(s);
         let dst_ptr = array::data_ptr_bytes(new_arr);
@@ -409,5 +425,52 @@ pub fn try_append(
             gc.mark_allocated_for_scan(new_arr);
         }
         Ok(from_array_range(gc, new_arr, 0, cur_len + 1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::objects::array;
+    use vo_common_core::bytecode::{Module, StructMeta};
+    use vo_common_core::types::SlotType;
+
+    #[test]
+    fn try_append_missing_struct_metadata_returns_error_before_write() {
+        let mut gc = Gc::new();
+        let em = ValueMeta::new(0, ValueKind::Struct);
+        let arr = array::create(&mut gc, em, 8, 2);
+        array::set_n(arr, 1, &[42], 8);
+        let s = from_array_range(&mut gc, arr, 0, 1);
+        let module = Module::new("test".to_string());
+
+        let err = try_append(&mut gc, em, 8, s, &[0], Some(&module))
+            .expect_err("missing struct metadata should reject append");
+
+        assert_eq!(
+            err,
+            crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
+        );
+        assert_eq!(array::get(arr, 1, 8), 42);
+    }
+
+    #[test]
+    fn try_append_with_struct_metadata_succeeds() {
+        let mut gc = Gc::new();
+        let em = ValueMeta::new(0, ValueKind::Struct);
+        let arr = array::create(&mut gc, em, 8, 2);
+        let s = from_array_range(&mut gc, arr, 0, 1);
+        let mut module = Module::new("test".to_string());
+        module.struct_metas.push(StructMeta {
+            slot_types: vec![SlotType::GcRef],
+            fields: Vec::new(),
+            field_index: Default::default(),
+        });
+
+        let result = try_append(&mut gc, em, 8, s, &[0], Some(&module))
+            .expect("struct metadata should allow append");
+
+        assert!(!result.is_null());
+        assert_eq!(array::get(arr, 1, 8), 0);
     }
 }

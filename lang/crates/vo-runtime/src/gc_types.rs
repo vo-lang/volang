@@ -12,6 +12,7 @@ use vo_common_core::types::{SlotType, ValueKind, ValueMeta};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypedWriteBarrierByMetaError {
+    AllocationFailed,
     MissingModuleMetadata,
     MissingStructMeta { meta_id: usize },
     SlotWidthMismatch { vals: usize, slot_types: usize },
@@ -22,6 +23,7 @@ pub enum TypedWriteBarrierByMetaError {
 impl core::fmt::Display for TypedWriteBarrierByMetaError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::AllocationFailed => write!(f, "typed_write_barrier_by_meta: allocation failed"),
             Self::MissingModuleMetadata => {
                 write!(f, "typed_write_barrier_by_meta: missing module metadata")
             }

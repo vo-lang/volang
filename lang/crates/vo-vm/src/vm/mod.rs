@@ -204,6 +204,129 @@ fn strict_jit_load_error(err: vo_jit::JitError) -> VmError {
     VmError::Jit(err.to_string())
 }
 
+fn invalid_module_metadata(msg: impl Into<String>) -> VmError {
+    VmError::Jit(format!("invalid module metadata: {}", msg.into()))
+}
+
+fn validate_vm_module(module: &Module) -> Result<(), VmError> {
+    let mut total_global_slots = 0usize;
+    for (idx, global) in module.globals.iter().enumerate() {
+        total_global_slots = total_global_slots
+            .checked_add(global.slots as usize)
+            .ok_or_else(|| invalid_module_metadata("global slot count overflows usize"))?;
+        if !global.slot_types.is_empty() && global.slot_types.len() != global.slots as usize {
+            return Err(invalid_module_metadata(format!(
+                "global {idx} ({}) slot_types len {} does not match slots {}",
+                global.name,
+                global.slot_types.len(),
+                global.slots
+            )));
+        }
+    }
+    let _ = total_global_slots;
+
+    for (idx, func) in module.functions.iter().enumerate() {
+        let local_slots = func.local_slots as usize;
+        if func.slot_types.len() > local_slots {
+            return Err(invalid_module_metadata(format!(
+                "function {idx} ({}) slot_types len {} exceeds local_slots {}",
+                func.name,
+                func.slot_types.len(),
+                func.local_slots
+            )));
+        }
+        if func.gc_scan_slots as usize > func.slot_types.len() {
+            return Err(invalid_module_metadata(format!(
+                "function {idx} ({}) gc_scan_slots {} exceeds slot_types len {}",
+                func.name,
+                func.gc_scan_slots,
+                func.slot_types.len()
+            )));
+        }
+
+        let expected_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
+        if func.gc_scan_slots < expected_scan_slots {
+            return Err(invalid_module_metadata(format!(
+                "function {idx} ({}) gc_scan_slots {} under-scans slot_types; expected at least {}",
+                func.name, func.gc_scan_slots, expected_scan_slots
+            )));
+        }
+
+        for (slot_idx, slot_type) in func.slot_types.iter().enumerate() {
+            match slot_type {
+                vo_common_core::types::SlotType::Interface0 => {
+                    if func.slot_types.get(slot_idx + 1)
+                        != Some(&vo_common_core::types::SlotType::Interface1)
+                    {
+                        return Err(invalid_module_metadata(format!(
+                            "function {idx} ({}) Interface0 slot {slot_idx} is not followed by Interface1",
+                            func.name
+                        )));
+                    }
+                }
+                vo_common_core::types::SlotType::Interface1 => {
+                    if slot_idx == 0
+                        || func.slot_types.get(slot_idx - 1)
+                            != Some(&vo_common_core::types::SlotType::Interface0)
+                    {
+                        return Err(invalid_module_metadata(format!(
+                            "function {idx} ({}) Interface1 slot {slot_idx} is not preceded by Interface0",
+                            func.name
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !func.borrowed_scan_slots_prefix.is_empty() {
+            let expected_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+            if func.borrowed_scan_slots_prefix != expected_prefix {
+                return Err(invalid_module_metadata(format!(
+                    "function {idx} ({}) borrowed_scan_slots_prefix does not match slot_types",
+                    func.name
+                )));
+            }
+        }
+
+        if !func.ret_slot_types.is_empty() && func.ret_slot_types.len() != func.ret_slots as usize {
+            return Err(invalid_module_metadata(format!(
+                "function {idx} ({}) ret_slot_types len {} does not match ret_slots {}",
+                func.name,
+                func.ret_slot_types.len(),
+                func.ret_slots
+            )));
+        }
+
+        if !func.heap_ret_slots.is_empty()
+            && func.heap_ret_slots.len() != func.heap_ret_gcref_count as usize
+        {
+            return Err(invalid_module_metadata(format!(
+                "function {idx} ({}) heap_ret_slots len {} does not match heap_ret_gcref_count {}",
+                func.name,
+                func.heap_ret_slots.len(),
+                func.heap_ret_gcref_count
+            )));
+        }
+        let heap_ret_end = (func.heap_ret_gcref_start as usize)
+            .checked_add(func.heap_ret_gcref_count as usize)
+            .ok_or_else(|| {
+                invalid_module_metadata(format!(
+                    "function {idx} ({}) heap return GcRef range overflows",
+                    func.name
+                ))
+            })?;
+        if heap_ret_end > local_slots {
+            return Err(invalid_module_metadata(format!(
+                "function {idx} ({}) heap return GcRef range {}..{} exceeds local_slots {}",
+                func.name, func.heap_ret_gcref_start, heap_ret_end, func.local_slots
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(debug_assertions)]
 #[allow(clippy::too_many_arguments)]
 fn debug_validate_extern_returns(
@@ -555,6 +678,16 @@ impl Vm {
 }
 
 impl Vm {
+    fn ensure_can_load_module(&self) -> Result<(), VmError> {
+        if self.module.is_some() || !self.scheduler.fibers.is_empty() {
+            return Err(VmError::Jit(
+                "Vm::load cannot replace a loaded or previously run module; create a new Vm"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn module(&self) -> Option<&Module> {
         self.module.as_ref()
     }
@@ -570,6 +703,8 @@ impl Vm {
 
     #[cfg(not(feature = "std"))]
     pub fn load(&mut self, module: Module) -> Result<(), VmError> {
+        self.ensure_can_load_module()?;
+        validate_vm_module(&module)?;
         vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
 
         #[cfg(feature = "jit")]
@@ -588,6 +723,8 @@ impl Vm {
         module: Module,
         ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     ) -> Result<(), VmError> {
+        self.ensure_can_load_module()?;
+        validate_vm_module(&module)?;
         #[cfg(not(target_arch = "wasm32"))]
         {
             vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
@@ -938,7 +1075,7 @@ impl Vm {
             }
             IslandCommand::WakeFiber { fiber_id } => {
                 self.scheduler
-                    .wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
+                    .try_wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
             }
             IslandCommand::EndpointRequest {
                 endpoint_id,
@@ -2169,7 +2306,7 @@ impl Vm {
                                         .to_string(),
                                 );
                             };
-                            frame.pc -= 1;
+                            frame.pc = frame.pc.saturating_sub(1);
 
                             // Push closure frame on current fiber using same layout as exec_call_closure
                             let closure_func_id =
@@ -2217,13 +2354,24 @@ impl Vm {
 
                             fiber.copy_slots_from_slice(new_bp + layout.arg_offset, &args);
 
-                            fiber.push_call_frame(
-                                closure_func_id,
-                                new_bp,
-                                0, // ret_reg=0 (return values go via replay cache, not caller stack)
-                                func_def.ret_slots,
-                                func_def.gc_scan_slots,
-                            );
+                            if fiber
+                                .try_push_call_frame(
+                                    closure_func_id,
+                                    new_bp,
+                                    0, // ret_reg=0 (return values go via replay cache, not caller stack)
+                                    func_def.ret_slots,
+                                    func_def.gc_scan_slots,
+                                )
+                                .is_err()
+                            {
+                                handle_panic_result!(runtime_trap(
+                                    &mut self.state.gc,
+                                    fiber,
+                                    stack,
+                                    module,
+                                    RuntimeTrapKind::StackOverflow,
+                                ));
+                            }
 
                             // Mark replay depth so return path knows to cache results.
                             // Push previous depth so nested CallExterns don't clobber it.
@@ -2453,55 +2601,83 @@ impl Vm {
                         4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         8 => {
-                            unsafe { *(base.offset(off * 8) as *mut u64) = val };
-                            // Write barrier for GcRef elements (string, slice, map, pointer, etc.)
                             let em = array::elem_meta(arr);
                             if em.value_kind().may_contain_gc_refs() {
-                                self.state.gc.write_barrier(arr, val as GcRef);
+                                if let Err(err) =
+                                    vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+                                        &mut self.state.gc,
+                                        arr,
+                                        &[val],
+                                        em,
+                                        Some(module),
+                                    )
+                                {
+                                    return ExecResult::JitError(err.to_string());
+                                }
                             }
+                            unsafe { *(base.offset(off * 8) as *mut u64) = val };
                         }
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
-                            for i in 0..elem_slots {
-                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
-                                unsafe { *ptr = stack_get(stack, src + i) };
-                            }
                             // Write barrier for multi-slot elements that may contain GcRefs
                             let em = array::elem_meta(arr);
                             if em.value_kind().may_contain_gc_refs() {
                                 let vals: Vec<u64> =
                                     (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
-                                vo_runtime::gc_types::typed_write_barrier_by_meta(
-                                    &mut self.state.gc,
-                                    arr,
-                                    &vals,
-                                    em,
-                                    Some(module),
-                                );
-                            }
-                        }
-                        _ => {
-                            let elem_bytes = inst.flags as usize;
-                            let elem_slots = elem_bytes.div_ceil(8);
-                            for i in 0..elem_slots {
-                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
-                                unsafe { *ptr = stack_get(stack, src + i) };
-                            }
-                            // Write barrier for multi-slot elements that may contain GcRefs
-                            if elem_bytes >= 8 {
-                                let em = array::elem_meta(arr);
-                                if em.value_kind().may_contain_gc_refs() {
-                                    let vals: Vec<u64> = (0..elem_slots)
-                                        .map(|i| stack_get(stack, src + i))
-                                        .collect();
-                                    vo_runtime::gc_types::typed_write_barrier_by_meta(
+                                if let Err(err) =
+                                    vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                         &mut self.state.gc,
                                         arr,
                                         &vals,
                                         em,
                                         Some(module),
-                                    );
+                                    )
+                                {
+                                    return ExecResult::JitError(err.to_string());
+                                }
+                                for (i, val) in vals.iter().enumerate() {
+                                    let ptr =
+                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                    unsafe { *ptr = *val };
+                                }
+                            } else {
+                                for i in 0..elem_slots {
+                                    let ptr =
+                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                    unsafe { *ptr = stack_get(stack, src + i) };
+                                }
+                            }
+                        }
+                        _ => {
+                            let elem_bytes = inst.flags as usize;
+                            let elem_slots = elem_bytes.div_ceil(8);
+                            // Write barrier for multi-slot elements that may contain GcRefs
+                            let em = array::elem_meta(arr);
+                            if elem_bytes >= 8 && em.value_kind().may_contain_gc_refs() {
+                                let vals: Vec<u64> =
+                                    (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                if let Err(err) =
+                                    vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+                                        &mut self.state.gc,
+                                        arr,
+                                        &vals,
+                                        em,
+                                        Some(module),
+                                    )
+                                {
+                                    return ExecResult::JitError(err.to_string());
+                                }
+                                for (i, val) in vals.iter().enumerate() {
+                                    let ptr =
+                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                    unsafe { *ptr = *val };
+                                }
+                            } else {
+                                for i in 0..elem_slots {
+                                    let ptr =
+                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                    unsafe { *ptr = stack_get(stack, src + i) };
                                 }
                             }
                         }
@@ -2624,65 +2800,96 @@ impl Vm {
                         4 | 132 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
                         8 => {
-                            unsafe { *(base.add(idx * 8) as *mut u64) = val };
-                            // Write barrier: backing array may be BLACK, val may be WHITE GcRef
                             let arr_ref = vo_runtime::objects::slice::array_ref(s);
                             if !arr_ref.is_null() {
                                 let em = array::elem_meta(arr_ref);
                                 if em.value_kind().may_contain_gc_refs() {
-                                    self.state.gc.write_barrier(arr_ref, val as GcRef);
+                                    if let Err(err) =
+                                        vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+                                            &mut self.state.gc,
+                                            arr_ref,
+                                            &[val],
+                                            em,
+                                            Some(module),
+                                        )
+                                    {
+                                        return ExecResult::JitError(err.to_string());
+                                    }
                                 }
                             }
+                            unsafe { *(base.add(idx * 8) as *mut u64) = val };
                         }
                         0 => {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
-                            for i in 0..elem_slots {
-                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
-                                unsafe { *ptr = stack_get(stack, src + i) };
-                            }
                             // Write barrier for multi-slot elements that may contain GcRefs
                             let arr_ref = vo_runtime::objects::slice::array_ref(s);
-                            if !arr_ref.is_null() {
+                            let needs_barrier = if arr_ref.is_null() {
+                                false
+                            } else {
+                                array::elem_meta(arr_ref).value_kind().may_contain_gc_refs()
+                            };
+                            if needs_barrier {
+                                let vals: Vec<u64> =
+                                    (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
                                 let em = array::elem_meta(arr_ref);
-                                if em.value_kind().may_contain_gc_refs() {
-                                    let vals: Vec<u64> = (0..elem_slots)
-                                        .map(|i| stack_get(stack, src + i))
-                                        .collect();
-                                    vo_runtime::gc_types::typed_write_barrier_by_meta(
+                                if let Err(err) =
+                                    vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                         &mut self.state.gc,
                                         arr_ref,
                                         &vals,
                                         em,
                                         Some(module),
-                                    );
+                                    )
+                                {
+                                    return ExecResult::JitError(err.to_string());
+                                }
+                                for (i, val) in vals.iter().enumerate() {
+                                    let ptr =
+                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                    unsafe { *ptr = *val };
+                                }
+                            } else {
+                                for i in 0..elem_slots {
+                                    let ptr =
+                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                    unsafe { *ptr = stack_get(stack, src + i) };
                                 }
                             }
                         }
                         _ => {
                             let elem_bytes = inst.flags as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
-                            for i in 0..elem_slots {
-                                let ptr = unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
-                                unsafe { *ptr = stack_get(stack, src + i) };
-                            }
                             // Write barrier for multi-slot elements that may contain GcRefs
-                            if elem_bytes >= 8 {
-                                let arr_ref = vo_runtime::objects::slice::array_ref(s);
-                                if !arr_ref.is_null() {
-                                    let em = array::elem_meta(arr_ref);
-                                    if em.value_kind().may_contain_gc_refs() {
-                                        let vals: Vec<u64> = (0..elem_slots)
-                                            .map(|i| stack_get(stack, src + i))
-                                            .collect();
-                                        vo_runtime::gc_types::typed_write_barrier_by_meta(
-                                            &mut self.state.gc,
-                                            arr_ref,
-                                            &vals,
-                                            em,
-                                            Some(module),
-                                        );
-                                    }
+                            let arr_ref = vo_runtime::objects::slice::array_ref(s);
+                            let needs_barrier = elem_bytes >= 8
+                                && !arr_ref.is_null()
+                                && array::elem_meta(arr_ref).value_kind().may_contain_gc_refs();
+                            if needs_barrier {
+                                let vals: Vec<u64> =
+                                    (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                let em = array::elem_meta(arr_ref);
+                                if let Err(err) =
+                                    vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+                                        &mut self.state.gc,
+                                        arr_ref,
+                                        &vals,
+                                        em,
+                                        Some(module),
+                                    )
+                                {
+                                    return ExecResult::JitError(err.to_string());
+                                }
+                                for (i, val) in vals.iter().enumerate() {
+                                    let ptr =
+                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                    unsafe { *ptr = *val };
+                                }
+                            } else {
+                                for i in 0..elem_slots {
+                                    let ptr =
+                                        unsafe { base.add(idx * elem_bytes + i * 8) as *mut u64 };
+                                    unsafe { *ptr = stack_get(stack, src + i) };
                                 }
                             }
                         }
@@ -2713,7 +2920,11 @@ impl Vm {
                     }
                 }
                 Opcode::SliceAppend => {
-                    exec::exec_slice_append(stack, bp, &inst, &mut self.state.gc, Some(module));
+                    if let Err(msg) =
+                        exec::exec_slice_append(stack, bp, &inst, &mut self.state.gc, Some(module))
+                    {
+                        return ExecResult::JitError(msg);
+                    }
                 }
                 Opcode::SliceAddr => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
@@ -2762,14 +2973,18 @@ impl Vm {
                             RuntimeTrapKind::NilMapWrite
                         ));
                     }
-                    if !exec::exec_map_set(stack, bp, &inst, &mut self.state.gc, Some(module)) {
-                        handle_panic_result!(runtime_trap(
-                            &mut self.state.gc,
-                            fiber,
-                            stack,
-                            module,
-                            RuntimeTrapKind::UnhashableType
-                        ));
+                    match exec::exec_map_set(stack, bp, &inst, &mut self.state.gc, Some(module)) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            handle_panic_result!(runtime_trap(
+                                &mut self.state.gc,
+                                fiber,
+                                stack,
+                                module,
+                                RuntimeTrapKind::UnhashableType
+                            ));
+                        }
+                        Err(msg) => return ExecResult::JitError(msg),
                     }
                 }
                 Opcode::MapDelete => {
@@ -2899,6 +3114,8 @@ impl Vm {
                         bp,
                         self.state.current_island_id,
                         fiber_id,
+                        &mut self.state,
+                        Some(module),
                         &mut fiber.select_state,
                         inst.a,
                     ) {
@@ -4006,6 +4223,8 @@ mod tests {
         module.functions[0].param_slots = 1;
         module.functions[0].local_slots = 1;
         module.functions[0].slot_types = vec![SlotType::Value];
+        module.functions[0].borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&module.functions[0].slot_types);
         let mut vm = Vm::new();
         vm.load(module).unwrap();
 
@@ -4189,6 +4408,45 @@ mod tests {
             }
             Ok(other) => panic!("missing extern load should be a VM error, got {other:?}"),
             Err(_) => panic!("missing extern load must not panic"),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn load_rejects_second_module_on_same_vm() {
+        let module = malformed_single_instruction_module("load-once", Vec::new(), Vec::new());
+        let mut vm = Vm::new();
+
+        vm.load(module.clone()).expect("first load should succeed");
+        let err = vm
+            .load(module)
+            .expect_err("second load on same VM should be rejected");
+
+        match err {
+            VmError::Jit(msg) => assert!(msg.contains("cannot replace"), "{msg}"),
+            other => panic!("second load should return Jit error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn load_rejects_function_metadata_that_under_scans_gc_roots() {
+        let mut module = malformed_single_instruction_module("under-scan", Vec::new(), Vec::new());
+        let func = &mut module.functions[0];
+        func.local_slots = 1;
+        func.slot_types = vec![SlotType::GcRef];
+        func.gc_scan_slots = 0;
+        func.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+        let mut vm = Vm::new();
+
+        let err = vm
+            .load(module)
+            .expect_err("under-scanning function metadata should be rejected");
+
+        match err {
+            VmError::Jit(msg) => assert!(msg.contains("under-scans"), "{msg}"),
+            other => panic!("metadata validation should return Jit error, got {other:?}"),
         }
     }
 

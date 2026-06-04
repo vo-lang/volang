@@ -199,13 +199,24 @@ fn handle_endpoint_request_inner(
             );
             vm_state.mark_gc_all_roots_dirty();
             if ctx.elem_meta.value_kind().may_contain_gc_refs() {
-                vo_runtime::gc_types::typed_write_barrier_by_meta(
+                if vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                     &mut vm_state.gc,
                     ctx.ch,
                     &value,
                     ctx.elem_meta,
                     Some(ctx.module),
-                );
+                )
+                .is_err()
+                {
+                    dispatch_response(
+                        requester,
+                        home_island,
+                        endpoint_send_ack(true),
+                        responses,
+                        local_wakes,
+                    );
+                    return;
+                }
             }
             match state.send_or_block_resolved(value, ctx.cap, from, home_island) {
                 vo_runtime::objects::queue_state::ResolvedSendResult::Wake(receiver) => {
@@ -397,10 +408,14 @@ fn mark_remote_endpoint_closed(vm: &mut Vm, endpoint_id: u64) {
 fn resume_endpoint_response(vm: &mut Vm, fiber_id: u64, kind: &EndpointResponseKind) {
     vm.state.pending_island_responses = vm.state.pending_island_responses.saturating_sub(1);
     let fid = crate::scheduler::FiberId::from_raw(fiber_id as u32);
-    vm.scheduler
-        .get_fiber_mut(fid)
-        .apply_endpoint_response(kind);
-    vm.scheduler.wake_fiber(fid);
+    let Some(fiber) = vm.scheduler.try_get_fiber_mut(fid) else {
+        return;
+    };
+    if !fiber.state.is_blocked() {
+        return;
+    }
+    fiber.apply_endpoint_response(kind);
+    vm.scheduler.try_wake_fiber(fid);
 }
 
 pub(crate) fn handle_endpoint_response_command(

@@ -2,6 +2,7 @@
 //! Map instructions: MapNew, MapGet, MapSet, MapDelete, MapLen
 
 extern crate alloc;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use vo_runtime::bytecode::Module;
@@ -78,7 +79,7 @@ pub fn exec_map_set(
     inst: &Instruction,
     gc: &mut Gc,
     module: Option<&Module>,
-) -> bool {
+) -> Result<bool, String> {
     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
     let meta = stack_get(stack, bp + inst.b as usize);
     let key_slots = ((meta >> 8) & 0xFF) as usize;
@@ -105,26 +106,41 @@ pub fn exec_map_set(
                 vo_runtime::ValueKind::Slice
                 | vo_runtime::ValueKind::Map
                 | vo_runtime::ValueKind::Closure => {
-                    return false; // Uncomparable type - should panic
+                    return Ok(false); // Uncomparable type - should panic
                 }
                 _ => {}
             }
         }
     }
 
-    map::set(m, &key, &val, module);
-
     // Write barrier: only barrier slots that are actually GcRefs.
-    // Uses typed_write_barrier_by_meta to avoid UB on mixed-slot types
+    // Uses try_typed_write_barrier_by_meta to avoid UB on mixed-slot types
     // (e.g., struct with int + pointer fields) where write_barrier would
     // dereference a non-pointer value as a GcHeader.
-    if (inst.flags & 0b01) != 0 {
-        vo_runtime::gc_types::typed_write_barrier_by_meta(gc, m, &key, map::key_meta(m), module);
+    if !m.is_null() {
+        if (inst.flags & 0b01) != 0 {
+            vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+                gc,
+                m,
+                &key,
+                map::key_meta(m),
+                module,
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        if (inst.flags & 0b10) != 0 {
+            vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+                gc,
+                m,
+                &val,
+                map::val_meta(m),
+                module,
+            )
+            .map_err(|err| err.to_string())?;
+        }
     }
-    if (inst.flags & 0b10) != 0 {
-        vo_runtime::gc_types::typed_write_barrier_by_meta(gc, m, &val, map::val_meta(m), module);
-    }
-    true
+    map::set(m, &key, &val, module);
+    Ok(true)
 }
 
 #[inline]
