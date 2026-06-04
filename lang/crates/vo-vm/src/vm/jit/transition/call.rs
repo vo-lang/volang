@@ -11,6 +11,14 @@ use super::super::materialize::{materialize_jit_frames, setup_prepared_call, set
 use super::super::side_exit;
 use super::jit_error_message;
 
+struct CallTarget<'a> {
+    func_id: u32,
+    call_arg_start: usize,
+    ret_slots: u16,
+    ret_reg: u16,
+    func_def: &'a vo_runtime::bytecode::FunctionDef,
+}
+
 pub(super) fn handle_call_transition(
     mode: JitBridgeMode,
     vm: &mut Vm,
@@ -32,34 +40,19 @@ pub(super) fn handle_call_transition(
             mode.call_error_prefix()
         ));
     };
-    let callee_ret_slots = callee_func_def.ret_slots;
-    let call_ret_reg = ctx.call_ret_reg();
+    let target = CallTarget {
+        func_id: callee_func_id,
+        call_arg_start,
+        ret_slots: callee_func_def.ret_slots,
+        ret_reg: ctx.call_ret_reg(),
+        func_def: callee_func_def,
+    };
 
     if call_kind == JitContext::CALL_KIND_PREPARED {
-        return handle_prepared_call(
-            vm,
-            fiber,
-            module,
-            ctx,
-            callee_func_id,
-            callee_ret_slots,
-            call_ret_reg,
-            callee_func_def,
-        );
+        return handle_prepared_call(vm, fiber, module, ctx, target);
     }
 
-    handle_regular_call(
-        mode,
-        vm,
-        fiber,
-        module,
-        ctx,
-        callee_func_id,
-        callee_ret_slots,
-        call_ret_reg,
-        call_arg_start,
-        callee_func_def,
-    )
+    handle_regular_call(mode, vm, fiber, module, ctx, target)
 }
 
 fn handle_special_call_kind(
@@ -92,17 +85,14 @@ fn handle_prepared_call(
     fiber: &mut Fiber,
     module: &Module,
     ctx: &JitContextWrapper,
-    callee_func_id: u32,
-    callee_ret_slots: u16,
-    call_ret_reg: u16,
-    callee_func_def: &vo_runtime::bytecode::FunctionDef,
+    target: CallTarget<'_>,
 ) -> JitBridgeTransition {
     side_exit::record(vm, JitSideExitReason::PreparedDynamicCall);
     if let Some(jit_mgr) = vm.jit.manager_mut() {
-        if let Err(err) = jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
+        if let Err(err) = jit_mgr.resolve_call(target.func_id, target.func_def, module) {
             return JitBridgeTransition::JitError(jit_error_message(
                 "prepared dynamic callee compilation",
-                &callee_func_def.name,
+                &target.func_def.name,
                 &err,
             ));
         }
@@ -112,9 +102,9 @@ fn handle_prepared_call(
     match setup_prepared_call(
         fiber,
         module,
-        callee_func_id,
-        callee_ret_slots,
-        call_ret_reg,
+        target.func_id,
+        target.ret_slots,
+        target.ret_reg,
         callee_bp,
         caller_resume_pc,
     ) {
@@ -129,21 +119,17 @@ fn handle_regular_call(
     fiber: &mut Fiber,
     module: &Module,
     ctx: &JitContextWrapper,
-    callee_func_id: u32,
-    callee_ret_slots: u16,
-    call_ret_reg: u16,
-    call_arg_start: usize,
-    callee_func_def: &vo_runtime::bytecode::FunctionDef,
+    target: CallTarget<'_>,
 ) -> JitBridgeTransition {
     side_exit::record(vm, JitSideExitReason::RegularCall);
     let resume_pc = ctx.call_resume_pc();
     if let Err(err) = setup_regular_call(
         fiber,
         module,
-        callee_func_id,
-        callee_ret_slots,
-        call_ret_reg,
-        call_arg_start,
+        target.func_id,
+        target.ret_slots,
+        target.ret_reg,
+        target.call_arg_start,
         resume_pc,
     ) {
         return JitBridgeTransition::FrameMaterializeError(err);
@@ -151,12 +137,12 @@ fn handle_regular_call(
 
     if mode.resolve_regular_callee() {
         if let Some(jit_mgr) = vm.jit.manager_mut() {
-            match jit_mgr.resolve_call(callee_func_id, callee_func_def, module) {
+            match jit_mgr.resolve_call(target.func_id, target.func_def, module) {
                 Ok(Some(_)) | Ok(None) => {}
                 Err(err) => {
                     return JitBridgeTransition::JitError(jit_error_message(
                         "callee compilation",
-                        &callee_func_def.name,
+                        &target.func_def.name,
                         &err,
                     ));
                 }
