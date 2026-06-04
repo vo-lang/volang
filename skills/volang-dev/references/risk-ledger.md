@@ -63,6 +63,24 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 - Bytecode/JIT specs and comments can lag current opcodes and callback support.
   Verify `vo-common-core`, `vo-engine::run`, `vo-vm/src/vm/jit/*`, and
   `vo-jit` before editing or explaining backend behavior.
+- `lang/docs/dev/jit-fact-source.md` documents the current maintainer
+  contract. In code, `vo-jit/src/semantics` is the opcode fact source for
+  capability, metadata requirement, register effects, runtime dependencies,
+  verifier requirements/domain, lowering owner, frame/trap policy, fail-fast
+  policy, and effect contracts.
+- `metadata_contract.rs`, `effects`, `capability`, `contract_graph`,
+  `verifier`, and lowering should derive opcode facts from semantic rows. Do
+  not reintroduce scattered opcode-family match tables unless a new explicit
+  row spec cannot express the fact.
+- Strict JIT verification and compile paths should fail fast for invalid
+  opcodes, missing/wrong JIT metadata, invalid references, slot/layout drift,
+  helper or callback ABI drift, and call-shape mismatches. Legal runtime paths
+  are explicit side exits, VM call materialization, runtime helpers, or runtime
+  panic recording.
+- Avoid using "fallback" for intentional JIT runtime paths. Prefer
+  `RuntimePathPolicy`, `JitSideExitReason`, "side exit", and "VM call
+  materialization"; legacy fallback wording is only compatibility terminology
+  at the language-test manifest boundary.
 - Dynamic access and error-sugar specs are intended behavior; current support
   crosses parser, checker, codegen, runtime builtins, and manifest expectations.
   Do not infer implementation status from spec text alone.

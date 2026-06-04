@@ -69,6 +69,9 @@ background in this skill; use references for decisions, caveats, and commands.
 - Opcode or bytecode changes usually cross `vo-common-core`, codegen, VM exec,
   bytecode text/serialization, function metadata, slot metadata, JIT or
   fallback behavior, runtime/JIT ABI helpers, and tests.
+- JIT opcode behavior changes must route through the semantic row, metadata
+  requirement, verifier domain, capability/runtime path policy, lowering owner,
+  and contract graph together. Do not add parallel opcode-family match tables.
 - GC-sensitive changes must audit slot metadata, VM root scanning, interface
   slots, JIT spill/materialization, defer/panic paths, and scheduler
   boundaries.
@@ -123,8 +126,13 @@ targets in `eng/tests.toml` already set this.
 - Native FFI docs may lag source macro names. Check `vo-ext` and
   `vo-ffi-macro` before writing examples.
 - JIT status is nuanced. Verify current `vo-engine::run`, `vo-vm` dispatch,
-  `vm/jit/*`, `jit_mgr`, `vo-jit`, and language tests before claiming support
-  or diagnosing failures.
+  `vm/jit/*`, `jit_mgr`, `vo-jit`, `lang/docs/dev/jit-fact-source.md`, and
+  language tests before claiming support or diagnosing failures.
+- `vo-jit/src/semantics` is the compact opcode fact source. Keep capability,
+  metadata requirements, register effects, runtime dependencies, verifier
+  requirements, lowering owner, and fail-fast policy derived from that source.
+- Use "VM call materialization" or "side exit" for intentional runtime paths;
+  avoid reviving broad "fallback" wording for strict JIT failures.
 - GC is non-moving incremental tri-color mark/sweep with precise slot scanning.
   Do not describe it as conservative or moving.
 - `RenderBuffer` keeps only the latest render frame.

@@ -86,10 +86,17 @@ dispatch changes. Add OSR when loops/backedges, HINT metadata, or `ForLoop`
 lowering are touched:
 
 ```sh
+cargo test -p vo-jit
+cargo test -p vo-vm --features jit
 ./d.py test jit tests/lang/cases/<case>.vo
 ./d.py test osr tests/lang/cases/<case>.vo
 VO_JIT_CALL_THRESHOLD=1 ./d.py run tests/lang/cases/<case>.vo --mode=jit
 ```
+
+For opcode semantics, metadata contracts, verifier preflight, contract graph,
+runtime path policy, or lowering-owner changes, start with `cargo test -p vo-jit`.
+Add `vo-vm --features jit` when VM bridge, materialization, callbacks, side
+exits, or `jit_mgr` behavior is touched.
 
 Use GC-focused checks for slot metadata, root scanning, write barriers,
 allocation, scheduler boundaries, defer/panic, or JIT materialization:

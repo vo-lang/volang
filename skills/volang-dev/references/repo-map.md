@@ -54,7 +54,7 @@ system.
 | `vo-engine` | Native compile/check/run API, module context, compile cache, native extension prep. |
 | `vo-runtime` | GC, object layouts, builtins, FFI registry/loader, stdlib runtime support, islands. |
 | `vo-vm` | Interpreter, scheduler, fibers, root scanning, VM-side JIT integration. |
-| `vo-jit` | Cranelift full-function and loop OSR compilation support. |
+| `vo-jit` | Cranelift full-function and loop OSR compilation, opcode semantic rows, contract graph, verifier, lowering, call helpers, and runtime path policy. |
 | `vo-module` | Module identity, manifests, lock files, workspaces, solver, registry, cache, lifecycle ops. |
 | `vo-release` | Module release verification and staging. |
 | `vo-stdlib` | Embedded stdlib source plus Rust extern implementations. |
@@ -74,6 +74,20 @@ Native compile/run:
 5. `vo-analysis` parses, imports, and type-checks packages.
 6. `vo-codegen` builds a `vo-common-core::Module`.
 7. `vo-engine::run` creates a `vo-vm::Vm`, registers stdlib/extensions, and runs the scheduler.
+
+JIT execution:
+
+1. `vo-engine::run` enables VM-side JIT policy through `vo-vm`.
+2. `vo-vm/src/vm/jit_mgr.rs` tracks hot functions/loops and asks `vo-jit` to
+   compile full functions or OSR loops.
+3. `vo-jit/src/semantics` owns opcode facts; `metadata_contract`, `effects`,
+   `capability`, `verifier`, `contract_graph`, and lowering derive from those
+   facts.
+4. `vo-jit/src/translate/*` lowers instructions to Cranelift; call behavior
+   is split through `call_helpers/*`.
+5. Runtime transitions return through `vo-vm/src/vm/jit/*`, including bridge
+   results, materialization, callbacks, side exits, panic setup, and transition
+   handling.
 
 Web/Studio compile/run:
 
@@ -116,5 +130,6 @@ Docs and artifact flow:
 - Build-like commands and lifecycle commands have different authority over
   dependency resolution and lock mutation.
 - Native extension examples in older specs may use obsolete macro names.
-- JIT docs and source comments are not perfectly aligned; inspect current
-  dispatch and test paths before making status claims.
+- JIT docs and source comments are not perfectly aligned; inspect
+  `lang/docs/dev/jit-fact-source.md`, current dispatch, semantic rows, VM bridge
+  paths, and tests before making status claims.

@@ -9,6 +9,7 @@ entry points before editing.
 - [Change Type Rules Or Diagnostics](#change-type-rules-or-diagnostics)
 - [Change Codegen Lowering Without Adding Opcodes](#change-codegen-lowering-without-adding-opcodes)
 - [Add Or Change A Bytecode Instruction](#add-or-change-a-bytecode-instruction)
+- [Change JIT Semantics, Contracts, Or Lowering](#change-jit-semantics-contracts-or-lowering)
 - [Change GC Or Root Scanning](#change-gc-or-root-scanning)
 - [Change Module Resolution Or Lock Semantics](#change-module-resolution-or-lock-semantics)
 - [Change Module Release Or Staging Behavior](#change-module-release-or-staging-behavior)
@@ -124,7 +125,12 @@ Touch likely areas:
 - `lang/crates/vo-codegen/src/*`
 - `lang/crates/vo-vm/src/exec/*`
 - `lang/crates/vo-vm/src/vm/mod.rs`
-- `lang/crates/vo-jit/src/*` or explicit VM fallback behavior
+- `lang/crates/vo-jit/src/semantics/*`
+- `lang/crates/vo-jit/src/metadata_contract.rs`
+- `lang/crates/vo-jit/src/verifier/*`
+- `lang/crates/vo-jit/src/translate/*`
+- `lang/crates/vo-jit/src/contract_graph/*`
+- `lang/crates/vo-vm/src/vm/jit/*` for JIT bridge/materialization behavior
 - `tests/lang/cases` and `tests/lang/manifest.toml`
 
 Checks:
@@ -138,7 +144,62 @@ Checks:
 
 Audit serialization, text dump, debug info, GC slot metadata, call/return frame
 shape, `FunctionDef` derived metadata, `slot_types`, `capture_slot_types`,
-runtime/JIT ABI helper needs, and JIT side exits or fallback behavior.
+runtime/JIT ABI helper needs, JIT side exits, and VM call materialization.
+
+## Change JIT Semantics, Contracts, Or Lowering
+
+Touch likely areas:
+
+- `lang/docs/dev/jit-fact-source.md`
+- `lang/crates/vo-jit/src/semantics/*`
+- `lang/crates/vo-jit/src/metadata_contract.rs`
+- `lang/crates/vo-jit/src/effects/*`
+- `lang/crates/vo-jit/src/capability.rs`
+- `lang/crates/vo-jit/src/contract_graph/*`
+- `lang/crates/vo-jit/src/verifier/*`
+- `lang/crates/vo-jit/src/translate/*`
+- `lang/crates/vo-jit/src/call_helpers/*`
+- `lang/crates/vo-vm/src/vm/jit/*`
+- `lang/crates/vo-vm/src/vm/jit_mgr.rs`
+- `tests/lang/cases` and `tests/lang/manifest.toml`
+
+Checks:
+
+```sh
+cargo test -p vo-jit
+cargo test -p vo-vm --features jit
+./d.py test jit tests/lang/cases/<case>.vo
+./d.py test osr tests/lang/cases/<case>.vo
+VO_JIT_CALL_THRESHOLD=1 ./d.py run tests/lang/cases/<case>.vo --mode=jit
+```
+
+`vo-jit/src/semantics` is the opcode fact source. When an opcode changes, add
+or update one semantic row and keep capability, metadata requirement, register
+effects, runtime dependencies, helper return policy, verifier requirements,
+verifier domain, lowering owner, frame/trap policy, fail-fast policy, and
+effect contract derived from it.
+
+`metadata_contract.rs` delegates opcode metadata requirements back to the
+semantic row. Do not create a second opcode-to-metadata match. Missing metadata,
+wrong metadata kind, invalid references, call-shape drift, helper/callback ABI
+drift, and slot-layout mismatches are strict JIT errors, not implicit
+interpreter fallbacks.
+
+Keep verifier dispatch in `verifier/instruction_contracts/dispatch.rs` and
+shared helpers in `context.rs`, `layout.rs`, and `preflight.rs`. Concrete
+contracts belong to focused family modules such as `calls`, `collections`,
+`control`, `interface`, `memory`, and `scalar`.
+
+Use `RuntimePathPolicy`, `JitSideExitReason`, "VM call materialization", and
+"side exit" precisely. Avoid broad "fallback" language unless referring to
+legacy language-test manifest compatibility at the test boundary.
+
+For call work, follow `call_helpers/*`: plan route selection in `plan.rs`,
+dynamic call state in `dynamic/*`, extern behavior in `externs.rs`, prepared
+calls in `prepared.rs`, result handling in `result_flow.rs`, VM materialization
+in `vm_materialization.rs`, and callback ABI wrappers in `callback_abi.rs`.
+VM-side bridge code belongs under `vo-vm/src/vm/jit/*`, with grouped transition
+state preferred over long argument lists.
 
 ## Change GC Or Root Scanning
 
