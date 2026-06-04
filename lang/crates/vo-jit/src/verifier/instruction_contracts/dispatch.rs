@@ -20,7 +20,7 @@ pub(crate) fn verify_slot_contract_with_row(
     ctx: VerifierCtx<'_>,
     row: &OpcodeSemantics,
 ) -> Result<(), JitMetadataError> {
-    verify_requirement_preflight(ctx, &row)?;
+    verify_requirement_preflight(ctx, row)?;
 
     match row.verifier_domain {
         crate::semantics::VerifierDomain::None => Ok(()),
