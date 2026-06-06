@@ -1,6 +1,13 @@
 version = 1
 
 [groups]
+gc-contract = [
+  "cargo-test-gc-runtime",
+  "cargo-test-gc-vm",
+  "cargo-test-gc-vm-jit",
+  "cargo-test-gc-jit",
+]
+
 quality = [
   "ci-self-check",
   "d-py-smoke",
@@ -23,6 +30,7 @@ test = [
   "vo-test",
   "vo-test-compile",
   "vo-test-gc",
+  "gc-contract",
   "vo-test-osr",
   "vo-test-nostd",
   "vo-test-wasm",
@@ -67,6 +75,7 @@ pr = [
   "vo-test",
   "vo-test-compile",
   "vo-test-gc",
+  "gc-contract",
   "vo-test-osr",
   "vo-test-nostd",
   "vo-test-wasm",
@@ -262,6 +271,42 @@ command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite",
 needs = ["test-data-lint"]
 tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "cargo-test-gc-runtime"
+title = "cargo GC runtime contract tests"
+command = ["cargo", "test", "-p", "vo-runtime", "gc"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-runtime/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "cargo-test-gc-vm"
+title = "cargo GC VM contract tests"
+command = ["cargo", "test", "-p", "vo-vm", "gc"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-vm/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "cargo-test-gc-vm-jit"
+title = "cargo GC VM JIT contract tests"
+command = ["cargo", "test", "-p", "vo-vm", "--features", "jit", "gc"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-vm/**", "lang/crates/vo-jit/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "test"
+
+[[task]]
+name = "cargo-test-gc-jit"
+title = "cargo GC JIT contract tests"
+command = ["cargo", "test", "-p", "vo-jit", "gc"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-jit/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "test"
 

@@ -209,122 +209,7 @@ fn invalid_module_metadata(msg: impl Into<String>) -> VmError {
 }
 
 fn validate_vm_module(module: &Module) -> Result<(), VmError> {
-    let mut total_global_slots = 0usize;
-    for (idx, global) in module.globals.iter().enumerate() {
-        total_global_slots = total_global_slots
-            .checked_add(global.slots as usize)
-            .ok_or_else(|| invalid_module_metadata("global slot count overflows usize"))?;
-        if !global.slot_types.is_empty() && global.slot_types.len() != global.slots as usize {
-            return Err(invalid_module_metadata(format!(
-                "global {idx} ({}) slot_types len {} does not match slots {}",
-                global.name,
-                global.slot_types.len(),
-                global.slots
-            )));
-        }
-    }
-    let _ = total_global_slots;
-
-    for (idx, func) in module.functions.iter().enumerate() {
-        let local_slots = func.local_slots as usize;
-        if func.slot_types.len() > local_slots {
-            return Err(invalid_module_metadata(format!(
-                "function {idx} ({}) slot_types len {} exceeds local_slots {}",
-                func.name,
-                func.slot_types.len(),
-                func.local_slots
-            )));
-        }
-        if func.gc_scan_slots as usize > func.slot_types.len() {
-            return Err(invalid_module_metadata(format!(
-                "function {idx} ({}) gc_scan_slots {} exceeds slot_types len {}",
-                func.name,
-                func.gc_scan_slots,
-                func.slot_types.len()
-            )));
-        }
-
-        let expected_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
-        if func.gc_scan_slots < expected_scan_slots {
-            return Err(invalid_module_metadata(format!(
-                "function {idx} ({}) gc_scan_slots {} under-scans slot_types; expected at least {}",
-                func.name, func.gc_scan_slots, expected_scan_slots
-            )));
-        }
-
-        for (slot_idx, slot_type) in func.slot_types.iter().enumerate() {
-            match slot_type {
-                vo_common_core::types::SlotType::Interface0 => {
-                    if func.slot_types.get(slot_idx + 1)
-                        != Some(&vo_common_core::types::SlotType::Interface1)
-                    {
-                        return Err(invalid_module_metadata(format!(
-                            "function {idx} ({}) Interface0 slot {slot_idx} is not followed by Interface1",
-                            func.name
-                        )));
-                    }
-                }
-                vo_common_core::types::SlotType::Interface1 => {
-                    if slot_idx == 0
-                        || func.slot_types.get(slot_idx - 1)
-                            != Some(&vo_common_core::types::SlotType::Interface0)
-                    {
-                        return Err(invalid_module_metadata(format!(
-                            "function {idx} ({}) Interface1 slot {slot_idx} is not preceded by Interface0",
-                            func.name
-                        )));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if !func.borrowed_scan_slots_prefix.is_empty() {
-            let expected_prefix = FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
-            if func.borrowed_scan_slots_prefix != expected_prefix {
-                return Err(invalid_module_metadata(format!(
-                    "function {idx} ({}) borrowed_scan_slots_prefix does not match slot_types",
-                    func.name
-                )));
-            }
-        }
-
-        if !func.ret_slot_types.is_empty() && func.ret_slot_types.len() != func.ret_slots as usize {
-            return Err(invalid_module_metadata(format!(
-                "function {idx} ({}) ret_slot_types len {} does not match ret_slots {}",
-                func.name,
-                func.ret_slot_types.len(),
-                func.ret_slots
-            )));
-        }
-
-        if !func.heap_ret_slots.is_empty()
-            && func.heap_ret_slots.len() != func.heap_ret_gcref_count as usize
-        {
-            return Err(invalid_module_metadata(format!(
-                "function {idx} ({}) heap_ret_slots len {} does not match heap_ret_gcref_count {}",
-                func.name,
-                func.heap_ret_slots.len(),
-                func.heap_ret_gcref_count
-            )));
-        }
-        let heap_ret_end = (func.heap_ret_gcref_start as usize)
-            .checked_add(func.heap_ret_gcref_count as usize)
-            .ok_or_else(|| {
-                invalid_module_metadata(format!(
-                    "function {idx} ({}) heap return GcRef range overflows",
-                    func.name
-                ))
-            })?;
-        if heap_ret_end > local_slots {
-            return Err(invalid_module_metadata(format!(
-                "function {idx} ({}) heap return GcRef range {}..{} exceeds local_slots {}",
-                func.name, func.heap_ret_gcref_start, heap_ret_end, func.local_slots
-            )));
-        }
-    }
-
-    Ok(())
+    crate::gc_layout_validate::validate_module_gc_layout(module).map_err(invalid_module_metadata)
 }
 
 #[cfg(debug_assertions)]
@@ -503,9 +388,24 @@ fn check_extern_frame_range(
     Ok(())
 }
 
+#[cfg(feature = "std")]
+fn gc_env_flag_from<F>(get_env: &F, name: &str) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get_env(name)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
 impl Vm {
     pub fn new() -> Self {
-        Self {
+        let mut vm = Self {
             #[cfg(feature = "jit")]
             jit: VmJitState::Disabled,
             #[cfg(feature = "std")]
@@ -515,6 +415,29 @@ impl Vm {
             module: None,
             scheduler: Scheduler::new(),
             state: VmState::new(),
+        };
+        vm.apply_gc_environment();
+        vm
+    }
+
+    fn apply_gc_environment(&mut self) {
+        #[cfg(feature = "std")]
+        {
+            self.apply_gc_environment_from(|name| std::env::var(name).ok());
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn apply_gc_environment_from<F>(&mut self, get_env: F)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let debug_alias = gc_env_flag_from(&get_env, "VO_GC_DEBUG");
+        if debug_alias || gc_env_flag_from(&get_env, "VO_GC_STRESS") {
+            self.set_gc_stress_every_step(true);
+        }
+        if debug_alias || gc_env_flag_from(&get_env, "VO_GC_VERIFY") {
+            self.set_gc_verify_after_step(true);
         }
     }
 
@@ -3526,14 +3449,20 @@ impl Default for Vm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fiber::Fiber;
+    use crate::fiber::{
+        DeferArgLayout, DeferEntry, Fiber, PanicState, ReturnValues, SelectState, UnwindingMode,
+        UnwindingState,
+    };
     #[cfg(feature = "std")]
     use std::sync::atomic::AtomicBool;
     #[cfg(feature = "std")]
     use std::sync::Arc;
-    use vo_runtime::bytecode::{Constant, ExternDef, FunctionDef, InterfaceMeta, StructMeta};
+    use vo_runtime::bytecode::{
+        Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, StructMeta,
+    };
     use vo_runtime::ffi::{ExternCallContext, ExternResult};
     use vo_runtime::island::{EndpointResponseKind, IslandCommand};
+    use vo_runtime::objects::interface;
     use vo_runtime::{SlotType, ValueKind, ValueMeta};
 
     fn gc_test_module() -> Module {
@@ -3581,6 +3510,38 @@ mod tests {
             param_types: Vec::new(),
         });
         module
+    }
+
+    fn gc_test_module_with_global() -> Module {
+        let mut module = gc_test_module();
+        module.globals.push(GlobalDef {
+            name: "root_global".to_string(),
+            slots: 1,
+            value_kind: ValueKind::Struct as u8,
+            meta_id: 1,
+            slot_types: vec![SlotType::GcRef],
+        });
+        module
+    }
+
+    fn alloc_gc_test_object(vm: &mut Vm) -> GcRef {
+        vm.state.gc.alloc(ValueMeta::new(1, ValueKind::Struct), 0)
+    }
+
+    fn assert_gc_roots_survive(vm: &mut Vm, roots: &[GcRef]) {
+        run_gc_until_pause(vm);
+        for &root in roots {
+            assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn apply_gc_env_pairs(vm: &mut Vm, pairs: &[(&str, &str)]) {
+        vm.apply_gc_environment_from(|name| {
+            pairs
+                .iter()
+                .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+        });
     }
 
     fn malformed_single_instruction_module(
@@ -4480,6 +4441,42 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn gc_env_stress_flag_enables_step_at_every_boundary() {
+        let mut vm = Vm::new();
+        vm.set_gc_stress_every_step(false);
+        vm.set_gc_verify_after_step(false);
+        apply_gc_env_pairs(&mut vm, &[("VO_GC_STRESS", "1")]);
+
+        assert!(vm.gc_stress_every_step());
+        assert!(!vm.gc_verify_after_step());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn gc_env_debug_alias_enables_stress_and_verify() {
+        let mut vm = Vm::new();
+        vm.set_gc_stress_every_step(false);
+        vm.set_gc_verify_after_step(false);
+        apply_gc_env_pairs(&mut vm, &[("VO_GC_DEBUG", "1")]);
+
+        assert!(vm.gc_stress_every_step());
+        assert!(vm.gc_verify_after_step());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn gc_env_verify_flag_enables_precise_step_verification() {
+        let mut vm = Vm::new();
+        vm.set_gc_stress_every_step(false);
+        vm.set_gc_verify_after_step(false);
+        apply_gc_env_pairs(&mut vm, &[("VO_GC_VERIFY", "yes")]);
+
+        assert!(!vm.gc_stress_every_step());
+        assert!(vm.gc_verify_after_step());
+    }
+
     #[test]
     fn run_scheduled_returns_suspended_when_waiting_for_island_response() {
         let mut vm = Vm::new();
@@ -4790,7 +4787,155 @@ mod tests {
     }
 
     #[test]
-    fn dirty_fiber_root_scan_rescues_late_sweep_root() {
+    fn gc_root_matrix_scans_globals_fibers_stacks_and_call_frames() {
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module_with_global());
+        let global_root = alloc_gc_test_object(&mut vm);
+        vm.state.globals[0] = global_root as u64;
+
+        let first_fiber = vm.scheduler.spawn(Fiber::new(0));
+        let second_fiber = vm.scheduler.spawn(Fiber::new(0));
+        let first_stack_root = alloc_gc_test_object(&mut vm);
+        let second_stack_root = alloc_gc_test_object(&mut vm);
+        {
+            let fiber = vm.scheduler.get_fiber_mut(first_fiber);
+            fiber.push_frame(0, 1, 1, 0, 0);
+            fiber.stack[0] = first_stack_root as u64;
+        }
+        {
+            let fiber = vm.scheduler.get_fiber_mut(second_fiber);
+            fiber.push_frame(0, 1, 1, 0, 0);
+            fiber.stack[0] = second_stack_root as u64;
+        }
+
+        assert_gc_roots_survive(&mut vm, &[global_root, first_stack_root, second_stack_root]);
+    }
+
+    #[test]
+    fn gc_root_matrix_scans_returns_defers_panic_sentinel_endpoints_and_selects() {
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module_with_root_slots(1));
+        let fid = vm.scheduler.spawn(Fiber::new(0));
+        let heap_return_fid = vm.scheduler.spawn(Fiber::new(0));
+
+        let stack_root = alloc_gc_test_object(&mut vm);
+        let return_root = alloc_gc_test_object(&mut vm);
+        let heap_return_root = alloc_gc_test_object(&mut vm);
+        let direct_defer_arg_root = alloc_gc_test_object(&mut vm);
+        let pending_defer_arg_root = alloc_gc_test_object(&mut vm);
+        let panic_root = alloc_gc_test_object(&mut vm);
+        let sentinel_root = alloc_gc_test_object(&mut vm);
+        let endpoint_root = alloc_gc_test_object(&mut vm);
+        let select_root = alloc_gc_test_object(&mut vm);
+        let replay_root = alloc_gc_test_object(&mut vm);
+
+        let direct_args = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::Void), 1);
+        unsafe { vo_runtime::gc::Gc::write_slot(direct_args, 0, direct_defer_arg_root as u64) };
+        let pending_args = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::Void), 1);
+        unsafe { vo_runtime::gc::Gc::write_slot(pending_args, 0, pending_defer_arg_root as u64) };
+
+        {
+            let fiber = vm.scheduler.get_fiber_mut(fid);
+            fiber.push_frame(0, 1, 1, 0, 0);
+            fiber.stack[0] = stack_root as u64;
+            fiber.defer_stack.push(DeferEntry {
+                frame_depth: 1,
+                func_id: 0,
+                closure: core::ptr::null_mut(),
+                args: direct_args,
+                arg_layout: DeferArgLayout {
+                    slot_types: vec![SlotType::GcRef],
+                },
+                is_closure: false,
+                is_errdefer: false,
+                registered_at_generation: 0,
+            });
+            fiber.unwinding = Some(UnwindingState {
+                pending: vec![DeferEntry {
+                    frame_depth: 1,
+                    func_id: 0,
+                    closure: core::ptr::null_mut(),
+                    args: pending_args,
+                    arg_layout: DeferArgLayout {
+                        slot_types: vec![SlotType::GcRef],
+                    },
+                    is_closure: false,
+                    is_errdefer: false,
+                    registered_at_generation: 0,
+                }],
+                target_depth: 0,
+                mode: UnwindingMode::Return,
+                current_defer_generation: 0,
+                return_values: Some(ReturnValues::Stack {
+                    vals: vec![return_root as u64],
+                    slot_types: vec![SlotType::GcRef],
+                }),
+                caller_ret_reg: 0,
+                caller_ret_count: 1,
+                is_closure_replay: false,
+            });
+            fiber.panic_state = Some(PanicState::Recoverable(
+                vo_runtime::InterfaceSlot::from_ref(panic_root, 0, ValueKind::Struct),
+            ));
+            fiber
+                .closure_replay
+                .results
+                .push((vec![replay_root as u64], vec![SlotType::GcRef]));
+            fiber.select_state = Some(SelectState {
+                cases: Vec::new(),
+                has_default: false,
+                woken_index: None,
+                select_id: 7,
+                registered_queues: vec![select_root],
+            });
+        }
+
+        {
+            let fiber = vm.scheduler.get_fiber_mut(heap_return_fid);
+            fiber.push_frame(0, 1, 1, 0, 0);
+            fiber.unwinding = Some(UnwindingState {
+                pending: Vec::new(),
+                target_depth: 0,
+                mode: UnwindingMode::Return,
+                current_defer_generation: 0,
+                return_values: Some(ReturnValues::Heap {
+                    gcrefs: vec![heap_return_root as u64],
+                    slots_per_ref: vec![1],
+                }),
+                caller_ret_reg: 0,
+                caller_ret_count: 1,
+                is_closure_replay: false,
+            });
+        }
+
+        vm.state.sentinel_errors.insert(
+            "gc-root-matrix",
+            vec![(
+                interface::pack_slot0(0, 0, ValueKind::Struct),
+                sentinel_root as u64,
+            )],
+        );
+        vm.state.endpoint_registry.register_live(99, endpoint_root);
+
+        assert_gc_roots_survive(
+            &mut vm,
+            &[
+                stack_root,
+                return_root,
+                heap_return_root,
+                direct_defer_arg_root,
+                pending_defer_arg_root,
+                panic_root,
+                sentinel_root,
+                endpoint_root,
+                select_root,
+                replay_root,
+            ],
+        );
+    }
+
+    #[test]
+    fn gc_root_dirty_fiber_scan_rescues_late_sweep_root() {
         let mut vm = Vm::new();
         vm.finish_load(gc_test_module());
         let fid = vm.scheduler.spawn(Fiber::new(0));
@@ -4820,7 +4965,45 @@ mod tests {
     }
 
     #[test]
-    fn full_vm_root_scan_is_budgeted() {
+    #[should_panic(expected = "GC verification failed: root")]
+    fn gc_verify_rejects_dead_white_root_during_sweep_before_free() {
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module_with_global());
+        let meta = ValueMeta::new(1, ValueKind::Struct);
+        for _ in 0..4096 {
+            vm.state.gc.alloc(meta, 0);
+        }
+        let late_root = vm.state.gc.alloc(meta, 0);
+
+        vm.gc_step();
+        assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Atomic);
+        vm.gc_step();
+        assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Sweep);
+        assert!(!vm.state.gc_roots_dirty_all);
+        assert_eq!(vm.state.gc.canonicalize_ref(late_root), Some(late_root));
+        assert!(vm.state.gc.is_dead_white(late_root));
+
+        vm.state.globals[0] = late_root as u64;
+        vm.set_gc_verify_after_step(true);
+        vm.gc_step_after_fiber(None);
+    }
+
+    #[test]
+    fn gc_verify_accepts_current_white_root_after_cycle_finishes() {
+        let mut vm = Vm::new();
+        vm.finish_load(gc_test_module_with_global());
+        let root = alloc_gc_test_object(&mut vm);
+        vm.state.globals[0] = root as u64;
+        vm.set_gc_verify_after_step(true);
+
+        run_gc_until_pause(&mut vm);
+
+        assert_eq!(vm.state.gc.state(), vo_runtime::gc::GcState::Pause);
+        assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+    }
+
+    #[test]
+    fn gc_root_full_vm_scan_is_budgeted() {
         const ROOTS: u16 = 2048;
         let mut vm = Vm::new();
         vm.finish_load(gc_test_module_with_root_slots(ROOTS));
@@ -4854,7 +5037,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_start_cycle_root_scan_restarts_when_roots_mutate() {
+    fn gc_root_pending_start_cycle_scan_restarts_when_roots_mutate() {
         const ROOTS: u16 = 2048;
         let mut vm = Vm::new();
         vm.finish_load(gc_test_module_with_root_slots(ROOTS));
@@ -4890,7 +5073,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_atomic_root_scan_restarts_when_roots_mutate() {
+    fn gc_root_pending_atomic_scan_restarts_when_roots_mutate() {
         const ROOTS: u16 = 2048;
         let mut vm = Vm::new();
         vm.finish_load(gc_test_module_with_root_slots(ROOTS));
@@ -4958,7 +5141,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_sweep_step_skips_vm_root_scan_when_roots_unchanged() {
+    fn gc_root_stable_sweep_step_skips_scan_when_roots_unchanged() {
         let mut vm = Vm::new();
         vm.finish_load(gc_test_module());
         let fid = vm.scheduler.spawn(Fiber::new(0));
@@ -4993,7 +5176,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan() {
+    fn gc_root_duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan() {
         let mut vm = Vm::new();
         let fid = vm.scheduler.spawn(Fiber::new(0));
         vm.state.gc_roots_dirty_all = false;

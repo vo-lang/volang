@@ -162,7 +162,7 @@ mod tests {
     use vo_runtime::bytecode::Module;
 
     #[test]
-    fn jit_push_frame_capacity_failure_records_recoverable_trap() {
+    fn gc_jit_push_frame_capacity_failure_records_recoverable_trap() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-push-frame-contract-test".to_string());
         module.functions.push(function(1, 0));

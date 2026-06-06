@@ -64,8 +64,17 @@ fn handle_special_call_kind(
 ) -> JitBridgeTransition {
     match mode {
         JitBridgeMode::FullFunction => match call_kind {
-            JitContext::CALL_KIND_YIELD => JitBridgeTransition::TimesliceExpired,
-            JitContext::CALL_KIND_BLOCK => JitBridgeTransition::QueueBlock,
+            JitContext::CALL_KIND_YIELD | JitContext::CALL_KIND_BLOCK => {
+                let resume_pc = ctx.call_resume_pc();
+                if let Err(err) = materialize_jit_frames(fiber, module, resume_pc) {
+                    return JitBridgeTransition::FrameMaterializeError(err);
+                }
+                match call_kind {
+                    JitContext::CALL_KIND_YIELD => JitBridgeTransition::TimesliceExpired,
+                    JitContext::CALL_KIND_BLOCK => JitBridgeTransition::QueueBlock,
+                    _ => unreachable!(),
+                }
+            }
             _ => JitBridgeTransition::JitError(format!(
                 "JIT returned unknown special call kind {call_kind}"
             )),
@@ -77,6 +86,129 @@ fn handle_special_call_kind(
                 Err(err) => JitBridgeTransition::FrameMaterializeError(err),
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod tests {
+    use super::super::super::context::build_jit_context;
+    use super::super::super::test_support::function;
+    use super::*;
+    use crate::fiber::{Fiber, ResumePoint};
+    use crate::vm::JitConfig;
+
+    fn assert_nested_special_call_materializes(call_kind: u8) {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-special-call-materialize-test".to_string());
+        module.functions.push(function(2, 0));
+        module.functions.push(function(3, 1));
+        module.functions.push(function(4, 2));
+
+        let mut fiber = Fiber::new(1);
+        let entry_bp = fiber.push_frame(0, 2, 0, 0, 0);
+        let outer_bp = fiber.reserve_slots_at(entry_bp + 2, 3) - 3;
+        let inner_bp = fiber.reserve_slots_at(outer_bp + 3, 4) - 4;
+        fiber.resume_stack.push(ResumePoint {
+            func_id: 2,
+            resume_pc: 22,
+            bp: inner_bp,
+            caller_bp: outer_bp,
+            ret_reg: 5,
+            ret_slots: 1,
+        });
+        fiber.resume_stack.push(ResumePoint {
+            func_id: 1,
+            resume_pc: 11,
+            bp: outer_bp,
+            caller_bp: entry_bp,
+            ret_reg: 3,
+            ret_slots: 1,
+        });
+
+        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        ctx.ctx.call_kind = call_kind;
+        ctx.ctx.call_resume_pc = 33;
+
+        let transition = handle_call_transition(
+            JitBridgeMode::FullFunction,
+            &mut vm,
+            &mut fiber,
+            &module,
+            &ctx,
+        );
+
+        match call_kind {
+            JitContext::CALL_KIND_YIELD => {
+                assert!(matches!(transition, JitBridgeTransition::TimesliceExpired));
+            }
+            JitContext::CALL_KIND_BLOCK => {
+                assert!(matches!(transition, JitBridgeTransition::QueueBlock));
+            }
+            _ => unreachable!(),
+        }
+        assert!(fiber.resume_stack.is_empty());
+        assert_eq!(fiber.frames.len(), 3);
+        assert_eq!(fiber.frames[0].pc, 11);
+        assert_eq!(fiber.frames[1].func_id, 1);
+        assert_eq!(fiber.frames[1].pc, 22);
+        assert_eq!(fiber.frames[2].func_id, 2);
+        assert_eq!(fiber.frames[2].pc, 33);
+    }
+
+    fn assert_top_level_special_call_materializes(call_kind: u8) {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-special-call-top-level-materialize-test".to_string());
+        module.functions.push(function(5, 0));
+
+        let mut fiber = Fiber::new(1);
+        let bp = fiber.push_frame(0, 5, 0, 0, 0);
+        fiber.sp = bp;
+
+        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        ctx.ctx.call_kind = call_kind;
+        ctx.ctx.call_resume_pc = 44;
+
+        let transition = handle_call_transition(
+            JitBridgeMode::FullFunction,
+            &mut vm,
+            &mut fiber,
+            &module,
+            &ctx,
+        );
+
+        match call_kind {
+            JitContext::CALL_KIND_YIELD => {
+                assert!(matches!(transition, JitBridgeTransition::TimesliceExpired));
+            }
+            JitContext::CALL_KIND_BLOCK => {
+                assert!(matches!(transition, JitBridgeTransition::QueueBlock));
+            }
+            _ => unreachable!(),
+        }
+        assert!(fiber.resume_stack.is_empty());
+        assert_eq!(fiber.frames.len(), 1);
+        assert_eq!(fiber.frames[0].pc, 44);
+        assert_eq!(fiber.sp, bp + 5);
+    }
+
+    #[test]
+    fn gc_full_jit_special_yield_materializes_nested_resume_stack() {
+        assert_nested_special_call_materializes(JitContext::CALL_KIND_YIELD);
+    }
+
+    #[test]
+    fn gc_full_jit_special_block_materializes_nested_resume_stack() {
+        assert_nested_special_call_materializes(JitContext::CALL_KIND_BLOCK);
+    }
+
+    #[test]
+    fn gc_full_jit_special_yield_materializes_top_level_frame() {
+        assert_top_level_special_call_materializes(JitContext::CALL_KIND_YIELD);
+    }
+
+    #[test]
+    fn gc_full_jit_special_block_materializes_top_level_frame() {
+        assert_top_level_special_call_materializes(JitContext::CALL_KIND_BLOCK);
     }
 }
 

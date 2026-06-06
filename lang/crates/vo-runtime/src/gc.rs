@@ -391,10 +391,9 @@ impl Gc {
         self.current_white ^ WHITE_BITS
     }
 
-    /// Check if object is dead (has the "other" white color).
+    /// Check if object is dead-white for the current cycle.
     #[inline]
-    #[allow(dead_code)]
-    fn is_dead(&self, obj: GcRef) -> bool {
+    pub fn is_dead_white(&self, obj: GcRef) -> bool {
         let header = Self::header(obj);
         (header.marked & WHITE_BITS) == self.other_white()
     }
@@ -1439,6 +1438,13 @@ impl Gc {
         self.all_objects.iter().filter(|obj| !obj.is_null()).count()
     }
 
+    pub fn objects(&self) -> impl Iterator<Item = GcRef> + '_ {
+        self.all_objects
+            .iter()
+            .copied()
+            .filter(|obj| !obj.is_null())
+    }
+
     pub fn debt(&self) -> i64 {
         self.debt
     }
@@ -2284,6 +2290,15 @@ mod tests {
 /// and heap object scanning.
 #[inline]
 pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::SlotType]) {
+    trace_slots_by_types(slots, slot_types, |child| gc.mark_gray(child));
+}
+
+/// Visit all GC references in a slot slice using precise SlotType metadata.
+#[inline]
+pub fn trace_slots_by_types<F>(slots: &[u64], slot_types: &[crate::SlotType], mut visit: F)
+where
+    F: FnMut(GcRef),
+{
     use crate::objects::interface;
     use crate::SlotType;
 
@@ -2300,7 +2315,7 @@ pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::Slot
         match slot_types[i] {
             SlotType::GcRef => {
                 if slots[i] != 0 {
-                    gc.mark_gray(slots[i] as GcRef);
+                    visit(slots[i] as GcRef);
                 }
             }
             SlotType::Interface0 => {
@@ -2314,7 +2329,7 @@ pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::Slot
                 );
                 // Interface header slot - check if data slot contains GcRef
                 if interface::data_is_gc_ref(slots[i]) && slots[i + 1] != 0 {
-                    gc.mark_gray(slots[i + 1] as GcRef);
+                    visit(slots[i + 1] as GcRef);
                 }
                 i += 1; // Skip data slot (Interface1)
             }

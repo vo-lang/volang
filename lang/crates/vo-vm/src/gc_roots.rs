@@ -1,53 +1,18 @@
 //! GC root scanning for VM.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 use vo_runtime::ffi::SentinelErrorCache;
 use vo_runtime::gc::{
-    scan_slots_by_types, Gc, GcRef, GcRootScanChunk, GcRootScanKind, GcRootState, GcState,
+    trace_slots_by_types, Gc, GcRef, GcRootScanChunk, GcRootScanKind, GcRootState, GcState,
 };
 use vo_runtime::slot::SLOT_BYTES;
 
-use crate::bytecode::{FunctionDef, GlobalDef};
+use crate::bytecode::{FunctionDef, GlobalDef, Module};
 use crate::fiber::{DeferEntry, Fiber, PanicState};
 use crate::scheduler::FiberId;
 use crate::vm::{EndpointRegistry, Vm, VmGcStepStats, VmRootScanMode, VmRootScanSnapshot};
-
-/// Scan a slice of raw GcRefs.
-#[inline]
-fn scan_gcrefs(gc: &mut Gc, gcrefs: &[u64]) {
-    for &raw in gcrefs {
-        let gcref = raw as GcRef;
-        if !gcref.is_null() {
-            gc.mark_gray(gcref);
-        }
-    }
-}
-
-/// Scan DeferEntry for GC refs.
-///
-/// Closure and args GcRefs are marked directly. Args content is scanned
-/// precisely using the argument layout captured at defer registration time.
-/// Saved defer args are ValueKind::Void objects, so scan_object skips them.
-#[inline]
-fn scan_defer_entry(gc: &mut Gc, entry: &DeferEntry) {
-    if !entry.closure.is_null() {
-        gc.mark_gray(entry.closure);
-    }
-    if !entry.args.is_null() {
-        gc.mark_gray(entry.args);
-        // Scan args content using the layout captured when the defer was registered.
-        // Closure callees may have hidden slot0/receiver prefixes, so callee slot_types
-        // are not a safe description of the saved user-argument buffer.
-        let arg_slots = entry.arg_layout.arg_slots() as usize;
-        if arg_slots > 0 {
-            let args_data =
-                unsafe { core::slice::from_raw_parts(entry.args as *const u64, arg_slots) };
-            scan_slots_by_types(gc, args_data, &entry.arg_layout.slot_types);
-        }
-    }
-}
 
 #[inline]
 fn collect_gcref(roots: &mut Vec<GcRef>, gcref: GcRef) {
@@ -69,25 +34,7 @@ fn collect_slots_by_types(
     slots: &[u64],
     slot_types: &[vo_runtime::SlotType],
 ) {
-    use vo_runtime::objects::interface;
-    use vo_runtime::SlotType;
-
-    let mut i = 0;
-    while i < slot_types.len() && i < slots.len() {
-        match slot_types[i] {
-            SlotType::GcRef => {
-                collect_gcref(roots, slots[i] as GcRef);
-            }
-            SlotType::Interface0 => {
-                if i + 1 < slots.len() && interface::data_is_gc_ref(slots[i]) {
-                    collect_gcref(roots, slots[i + 1] as GcRef);
-                }
-                i += 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
+    trace_slots_by_types(slots, slot_types, |child| collect_gcref(roots, child));
 }
 
 #[inline]
@@ -394,19 +341,16 @@ impl Vm {
         self.state.gc.stress_every_step()
     }
 
-    pub fn scan_roots(&mut self) {
-        if self.module.is_none() {
-            return;
-        }
+    /// Enable or disable precise GC verification after VM GC steps.
+    #[inline]
+    pub fn set_gc_verify_after_step(&mut self, enabled: bool) {
+        self.state.gc_verify_after_step = enabled;
+    }
 
-        let module = self.module.as_ref().unwrap();
-        scan_globals(&mut self.state.gc, &self.state.globals, &module.globals);
-        scan_fibers(
-            &mut self.state.gc,
-            &self.scheduler.fibers,
-            &module.functions,
-        );
-        scan_sentinel_errors(&mut self.state.gc, &self.state.sentinel_errors);
+    /// Returns whether precise GC verification after VM GC steps is enabled.
+    #[inline]
+    pub fn gc_verify_after_step(&self) -> bool {
+        self.state.gc_verify_after_step
     }
 
     /// Mark all VM roots dirty. Use for host/I/O/island paths that can mutate
@@ -591,151 +535,124 @@ impl Vm {
                 }
             }
         }
-    }
-}
 
-/// Scan sentinel error cache — interface pairs (slot0, slot1) may contain GcRefs.
-fn scan_sentinel_errors(gc: &mut Gc, cache: &SentinelErrorCache) {
-    for errors in cache.iter_values() {
-        for &(slot0, slot1) in errors {
-            if vo_runtime::objects::interface::data_is_gc_ref(slot0) && slot1 != 0 {
-                gc.mark_gray(slot1 as GcRef);
+        if self.state.gc_verify_after_step {
+            if let Err(err) = self.verify_precise_gc_after_step(module_ref) {
+                panic!("GC verification failed: {err}");
             }
         }
     }
-}
 
-fn scan_globals(gc: &mut Gc, globals: &[u64], global_defs: &[GlobalDef]) {
-    let mut global_idx = 0;
-    for def in global_defs {
-        let global_slice = &globals[global_idx..global_idx + def.slots as usize];
-        scan_slots_by_types(gc, global_slice, &def.slot_types);
-        global_idx += def.slots as usize;
-    }
-}
+    fn verify_precise_gc_after_step(&self, module: &Module) -> Result<(), String> {
+        let snapshot = build_vm_root_scan_snapshot(
+            &self.state.gc,
+            GcRootScanKind::Atomic,
+            self.state.gc_dirty_epoch,
+            true,
+            &[],
+            &self.state.globals,
+            &module.globals,
+            &self.scheduler.fibers,
+            &module.functions,
+            &self.state.sentinel_errors,
+            &self.state.endpoint_registry,
+        );
 
-fn scan_fibers(gc: &mut Gc, fibers: &[Box<Fiber>], functions: &[FunctionDef]) {
-    for fiber in fibers {
-        scan_fiber(gc, fiber, functions);
-    }
-}
+        for root in snapshot.roots {
+            if root.is_null() {
+                continue;
+            }
+            let Some(canonical_root) = self.state.gc.canonicalize_ref(root) else {
+                return Err(format!(
+                    "root {:?} does not reference a live GC object",
+                    root
+                ));
+            };
+            let dangling_white = match self.state.gc.state() {
+                GcState::Pause => false,
+                GcState::Sweep => self.state.gc.is_dead_white(canonical_root),
+                _ => self.state.gc.is_white(canonical_root),
+            };
+            if dangling_white {
+                return Err(format!(
+                    "root {:?} references unreachable white object {:?} during {:?}",
+                    root,
+                    canonical_root,
+                    self.state.gc.state()
+                ));
+            }
+        }
 
-fn scan_fiber(gc: &mut Gc, fiber: &Fiber, functions: &[FunctionDef]) {
-    // Dead fibers are waiting for slot reuse — their stack may contain stale GcRefs
-    // that would incorrectly keep objects alive. Skip them.
-    if fiber.state.is_dead() {
-        return;
-    }
+        let func_closure_scan_layout =
+            |func_id: u32| -> vo_runtime::gc_types::ClosureScanLayout<'_> {
+                let func = module.functions.get(func_id as usize).unwrap_or_else(|| {
+                    panic!(
+                        "closure GC metadata missing: func_id={} functions_len={}",
+                        func_id,
+                        module.functions.len()
+                    )
+                });
+                let runtime_capture_slot_types = if func.capture_slot_types.is_empty()
+                    && func.recv_slots == 1
+                {
+                    func.slot_types.get(..1).unwrap_or_else(|| {
+                        panic!(
+                            "closure receiver slot metadata missing: func_id={} name={} slot range 0..1 actual slot_types={}",
+                            func_id,
+                            func.name,
+                            func.slot_types.len()
+                        )
+                    })
+                } else {
+                    &[]
+                };
+                vo_runtime::gc_types::ClosureScanLayout::new(
+                    func.capture_slot_types.as_slice(),
+                    runtime_capture_slot_types,
+                )
+            };
 
-    // Scan stack frames (VM frames)
-    // Note: resume_stack (JIT shadow frames) doesn't need scanning because
-    // GC cannot trigger during pure JIT execution (no safepoints).
-    // When JIT returns Call/WaitIo, materialize_jit_frames converts
-    // resume_stack to fiber.frames before VM takes over.
-    for frame in &fiber.frames {
-        let func = &functions[frame.func_id as usize];
-        let scan_slots = frame.scan_slots as usize;
-        let stack_slice = &fiber.stack[frame.bp..frame.bp + scan_slots];
-        let slot_types = &func.slot_types[..func.slot_types.len().min(scan_slots)];
-        #[cfg(debug_assertions)]
-        {
-            for (slot_idx, slot_type) in slot_types.iter().enumerate() {
-                match *slot_type {
-                    vo_runtime::SlotType::GcRef => {
-                        let raw = stack_slice[slot_idx];
-                        if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
-                            panic!(
-                                "scan_fibers: invalid GcRef in fiber={} func={} name={} frame_bp={} frame_pc={} frame_scan_slots={} scan_slot={} raw=0x{:016x}",
-                                fiber.id,
-                                frame.func_id,
-                                func.name,
-                                frame.bp,
-                                frame.pc,
-                                frame.scan_slots,
-                                slot_idx,
-                                raw,
-                            );
-                        }
+        for parent in self.state.gc.objects() {
+            if !self.state.gc.is_black(parent) {
+                continue;
+            }
+
+            let mut violation: Option<String> = None;
+            vo_runtime::gc_types::trace_object_children(
+                parent,
+                &module.struct_metas,
+                &func_closure_scan_layout,
+                |child| {
+                    if violation.is_some() || child.is_null() {
+                        return;
                     }
-                    vo_runtime::SlotType::Interface0 => {
-                        if slot_idx + 1 < stack_slice.len()
-                            && vo_runtime::objects::interface::data_is_gc_ref(stack_slice[slot_idx])
-                        {
-                            let raw = stack_slice[slot_idx + 1];
-                            if raw != 0 && gc.canonicalize_ref(raw as GcRef).is_none() {
-                                panic!(
-                                    "scan_fibers: invalid interface GcRef in fiber={} func={} name={} frame_bp={} frame_pc={} frame_scan_slots={} scan_slot={} slot0=0x{:016x} raw=0x{:016x}",
-                                    fiber.id,
-                                    frame.func_id,
-                                    func.name,
-                                    frame.bp,
-                                    frame.pc,
-                                    frame.scan_slots,
-                                    slot_idx,
-                                    stack_slice[slot_idx],
-                                    raw,
-                                );
-                            }
-                        }
+                    let Some(child) = self.state.gc.canonicalize_ref(child) else {
+                        violation = Some(format!(
+                            "black object {:?} references non-live child {:?}",
+                            parent, child
+                        ));
+                        return;
+                    };
+                    let dangling_white = if self.state.gc.state() == GcState::Sweep {
+                        self.state.gc.is_dead_white(child)
+                    } else {
+                        self.state.gc.is_white(child)
+                    };
+                    if dangling_white {
+                        violation = Some(format!(
+                            "black object {:?} references unreachable white child {:?} during {:?}",
+                            parent,
+                            child,
+                            self.state.gc.state()
+                        ));
                     }
-                    _ => {}
-                }
+                },
+            );
+            if let Some(err) = violation {
+                return Err(err);
             }
         }
-        scan_slots_by_types(gc, stack_slice, slot_types);
-    }
 
-    // Scan defer_stack
-    for entry in &fiber.defer_stack {
-        scan_defer_entry(gc, entry);
-    }
-
-    // Scan unwinding state (return/panic unwinding with pending defers)
-    if let Some(state) = &fiber.unwinding {
-        for entry in &state.pending {
-            scan_defer_entry(gc, entry);
-        }
-        // Scan return values
-        if let Some(ref rv) = state.return_values {
-            match rv {
-                crate::fiber::ReturnValues::Stack { vals, slot_types } => {
-                    scan_slots_by_types(gc, vals, slot_types);
-                }
-                crate::fiber::ReturnValues::Heap { gcrefs, .. } => {
-                    scan_gcrefs(gc, gcrefs);
-                }
-            }
-        }
-    }
-
-    // Scan panic value (only Recoverable has interface{})
-    if let Some(PanicState::Recoverable(val)) = fiber.panic_state {
-        if val.is_ref_type() && val.slot1 != 0 {
-            gc.mark_gray(val.as_ref());
-        }
-    }
-
-    // Scan closure replay results using slot_types for type-safe scanning.
-    // Each result carries its own slot_types extracted from the returning function.
-    for (vals, slot_types) in &fiber.closure_replay.results {
-        scan_slots_by_types(gc, vals, slot_types);
-    }
-
-    // Scan select state — registered_channels holds channel GcRefs while blocked in select.
-    if let Some(ref ss) = fiber.select_state {
-        for &ch in &ss.registered_queues {
-            if !ch.is_null() {
-                gc.mark_gray(ch);
-            }
-        }
-    }
-
-    // Scan JIT panic message (InterfaceSlot may contain GcRef).
-    #[cfg(feature = "jit")]
-    if fiber.jit_panic_flag {
-        let val = fiber.jit_panic_msg;
-        if val.is_ref_type() && val.slot1 != 0 {
-            gc.mark_gray(val.as_ref());
-        }
+        Ok(())
     }
 }

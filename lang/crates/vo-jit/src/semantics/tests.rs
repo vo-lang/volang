@@ -315,7 +315,7 @@ fn metadata_contract_uses_semantic_rows_as_requirement_source() {
 }
 
 #[test]
-fn typed_slot_lowerings_declare_layout_verifier_requirements() {
+fn gc_layout_typed_slot_lowerings_declare_layout_verifier_requirements() {
     for opcode in [
         Opcode::LoadInt,
         Opcode::LoadConst,
@@ -343,7 +343,7 @@ fn typed_slot_lowerings_declare_layout_verifier_requirements() {
 }
 
 #[test]
-fn control_flow_value_slots_declare_layout_and_fail_fast_policy() {
+fn gc_layout_control_flow_value_slots_declare_layout_and_fail_fast_policy() {
     for opcode in [Opcode::JumpIf, Opcode::JumpIfNot, Opcode::ForLoop] {
         let row = opcode_semantics(opcode);
         assert!(

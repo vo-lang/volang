@@ -40,14 +40,14 @@ default_timeout_sec = 60
 name = "gc-vm"
 kind = "native"
 backend = "vm"
-env = { VOWORK = "off", VO_GC_DEBUG = "1" }
+env = { VOWORK = "off", VO_GC_STRESS = "1", VO_GC_VERIFY = "1" }
 default_timeout_sec = 60
 
 [[target]]
 name = "gc-jit"
 kind = "native"
 backend = "jit"
-env = { VOWORK = "off", VO_GC_DEBUG = "1", VO_JIT_CALL_THRESHOLD = "1" }
+env = { VOWORK = "off", VO_GC_STRESS = "1", VO_GC_VERIFY = "1", VO_JIT_CALL_THRESHOLD = "1" }
 default_timeout_sec = 90
 
 [[target]]

@@ -321,6 +321,7 @@ pub struct VmState {
     pub gc_dirty_epoch: u64,
     pub gc_root_scan: Option<VmRootScanSnapshot>,
     pub last_gc_step_stats: VmGcStepStats,
+    pub gc_verify_after_step: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +388,7 @@ impl VmState {
             gc_dirty_epoch: 0,
             gc_root_scan: None,
             last_gc_step_stats: VmGcStepStats::default(),
+            gc_verify_after_step: false,
         }
     }
 

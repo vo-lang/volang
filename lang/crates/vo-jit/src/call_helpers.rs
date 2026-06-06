@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn call_plan_routes_full_function_call_shapes() {
+    fn gc_materialize_call_plan_routes_full_function_call_shapes() {
         let self_plan = CallPlan::new(7, 2, &func(8, false), None);
         assert_eq!(
             self_plan.route_for_full_function(7),

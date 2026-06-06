@@ -631,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_contract_protects_key_runtime_boundaries() {
+    fn gc_effect_contract_protects_key_runtime_boundaries() {
         let alloc = crate::contract::opcode_contract(Opcode::PtrNew);
         assert!(alloc.may_alloc && alloc.may_gc);
 
@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn array_slice_multi_slot_barriers_use_typed_metadata_helper() {
+    fn gc_array_slice_multi_slot_barriers_use_typed_metadata_helper() {
         let lowering = include_str!("translate/collections/array.rs");
         let runtime = include_str!("../../vo-runtime/src/jit_api.rs");
         assert!(

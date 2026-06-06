@@ -316,7 +316,7 @@ mod tests {
     use crate::fiber::ResumePoint;
 
     #[test]
-    fn materialized_frame_invariants_are_not_debug_only() {
+    fn gc_materialized_frame_invariants_are_not_debug_only() {
         let src = include_str!("materialize.rs");
         assert!(
             !src.contains(
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_jit_frames_preserves_nested_frame_invariants() {
+    fn gc_materialize_jit_frames_preserves_nested_frame_invariants() {
         let mut module = Module::new("jit-frame-test".to_string());
         module.functions.push(function(2, 0));
         module.functions.push(function(3, 1));
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_jit_frames_without_shadow_frames_restores_entry_sp() {
+    fn gc_materialize_jit_frames_without_shadow_frames_restores_entry_sp() {
         let mut module = Module::new("jit-entry-frame-test".to_string());
         module.functions.push(function(9, 3));
 
@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn materialized_invariants_allow_borrowed_parent_above_current_sp() {
+    fn gc_materialized_invariants_allow_borrowed_parent_above_current_sp() {
         let mut module = Module::new("jit-borrowed-parent-frame-test".to_string());
         module.functions.push(function(10, 4));
         module.functions.push(function(2, 1));

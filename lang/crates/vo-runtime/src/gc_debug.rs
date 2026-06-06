@@ -202,8 +202,10 @@ pub fn on_ptr_write(parent: GcRef, offset: usize, old_val: u64, new_val: u64) {
     });
 }
 
-/// Verify tri-color invariant after mark phase
-/// Black objects should not reference white objects
+/// Verify debugger-tracked object liveness after a GC step.
+///
+/// Precise tri-color edge checks require SlotType metadata and live in the VM
+/// verifier. This hook intentionally avoids conservative word scanning.
 #[inline]
 pub fn verify_tri_color(gc: &Gc) {
     DEBUGGER.with(|d| {
@@ -213,33 +215,11 @@ pub fn verify_tri_color(gc: &Gc) {
         }
         dbg.stats.invariant_checks += 1;
 
-        // Collect violations first to avoid borrow conflict
-        let mut violations = Vec::new();
-
-        // For each live object that is black, check its children
-        for &obj in &dbg.live_objects {
-            if gc.is_black(obj) {
-                let header = Gc::header(obj);
-                let slots = header.slots as usize;
-
-                for i in 0..slots {
-                    let child = unsafe { Gc::read_slot(obj, i) };
-                    if child != 0 {
-                        let child_ref = child as GcRef;
-                        if dbg.live_objects.contains(&child_ref) && gc.is_white(child_ref) {
-                            violations.push(format!(
-                                "black {:?} -> white {:?} at slot {}",
-                                obj, child_ref, i
-                            ));
-                        }
-                    }
-                }
+        let tracked: Vec<_> = dbg.live_objects.iter().copied().collect();
+        for obj in tracked {
+            if gc.canonicalize_ref(obj).is_none() {
+                dbg.report_violation("liveness", &format!("tracked freed object {:?}", obj));
             }
-        }
-
-        // Report violations
-        for v in violations {
-            dbg.report_violation("tri-color", &v);
         }
     });
 }

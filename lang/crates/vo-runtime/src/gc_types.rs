@@ -4,7 +4,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 
-use crate::gc::{scan_slots_by_types, Gc, GcRef};
+use crate::gc::{trace_slots_by_types, Gc, GcRef};
 use crate::objects::{array, closure, interface, map, queue, queue_state, slice};
 use crate::slot::{byte_offset_for_slots, slot_to_ptr, Slot, SLOT_BYTES};
 use vo_common_core::bytecode::StructMeta;
@@ -240,6 +240,21 @@ pub fn scan_object<'a, F>(
 ) where
     F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
 {
+    trace_object_children(obj, struct_metas, func_closure_scan_layout, |child| {
+        gc.mark_gray(child)
+    });
+}
+
+/// Visit a GC object's children through the same precise metadata rules used by collection.
+pub fn trace_object_children<'a, F, V>(
+    obj: GcRef,
+    struct_metas: &[StructMeta],
+    func_closure_scan_layout: &F,
+    mut visit: V,
+) where
+    F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
+    V: FnMut(GcRef),
+{
     let gc_header = Gc::header(obj);
 
     // Large arrays use GcHeader.slots == 0 and store the real size in ArrayHeader.
@@ -251,28 +266,28 @@ pub fn scan_object<'a, F>(
                 "scan_object: Array object {:p} has invalid slots={} (expected 0 for large array or >= HEADER_SLOTS={}) — codegen bug (PtrNew box should use Struct)",
                 obj, gc_header.slots, array::HEADER_SLOTS
             );
-            scan_array(gc, obj, struct_metas);
+            trace_array_children(obj, struct_metas, &mut visit);
         }
         ValueKind::String => {
             let arr = slice::array_ref(obj);
             if !arr.is_null() {
-                gc.mark_gray(arr);
+                visit(arr);
             }
         }
 
         ValueKind::Slice => {
             let arr = slice::array_ref(obj);
             if !arr.is_null() {
-                gc.mark_gray(arr);
+                visit(arr);
             }
         }
 
         ValueKind::Struct | ValueKind::Pointer => {
-            scan_struct(gc, obj, gc_header.meta_id() as usize, struct_metas);
+            trace_struct_children(obj, gc_header.meta_id() as usize, struct_metas, &mut visit);
         }
 
         ValueKind::Closure => {
-            scan_closure(gc, obj, func_closure_scan_layout);
+            trace_closure_children(obj, func_closure_scan_layout, &mut visit);
         }
 
         ValueKind::Map => {
@@ -286,7 +301,7 @@ pub fn scan_object<'a, F>(
                 gc_header.slots,
                 map::DATA_SLOTS
             );
-            scan_map(gc, obj, struct_metas);
+            trace_map_children(obj, struct_metas, &mut visit);
         }
 
         kind if kind.is_queue() => {
@@ -297,7 +312,7 @@ pub fn scan_object<'a, F>(
                 gc_header.slots,
                 queue_state::DATA_SLOTS
             );
-            scan_queue(gc, obj, struct_metas);
+            trace_queue_children(obj, struct_metas, &mut visit);
         }
 
         // Remote channel proxy: state lives on home island, not locally.
@@ -315,9 +330,10 @@ pub fn scan_object<'a, F>(
 /// For regular closures, all captures are GcRef (pointers to heap-boxed escaped vars).
 /// For method value closures, captures may include interface data (itab + data).
 /// Runtime-created direct method closures capture receiver slot1 for a method function.
-fn scan_closure<'a, F>(gc: &mut Gc, obj: GcRef, func_capture_slot_types: &F)
+fn trace_closure_children<'a, F, V>(obj: GcRef, func_capture_slot_types: &F, visit: &mut V)
 where
     F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
+    V: FnMut(GcRef),
 {
     let func_id = closure::func_id(obj);
     let cap_count = closure::capture_count(obj);
@@ -332,14 +348,14 @@ where
     let layout = func_capture_slot_types(func_id);
     let capture_types = layout.capture_slot_types;
     if !capture_types.is_empty() {
-        scan_slots_by_types(gc, capture_slots, capture_types);
+        trace_slots_by_types(capture_slots, capture_types, visit);
         return;
     }
 
     let runtime_capture_types = layout.runtime_capture_slot_types;
     if !runtime_capture_types.is_empty() {
         if runtime_capture_types.len() == cap_count {
-            scan_slots_by_types(gc, capture_slots, runtime_capture_types);
+            trace_slots_by_types(capture_slots, runtime_capture_types, visit);
             return;
         }
         panic!(
@@ -356,7 +372,10 @@ where
     );
 }
 
-fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
+fn trace_array_children<V>(obj: GcRef, struct_metas: &[StructMeta], visit: &mut V)
+where
+    V: FnMut(GcRef),
+{
     let elem_meta = array::elem_meta(obj);
     let elem_kind = elem_meta.value_kind();
 
@@ -379,7 +398,7 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
             .unwrap_or_else(|| panic!("scan_array: missing StructMeta id {meta_id}"))
             .slot_types;
         for idx in 0..len {
-            scan_array_struct_elem(gc, obj, idx, elem_bytes, slot_types);
+            trace_array_struct_elem(obj, idx, elem_bytes, slot_types, visit);
         }
         return;
     }
@@ -398,7 +417,7 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
                 let data_slot =
                     unsafe { *((obj as *const u8).add(elem_off + SLOT_BYTES) as *const Slot) };
                 if data_slot != 0 {
-                    gc.mark_gray(slot_to_ptr(data_slot));
+                    visit(slot_to_ptr(data_slot));
                 }
             }
         }
@@ -411,18 +430,20 @@ fn scan_array(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
         let ptr = unsafe { (obj as *const u8).add(base_off + idx * elem_bytes) as *const Slot };
         let child = unsafe { *ptr };
         if child != 0 {
-            gc.mark_gray(slot_to_ptr(child));
+            visit(slot_to_ptr(child));
         }
     }
 }
 
-fn scan_array_struct_elem(
-    gc: &mut Gc,
+fn trace_array_struct_elem<V>(
     obj: GcRef,
     idx: usize,
     elem_bytes: usize,
     slot_types: &[SlotType],
-) {
+    visit: &mut V,
+) where
+    V: FnMut(GcRef),
+{
     let base_off = byte_offset_for_slots(array::HEADER_SLOTS) + idx * elem_bytes;
     let mut i = 0;
     while i < slot_types.len() {
@@ -431,7 +452,7 @@ fn scan_array_struct_elem(
             let ptr = unsafe { (obj as *const u8).add(base_off + i * SLOT_BYTES) as *const Slot };
             let child = unsafe { *ptr };
             if child != 0 {
-                gc.mark_gray(slot_to_ptr(child));
+                visit(slot_to_ptr(child));
             }
         } else if st == SlotType::Interface0 {
             let header_ptr =
@@ -443,7 +464,7 @@ fn scan_array_struct_elem(
                 };
                 let child = unsafe { *data_ptr };
                 if child != 0 {
-                    gc.mark_gray(slot_to_ptr(child));
+                    visit(slot_to_ptr(child));
                 }
             }
             i += 1;
@@ -452,7 +473,10 @@ fn scan_array_struct_elem(
     }
 }
 
-fn scan_queue(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
+fn trace_queue_children<V>(obj: GcRef, struct_metas: &[StructMeta], visit: &mut V)
+where
+    V: FnMut(GcRef),
+{
     // REMOTE channels have no local state — elements live on the home island
     if queue::is_remote(obj) {
         return;
@@ -471,10 +495,10 @@ fn scan_queue(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
 
     let state = queue::local_state(obj);
     for elem in state.iter_buffer() {
-        scan_elem(gc, elem, &elem_scan);
+        trace_elem(elem, &elem_scan, visit);
     }
     for elem in state.iter_waiting_values() {
-        scan_elem(gc, elem, &elem_scan);
+        trace_elem(elem, &elem_scan, visit);
     }
 }
 
@@ -514,28 +538,34 @@ fn resolve_elem_scan<'a>(
     }
 }
 
-fn scan_elem(gc: &mut Gc, slots: &[u64], scan: &ElemScan) {
+fn trace_elem<V>(slots: &[u64], scan: &ElemScan, visit: &mut V)
+where
+    V: FnMut(GcRef),
+{
     match scan {
         ElemScan::NoRefs => {}
         ElemScan::GcRefs => {
             for &slot in slots {
                 if slot != 0 {
-                    gc.mark_gray(slot as GcRef);
+                    visit(slot as GcRef);
                 }
             }
         }
         ElemScan::Interface => {
             if slots.len() >= 2 && interface::data_is_gc_ref(slots[0]) && slots[1] != 0 {
-                gc.mark_gray(slots[1] as GcRef);
+                visit(slots[1] as GcRef);
             }
         }
         ElemScan::Typed(types) => {
-            scan_slots_by_types(gc, slots, types);
+            trace_slots_by_types(slots, types, visit);
         }
     }
 }
 
-fn scan_map(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
+fn trace_map_children<V>(obj: GcRef, struct_metas: &[StructMeta], visit: &mut V)
+where
+    V: FnMut(GcRef),
+{
     let key_meta = map::key_meta(obj);
     let val_meta = map::val_meta(obj);
     let key_kind = key_meta.value_kind();
@@ -564,12 +594,15 @@ fn scan_map(gc: &mut Gc, obj: GcRef, struct_metas: &[StructMeta]) {
 
     let mut iter = map::iter_init(obj);
     while let Some((k, v)) = map::iter_next(&mut iter) {
-        scan_elem(gc, k, &key_scan);
-        scan_elem(gc, v, &val_scan);
+        trace_elem(k, &key_scan, visit);
+        trace_elem(v, &val_scan, visit);
     }
 }
 
-fn scan_struct(gc: &mut Gc, obj: GcRef, meta_id: usize, struct_metas: &[StructMeta]) {
+fn trace_struct_children<V>(obj: GcRef, meta_id: usize, struct_metas: &[StructMeta], visit: &mut V)
+where
+    V: FnMut(GcRef),
+{
     let meta = struct_metas
         .get(meta_id)
         .unwrap_or_else(|| panic!("scan_struct: missing StructMeta id {meta_id}"));
@@ -579,14 +612,14 @@ fn scan_struct(gc: &mut Gc, obj: GcRef, meta_id: usize, struct_metas: &[StructMe
         if st == SlotType::GcRef {
             let child = unsafe { Gc::read_slot(obj, i) };
             if child != 0 {
-                gc.mark_gray(child as GcRef);
+                visit(child as GcRef);
             }
         } else if st == SlotType::Interface0 {
             let header_slot = unsafe { Gc::read_slot(obj, i) };
             if interface::data_is_gc_ref(header_slot) {
                 let child = unsafe { Gc::read_slot(obj, i + 1) };
                 if child != 0 {
-                    gc.mark_gray(child as GcRef);
+                    visit(child as GcRef);
                 }
             }
             i += 1;
@@ -658,7 +691,7 @@ mod tests {
             "invalid GC object layouts must fail fast instead of skipping scans"
         );
 
-        let scan_closure = section(src, "fn scan_closure", "fn scan_array");
+        let scan_closure = section(src, "fn trace_closure_children", "fn trace_array_children");
         assert!(
             !scan_closure.contains("debug_assert"),
             "closure capture layout validation must run in release builds"
@@ -668,19 +701,19 @@ mod tests {
             "closure capture layout drift must not use legacy all-GcRef fallback"
         );
 
-        let scan_array = section(src, "fn scan_array", "fn scan_array_struct_elem");
+        let scan_array = section(src, "fn trace_array_children", "fn trace_array_struct_elem");
         assert!(
             !scan_array.contains("No struct_meta available"),
             "array struct-element metadata drift must fail fast instead of skipping scans"
         );
 
-        let elem_scan = section(src, "fn resolve_elem_scan", "fn scan_elem");
+        let elem_scan = section(src, "fn resolve_elem_scan", "fn trace_elem");
         assert!(
             !elem_scan.contains("ElemScan::Skip"),
             "container element scan resolution must not use missing-metadata skip"
         );
 
-        let scan_struct = section(src, "fn scan_struct", "/// Finalize");
+        let scan_struct = section(src, "fn trace_struct_children", "/// Finalize");
         assert!(
             !scan_struct.contains("return;"),
             "struct metadata drift must fail fast instead of returning without scanning"

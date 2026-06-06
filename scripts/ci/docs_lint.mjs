@@ -53,7 +53,8 @@ async function lintCurrentDocFacts() {
   requireEnv(targetEnvs, 'jit', 'VO_JIT_CALL_THRESHOLD', '1');
   requireEnv(targetEnvs, 'osr', 'VO_JIT_CALL_THRESHOLD', '1000');
   requireEnv(targetEnvs, 'osr', 'VO_JIT_LOOP_THRESHOLD', '1');
-  requireEnv(targetEnvs, 'gc-jit', 'VO_GC_DEBUG', '1');
+  requireEnv(targetEnvs, 'gc-jit', 'VO_GC_STRESS', '1');
+  requireEnv(targetEnvs, 'gc-jit', 'VO_GC_VERIFY', '1');
   requireEnv(targetEnvs, 'gc-jit', 'VO_JIT_CALL_THRESHOLD', '1');
 
   const benchmarksManifestSource = await fs.readFile(
@@ -164,7 +165,8 @@ async function lintCurrentDocFacts() {
     `jit\` sets \`VO_JIT_CALL_THRESHOLD=${targetEnvs.get('jit').VO_JIT_CALL_THRESHOLD}`,
     `osr\` sets \`VO_JIT_CALL_THRESHOLD=${targetEnvs.get('osr').VO_JIT_CALL_THRESHOLD}`,
     `VO_JIT_LOOP_THRESHOLD=${targetEnvs.get('osr').VO_JIT_LOOP_THRESHOLD}`,
-    `gc-jit\` sets \`VO_GC_DEBUG=${targetEnvs.get('gc-jit').VO_GC_DEBUG}`,
+    `gc-jit\` sets \`VO_GC_STRESS=${targetEnvs.get('gc-jit').VO_GC_STRESS}`,
+    `VO_GC_VERIFY=${targetEnvs.get('gc-jit').VO_GC_VERIFY}`,
     `VO_JIT_CALL_THRESHOLD=${targetEnvs.get('gc-jit').VO_JIT_CALL_THRESHOLD}`,
     `benchmark suite currently has ${benchmarkCount} manifest entries`,
   ]) {
