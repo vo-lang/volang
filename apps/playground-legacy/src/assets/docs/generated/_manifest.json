@@ -30,8 +30,8 @@
       "title": "Language Spec",
       "source": "lang/docs/spec/language.md",
       "output": "spec/language.md",
-      "source_digest": "sha256:e00b3333775d458082d248678196669999319bd12778ad1b39f23052f5f9575e",
-      "generated_at": "2026-05-27T11:17:51+08:00",
+      "source_digest": "sha256:9decc556b8bc922658086300022097383d0d08498384c60d9e230bf2d0ebfc99",
+      "generated_at": "2026-06-07T18:45:34+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
