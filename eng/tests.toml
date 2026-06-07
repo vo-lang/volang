@@ -15,6 +15,18 @@ targets = ["gc-vm", "gc-jit"]
 [matrices.compile]
 targets = ["compile"]
 
+[matrices.default-gc]
+targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
+
+[matrices.gc-wasm]
+targets = ["gc-vm", "gc-jit", "wasm"]
+
+[matrices.default-no-osr]
+targets = ["vm", "jit", "nostd", "wasm"]
+
+[matrices.default-gc-jit-only]
+targets = ["vm", "jit", "osr", "gc-jit", "nostd", "wasm"]
+
 [[alias]]
 name = "both"
 targets = ["vm", "jit"]

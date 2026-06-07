@@ -5,7 +5,8 @@ use crate::command_lint::{
     validate_first_party_run_node_workspace,
 };
 use crate::config::{
-    load_artifacts, load_ci, load_project, load_tasks, load_toolchains, ProjectRepo, Task, TaskFile,
+    load_artifacts, load_ci, load_project, load_tasks, load_toolchains, ProjectRepo, Task,
+    TaskFile, TaskGroup,
 };
 use crate::lint_policy::{
     contains_glob_meta, declared_repo_names, validate_ascii_slug, validate_repo_path_like,
@@ -22,13 +23,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
-    let target = args.first().map(String::as_str).unwrap_or("all");
-    if args.len() > 1 {
-        bail!("vo-dev lint accepts at most one target");
-    }
+    let opts = LintArgs::parse(args)?;
+    let target = opts.target.as_str();
     match target {
         "tasks" => {
-            lint_tasks(root)?;
+            lint_tasks(root, opts.strict)?;
             println!("vo-dev lint tasks: ok");
         }
         "artifacts" => {
@@ -60,7 +59,7 @@ pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
             println!("vo-dev lint release: ok");
         }
         "all" => {
-            lint_tasks(root)?;
+            lint_tasks(root, opts.strict)?;
             lint_artifacts(root)?;
             lint_repo_boundaries(root)?;
             lint_layout(root)?;
@@ -75,12 +74,47 @@ pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn lint_tasks(root: &Path) -> Result<()> {
+struct LintArgs {
+    target: String,
+    strict: bool,
+}
+
+impl LintArgs {
+    fn parse(args: Vec<String>) -> Result<Self> {
+        let mut target = "all".to_string();
+        let mut target_seen = false;
+        let mut strict = false;
+        for arg in args {
+            match arg.as_str() {
+                "--strict" => strict = true,
+                other if other.starts_with('-') => bail!("unknown lint argument: {other}"),
+                other => {
+                    if target_seen {
+                        bail!("vo-dev lint accepts at most one target");
+                    }
+                    target = other.to_string();
+                    target_seen = true;
+                }
+            }
+        }
+        Ok(Self { target, strict })
+    }
+}
+
+fn lint_tasks(root: &Path, strict: bool) -> Result<()> {
     let config = load_tasks(root)?;
-    lint_task_file(root, &config)
+    lint_task_file_with_options(root, &config, strict)
 }
 
 pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
+    lint_task_file_with_options(root, config, false)
+}
+
+pub(crate) fn lint_task_file_with_options(
+    root: &Path,
+    config: &TaskFile,
+    strict: bool,
+) -> Result<()> {
     if config.version != 1 {
         bail!("eng/tasks.toml version must be 1");
     }
@@ -98,6 +132,7 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
     let allowed_tiers = [
         "fast", "test", "contract", "stress", "site", "release", "manual", "legacy",
     ];
+    let group_meta = group_metadata_map(config)?;
 
     for task in &config.tasks {
         if task.name.trim().is_empty() {
@@ -136,6 +171,36 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
         }
         if let Some(owner) = &task.owner {
             validate_ascii_slug("task owner", owner, &['-', '_', '.'])?;
+        }
+        if strict && task.owner.as_deref().unwrap_or_default().trim().is_empty() {
+            bail!(
+                "task {} missing owner; add owner = \"<subsystem>\" to eng/tasks.toml",
+                task.name
+            );
+        }
+        if strict && task.tags.is_empty() {
+            bail!(
+                "task {} missing tags; add tags = [\"<surface>\", \"<domain>\"]",
+                task.name
+            );
+        }
+        if strict && !task.tags.iter().any(|tag| is_surface_tag(tag)) {
+            bail!(
+                "task {} missing surface tag; add one of {}",
+                task.name,
+                SURFACE_TAGS.join(",")
+            );
+        }
+        if strict
+            && matches!(task.tier.as_str(), "contract" | "stress")
+            && !task.tags.iter().any(|tag| tag == &task.tier)
+        {
+            bail!(
+                "task {} tier {} must also carry tag {}",
+                task.name,
+                task.tier,
+                task.tier
+            );
         }
         if task.inputs.is_empty() {
             bail!("task {} inputs cannot be empty", task.name);
@@ -239,6 +304,16 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
                 bail!("group {group} references unknown task or group {item}");
             }
         }
+        if strict && !group_meta.contains_key(group.as_str()) {
+            bail!("group {group} missing [[group]] metadata in eng/tasks.toml");
+        }
+    }
+    for group in group_meta.values() {
+        lint_task_group_metadata(config, &task_map, group, strict)?;
+    }
+    if strict {
+        lint_required_groups(config)?;
+        lint_public_task_reachability(config, &task_map)?;
     }
     for task in task_map.keys() {
         detect_task_cycle(task, &task_map, &mut Vec::new(), &mut HashSet::new())?;
@@ -295,6 +370,196 @@ fn validate_ci_route_task(
     if entry.internal {
         bail!("eng/ci.toml {owner} references internal task {task}");
     }
+    Ok(())
+}
+
+const SURFACE_TAGS: &[&str] = &[
+    "manifest-lint",
+    "lang-case",
+    "crate-unit",
+    "crate-integration",
+    "contract",
+    "model",
+    "docs-policy",
+    "example-smoke",
+    "benchmark",
+    "app-build",
+    "app-smoke",
+    "release-verify",
+    "legacy-excluded",
+    "tooling",
+    "repo-policy",
+];
+
+const REQUIRED_GROUPS: &[&str] = &[
+    "quality",
+    "lang-main",
+    "lang-backends",
+    "compile-contract",
+    "gc-contract",
+    "jit-contract",
+    "runtime-contract",
+    "typechecker-contract",
+    "codegen-contract",
+    "module-contract",
+    "release-contract",
+    "docs-contract",
+    "app-contract",
+    "docs",
+    "examples",
+    "benchmarks",
+    "app-site",
+    "release-verify",
+    "legacy-excluded",
+    "contract",
+    "stress",
+    "test",
+    "site",
+    "full",
+    "pr",
+];
+
+const TOP_LEVEL_GROUPS: &[&str] = &[
+    "pr",
+    "full",
+    "quality",
+    "test",
+    "contract",
+    "stress",
+    "site",
+    "release-verify",
+    "legacy-excluded",
+];
+
+fn is_surface_tag(tag: &str) -> bool {
+    SURFACE_TAGS.contains(&tag)
+}
+
+fn group_metadata_map<'a>(config: &'a TaskFile) -> Result<BTreeMap<&'a str, &'a TaskGroup>> {
+    let mut out = BTreeMap::new();
+    for group in &config.group_meta {
+        validate_ascii_slug("group name", &group.name, &['-'])?;
+        if out.insert(group.name.as_str(), group).is_some() {
+            bail!("duplicate [[group]] metadata for {}", group.name);
+        }
+    }
+    Ok(out)
+}
+
+fn lint_task_group_metadata(
+    config: &TaskFile,
+    task_map: &BTreeMap<String, Task>,
+    group: &TaskGroup,
+    strict: bool,
+) -> Result<()> {
+    if group.title.trim().is_empty() {
+        bail!("group {} title cannot be empty", group.name);
+    }
+    if group.tier_intent.trim().is_empty() {
+        bail!("group {} tier_intent cannot be empty", group.name);
+    }
+    validate_ascii_slug("group owner", &group.owner, &['-', '_', '.'])?;
+    validate_unique_values("group metadata", &group.name, "tag", &group.tags)?;
+    validate_unique_values("group metadata", &group.name, "task", &group.tasks)?;
+    validate_unique_values(
+        "group metadata",
+        &group.name,
+        "included_in",
+        &group.included_in,
+    )?;
+    for tag in &group.tags {
+        validate_ascii_slug("group tag", tag, &['-', '_', '.'])?;
+    }
+    for item in &group.tasks {
+        if !task_map.contains_key(item) && !config.groups.contains_key(item) {
+            bail!(
+                "group metadata {} references unknown task or group {item}",
+                group.name
+            );
+        }
+    }
+    for parent in &group.included_in {
+        if !config.groups.contains_key(parent) {
+            bail!(
+                "group metadata {} included_in references unknown group {parent}",
+                group.name
+            );
+        }
+    }
+    if group.selection_policy.trim().is_empty() {
+        bail!("group {} selection_policy cannot be empty", group.name);
+    }
+    if strict {
+        if group.tags.is_empty() {
+            bail!("group {} missing tags", group.name);
+        }
+        let Some(items) = config.groups.get(&group.name) else {
+            bail!("group metadata {} has no [groups] entry", group.name);
+        };
+        if items != &group.tasks {
+            bail!(
+                "group metadata {} tasks must match [groups] entry",
+                group.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn lint_required_groups(config: &TaskFile) -> Result<()> {
+    for group in REQUIRED_GROUPS {
+        if !config.groups.contains_key(*group) {
+            bail!("required group {group} missing from eng/tasks.toml");
+        }
+    }
+    Ok(())
+}
+
+fn lint_public_task_reachability(
+    config: &TaskFile,
+    task_map: &BTreeMap<String, Task>,
+) -> Result<()> {
+    let mut reachable = HashSet::new();
+    for group in TOP_LEVEL_GROUPS {
+        if config.groups.contains_key(*group) {
+            collect_group_reachable(config, group, &mut reachable, &mut Vec::new())?;
+        }
+    }
+    for task in task_map.values() {
+        if !task.internal && !reachable.contains(&task.name) {
+            bail!(
+                "public task {} is not reachable from a top-level task group",
+                task.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn collect_group_reachable(
+    config: &TaskFile,
+    group: &str,
+    reachable: &mut HashSet<String>,
+    stack: &mut Vec<String>,
+) -> Result<()> {
+    if stack.iter().any(|item| item == group) {
+        stack.push(group.to_string());
+        bail!(
+            "group cycle while checking reachability: {}",
+            stack.join(" -> ")
+        );
+    }
+    stack.push(group.to_string());
+    if let Some(items) = config.groups.get(group) {
+        for item in items {
+            if config.groups.contains_key(item) {
+                collect_group_reachable(config, item, reachable, stack)?;
+            } else {
+                reachable.insert(item.clone());
+            }
+        }
+    }
+    stack.pop();
     Ok(())
 }
 

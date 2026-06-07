@@ -1,17 +1,6 @@
 version = 1
 
 [groups]
-gc-contract = [
-  "cargo-test-gc-runtime",
-  "cargo-test-gc-vm",
-  "cargo-test-gc-vm-jit",
-  "cargo-test-gc-jit",
-]
-
-contract = [
-  "gc-contract",
-]
-
 quality = [
   "ci-self-check",
   "d-py-smoke",
@@ -29,28 +18,100 @@ quality = [
   "wasm-check",
 ]
 
-test = [
+docs = [
+  "docs-lint",
+]
+
+examples = [
+  "eng-lint-examples",
+  "examples-smoke",
+]
+
+benchmarks = [
+  "eng-lint-benchmarks",
+]
+
+lang-main = [
   "test-data-lint",
   "vo-test",
   "vo-test-compile",
-  "vo-test-gc",
-  "gc-contract",
+]
+
+lang-backends = [
   "vo-test-osr",
   "vo-test-nostd",
   "vo-test-wasm",
-  "examples-smoke",
-  "cargo-test-release",
-  "wasm-check-release",
 ]
 
-release-verify = [
-  "release-verify-vogui",
-  "release-verify-voplay",
-  "release-verify-vopack",
-  "release-verify-vostore",
+compile-contract = [
+  "vo-test-compile",
 ]
 
-site = [
+gc-contract = [
+  "vo-test-gc",
+  "cargo-test-gc-runtime",
+  "cargo-test-gc-vm",
+  "cargo-test-gc-vm-jit",
+  "cargo-test-gc-jit",
+]
+
+jit-contract = [
+  "vo-test-jit-contract",
+  "cargo-test-jit",
+]
+
+runtime-contract = [
+  "vo-test-runtime-contract",
+  "cargo-test-runtime",
+  "cargo-test-vm",
+]
+
+typechecker-contract = [
+  "cargo-test-analysis",
+  "vo-test-compile",
+]
+
+codegen-contract = [
+  "cargo-test-codegen",
+]
+
+module-contract = [
+  "cargo-test-module",
+]
+
+release-contract = [
+  "eng-lint-release",
+]
+
+docs-contract = [
+  "docs-lint",
+]
+
+app-contract = [
+  "wasm-check",
+  "vo-test-wasm",
+]
+
+contract = [
+  "compile-contract",
+  "gc-contract",
+  "jit-contract",
+  "runtime-contract",
+  "typechecker-contract",
+  "codegen-contract",
+  "module-contract",
+  "release-contract",
+  "docs-contract",
+  "app-contract",
+]
+
+stress = [
+  "vo-test-gc-stress-repeat",
+  "vo-test-jit-osr-stress-repeat",
+  "cargo-test-runtime-model",
+]
+
+app-site = [
   "vo-web-wasm-build",
   "vogui-build",
   "studio-wasm-build",
@@ -60,46 +121,300 @@ site = [
   "blockkart-smoke-static",
 ]
 
-pr = [
-  "ci-self-check",
-  "d-py-smoke",
-  "eng-lint-tasks",
-  "eng-lint-artifacts",
-  "eng-lint-repo-boundaries",
-  "eng-lint-release",
-  "eng-lint-layout",
-  "docs-lint",
-  "eng-lint-examples",
-  "eng-lint-benchmarks",
-  "cargo-fmt",
-  "cargo-clippy",
-  "cargo-check",
-  "wasm-check",
-  "test-data-lint",
-  "vo-test",
-  "vo-test-compile",
-  "vo-test-gc",
-  "gc-contract",
-  "vo-test-osr",
-  "vo-test-nostd",
-  "vo-test-wasm",
-  "examples-smoke",
-  "cargo-test-release",
-  "wasm-check-release",
-  "quickplay-validate",
-  "blockkart-smoke-static",
+site = [
+  "app-site",
+]
+
+release-verify = [
   "release-verify-vogui",
   "release-verify-voplay",
   "release-verify-vopack",
   "release-verify-vostore",
 ]
 
+legacy-excluded = [
+  "legacy-playground-inventory",
+]
+
+test = [
+  "lang-main",
+  "lang-backends",
+  "gc-contract",
+  "examples",
+  "cargo-test-release",
+  "wasm-check-release",
+]
+
+pr = [
+  "quality",
+  "test",
+  "docs",
+  "examples",
+  "benchmarks",
+  "app-contract",
+  "quickplay-validate",
+  "blockkart-smoke-static",
+  "release-verify",
+]
+
 full = [
   "quality",
   "test",
+  "contract",
   "site",
   "release-verify",
+  "legacy-excluded",
 ]
+
+[[group]]
+name = "quality"
+title = "Quality"
+tier_intent = "fast PR policy and source hygiene"
+owner = "eng"
+tags = ["quality", "repo-policy"]
+tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "eng-lint-artifacts", "eng-lint-repo-boundaries", "eng-lint-release", "eng-lint-layout", "docs-lint", "eng-lint-examples", "eng-lint-benchmarks", "cargo-fmt", "cargo-clippy", "cargo-check", "wasm-check"]
+included_in = ["pr", "full"]
+selection_policy = "Selected when the quality validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "docs"
+title = "Docs"
+tier_intent = "documentation policy checks"
+owner = "docs"
+tags = ["docs", "docs-policy"]
+tasks = ["docs-lint"]
+included_in = ["pr"]
+selection_policy = "Selected when the docs validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "examples"
+title = "Examples"
+tier_intent = "example manifest and smoke checks"
+owner = "eng"
+tags = ["examples", "example-smoke"]
+tasks = ["eng-lint-examples", "examples-smoke"]
+included_in = ["test", "pr"]
+selection_policy = "Selected when the examples validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "benchmarks"
+title = "Benchmarks"
+tier_intent = "benchmark manifest checks"
+owner = "eng"
+tags = ["benchmarks", "benchmark"]
+tasks = ["eng-lint-benchmarks"]
+included_in = ["pr"]
+selection_policy = "Selected when the benchmarks validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "lang-main"
+title = "Language Main"
+tier_intent = "main language regression and compile-fail checks"
+owner = "runtime"
+tags = ["lang-case", "test"]
+tasks = ["test-data-lint", "vo-test", "vo-test-compile"]
+included_in = ["test"]
+selection_policy = "Selected when the lang-main validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "lang-backends"
+title = "Language Backends"
+tier_intent = "backend-specific OSR no_std and WASM checks"
+owner = "web-wasm"
+tags = ["lang-case", "web-wasm", "test"]
+tasks = ["vo-test-osr", "vo-test-nostd", "vo-test-wasm"]
+included_in = ["test"]
+selection_policy = "Selected when the lang-backends validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "compile-contract"
+title = "Compile Contract"
+tier_intent = "compile-fail and diagnostic contracts"
+owner = "typechecker"
+tags = ["compile-fail", "contract"]
+tasks = ["vo-test-compile"]
+included_in = ["contract"]
+selection_policy = "Selected when the compile-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "gc-contract"
+title = "GC Contract"
+tier_intent = "GC language crate VM and JIT contracts"
+owner = "runtime-gc"
+tags = ["gc", "contract"]
+tasks = ["vo-test-gc", "cargo-test-gc-runtime", "cargo-test-gc-vm", "cargo-test-gc-vm-jit", "cargo-test-gc-jit"]
+included_in = ["contract", "test"]
+selection_policy = "Selected when the gc-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "jit-contract"
+title = "JIT Contract"
+tier_intent = "JIT semantic lowering and differential contracts"
+owner = "jit"
+tags = ["jit", "contract"]
+tasks = ["vo-test-jit-contract", "cargo-test-jit"]
+included_in = ["contract"]
+selection_policy = "Selected when the jit-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "runtime-contract"
+title = "Runtime Contract"
+tier_intent = "scheduler panic defer VM runtime contracts"
+owner = "runtime"
+tags = ["runtime", "contract"]
+tasks = ["vo-test-runtime-contract", "cargo-test-runtime", "cargo-test-vm"]
+included_in = ["contract"]
+selection_policy = "Selected when the runtime-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "typechecker-contract"
+title = "Typechecker Contract"
+tier_intent = "typechecker semantic rule contracts"
+owner = "typechecker"
+tags = ["typechecker", "contract"]
+tasks = ["cargo-test-analysis", "vo-test-compile"]
+included_in = ["contract"]
+selection_policy = "Selected when the typechecker-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "codegen-contract"
+title = "Codegen Contract"
+tier_intent = "codegen bytecode metadata contracts"
+owner = "codegen"
+tags = ["codegen", "bytecode", "contract"]
+tasks = ["cargo-test-codegen"]
+included_in = ["contract"]
+selection_policy = "Selected when the codegen-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "module-contract"
+title = "Module Contract"
+tier_intent = "module resolver workspace and archive contracts"
+owner = "module"
+tags = ["module", "contract"]
+tasks = ["cargo-test-module"]
+included_in = ["contract"]
+selection_policy = "Selected when the module-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "release-contract"
+title = "Release Contract"
+tier_intent = "release policy lint contract"
+owner = "release"
+tags = ["release", "contract"]
+tasks = ["eng-lint-release"]
+included_in = ["contract"]
+selection_policy = "Selected when the release-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "docs-contract"
+title = "Docs Contract"
+tier_intent = "source backed docs contract"
+owner = "docs"
+tags = ["docs", "contract"]
+tasks = ["docs-lint"]
+included_in = ["contract"]
+selection_policy = "Selected when the docs-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "app-contract"
+title = "App Contract"
+tier_intent = "WASM and app-visible language contract"
+owner = "web-wasm"
+tags = ["app", "contract", "web-wasm"]
+tasks = ["wasm-check", "vo-test-wasm"]
+included_in = ["contract", "pr"]
+selection_policy = "Selected when the app-contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "contract"
+title = "Contract"
+tier_intent = "composed high-risk contract layer"
+owner = "eng"
+tags = ["contract"]
+tasks = ["compile-contract", "gc-contract", "jit-contract", "runtime-contract", "typechecker-contract", "codegen-contract", "module-contract", "release-contract", "docs-contract", "app-contract"]
+included_in = ["full"]
+selection_policy = "Selected when the contract validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "stress"
+title = "Stress"
+tier_intent = "explicit heavier stress and repeat checks"
+owner = "eng"
+tags = ["stress"]
+tasks = ["vo-test-gc-stress-repeat", "vo-test-jit-osr-stress-repeat", "cargo-test-runtime-model"]
+included_in = []
+selection_policy = "Selected when the stress validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "app-site"
+title = "App Site"
+tier_intent = "Studio vo-web quickplay and static site checks"
+owner = "studio"
+tags = ["app-site", "app-build", "app-smoke"]
+tasks = ["vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "quickplay-validate", "blockkart-smoke-static"]
+included_in = ["site"]
+selection_policy = "Selected when the app-site validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "site"
+title = "Site"
+tier_intent = "top-level local site validation"
+owner = "studio"
+tags = ["site", "app-site"]
+tasks = ["app-site"]
+included_in = ["full"]
+selection_policy = "Selected when the site validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "release-verify"
+title = "Release Verify"
+tier_intent = "first-party release verification"
+owner = "release"
+tags = ["release-verify"]
+tasks = ["release-verify-vogui", "release-verify-voplay", "release-verify-vopack", "release-verify-vostore"]
+included_in = ["pr", "full"]
+selection_policy = "Selected when the release-verify validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "legacy-excluded"
+title = "Legacy Excluded"
+tier_intent = "explicit inventory for excluded legacy surfaces"
+owner = "eng"
+tags = ["legacy-excluded"]
+tasks = ["legacy-playground-inventory"]
+included_in = ["full"]
+selection_policy = "Selected when the legacy-excluded validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "test"
+title = "Test"
+tier_intent = "main functional test gate"
+owner = "eng"
+tags = ["test", "lang-case"]
+tasks = ["lang-main", "lang-backends", "gc-contract", "examples", "cargo-test-release", "wasm-check-release"]
+included_in = ["pr", "full"]
+selection_policy = "Selected when the test validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "pr"
+title = "PR"
+tier_intent = "normal pull request validation"
+owner = "eng"
+tags = ["pr"]
+tasks = ["quality", "test", "docs", "examples", "benchmarks", "app-contract", "quickplay-validate", "blockkart-smoke-static", "release-verify"]
+included_in = []
+selection_policy = "Selected when the pr validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "full"
+title = "Full"
+tier_intent = "full normal validation catalog"
+owner = "eng"
+tags = ["full"]
+tasks = ["quality", "test", "contract", "site", "release-verify", "legacy-excluded"]
+included_in = []
+selection_policy = "Selected when the full validation surface is requested or when a parent group includes it."
 
 [[task]]
 name = "ci-self-check"
@@ -109,6 +424,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["scripts/ci/**", "scripts/ci-local.sh", "d.py", ".githooks/pre-push", ".github/workflows/**", "eng/**", "cmd/vo-dev/**"]
 outputs = []
 tier = "fast"
+tags = ["repo-policy", "tooling"]
+owner = "eng"
 
 [[task]]
 name = "d-py-smoke"
@@ -119,15 +436,19 @@ inputs = ["d.py", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock", ".githooks/pre-pu
 outputs = []
 env = { PYTHONDONTWRITEBYTECODE = "1" }
 tier = "fast"
+tags = ["repo-policy", "tooling"]
+owner = "eng"
 
 [[task]]
 name = "eng-lint-tasks"
 title = "engineering task manifest lint"
-command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "tasks"]
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "tasks", "--strict"]
 tools = ["rust", "vo-dev"]
 inputs = ["eng/tasks.toml", "eng/toolchains.toml", "eng/project.toml", "eng/artifacts.toml", "eng/ci.toml", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock"]
 outputs = []
 tier = "fast"
+tags = ["manifest-lint", "repo-policy"]
+owner = "eng"
 
 [[task]]
 name = "eng-lint-artifacts"
@@ -137,6 +458,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["eng/artifacts.toml", "eng/tasks.toml", "eng/project.toml", "cmd/vo-dev/**", "apps/studio/public/quickplay/blockkart/**"]
 outputs = []
 tier = "fast"
+tags = ["manifest-lint", "repo-policy", "artifact"]
+owner = "eng"
 
 [[task]]
 name = "eng-lint-repo-boundaries"
@@ -146,6 +469,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["eng/project.toml", "eng/tasks.toml", "cmd/vo-dev/**", "scripts/ci/**", ".github/workflows/**", "d.py", "vo.work", "apps/playground-legacy/vite.config.ts", "apps/playground-legacy/rust/build.rs", "apps/playground-legacy/src/**", "apps/studio/src-tauri/**"]
 outputs = []
 tier = "fast"
+tags = ["repo-policy", "legacy-excluded"]
+owner = "eng"
 
 [[task]]
 name = "eng-lint-release"
@@ -155,6 +480,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["eng/release.toml", ".github/workflows/release.yml", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock"]
 outputs = []
 tier = "fast"
+tags = ["release-verify", "repo-policy"]
+owner = "release"
 
 [[task]]
 name = "eng-lint-layout"
@@ -164,6 +491,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo-dev/**", "Cargo.toml", "eng/**", "examples/manifest.toml", "tests/lang/manifest.toml", "benchmarks/manifest.toml", ".gitignore"]
 outputs = []
 tier = "fast"
+tags = ["repo-policy"]
+owner = "eng"
 
 [[task]]
 name = "docs-sync"
@@ -174,6 +503,9 @@ node_workspaces = ["studio"]
 inputs = ["scripts/ci/docs_sync.mjs", "lang/docs/spec/**", "lang/docs/vo-for-gophers.md"]
 outputs = ["apps/playground-legacy/src/assets/docs/generated"]
 tier = "manual"
+internal = true
+tags = ["docs-policy"]
+owner = "docs"
 
 [[task]]
 name = "docs-lint"
@@ -184,6 +516,8 @@ node_workspaces = ["studio"]
 inputs = ["scripts/ci/docs_lint.mjs", "scripts/ci/docs_sync.mjs", "lang/docs/spec/**", "lang/docs/vo-for-gophers.md", "apps/playground-legacy/src/assets/docs/generated/**", "apps/studio/docs/manifest.toml", "apps/studio/docs/pages/**"]
 outputs = []
 tier = "fast"
+tags = ["docs-policy", "manifest-lint"]
+owner = "docs"
 
 [[task]]
 name = "eng-lint-examples"
@@ -193,6 +527,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo-dev/**", "examples/manifest.toml", "examples/**"]
 outputs = []
 tier = "fast"
+tags = ["manifest-lint", "example-smoke"]
+owner = "eng"
 
 [[task]]
 name = "eng-lint-benchmarks"
@@ -202,6 +538,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo-dev/**", "benchmarks/manifest.toml", "benchmarks/**"]
 outputs = []
 tier = "fast"
+tags = ["manifest-lint", "benchmark"]
+owner = "eng"
 
 [[task]]
 name = "cargo-fmt"
@@ -211,6 +549,8 @@ tools = ["rust"]
 inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", ".github/workflows/**", "scripts/ci/**", "d.py"]
 outputs = []
 tier = "fast"
+tags = ["repo-policy", "tooling"]
+owner = "eng"
 
 [[task]]
 name = "cargo-clippy"
@@ -220,6 +560,8 @@ tools = ["rust"]
 inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**"]
 outputs = []
 tier = "fast"
+tags = ["crate-unit", "repo-policy"]
+owner = "eng"
 
 [[task]]
 name = "cargo-check"
@@ -229,6 +571,8 @@ tools = ["rust"]
 inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**"]
 outputs = []
 tier = "fast"
+tags = ["crate-integration", "repo-policy"]
+owner = "eng"
 
 [[task]]
 name = "wasm-check"
@@ -238,15 +582,19 @@ tools = ["rust"]
 inputs = ["lang/crates/**", "lang/stdlib/**", "apps/studio/wasm/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "fast"
+tags = ["app-build", "web-wasm"]
+owner = "web-wasm"
 
 [[task]]
 name = "test-data-lint"
 title = "language test manifest lint"
-command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "lint", "--suite", "lang"]
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "lint", "--suite", "lang", "--strict"]
 tools = ["rust", "vo-dev"]
 inputs = ["eng/tests.toml", "cmd/vo-dev/**", "tests/lang/cases/**", "tests/lang/**"]
 outputs = []
 tier = "test"
+tags = ["manifest-lint", "lang-case"]
+owner = "eng"
 
 [[task]]
 name = "vo-test"
@@ -257,6 +605,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
 outputs = []
 tier = "test"
+tags = ["lang-case", "runtime"]
+owner = "runtime"
 
 [[task]]
 name = "vo-test-compile"
@@ -267,6 +617,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
 outputs = []
 tier = "test"
+tags = ["lang-case", "compile-fail"]
+owner = "typechecker"
 
 [[task]]
 name = "vo-test-gc"
@@ -325,6 +677,134 @@ tags = ["gc", "jit", "contract"]
 owner = "runtime-gc"
 
 [[task]]
+name = "vo-test-jit-contract"
+title = "vo JIT contract language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--tags", "jit", "--targets", "vm,jit,osr", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "contract"
+tags = ["jit", "lang-case", "contract"]
+owner = "jit"
+
+[[task]]
+name = "vo-test-runtime-contract"
+title = "vo runtime scheduler contract language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--tags", "scheduler", "--targets", "vm,jit,osr", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "contract"
+tags = ["runtime", "scheduler", "lang-case", "contract"]
+owner = "runtime"
+
+[[task]]
+name = "cargo-test-jit"
+title = "cargo JIT contract tests"
+command = ["cargo", "test", "-p", "vo-jit"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-jit/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "contract"
+tags = ["jit", "crate-unit", "contract"]
+owner = "jit"
+
+[[task]]
+name = "cargo-test-runtime"
+title = "cargo runtime contract tests"
+command = ["cargo", "test", "-p", "vo-runtime"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-runtime/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "contract"
+tags = ["runtime", "crate-unit", "contract"]
+owner = "runtime"
+
+[[task]]
+name = "cargo-test-vm"
+title = "cargo VM runtime contract tests"
+command = ["cargo", "test", "-p", "vo-vm"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-vm/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "contract"
+tags = ["runtime", "vm", "crate-unit", "contract"]
+owner = "runtime"
+
+[[task]]
+name = "cargo-test-analysis"
+title = "cargo typechecker contract tests"
+command = ["cargo", "test", "-p", "vo-analysis"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-analysis/**", "lang/crates/vo-syntax/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "contract"
+tags = ["typechecker", "crate-unit", "contract"]
+owner = "typechecker"
+
+[[task]]
+name = "cargo-test-codegen"
+title = "cargo codegen contract tests"
+command = ["cargo", "test", "-p", "vo-codegen"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-codegen/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "contract"
+tags = ["codegen", "bytecode", "crate-unit", "contract"]
+owner = "codegen"
+
+[[task]]
+name = "cargo-test-module"
+title = "cargo module contract tests"
+command = ["cargo", "test", "-p", "vo-module"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-module/**", "cmd/vo/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "contract"
+tags = ["module", "crate-unit", "contract"]
+owner = "module"
+
+[[task]]
+name = "vo-test-gc-stress-repeat"
+title = "vo GC stress repeat language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--tags", "gc", "--repeat", "2", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "stress"
+tags = ["gc", "lang-case", "stress"]
+owner = "runtime-gc"
+timeout_sec = 1800
+
+[[task]]
+name = "vo-test-jit-osr-stress-repeat"
+title = "vo JIT OSR stress repeat language tests"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--tags", "jit", "--targets", "jit,osr", "--repeat", "2", "--release"]
+needs = ["test-data-lint"]
+tools = ["rust", "vo-dev"]
+inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "eng/tests.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "stress"
+tags = ["jit", "osr", "lang-case", "stress"]
+owner = "jit"
+timeout_sec = 1800
+
+[[task]]
+name = "cargo-test-runtime-model"
+title = "cargo runtime model tests"
+command = ["cargo", "test", "-p", "vo-runtime", "model"]
+tools = ["rust"]
+inputs = ["lang/crates/vo-runtime/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = []
+tier = "stress"
+tags = ["runtime", "model", "stress"]
+owner = "runtime"
+timeout_sec = 900
+
+[[task]]
 name = "vo-test-osr"
 title = "vo OSR language tests"
 command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "test", "run", "--suite", "lang", "--targets", "osr", "--release"]
@@ -333,6 +813,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
 outputs = []
 tier = "test"
+tags = ["lang-case", "jit", "osr"]
+owner = "jit"
 
 [[task]]
 name = "vo-test-nostd"
@@ -343,6 +825,8 @@ tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
 outputs = []
 tier = "test"
+tags = ["lang-case", "runtime", "nostd"]
+owner = "runtime"
 
 [[task]]
 name = "vo-test-wasm"
@@ -354,6 +838,8 @@ node_workspaces = ["vo-web"]
 inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**", "lang/crates/vo-web/**"]
 outputs = []
 tier = "test"
+tags = ["lang-case", "app-build", "web-wasm"]
+owner = "web-wasm"
 
 [[task]]
 name = "examples-smoke"
@@ -364,6 +850,8 @@ tools = ["rust"]
 inputs = ["cmd/vo/**", "lang/crates/**", "lang/stdlib/**", "examples/manifest.toml", "examples/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "test"
+tags = ["example-smoke"]
+owner = "eng"
 
 [[task]]
 name = "cargo-test-release"
@@ -373,6 +861,8 @@ tools = ["rust"]
 inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "test"
+tags = ["crate-integration", "release-verify"]
+owner = "release"
 
 [[task]]
 name = "wasm-check-release"
@@ -382,6 +872,8 @@ tools = ["rust"]
 inputs = ["lang/crates/**", "lang/stdlib/**", "apps/studio/wasm/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "test"
+tags = ["app-build", "release-verify", "web-wasm"]
+owner = "web-wasm"
 
 [[task]]
 name = "vo-web-wasm-build"
@@ -392,6 +884,8 @@ tools = ["rust", "wasm-pack"]
 inputs = ["lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = ["lang/crates/vo-web/pkg"]
 tier = "site"
+tags = ["app-build", "web-wasm"]
+owner = "web-wasm"
 
 [[task]]
 name = "vogui-npm-ci"
@@ -404,6 +898,8 @@ internal = true
 inputs = ["eng/project.toml", "cmd/vo-dev/**"]
 outputs = []
 tier = "site"
+tags = ["app-build"]
+owner = "studio"
 
 [[task]]
 name = "vogui-build"
@@ -416,6 +912,8 @@ repo = "vogui"
 inputs = ["apps/studio/package.json", "apps/studio/package-lock.json", "eng/project.toml", "cmd/vo-dev/**"]
 outputs = []
 tier = "site"
+tags = ["app-build"]
+owner = "studio"
 
 [[task]]
 name = "studio-wasm-build"
@@ -427,6 +925,8 @@ node_workspaces = ["studio"]
 inputs = ["apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/wasm/**", "apps/studio/scripts/build_wasm.mjs", "apps/studio/scripts/studio_build_id.mjs", "apps/studio/public/quickplay/blockkart/**", "lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = ["apps/studio/public/wasm/vo_studio_wasm_bg.wasm", "apps/studio/public/wasm/vo_studio_wasm.js", "apps/studio/public/wasm/vo_studio_wasm.build_id"]
 tier = "site"
+tags = ["app-build"]
+owner = "studio"
 
 [[task]]
 name = "studio-npm-ci"
@@ -439,6 +939,8 @@ internal = true
 inputs = ["apps/studio/package.json", "apps/studio/package-lock.json"]
 outputs = ["apps/studio/node_modules"]
 tier = "site"
+tags = ["app-build"]
+owner = "studio"
 
 [[task]]
 name = "studio-install-local-vogui"
@@ -451,6 +953,8 @@ repo = "vogui"
 inputs = ["cmd/vo-dev/**", "apps/studio/package.json", "apps/studio/package-lock.json", "eng/project.toml"]
 outputs = []
 tier = "site"
+tags = ["app-build"]
+owner = "studio"
 
 [[task]]
 name = "studio-build"
@@ -463,6 +967,8 @@ node_workspaces = ["studio"]
 inputs = ["apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json", "apps/studio/wasm/**", "lang/crates/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = ["apps/studio/dist"]
 tier = "site"
+tags = ["app-build"]
+owner = "studio"
 
 [[task]]
 name = "quickplay-blockkart-package"
@@ -476,6 +982,8 @@ internal = true
 inputs = ["apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "module-cache:voplay", "module-cache:vogui"]
 outputs = ["apps/studio/public/quickplay/blockkart"]
 tier = "manual"
+tags = ["app-smoke", "manual"]
+owner = "studio"
 
 [[task]]
 name = "quickplay-validate"
@@ -486,6 +994,8 @@ node_workspaces = ["studio"]
 inputs = ["scripts/ci/quickplay_validate.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml"]
 outputs = []
 tier = "site"
+tags = ["app-smoke", "manifest-lint"]
+owner = "studio"
 
 [[task]]
 name = "blockkart-smoke-static"
@@ -497,6 +1007,8 @@ node_workspaces = ["studio"]
 inputs = ["scripts/ci/smoke_blockkart.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts"]
 outputs = []
 tier = "site"
+tags = ["app-smoke"]
+owner = "studio"
 
 [[task]]
 name = "blockkart-smoke-remote"
@@ -508,6 +1020,20 @@ node_workspaces = ["studio"]
 inputs = ["scripts/ci/smoke_blockkart.mjs", "apps/studio/scripts/studio_build_id.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts"]
 outputs = []
 tier = "site"
+internal = true
+tags = ["app-smoke"]
+owner = "studio"
+
+[[task]]
+name = "legacy-playground-inventory"
+title = "legacy playground exclusion inventory"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "repo-boundaries"]
+tools = ["rust", "vo-dev"]
+inputs = ["apps/playground-legacy/**", "Cargo.toml", "eng/project.toml", "eng/tasks.toml", "cmd/vo-dev/**"]
+outputs = []
+tier = "legacy"
+tags = ["legacy-excluded", "repo-policy"]
+owner = "eng"
 
 [[task]]
 name = "release-verify-vogui"
@@ -518,6 +1044,8 @@ repo = "vogui"
 inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
 outputs = []
 tier = "release"
+tags = ["release-verify"]
+owner = "release"
 
 [[task]]
 name = "release-verify-voplay"
@@ -528,6 +1056,8 @@ repo = "voplay"
 inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
 outputs = []
 tier = "release"
+tags = ["release-verify"]
+owner = "release"
 
 [[task]]
 name = "release-verify-vopack"
@@ -538,6 +1068,8 @@ repo = "vopack"
 inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
 outputs = []
 tier = "release"
+tags = ["release-verify"]
+owner = "release"
 
 [[task]]
 name = "release-verify-vostore"
@@ -548,3 +1080,5 @@ repo = "vostore"
 inputs = ["cmd/vo/**", "cmd/vo-dev/**", "lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**", "eng/project.toml"]
 outputs = []
 tier = "release"
+tags = ["release-verify"]
+owner = "release"

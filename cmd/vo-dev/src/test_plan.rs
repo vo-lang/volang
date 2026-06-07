@@ -16,7 +16,7 @@ pub(crate) struct TestPlan {
     pub(crate) jobs: Vec<TestJob>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct TestJob {
     pub(crate) id: String,
     case_id: String,
@@ -30,6 +30,7 @@ pub(crate) struct TestJob {
     env: BTreeMap<String, String>,
     timeout_sec: u64,
     expect: serde_json::Value,
+    pub(crate) selection_reasons: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -45,6 +46,8 @@ pub(crate) struct TestArgs {
     pub(crate) paths: Vec<String>,
     pub(crate) verbose: bool,
     pub(crate) release: bool,
+    pub(crate) explain: bool,
+    pub(crate) repeat: usize,
 }
 
 impl TestArgs {
@@ -60,11 +63,16 @@ impl TestArgs {
         let mut paths = Vec::new();
         let mut verbose = false;
         let mut release = false;
+        let mut explain = false;
+        let mut repeat = 1usize;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
                 "--release" => {
                     release = true;
+                }
+                "--explain" => {
+                    explain = true;
                 }
                 "--suite" => {
                     i += 1;
@@ -165,6 +173,19 @@ impl TestArgs {
                 arg if arg.starts_with("-j") && arg.len() > 2 => {
                     jobs = Some(arg[2..].parse().context("invalid jobs value")?);
                 }
+                "--repeat" => {
+                    i += 1;
+                    repeat = args
+                        .get(i)
+                        .ok_or_else(|| anyhow!("--repeat requires a value"))?
+                        .parse()
+                        .context("invalid repeat value")?;
+                }
+                arg if arg.starts_with("--repeat=") => {
+                    repeat = arg["--repeat=".len()..]
+                        .parse()
+                        .context("invalid repeat value")?;
+                }
                 "--path" => {
                     i += 1;
                     paths.push(
@@ -203,6 +224,9 @@ impl TestArgs {
         if jobs == Some(0) {
             bail!("--jobs must be > 0");
         }
+        if repeat == 0 {
+            bail!("--repeat must be > 0");
+        }
         normalize_filter_values("matrix", &mut matrices)?;
         normalize_filter_values("tag", &mut tags)?;
         normalize_filter_values("owner", &mut owners)?;
@@ -223,6 +247,8 @@ impl TestArgs {
             paths,
             verbose,
             release,
+            explain,
+            repeat,
         })
     }
 }
@@ -269,7 +295,13 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                     .get("compile")
                     .ok_or_else(|| anyhow!("eng/tests.toml must define target compile"))?;
                 jobs.push(compile_fail_job(
-                    root, &manifest, case, target, &expect, "compile",
+                    root,
+                    &manifest,
+                    case,
+                    target,
+                    &expect,
+                    "compile",
+                    &selection_reasons_for_case(case, opts, &case_targets, "compile"),
                 )?);
             }
             for target_name in &effective_targets {
@@ -289,6 +321,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                     target,
                     &expect,
                     &format!("{target_name}-compile"),
+                    &selection_reasons_for_case(case, opts, &case_targets, target_name),
                 )?);
             }
             continue;
@@ -321,7 +354,28 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                     "kind": "pass",
                     "jit_regular_call_side_exits_min": expect.jit_regular_call_side_exits_min,
                 }),
+                selection_reasons: selection_reasons_for_case(
+                    case,
+                    opts,
+                    &case_targets,
+                    target_name,
+                ),
             });
+        }
+    }
+
+    if opts.repeat > 1 {
+        let originals = jobs;
+        jobs = Vec::with_capacity(originals.len() * opts.repeat);
+        for iteration in 1..=opts.repeat {
+            for job in &originals {
+                let mut repeated = job.clone();
+                repeated.id = format!("{}#{}", repeated.id, iteration);
+                repeated
+                    .selection_reasons
+                    .push(format!("repeat iteration {iteration}/{}", opts.repeat));
+                jobs.push(repeated);
+            }
         }
     }
 
@@ -411,6 +465,7 @@ fn compile_fail_job(
     target: &TestTarget,
     expect: &CaseExpect,
     suffix: &str,
+    selection_reasons: &[String],
 ) -> Result<TestJob> {
     Ok(TestJob {
         id: format!("{}::{suffix}", case.id),
@@ -425,6 +480,7 @@ fn compile_fail_job(
         env: target.env.clone(),
         timeout_sec: case_timeout(case, &target.name, target.default_timeout_sec),
         expect: json!({ "kind": "fail", "patterns": expect.patterns }),
+        selection_reasons: selection_reasons.to_vec(),
     })
 }
 
@@ -446,6 +502,73 @@ fn compile_fail_enabled_for_targets(case_targets: &[String], target: &str) -> bo
             .iter()
             .any(|case_target| case_target == "compile")
             && target_runs_native_compile_fail(target)
+}
+
+fn selection_reasons_for_case(
+    case: &ManifestCase,
+    opts: &TestArgs,
+    case_targets: &[String],
+    target_name: &str,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if opts.paths.is_empty()
+        && opts.matrices.is_empty()
+        && opts.tags.is_empty()
+        && opts.owners.is_empty()
+    {
+        reasons.push("selected by suite defaults".to_string());
+    }
+    if !opts.paths.is_empty() {
+        reasons.push(format!("matched path filter {}", opts.paths.join(",")));
+    }
+    if !opts.matrices.is_empty() {
+        reasons.push(format!("matched matrix filter {}", opts.matrices.join(",")));
+    }
+    if !opts.tags.is_empty() {
+        reasons.push(format!("matched tag filter {}", opts.tags.join(",")));
+    }
+    if !opts.owners.is_empty() {
+        reasons.push(format!("matched owner filter {}", opts.owners.join(",")));
+    }
+    if opts.targets_explicit {
+        reasons.push(format!(
+            "target {target_name} selected by explicit --targets"
+        ));
+    } else if let Some(matrix) = &case.matrix {
+        reasons.push(format!("target {target_name} selected by matrix {matrix}"));
+    } else if !case_targets.is_empty() {
+        reasons.push(format!(
+            "target {target_name} selected by explicit case target override"
+        ));
+    }
+    if let Some(owner) = &case.owner {
+        reasons.push(format!("owned by {owner}"));
+    }
+    if !case.tags.is_empty() {
+        reasons.push(format!("case tags {}", case.tags.join(",")));
+    }
+    if has_target_name(&case.skip, target_name) {
+        reasons.push(format!(
+            "target {target_name} skipped because {}",
+            case.reason.as_deref().unwrap_or("(missing reason)")
+        ));
+    }
+    if let Some(timeout) = case.timeout.get(target_name) {
+        reasons.push(format!("target {target_name} timeout set to {timeout}s"));
+    }
+    if case
+        .expect
+        .as_ref()
+        .is_some_and(|value| value.as_table().is_some())
+    {
+        reasons.push(format!(
+            "case has structured expectation because {}",
+            case.reason
+                .as_deref()
+                .unwrap_or("the manifest declares one")
+        ));
+    }
+    reasons
 }
 
 impl TestArgs {
@@ -582,4 +705,38 @@ fn describe_case_filters(opts: &TestArgs) -> String {
         parts.push(format!("--owner {}", opts.owners.join(",")));
     }
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_plan_job_json_includes_explain_reasons() {
+        let plan = TestPlan {
+            schema: "volang.test-plan.v1",
+            suite: "lang".to_string(),
+            jobs: vec![TestJob {
+                id: "case::vm".to_string(),
+                case_id: "case".to_string(),
+                kind: "file".to_string(),
+                path: "tests/lang/cases/case.vo".to_string(),
+                target: "vm".to_string(),
+                backend: "vm".to_string(),
+                matrix: Some("default".to_string()),
+                tags: vec!["runtime".to_string()],
+                owner: Some("runtime".to_string()),
+                env: BTreeMap::new(),
+                timeout_sec: 20,
+                expect: json!({ "kind": "pass" }),
+                selection_reasons: vec!["target vm selected by matrix default".to_string()],
+            }],
+        };
+        let value = serde_json::to_value(plan).unwrap();
+        assert_eq!(value["schema"], "volang.test-plan.v1");
+        assert_eq!(
+            value["jobs"][0]["selection_reasons"][0],
+            "target vm selected by matrix default"
+        );
+    }
 }

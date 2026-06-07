@@ -1,7 +1,7 @@
 //! Central GC layout validation for module metadata loaded by the VM.
 
 #[cfg(not(feature = "std"))]
-use alloc::{format, string::String};
+use alloc::{format, string::String, string::ToString};
 
 use crate::bytecode::{FunctionDef, Module};
 use vo_common_core::types::SlotType;

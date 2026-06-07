@@ -25,6 +25,38 @@ path = "apps/playground-legacy/src/assets/docs/generated/**"
 tasks = ["docs-lint"]
 
 [[known_prefix]]
+path = "lang/crates/vo-runtime/**"
+tasks = ["cargo-test-runtime", "cargo-test-gc-runtime", "vo-test-runtime-contract", "vo-test-gc"]
+
+[[known_prefix]]
+path = "lang/crates/vo-vm/**"
+tasks = ["cargo-test-vm", "cargo-test-gc-vm", "cargo-test-gc-vm-jit", "vo-test-runtime-contract", "vo-test-gc"]
+
+[[known_prefix]]
+path = "lang/crates/vo-jit/**"
+tasks = ["cargo-test-jit", "cargo-test-gc-jit", "cargo-test-gc-vm-jit", "vo-test-jit-contract", "vo-test-osr"]
+
+[[known_prefix]]
+path = "lang/crates/vo-analysis/**"
+tasks = ["cargo-test-analysis", "vo-test-compile"]
+
+[[known_prefix]]
+path = "lang/crates/vo-codegen/**"
+tasks = ["cargo-test-codegen", "vo-test-compile", "vo-test"]
+
+[[known_prefix]]
+path = "lang/crates/vo-module/**"
+tasks = ["cargo-test-module", "test-data-lint"]
+
+[[known_prefix]]
+path = "lang/crates/vo-web/**"
+tasks = ["wasm-check", "vo-test-wasm", "vo-web-wasm-build"]
+
+[[known_prefix]]
+path = "apps/studio/**"
+tasks = ["docs-lint", "studio-build", "quickplay-validate", "blockkart-smoke-static"]
+
+[[known_prefix]]
 path = "examples/**"
 tasks = ["eng-lint-examples", "examples-smoke"]
 

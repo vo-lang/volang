@@ -177,6 +177,8 @@ struct PlanResult {
     stdout: String,
     stderr: String,
     error: String,
+    expect: Expect,
+    baseline: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,11 +202,16 @@ struct JsonJobResult {
     matrix: Option<String>,
     tags: Vec<String>,
     owner: Option<String>,
+    expect: Expect,
     status: String,
     elapsed_ms: u128,
     stdout: String,
     stderr: String,
     error: String,
+    skip_reason: Option<String>,
+    failure_reason: Option<String>,
+    baseline: Option<String>,
+    artifacts: Vec<String>,
 }
 
 fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::Error>> {
@@ -249,6 +256,7 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
                     matrix: result.matrix.clone(),
                     tags: result.tags.clone(),
                     owner: result.owner.clone(),
+                    expect: result.expect.clone(),
                     status: if result.passed {
                         "passed".to_string()
                     } else {
@@ -258,6 +266,14 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
                     stdout: result.stdout.clone(),
                     stderr: result.stderr.clone(),
                     error: result.error.clone(),
+                    skip_reason: None,
+                    failure_reason: if result.passed || result.error.trim().is_empty() {
+                        None
+                    } else {
+                        Some(result.error.clone())
+                    },
+                    baseline: result.baseline.clone(),
+                    artifacts: Vec::new(),
                 })
                 .collect(),
         };
@@ -311,6 +327,7 @@ fn validate_differential_results(results: &mut [PlanResult]) {
             .insert(result.target.clone(), index);
     }
 
+    let mut baselines = Vec::new();
     let mut failures = Vec::new();
     for targets in by_case.values() {
         for (target, baseline_candidates) in [
@@ -327,6 +344,7 @@ fn validate_differential_results(results: &mut [PlanResult]) {
             else {
                 continue;
             };
+            baselines.push((target_index, baseline_name.to_string()));
 
             if let Some(detail) =
                 differential_mismatch(&results[baseline_index], &results[target_index])
@@ -339,6 +357,9 @@ fn validate_differential_results(results: &mut [PlanResult]) {
         }
     }
 
+    for (index, baseline) in baselines {
+        results[index].baseline = Some(baseline);
+    }
     for (index, detail) in failures {
         let result = &mut results[index];
         result.passed = false;
@@ -436,6 +457,8 @@ fn run_jobs_parallel(
                 stdout: String::new(),
                 stderr: String::new(),
                 error: err.to_string(),
+                expect: job.expect.clone(),
+                baseline: None,
             });
             if tx.send((index, result)).is_err() {
                 break;
@@ -489,6 +512,8 @@ fn run_jobs_parallel(
                     stdout: String::new(),
                     stderr: String::new(),
                     error: "worker exited without reporting a result".to_string(),
+                    expect: job.expect.clone(),
+                    baseline: None,
                 }
             })
         })
@@ -565,6 +590,8 @@ fn run_job_subprocess(job: &TestJob) -> Result<PlanResult, Box<dyn std::error::E
         stdout,
         stderr,
         error,
+        expect: job.expect.clone(),
+        baseline: None,
     })
 }
 
@@ -735,6 +762,13 @@ mod tests {
             stdout: stdout.to_string(),
             stderr: String::new(),
             error: error.to_string(),
+            expect: Expect {
+                kind: "pass".to_string(),
+                patterns: Vec::new(),
+                pattern: None,
+                jit_regular_call_side_exits_min: None,
+            },
+            baseline: None,
         }
     }
 
@@ -763,6 +797,7 @@ mod tests {
         validate_differential_results(&mut results);
 
         assert!(!results[2].passed);
+        assert_eq!(results[2].baseline.as_deref(), Some("gc-vm"));
         assert!(results[2].error.contains("against gc-vm"));
     }
 
@@ -777,5 +812,55 @@ mod tests {
 
         assert!(!results[1].passed);
         assert!(results[1].error.contains("panic/error expected"));
+    }
+
+    #[test]
+    fn json_result_job_includes_v1_schema_fields() {
+        let result = result("case", "jit", false, "", "boom");
+        let job = JsonJobResult {
+            id: result.id.clone(),
+            case_id: result.case_id.clone(),
+            kind: result.kind.clone(),
+            path: result.path.clone(),
+            target: result.target.clone(),
+            backend: result.backend.clone(),
+            matrix: result.matrix.clone(),
+            tags: result.tags.clone(),
+            owner: result.owner.clone(),
+            expect: result.expect.clone(),
+            status: "failed".to_string(),
+            elapsed_ms: result.elapsed_ms,
+            stdout: result.stdout.clone(),
+            stderr: result.stderr.clone(),
+            error: result.error.clone(),
+            skip_reason: None,
+            failure_reason: Some(result.error.clone()),
+            baseline: Some("vm".to_string()),
+            artifacts: Vec::new(),
+        };
+        let value = serde_json::to_value(job).unwrap();
+        for key in [
+            "id",
+            "case_id",
+            "kind",
+            "path",
+            "target",
+            "backend",
+            "matrix",
+            "tags",
+            "owner",
+            "expect",
+            "status",
+            "elapsed_ms",
+            "stdout",
+            "stderr",
+            "error",
+            "skip_reason",
+            "failure_reason",
+            "baseline",
+            "artifacts",
+        ] {
+            assert!(value.get(key).is_some(), "missing {key}");
+        }
     }
 }

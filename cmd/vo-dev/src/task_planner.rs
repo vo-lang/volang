@@ -3,7 +3,8 @@ use crate::glob::path_matches;
 use crate::lint_system::lint_task_file;
 use crate::task_graph::{add_task_with_deps, resolve_selector, task_map};
 use anyhow::{anyhow, bail, Result};
-use std::collections::{BTreeSet, HashSet};
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -15,6 +16,7 @@ pub(crate) struct PlanArgs {
     pub(crate) base: Option<String>,
     pub(crate) head: Option<String>,
     pub(crate) format: String,
+    pub(crate) explain: bool,
 }
 
 impl PlanArgs {
@@ -24,10 +26,12 @@ impl PlanArgs {
         let mut base = None;
         let mut head = None;
         let mut format = "text".to_string();
+        let mut explain = false;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
                 "--changed" => changed = true,
+                "--explain" => explain = true,
                 "--base" => {
                     i += 1;
                     base = Some(
@@ -72,18 +76,45 @@ impl PlanArgs {
             base,
             head,
             format,
+            explain,
         })
     }
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct TaskPlanDetails {
+    pub(crate) tasks: Vec<String>,
+    pub(crate) changed_files: Vec<String>,
+    pub(crate) unknown_files: Vec<String>,
+    pub(crate) reasons: BTreeMap<String, Vec<String>>,
+}
+
 pub(crate) fn plan_tasks(root: &Path, opts: &PlanArgs) -> Result<(Vec<String>, Vec<String>)> {
+    let plan = plan_task_details(root, opts)?;
+    Ok((plan.tasks, plan.changed_files))
+}
+
+pub(crate) fn plan_task_details(root: &Path, opts: &PlanArgs) -> Result<TaskPlanDetails> {
     let config = load_tasks(root)?;
     lint_task_file(root, &config)?;
     let task_map = task_map(&config)?;
     let changed_mode = opts.changed || opts.selector == "smart";
     if !changed_mode {
         let tasks = resolve_selector(&config, &opts.selector)?;
-        return Ok((tasks, Vec::new()));
+        let mut reasons = BTreeMap::new();
+        for task in &tasks {
+            add_reason(
+                &mut reasons,
+                task,
+                format!("selected by explicit selector {}", opts.selector),
+            );
+        }
+        return Ok(TaskPlanDetails {
+            tasks,
+            changed_files: Vec::new(),
+            unknown_files: Vec::new(),
+            reasons,
+        });
     }
 
     let ci = load_ci(root)?;
@@ -103,6 +134,7 @@ pub(crate) fn plan_tasks(root: &Path, opts: &PlanArgs) -> Result<(Vec<String>, V
     let mut selected = Vec::new();
     let mut selected_set = HashSet::new();
     let mut unknown = Vec::new();
+    let mut reasons = BTreeMap::new();
 
     for file in &files {
         let mut matched = false;
@@ -112,6 +144,13 @@ pub(crate) fn plan_tasks(root: &Path, opts: &PlanArgs) -> Result<(Vec<String>, V
                 for name in &known.tasks {
                     if in_scope(name, &scope) && selected_set.insert(name.clone()) {
                         selected.push(name.clone());
+                    }
+                    if in_scope(name, &scope) {
+                        add_reason(
+                            &mut reasons,
+                            name,
+                            format!("changed path {file} matched known prefix {}", known.path),
+                        );
                     }
                 }
             }
@@ -132,6 +171,17 @@ pub(crate) fn plan_tasks(root: &Path, opts: &PlanArgs) -> Result<(Vec<String>, V
                 if selected_set.insert(task.name.clone()) {
                     selected.push(task.name.clone());
                 }
+                for pattern in task
+                    .inputs
+                    .iter()
+                    .filter(|pattern| path_matches(file, pattern))
+                {
+                    add_reason(
+                        &mut reasons,
+                        &task.name,
+                        format!("changed path {file} matched task input {pattern}"),
+                    );
+                }
             }
         }
         if !matched {
@@ -151,6 +201,17 @@ pub(crate) fn plan_tasks(root: &Path, opts: &PlanArgs) -> Result<(Vec<String>, V
                     if in_scope(name, &scope) && selected_set.insert(name.clone()) {
                         selected.push(name.clone());
                     }
+                    if in_scope(name, &scope) {
+                        add_reason(
+                            &mut reasons,
+                            name,
+                            format!(
+                                "unknown path fallback for {} unmatched file(s): {}",
+                                unknown.len(),
+                                unknown.join(", ")
+                            ),
+                        );
+                    }
                 }
             }
             "error" => bail!(
@@ -161,14 +222,30 @@ pub(crate) fn plan_tasks(root: &Path, opts: &PlanArgs) -> Result<(Vec<String>, V
         }
     }
 
-    add_downstream_dependents(&config, &scope, &mut selected, &mut selected_set);
+    add_downstream_dependents(
+        &config,
+        &scope,
+        &mut selected,
+        &mut selected_set,
+        &mut reasons,
+    );
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for name in selected {
         add_task_with_deps(&name, &task_map, &mut out, &mut seen)?;
     }
-    Ok((out, files))
+    for task in &out {
+        reasons
+            .entry(task.clone())
+            .or_insert_with(|| vec!["dependency expansion for selected task".to_string()]);
+    }
+    Ok(TaskPlanDetails {
+        tasks: out,
+        changed_files: files,
+        unknown_files: unknown,
+        reasons,
+    })
 }
 
 fn add_downstream_dependents(
@@ -176,6 +253,7 @@ fn add_downstream_dependents(
     scope: &Option<HashSet<String>>,
     selected: &mut Vec<String>,
     selected_set: &mut HashSet<String>,
+    reasons: &mut BTreeMap<String, Vec<String>>,
 ) {
     let mut index = 0;
     while index < selected.len() {
@@ -189,8 +267,20 @@ fn add_downstream_dependents(
                 && selected_set.insert(task.name.clone())
             {
                 selected.push(task.name.clone());
+                add_reason(
+                    reasons,
+                    &task.name,
+                    format!("downstream task depends on selected task {selected_name}"),
+                );
             }
         }
+    }
+}
+
+fn add_reason(reasons: &mut BTreeMap<String, Vec<String>>, task: &str, reason: String) {
+    let entry = reasons.entry(task.to_string()).or_default();
+    if !entry.iter().any(|existing| existing == &reason) {
+        entry.push(reason);
     }
 }
 

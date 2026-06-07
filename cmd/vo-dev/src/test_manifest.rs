@@ -29,11 +29,11 @@ pub(crate) struct ManifestCase {
     pub(crate) skip: Vec<String>,
     #[serde(default)]
     pub(crate) timeout: BTreeMap<String, u64>,
-    reason: Option<String>,
-    zip_root: Option<String>,
+    pub(crate) reason: Option<String>,
+    pub(crate) zip_root: Option<String>,
     #[serde(default)]
-    blank: bool,
-    expect: Option<toml::Value>,
+    pub(crate) blank: bool,
+    pub(crate) expect: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +63,51 @@ struct TestCatalogCase {
     timeout: BTreeMap<String, u64>,
     reason: Option<String>,
     expect: CaseExpect,
+}
+
+#[derive(Debug, Serialize)]
+struct TestStats {
+    schema: &'static str,
+    suite: String,
+    cases: usize,
+    jobs: usize,
+    expected_fail_cases: usize,
+    skip_entries: usize,
+    cases_by_kind: BTreeMap<String, usize>,
+    cases_by_matrix: BTreeMap<String, usize>,
+    jobs_by_target: BTreeMap<String, usize>,
+    skips_by_target: BTreeMap<String, usize>,
+    cases_by_tag: BTreeMap<String, usize>,
+    cases_by_owner: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestCoverage {
+    schema: &'static str,
+    suite: String,
+    cases: usize,
+    missing_matrix: usize,
+    missing_tags: usize,
+    missing_owner: usize,
+    missing_expect: usize,
+    explicit_targets: usize,
+    explicit_targets_without_reason: usize,
+    compile_fail_without_compile_matrix: usize,
+    gc_filename_only: usize,
+    unowned_skips: usize,
+    unowned_failures: usize,
+    unowned_timeouts: usize,
+    unowned_target_overrides: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TestExplain {
+    schema: &'static str,
+    suite: String,
+    case: TestCatalogCase,
+    selected_targets: Vec<String>,
+    selected_jobs: Vec<String>,
+    reasons: Vec<String>,
 }
 
 pub(crate) fn load_manifest(root: &Path) -> Result<ManifestFile> {
@@ -213,7 +258,7 @@ fn parse_u64_expect_min(
         .transpose()
 }
 
-pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
+pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
     let manifest = load_manifest(root)?;
     let test_config = load_test_config(root)?;
     let targets = &test_config.targets;
@@ -262,6 +307,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             bail!("duplicate test case id: {}", case.id);
         }
         validate_manifest_case_shape(case)?;
+        validate_manifest_case_metadata(case, &test_config, strict)?;
         if case.kind != "file" && case.kind != "project" && case.kind != "zip" {
             bail!("case {} has invalid kind {}", case.id, case.kind);
         }
@@ -392,6 +438,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             if is_gc_regression_case(case)
                 && !missing_required_targets(&resolved_targets, &test_config.gc_regression_targets)
                     .is_empty()
+                && !has_manifest_reason(case)
             {
                 bail!(
                     "case {} looks like a GC regression but does not target {}",
@@ -427,7 +474,17 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn print_test_stats(root: &Path, suite: &str) -> Result<()> {
+pub(crate) fn print_test_stats(root: &Path, suite: &str, format: &str) -> Result<()> {
+    let stats = collect_test_stats(root, suite)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        print_test_stats_text(&stats);
+    }
+    Ok(())
+}
+
+fn collect_test_stats(root: &Path, suite: &str) -> Result<TestStats> {
     let manifest = load_manifest(root)?;
     let test_config = load_test_config(root)?;
     if manifest.suite != suite {
@@ -495,18 +552,34 @@ pub(crate) fn print_test_stats(root: &Path, suite: &str) -> Result<()> {
         }
     }
 
-    println!("{} test stats:", manifest.suite);
-    println!("  cases: {case_count}");
-    println!("  jobs: {job_count}");
-    println!("  expected-fail cases: {expected_fail_count}");
-    println!("  skip entries: {skip_count}");
-    print_count_map("cases by kind", &by_kind);
-    print_count_map("cases by matrix", &by_matrix);
-    print_count_map("jobs by target", &jobs_by_target);
-    print_count_map("skips by target", &skips_by_target);
-    print_count_map("cases by tag", &by_tag);
-    print_count_map("cases by owner", &by_owner);
-    Ok(())
+    Ok(TestStats {
+        schema: "volang.test-stats.v1",
+        suite: manifest.suite,
+        cases: case_count,
+        jobs: job_count,
+        expected_fail_cases: expected_fail_count,
+        skip_entries: skip_count,
+        cases_by_kind: by_kind,
+        cases_by_matrix: by_matrix,
+        jobs_by_target,
+        skips_by_target,
+        cases_by_tag: by_tag,
+        cases_by_owner: by_owner,
+    })
+}
+
+fn print_test_stats_text(stats: &TestStats) {
+    println!("{} test stats:", stats.suite);
+    println!("  cases: {}", stats.cases);
+    println!("  jobs: {}", stats.jobs);
+    println!("  expected-fail cases: {}", stats.expected_fail_cases);
+    println!("  skip entries: {}", stats.skip_entries);
+    print_count_map("cases by kind", &stats.cases_by_kind);
+    print_count_map("cases by matrix", &stats.cases_by_matrix);
+    print_count_map("jobs by target", &stats.jobs_by_target);
+    print_count_map("skips by target", &stats.skips_by_target);
+    print_count_map("cases by tag", &stats.cases_by_tag);
+    print_count_map("cases by owner", &stats.cases_by_owner);
 }
 
 pub(crate) fn print_test_catalog(root: &Path, suite: &str, format: &str) -> Result<()> {
@@ -565,6 +638,250 @@ pub(crate) fn print_test_catalog(root: &Path, suite: &str, format: &str) -> Resu
     Ok(())
 }
 
+pub(crate) fn print_test_coverage(root: &Path, suite: &str, format: &str) -> Result<()> {
+    let coverage = collect_test_coverage(root, suite)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&coverage)?);
+    } else {
+        println!("{} test metadata coverage:", coverage.suite);
+        println!("  cases: {}", coverage.cases);
+        println!("  missing matrix: {}", coverage.missing_matrix);
+        println!("  missing tags: {}", coverage.missing_tags);
+        println!("  missing owner: {}", coverage.missing_owner);
+        println!("  missing expect: {}", coverage.missing_expect);
+        println!("  explicit targets: {}", coverage.explicit_targets);
+        println!(
+            "  explicit targets without reason: {}",
+            coverage.explicit_targets_without_reason
+        );
+        println!(
+            "  compile-fail without compile matrix: {}",
+            coverage.compile_fail_without_compile_matrix
+        );
+        println!("  filename-only GC metadata: {}", coverage.gc_filename_only);
+        println!("  unowned skips: {}", coverage.unowned_skips);
+        println!("  unowned failures: {}", coverage.unowned_failures);
+        println!("  unowned timeouts: {}", coverage.unowned_timeouts);
+        println!(
+            "  unowned target overrides: {}",
+            coverage.unowned_target_overrides
+        );
+    }
+    if coverage.missing_matrix != 0
+        || coverage.missing_tags != 0
+        || coverage.missing_owner != 0
+        || coverage.missing_expect != 0
+        || coverage.explicit_targets != 0
+        || coverage.explicit_targets_without_reason != 0
+        || coverage.compile_fail_without_compile_matrix != 0
+        || coverage.gc_filename_only != 0
+        || coverage.unowned_skips != 0
+        || coverage.unowned_failures != 0
+        || coverage.unowned_timeouts != 0
+        || coverage.unowned_target_overrides != 0
+    {
+        bail!("{} test metadata coverage is incomplete", coverage.suite);
+    }
+    Ok(())
+}
+
+pub(crate) fn explain_test_case(
+    root: &Path,
+    suite: &str,
+    case_id: &str,
+    format: &str,
+) -> Result<()> {
+    let manifest = load_manifest(root)?;
+    let test_config = load_test_config(root)?;
+    if manifest.suite != suite {
+        bail!(
+            "manifest suite {} does not match requested suite {}",
+            manifest.suite,
+            suite
+        );
+    }
+    let case = manifest
+        .cases
+        .iter()
+        .find(|case| case.id == case_id)
+        .ok_or_else(|| anyhow!("unknown test case: {case_id}"))?;
+    let selected_targets = resolved_case_targets(case, &test_config)?;
+    let expect = parse_case_expect(case)?;
+    let selected_jobs = selected_targets
+        .iter()
+        .filter(|target| !has_target_name(&case.skip, target))
+        .map(|target| {
+            if expect.kind == "fail" {
+                format!("{}::{target}-compile", case.id)
+            } else {
+                format!("{}::{target}", case.id)
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut reasons = Vec::new();
+    if let Some(matrix) = &case.matrix {
+        reasons.push(format!(
+            "matrix {matrix} expands to {}",
+            selected_targets.join(",")
+        ));
+    }
+    if !case.targets.is_empty() {
+        reasons.push(format!(
+            "explicit target override {}",
+            case.targets.join(",")
+        ));
+    }
+    if !case.tags.is_empty() {
+        reasons.push(format!("tags {}", case.tags.join(",")));
+    }
+    if let Some(owner) = &case.owner {
+        reasons.push(format!("owner {owner}"));
+    }
+    if !case.skip.is_empty() {
+        reasons.push(format!(
+            "skips {} because {}",
+            case.skip.join(","),
+            case.reason.as_deref().unwrap_or("(missing reason)")
+        ));
+    }
+    if !case.timeout.is_empty() {
+        reasons.push(format!("target timeouts {:?}", case.timeout));
+    }
+    if expect.kind == "fail" {
+        reasons.push(format!(
+            "expected compile failure because {}",
+            case.reason.as_deref().unwrap_or("(missing reason)")
+        ));
+    }
+    let explanation = TestExplain {
+        schema: "volang.test-explain.v1",
+        suite: manifest.suite.clone(),
+        case: TestCatalogCase {
+            id: case.id.clone(),
+            kind: case.kind.clone(),
+            path: manifest_case_path(root, &manifest, case)?,
+            targets: selected_targets.clone(),
+            matrix: case.matrix.clone(),
+            tags: case.tags.clone(),
+            owner: case.owner.clone(),
+            skip: case.skip.clone(),
+            timeout: case.timeout.clone(),
+            reason: case.reason.clone(),
+            expect,
+        },
+        selected_targets,
+        selected_jobs,
+        reasons,
+    };
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&explanation)?);
+    } else {
+        println!("test case {}", explanation.case.id);
+        println!("  path: {}", explanation.case.path);
+        println!(
+            "  matrix: {}",
+            explanation.case.matrix.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "  owner: {}",
+            explanation.case.owner.as_deref().unwrap_or("(missing)")
+        );
+        println!("  tags: {}", explanation.case.tags.join(","));
+        println!("  targets: {}", explanation.selected_targets.join(","));
+        println!("  jobs: {}", explanation.selected_jobs.join(","));
+        println!("  reasons:");
+        for reason in &explanation.reasons {
+            println!("    - {reason}");
+        }
+    }
+    Ok(())
+}
+
+fn collect_test_coverage(root: &Path, suite: &str) -> Result<TestCoverage> {
+    let manifest = load_manifest(root)?;
+    if manifest.suite != suite {
+        bail!(
+            "manifest suite {} does not match requested suite {}",
+            manifest.suite,
+            suite
+        );
+    }
+    let mut missing_matrix = 0usize;
+    let mut missing_tags = 0usize;
+    let mut missing_owner = 0usize;
+    let mut missing_expect = 0usize;
+    let mut explicit_targets = 0usize;
+    let mut explicit_targets_without_reason = 0usize;
+    let mut compile_fail_without_compile_matrix = 0usize;
+    let mut gc_filename_only = 0usize;
+    let mut unowned_skips = 0usize;
+    let mut unowned_failures = 0usize;
+    let mut unowned_timeouts = 0usize;
+    let mut unowned_target_overrides = 0usize;
+    for case in &manifest.cases {
+        let has_owner = !case.owner.as_deref().unwrap_or_default().trim().is_empty();
+        if case.matrix.is_none() {
+            missing_matrix += 1;
+        }
+        if case.tags.is_empty() {
+            missing_tags += 1;
+        }
+        if !has_owner {
+            missing_owner += 1;
+        }
+        if case.expect.is_none() {
+            missing_expect += 1;
+        }
+        if !case.targets.is_empty() {
+            explicit_targets += 1;
+            if !has_manifest_reason(case) {
+                explicit_targets_without_reason += 1;
+            }
+            if !has_owner {
+                unowned_target_overrides += 1;
+            }
+        }
+        let expect = parse_case_expect(case)?;
+        if expect.kind == "fail" {
+            if case.matrix.as_deref() != Some("compile") {
+                compile_fail_without_compile_matrix += 1;
+            }
+            if !has_owner {
+                unowned_failures += 1;
+            }
+        }
+        if looks_like_gc_regression(case)
+            && case.matrix.as_deref() != Some("gc")
+            && !case.tags.iter().any(|tag| tag == "gc")
+        {
+            gc_filename_only += 1;
+        }
+        if !case.skip.is_empty() && !has_owner {
+            unowned_skips += 1;
+        }
+        if !case.timeout.is_empty() && !has_owner {
+            unowned_timeouts += 1;
+        }
+    }
+    Ok(TestCoverage {
+        schema: "volang.test-coverage.v1",
+        suite: manifest.suite,
+        cases: manifest.cases.len(),
+        missing_matrix,
+        missing_tags,
+        missing_owner,
+        missing_expect,
+        explicit_targets,
+        explicit_targets_without_reason,
+        compile_fail_without_compile_matrix,
+        gc_filename_only,
+        unowned_skips,
+        unowned_failures,
+        unowned_timeouts,
+        unowned_target_overrides,
+    })
+}
+
 fn validate_manifest_case_shape(case: &ManifestCase) -> Result<()> {
     if case.id.trim().is_empty() {
         bail!("case id cannot be empty");
@@ -612,6 +929,104 @@ fn validate_manifest_case_shape(case: &ManifestCase) -> Result<()> {
         ("zip", None) => {}
         (_, Some(_)) => bail!("case {} zip_root is only valid for zip cases", case.id),
         (_, None) => {}
+    }
+    Ok(())
+}
+
+fn validate_manifest_case_metadata(
+    case: &ManifestCase,
+    test_config: &TestConfig,
+    strict: bool,
+) -> Result<()> {
+    if !strict {
+        if !case.targets.is_empty() {
+            for (matrix, targets) in &test_config.matrices {
+                if targets == &case.targets {
+                    eprintln!(
+                        "warning: case {} explicit targets match matrix {}; prefer matrix = {:?}",
+                        case.id, matrix, matrix
+                    );
+                    break;
+                }
+            }
+        }
+        return Ok(());
+    }
+    if case.matrix.as_deref().unwrap_or_default().trim().is_empty() {
+        bail!(
+            "case {} missing matrix; add matrix = \"default\", \"native\", \"gc\", or \"compile\"",
+            case.id
+        );
+    }
+    if case.tags.is_empty() {
+        bail!(
+            "case {} missing tags; add tags = [\"<domain>\", \"regression\"]",
+            case.id
+        );
+    }
+    if case.owner.as_deref().unwrap_or_default().trim().is_empty() {
+        bail!(
+            "case {} missing owner; add owner = \"<subsystem>\"",
+            case.id
+        );
+    }
+    if case.expect.is_none() {
+        bail!(
+            "case {} missing expect; add expect = \"pass\" or expect = {{ fail = [...] }}",
+            case.id
+        );
+    }
+    if !case.targets.is_empty() {
+        bail!(
+            "case {} uses explicit targets; completion requires a named matrix in eng/tests.toml",
+            case.id
+        );
+    }
+    if !case.timeout.is_empty() && !has_manifest_reason(case) {
+        bail!("case {} has timeout but no reason", case.id);
+    }
+    let expect = parse_case_expect(case)?;
+    if expect.kind == "fail" && case.matrix.as_deref() != Some("compile") {
+        bail!(
+            "case {} expected failure must use matrix = \"compile\"",
+            case.id
+        );
+    }
+    if expect.kind == "fail" && !case.tags.iter().any(|tag| tag == "compile-fail") {
+        bail!(
+            "case {} expected failure must include tag compile-fail",
+            case.id
+        );
+    }
+    if case.blank
+        && !matches!(
+            case.owner.as_deref(),
+            Some("eng") | Some("runtime") | Some("stdlib") | Some("module") | Some("typechecker")
+        )
+    {
+        bail!(
+            "blank case {} must be owned by eng or the relevant subsystem",
+            case.id
+        );
+    }
+    if looks_like_gc_regression(case)
+        && case.matrix.as_deref() != Some("gc")
+        && !case.tags.iter().any(|tag| tag == "gc")
+    {
+        bail!(
+            "case {} looks like a GC regression but is not selected by matrix/tag metadata",
+            case.id
+        );
+    }
+    for (matrix, targets) in &test_config.matrices {
+        if targets == &case.targets {
+            bail!(
+                "case {} explicit targets match matrix {}; use matrix = {:?}",
+                case.id,
+                matrix,
+                matrix
+            );
+        }
     }
     Ok(())
 }
@@ -808,6 +1223,33 @@ fn collect_zip_files(root: &Path) -> Result<Vec<PathBuf>> {
     collect_zip_files_inner(root, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stats_json_schema_is_stable() {
+        let stats = TestStats {
+            schema: "volang.test-stats.v1",
+            suite: "lang".to_string(),
+            cases: 1,
+            jobs: 1,
+            expected_fail_cases: 0,
+            skip_entries: 0,
+            cases_by_kind: BTreeMap::new(),
+            cases_by_matrix: BTreeMap::new(),
+            jobs_by_target: BTreeMap::new(),
+            skips_by_target: BTreeMap::new(),
+            cases_by_tag: BTreeMap::new(),
+            cases_by_owner: BTreeMap::new(),
+        };
+        let value = serde_json::to_value(stats).unwrap();
+        assert_eq!(value["schema"], "volang.test-stats.v1");
+        assert!(value.get("cases_by_matrix").is_some());
+        assert!(value.get("jobs_by_target").is_some());
+    }
 }
 
 fn collect_zip_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {

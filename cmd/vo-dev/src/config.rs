@@ -9,8 +9,25 @@ pub(crate) struct TaskFile {
     pub(crate) version: u32,
     #[serde(default)]
     pub(crate) groups: BTreeMap<String, Vec<String>>,
+    #[serde(default, rename = "group")]
+    pub(crate) group_meta: Vec<TaskGroup>,
     #[serde(default, rename = "task")]
     pub(crate) tasks: Vec<Task>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TaskGroup {
+    pub(crate) name: String,
+    pub(crate) title: String,
+    pub(crate) tier_intent: String,
+    pub(crate) owner: String,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) tasks: Vec<String>,
+    #[serde(default)]
+    pub(crate) included_in: Vec<String>,
+    pub(crate) selection_policy: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
