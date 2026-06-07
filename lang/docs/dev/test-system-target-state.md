@@ -23,7 +23,8 @@ The target state is represented in executable policy:
 - `tests/lang/manifest.toml` cases carry complete matrix, tag, owner, and
   expectation metadata.
 - Strict language lint and coverage commands reject missing metadata, target
-  arrays, unowned skips/failures/timeouts, and filename-only GC selection.
+  arrays, unowned skips/failures/timeouts, loose root-level `.vo` cases, and
+  filename-only GC selection.
 - Native and WASM language runs emit `volang.test-result.v1`, and
   `vo-dev test run --format json` aggregates mixed native/WASM output.
 - `eng/tasks.toml` declares first-class group metadata plus owner/tag/tier
@@ -260,7 +261,7 @@ Default functional case:
 [[case]]
 id = "slice-append-semantics"
 kind = "file"
-path = "cases/slice_append_semantics.vo"
+path = "cases/runtime/slice/slice_append_semantics.vo"
 matrix = "default"
 tags = ["slice", "runtime", "regression"]
 owner = "runtime"
@@ -273,7 +274,7 @@ GC regression case:
 [[case]]
 id = "gc-slice-grow-retains-elements"
 kind = "file"
-path = "cases/gc_slice_grow.vo"
+path = "cases/gc/gc_slice_grow.vo"
 matrix = "gc"
 tags = ["gc", "slice", "barrier", "regression"]
 owner = "runtime-gc"
@@ -300,7 +301,7 @@ Override case:
 [[case]]
 id = "blocking-file-ops"
 kind = "file"
-path = "cases/blocking_file_ops.vo"
+path = "cases/runtime/core/2026_01_31_blocking_file_ops.vo"
 matrix = "default"
 skip = ["nostd", "wasm"]
 reason = "requires native file APIs not available in those targets"
@@ -404,8 +405,8 @@ cargo run -q -p vo-dev -- test plan --suite lang --matrix gc
 cargo run -q -p vo-dev -- test run --suite lang --tags gc --format json
 ```
 
-These commands are implemented through `vo-dev`. The remaining result-schema
-work is native/WASM result aggregation, not catalog or case selection.
+These commands are implemented through `vo-dev`. Native and WASM runners emit
+the shared result schema, and `vo-dev` aggregates mixed native/WASM JSON output.
 
 ## CI Routing Target State
 
@@ -421,7 +422,7 @@ Examples:
   `domain = ["gc", "runtime"]`.
 - `lang/crates/vo-jit/src/semantics/**` selects `jit-contract`, JIT crate
   tests, and language JIT/OSR smoke because it matches `domain = ["jit"]`.
-- `tests/lang/cases/gc_slice_grow.vo` selects language manifest lint and the
+- `tests/lang/cases/gc/gc_slice_grow.vo` selects language manifest lint and the
   case's declared matrix because it is a manifest input.
 - `apps/studio/src/**` selects Studio build and site smoke, not language GC
   tests unless shared runtime inputs changed.
@@ -581,10 +582,12 @@ Rules:
 
 ### Phase 6: Directory Cleanup
 
-- Move language cases into clearer domain directories after metadata coverage is
-  stable.
-- Keep the manifest as the authoritative catalog.
-- Use catalog diffs to confirm no jobs were lost during movement.
+- Implemented: root-level language `.vo` cases have been moved into domain
+  directories that mirror the metadata catalog.
+- Implemented: the manifest remains the authoritative catalog; directories are
+  a browsing aid and carry no selection policy.
+- Implemented: case ids remain stable, and catalog/stats/coverage checks verify
+  that no jobs or metadata were lost during movement.
 
 ### Phase 7: Optional New Testing Techniques
 

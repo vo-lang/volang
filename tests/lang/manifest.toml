@@ -5,7 +5,7 @@ root = "tests/lang"
 [[case]]
 id = "2026-01-29-jit-trampoline-select"
 kind = "file"
-path = "cases/2026_01_29_jit_trampoline_select.vo"
+path = "cases/jit/2026_01_29_jit_trampoline_select.vo"
 matrix = "default"
 tags = ["jit", "regression", "select"]
 owner = "jit"
@@ -14,7 +14,7 @@ expect = "pass"
 [[case]]
 id = "2026-01-30-jit-nested-call"
 kind = "file"
-path = "cases/2026_01_30_jit_nested_call.vo"
+path = "cases/jit/2026_01_30_jit_nested_call.vo"
 matrix = "default"
 tags = ["jit", "regression"]
 owner = "jit"
@@ -23,7 +23,7 @@ expect = "pass"
 [[case]]
 id = "2026-01-30-jit-to-jit-direct"
 kind = "file"
-path = "cases/2026_01_30_jit_to_jit_direct.vo"
+path = "cases/jit/2026_01_30_jit_to_jit_direct.vo"
 matrix = "default"
 tags = ["jit", "regression"]
 owner = "jit"
@@ -32,7 +32,7 @@ expect = "pass"
 [[case]]
 id = "2026-01-31-blocking-file-ops"
 kind = "file"
-path = "cases/2026_01_31_blocking_file_ops.vo"
+path = "cases/runtime/core/2026_01_31_blocking_file_ops.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -43,7 +43,7 @@ expect = "pass"
 [[case]]
 id = "2026-01-31-nil-slice-write"
 kind = "file"
-path = "cases/2026_01_31_nil_slice_write.vo"
+path = "cases/runtime/slice/2026_01_31_nil_slice_write.vo"
 matrix = "default"
 tags = ["runtime", "regression", "slice"]
 owner = "runtime"
@@ -52,7 +52,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-01-jit-vm-call-zero-init"
 kind = "file"
-path = "cases/2026_02_01_jit_vm_call_zero_init.vo"
+path = "cases/jit/2026_02_01_jit_vm_call_zero_init.vo"
 matrix = "default"
 tags = ["jit", "regression"]
 owner = "jit"
@@ -61,7 +61,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-02-mixed-jit-vm-waitio"
 kind = "file"
-path = "cases/2026_02_02_mixed_jit_vm_waitio.vo"
+path = "cases/jit/2026_02_02_mixed_jit_vm_waitio.vo"
 matrix = "default"
 tags = ["jit", "regression"]
 owner = "jit"
@@ -72,7 +72,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-02-nested-jit-waitio"
 kind = "file"
-path = "cases/2026_02_02_nested_jit_waitio.vo"
+path = "cases/jit/2026_02_02_nested_jit_waitio.vo"
 matrix = "default"
 tags = ["jit", "regression"]
 owner = "jit"
@@ -83,7 +83,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-04-int-div-mod-overflow"
 kind = "file"
-path = "cases/2026_02_04_int_div_mod_overflow.vo"
+path = "cases/runtime/numeric/2026_02_04_int_div_mod_overflow.vo"
 matrix = "default"
 tags = ["runtime", "regression", "numeric"]
 owner = "runtime"
@@ -92,7 +92,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-04-nil-check-merge"
 kind = "file"
-path = "cases/2026_02_04_nil_check_merge.vo"
+path = "cases/runtime/core/2026_02_04_nil_check_merge.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -101,7 +101,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-06-channel-wake-pc"
 kind = "file"
-path = "cases/2026_02_06_channel_wake_pc.vo"
+path = "cases/runtime/scheduler/2026_02_06_channel_wake_pc.vo"
 matrix = "default"
 tags = ["scheduler", "regression", "channel"]
 owner = "runtime"
@@ -112,7 +112,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-06-jit-loop-defer-comprehensive"
 kind = "file"
-path = "cases/2026_02_06_jit_loop_defer_comprehensive.vo"
+path = "cases/jit/2026_02_06_jit_loop_defer_comprehensive.vo"
 matrix = "default"
 tags = ["jit", "regression", "defer"]
 owner = "jit"
@@ -121,7 +121,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-06-jit-loop-osr-defer"
 kind = "file"
-path = "cases/2026_02_06_jit_loop_osr_defer.vo"
+path = "cases/jit/2026_02_06_jit_loop_osr_defer.vo"
 matrix = "default"
 tags = ["jit", "osr", "regression", "defer"]
 owner = "jit"
@@ -130,7 +130,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-06-jit-select-comprehensive"
 kind = "file"
-path = "cases/2026_02_06_jit_select_comprehensive.vo"
+path = "cases/jit/2026_02_06_jit_select_comprehensive.vo"
 matrix = "default"
 tags = ["jit", "regression", "select"]
 owner = "jit"
@@ -139,7 +139,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-06-loop-osr-only"
 kind = "file"
-path = "cases/2026_02_06_loop_osr_only.vo"
+path = "cases/jit/2026_02_06_loop_osr_only.vo"
 matrix = "default"
 tags = ["osr", "regression"]
 owner = "jit"
@@ -148,7 +148,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-06-port-wake-pc"
 kind = "file"
-path = "cases/2026_02_06_port_wake_pc.vo"
+path = "cases/runtime/scheduler/2026_02_06_port_wake_pc.vo"
 matrix = "default"
 tags = ["scheduler", "regression", "port"]
 owner = "runtime"
@@ -159,7 +159,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-18-ptr-selector-non-zero-offset"
 kind = "file"
-path = "cases/2026_02_18_ptr_selector_non_zero_offset.vo"
+path = "cases/runtime/scheduler/2026_02_18_ptr_selector_non_zero_offset.vo"
 matrix = "default"
 tags = ["scheduler", "regression", "select"]
 owner = "runtime"
@@ -168,7 +168,7 @@ expect = "pass"
 [[case]]
 id = "2026-02-18-select-recv-assign-capture"
 kind = "file"
-path = "cases/2026_02_18_select_recv_assign_capture.vo"
+path = "cases/runtime/scheduler/2026_02_18_select_recv_assign_capture.vo"
 matrix = "default"
 tags = ["scheduler", "regression", "select"]
 owner = "runtime"
@@ -177,7 +177,7 @@ expect = "pass"
 [[case]]
 id = "2026-03-13-jit-port-queue-builtins"
 kind = "file"
-path = "cases/2026_03_13_jit_port_queue_builtins.vo"
+path = "cases/jit/2026_03_13_jit_port_queue_builtins.vo"
 matrix = "default"
 tags = ["jit", "regression", "port"]
 owner = "jit"
@@ -186,7 +186,7 @@ expect = "pass"
 [[case]]
 id = "2026-03-15-remote-blocked-recv-bytes"
 kind = "file"
-path = "cases/2026_03_15_remote_blocked_recv_bytes.vo"
+path = "cases/stdlib/2026_03_15_remote_blocked_recv_bytes.vo"
 matrix = "default"
 tags = ["stdlib", "regression"]
 owner = "stdlib"
@@ -197,7 +197,7 @@ expect = "pass"
 [[case]]
 id = "anon-interface-assertion"
 kind = "file"
-path = "cases/anon_interface_assertion.vo"
+path = "cases/runtime/interface/anon_interface_assertion.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -206,7 +206,7 @@ expect = "pass"
 [[case]]
 id = "anon-struct-iface-impl"
 kind = "file"
-path = "cases/anon_struct_iface_impl.vo"
+path = "cases/runtime/interface/anon_struct_iface_impl.vo"
 matrix = "default"
 tags = ["interface", "struct"]
 owner = "runtime"
@@ -215,7 +215,7 @@ expect = "pass"
 [[case]]
 id = "anonymous-receiver"
 kind = "file"
-path = "cases/anonymous_receiver.vo"
+path = "cases/runtime/core/anonymous_receiver.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -224,7 +224,7 @@ expect = "pass"
 [[case]]
 id = "anonymous-struct-literal"
 kind = "file"
-path = "cases/anonymous_struct_literal.vo"
+path = "cases/typechecker/anonymous_struct_literal.vo"
 matrix = "default"
 tags = ["typechecker", "struct"]
 owner = "typechecker"
@@ -233,7 +233,7 @@ expect = "pass"
 [[case]]
 id = "any-alias-interface"
 kind = "file"
-path = "cases/any_alias_interface.vo"
+path = "cases/runtime/interface/any_alias_interface.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -242,7 +242,7 @@ expect = "pass"
 [[case]]
 id = "append-self-slice"
 kind = "file"
-path = "cases/append_self_slice.vo"
+path = "cases/runtime/slice/append_self_slice.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -251,7 +251,7 @@ expect = "pass"
 [[case]]
 id = "array-as-map-key"
 kind = "file"
-path = "cases/array_as_map_key.vo"
+path = "cases/runtime/map/array_as_map_key.vo"
 matrix = "default"
 tags = ["runtime", "map", "array"]
 owner = "runtime"
@@ -260,7 +260,7 @@ expect = "pass"
 [[case]]
 id = "array-slice-get-set"
 kind = "file"
-path = "cases/array_slice_get_set.vo"
+path = "cases/runtime/slice/array_slice_get_set.vo"
 matrix = "default"
 tags = ["runtime", "slice", "array"]
 owner = "runtime"
@@ -269,7 +269,7 @@ expect = "pass"
 [[case]]
 id = "array-value-semantics"
 kind = "file"
-path = "cases/array_value_semantics.vo"
+path = "cases/runtime/array/array_value_semantics.vo"
 matrix = "default"
 tags = ["runtime", "array"]
 owner = "runtime"
@@ -278,7 +278,7 @@ expect = "pass"
 [[case]]
 id = "assert-diagnostic"
 kind = "file"
-path = "cases/assert_diagnostic.vo"
+path = "cases/runtime/core/assert_diagnostic.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -287,7 +287,7 @@ expect = "pass"
 [[case]]
 id = "bare-return-multi"
 kind = "file"
-path = "cases/bare_return_multi.vo"
+path = "cases/runtime/control_flow/bare_return_multi.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -296,7 +296,7 @@ expect = "pass"
 [[case]]
 id = "big-array"
 kind = "file"
-path = "cases/big_array.vo"
+path = "cases/runtime/array/big_array.vo"
 matrix = "default"
 tags = ["runtime", "array"]
 owner = "runtime"
@@ -305,7 +305,7 @@ expect = "pass"
 [[case]]
 id = "bitnot-const"
 kind = "file"
-path = "cases/bitnot_const.vo"
+path = "cases/typechecker/bitnot_const.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -314,7 +314,7 @@ expect = "pass"
 [[case]]
 id = "bitnot-simple"
 kind = "file"
-path = "cases/bitnot_simple.vo"
+path = "cases/runtime/numeric/bitnot_simple.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -323,7 +323,7 @@ expect = "pass"
 [[case]]
 id = "bitwise-ops"
 kind = "file"
-path = "cases/bitwise_ops.vo"
+path = "cases/runtime/numeric/bitwise_ops.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -332,7 +332,7 @@ expect = "pass"
 [[case]]
 id = "blank-identifier-complex"
 kind = "file"
-path = "cases/blank_identifier_complex.vo"
+path = "cases/runtime/core/blank_identifier_complex.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -341,7 +341,7 @@ expect = "pass"
 [[case]]
 id = "bug-any-comparison-concrete"
 kind = "file"
-path = "cases/bug_any_comparison_concrete.vo"
+path = "cases/runtime/core/bug_any_comparison_concrete.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -350,7 +350,7 @@ expect = "pass"
 [[case]]
 id = "bug-array-of-struct"
 kind = "file"
-path = "cases/bug_array_of_struct.vo"
+path = "cases/runtime/array/bug_array_of_struct.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct", "array"]
 owner = "runtime"
@@ -359,7 +359,7 @@ expect = "pass"
 [[case]]
 id = "bug-builtin-shadow"
 kind = "file"
-path = "cases/bug_builtin_shadow.vo"
+path = "cases/runtime/core/bug_builtin_shadow.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -368,7 +368,7 @@ expect = "pass"
 [[case]]
 id = "bug-closure-multi-assign-capture"
 kind = "file"
-path = "cases/bug_closure_multi_assign_capture.vo"
+path = "cases/runtime/closure/bug_closure_multi_assign_capture.vo"
 matrix = "default"
 tags = ["runtime", "regression", "closure"]
 owner = "runtime"
@@ -377,7 +377,7 @@ expect = "pass"
 [[case]]
 id = "bug-closure-named-return"
 kind = "file"
-path = "cases/bug_closure_named_return.vo"
+path = "cases/runtime/closure/bug_closure_named_return.vo"
 matrix = "default"
 tags = ["runtime", "regression", "closure", "control-flow"]
 owner = "runtime"
@@ -386,7 +386,7 @@ expect = "pass"
 [[case]]
 id = "bug-closure-ptr-compare"
 kind = "file"
-path = "cases/bug_closure_ptr_compare.vo"
+path = "cases/runtime/closure/bug_closure_ptr_compare.vo"
 matrix = "default"
 tags = ["runtime", "regression", "closure"]
 owner = "runtime"
@@ -395,7 +395,7 @@ expect = "pass"
 [[case]]
 id = "bug-composite-ptr-method-minimal"
 kind = "file"
-path = "cases/bug_composite_ptr_method_minimal.vo"
+path = "cases/runtime/method/bug_composite_ptr_method_minimal.vo"
 matrix = "default"
 tags = ["runtime", "regression", "method"]
 owner = "runtime"
@@ -404,7 +404,7 @@ expect = "pass"
 [[case]]
 id = "bug-defer-break-label"
 kind = "file"
-path = "cases/bug_defer_break_label.vo"
+path = "cases/runtime/defer/bug_defer_break_label.vo"
 matrix = "default"
 tags = ["runtime", "regression", "defer", "control-flow"]
 owner = "runtime"
@@ -413,7 +413,7 @@ expect = "pass"
 [[case]]
 id = "bug-defer-closure-iface-arg"
 kind = "file"
-path = "cases/bug_defer_closure_iface_arg.vo"
+path = "cases/runtime/defer/bug_defer_closure_iface_arg.vo"
 matrix = "default"
 tags = ["interface", "regression", "closure", "defer"]
 owner = "runtime"
@@ -422,7 +422,7 @@ expect = "pass"
 [[case]]
 id = "bug-defer-recover-mixed-named-return"
 kind = "file"
-path = "cases/bug_defer_recover_mixed_named_return.vo"
+path = "cases/runtime/defer/bug_defer_recover_mixed_named_return.vo"
 matrix = "default"
 tags = ["runtime", "regression", "defer", "panic", "control-flow"]
 owner = "runtime"
@@ -431,7 +431,7 @@ expect = "pass"
 [[case]]
 id = "bug-embed-iface-stack"
 kind = "file"
-path = "cases/bug_embed_iface_stack.vo"
+path = "cases/runtime/interface/bug_embed_iface_stack.vo"
 matrix = "default"
 tags = ["interface", "regression", "struct"]
 owner = "runtime"
@@ -440,7 +440,7 @@ expect = "pass"
 [[case]]
 id = "bug-for-init-shadow"
 kind = "file"
-path = "cases/bug_for_init_shadow.vo"
+path = "cases/runtime/control_flow/bug_for_init_shadow.vo"
 matrix = "default"
 tags = ["runtime", "regression", "control-flow"]
 owner = "runtime"
@@ -449,7 +449,7 @@ expect = "pass"
 [[case]]
 id = "bug-for-range-break-label"
 kind = "file"
-path = "cases/bug_for_range_break_label.vo"
+path = "cases/runtime/control_flow/bug_for_range_break_label.vo"
 matrix = "default"
 tags = ["runtime", "regression", "control-flow"]
 owner = "runtime"
@@ -458,7 +458,7 @@ expect = "pass"
 [[case]]
 id = "bug-for-range-closure-capture"
 kind = "file"
-path = "cases/bug_for_range_closure_capture.vo"
+path = "cases/runtime/closure/bug_for_range_closure_capture.vo"
 matrix = "default"
 tags = ["runtime", "regression", "closure", "control-flow"]
 owner = "runtime"
@@ -467,7 +467,7 @@ expect = "pass"
 [[case]]
 id = "bug-global-func-var"
 kind = "file"
-path = "cases/bug_global_func_var.vo"
+path = "cases/runtime/core/bug_global_func_var.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -476,7 +476,7 @@ expect = "pass"
 [[case]]
 id = "bug-if-init-shadow"
 kind = "file"
-path = "cases/bug_if_init_shadow.vo"
+path = "cases/runtime/core/bug_if_init_shadow.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -485,7 +485,7 @@ expect = "pass"
 [[case]]
 id = "bug-iife-crash"
 kind = "file"
-path = "cases/bug_iife_crash.vo"
+path = "cases/runtime/core/bug_iife_crash.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -494,7 +494,7 @@ expect = "pass"
 [[case]]
 id = "bug-labeled-break-defer"
 kind = "file"
-path = "cases/bug_labeled_break_defer.vo"
+path = "cases/runtime/defer/bug_labeled_break_defer.vo"
 matrix = "default"
 tags = ["runtime", "regression", "defer", "control-flow"]
 owner = "runtime"
@@ -503,7 +503,7 @@ expect = "pass"
 [[case]]
 id = "bug-large-return-slots"
 kind = "file"
-path = "cases/bug_large_return_slots.vo"
+path = "cases/runtime/control_flow/bug_large_return_slots.vo"
 matrix = "default"
 tags = ["codegen", "regression", "control-flow"]
 owner = "codegen"
@@ -512,7 +512,7 @@ expect = "pass"
 [[case]]
 id = "bug-large-struct-field-copy"
 kind = "file"
-path = "cases/bug_large_struct_field_copy.vo"
+path = "cases/runtime/struct/bug_large_struct_field_copy.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct"]
 owner = "runtime"
@@ -521,7 +521,7 @@ expect = "pass"
 [[case]]
 id = "bug-map-any-string-key"
 kind = "file"
-path = "cases/bug_map_any_string_key.vo"
+path = "cases/runtime/map/bug_map_any_string_key.vo"
 matrix = "default"
 tags = ["runtime", "regression", "map", "string"]
 owner = "runtime"
@@ -530,7 +530,7 @@ expect = "pass"
 [[case]]
 id = "bug-map-struct-key-string"
 kind = "file"
-path = "cases/bug_map_struct_key_string.vo"
+path = "cases/runtime/map/bug_map_struct_key_string.vo"
 matrix = "default"
 tags = ["runtime", "regression", "map", "struct", "string"]
 owner = "runtime"
@@ -539,7 +539,7 @@ expect = "pass"
 [[case]]
 id = "bug-method-expr-immediate-call"
 kind = "file"
-path = "cases/bug_method_expr_immediate_call.vo"
+path = "cases/runtime/method/bug_method_expr_immediate_call.vo"
 matrix = "default"
 tags = ["runtime", "regression", "method"]
 owner = "runtime"
@@ -548,7 +548,7 @@ expect = "pass"
 [[case]]
 id = "bug-multi-assign-interface"
 kind = "file"
-path = "cases/bug_multi_assign_interface.vo"
+path = "cases/runtime/interface/bug_multi_assign_interface.vo"
 matrix = "default"
 tags = ["interface", "regression", "numeric"]
 owner = "runtime"
@@ -557,7 +557,7 @@ expect = "pass"
 [[case]]
 id = "bug-multi-assign-to-interface"
 kind = "file"
-path = "cases/bug_multi_assign_to_interface.vo"
+path = "cases/runtime/interface/bug_multi_assign_to_interface.vo"
 matrix = "default"
 tags = ["interface", "regression", "numeric"]
 owner = "runtime"
@@ -566,7 +566,7 @@ expect = "pass"
 [[case]]
 id = "bug-multi-level-pointer-embed"
 kind = "file"
-path = "cases/bug_multi_level_pointer_embed.vo"
+path = "cases/runtime/struct/bug_multi_level_pointer_embed.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct", "numeric"]
 owner = "runtime"
@@ -575,7 +575,7 @@ expect = "pass"
 [[case]]
 id = "bug-multi-return-expand"
 kind = "file"
-path = "cases/bug_multi_return_expand.vo"
+path = "cases/runtime/control_flow/bug_multi_return_expand.vo"
 matrix = "default"
 tags = ["runtime", "regression", "control-flow"]
 owner = "runtime"
@@ -584,7 +584,7 @@ expect = "pass"
 [[case]]
 id = "bug-nested-array-compound"
 kind = "file"
-path = "cases/bug_nested_array_compound.vo"
+path = "cases/runtime/array/bug_nested_array_compound.vo"
 matrix = "default"
 tags = ["runtime", "regression", "array"]
 owner = "runtime"
@@ -593,7 +593,7 @@ expect = "pass"
 [[case]]
 id = "bug-nested-defer-not-run"
 kind = "file"
-path = "cases/bug_nested_defer_not_run.vo"
+path = "cases/runtime/defer/bug_nested_defer_not_run.vo"
 matrix = "default"
 tags = ["runtime", "regression", "defer"]
 owner = "runtime"
@@ -602,7 +602,7 @@ expect = "pass"
 [[case]]
 id = "bug-panic-terminates"
 kind = "file"
-path = "cases/bug_panic_terminates.vo"
+path = "cases/runtime/panic/bug_panic_terminates.vo"
 matrix = "default"
 tags = ["runtime", "regression", "panic"]
 owner = "runtime"
@@ -611,7 +611,7 @@ expect = "pass"
 [[case]]
 id = "bug-paren-deref-field"
 kind = "file"
-path = "cases/bug_paren_deref_field.vo"
+path = "cases/runtime/core/bug_paren_deref_field.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -620,7 +620,7 @@ expect = "pass"
 [[case]]
 id = "bug-partial-struct-init"
 kind = "file"
-path = "cases/bug_partial_struct_init.vo"
+path = "cases/runtime/struct/bug_partial_struct_init.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct"]
 owner = "runtime"
@@ -629,7 +629,7 @@ expect = "pass"
 [[case]]
 id = "bug-ptr-array-field-access"
 kind = "file"
-path = "cases/bug_ptr_array_field_access.vo"
+path = "cases/runtime/array/bug_ptr_array_field_access.vo"
 matrix = "default"
 tags = ["runtime", "regression", "array"]
 owner = "runtime"
@@ -638,7 +638,7 @@ expect = "pass"
 [[case]]
 id = "bug-ptr-receiver-method-value"
 kind = "file"
-path = "cases/bug_ptr_receiver_method_value.vo"
+path = "cases/runtime/method/bug_ptr_receiver_method_value.vo"
 matrix = "default"
 tags = ["runtime", "regression", "method"]
 owner = "runtime"
@@ -647,7 +647,7 @@ expect = "pass"
 [[case]]
 id = "bug-ptr-recv-named-slice"
 kind = "file"
-path = "cases/bug_ptr_recv_named_slice.vo"
+path = "cases/typechecker/bug_ptr_recv_named_slice.vo"
 matrix = "compile"
 tags = ["typechecker", "compile-fail", "regression", "slice"]
 owner = "typechecker"
@@ -657,7 +657,7 @@ expect = { fail = ["invalid pointer type *main.IntSlice"] }
 [[case]]
 id = "bug-question-op-error-only"
 kind = "file"
-path = "cases/bug_question_op_error_only.vo"
+path = "cases/runtime/core/bug_question_op_error_only.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -666,7 +666,7 @@ expect = "pass"
 [[case]]
 id = "bug-range-select-iface"
 kind = "file"
-path = "cases/bug_range_select_iface.vo"
+path = "cases/runtime/scheduler/bug_range_select_iface.vo"
 matrix = "default"
 tags = ["interface", "regression", "select", "control-flow"]
 owner = "runtime"
@@ -675,7 +675,7 @@ expect = "pass"
 [[case]]
 id = "bug-recover-nested-call"
 kind = "file"
-path = "cases/bug_recover_nested_call.vo"
+path = "cases/runtime/panic/bug_recover_nested_call.vo"
 matrix = "default"
 tags = ["runtime", "regression", "panic"]
 owner = "runtime"
@@ -684,7 +684,7 @@ expect = "pass"
 [[case]]
 id = "bug-select-recv-assign"
 kind = "file"
-path = "cases/bug_select_recv_assign.vo"
+path = "cases/runtime/scheduler/bug_select_recv_assign.vo"
 matrix = "default"
 tags = ["scheduler", "regression", "select"]
 owner = "runtime"
@@ -693,7 +693,7 @@ expect = "pass"
 [[case]]
 id = "bug-sparse-array-keyed"
 kind = "file"
-path = "cases/bug_sparse_array_keyed.vo"
+path = "cases/runtime/array/bug_sparse_array_keyed.vo"
 matrix = "default"
 tags = ["runtime", "regression", "array"]
 owner = "runtime"
@@ -702,7 +702,7 @@ expect = "pass"
 [[case]]
 id = "bug-struct-arr-and-func-field"
 kind = "file"
-path = "cases/bug_struct_arr_and_func_field.vo"
+path = "cases/runtime/struct/bug_struct_arr_and_func_field.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct"]
 owner = "runtime"
@@ -711,7 +711,7 @@ expect = "pass"
 [[case]]
 id = "bug-switch-any-case-match"
 kind = "file"
-path = "cases/bug_switch_any_case_match.vo"
+path = "cases/runtime/control_flow/bug_switch_any_case_match.vo"
 matrix = "default"
 tags = ["runtime", "regression", "control-flow"]
 owner = "runtime"
@@ -720,7 +720,7 @@ expect = "pass"
 [[case]]
 id = "bug-switch-default-first"
 kind = "file"
-path = "cases/bug_switch_default_first.vo"
+path = "cases/runtime/control_flow/bug_switch_default_first.vo"
 matrix = "default"
 tags = ["runtime", "regression", "control-flow"]
 owner = "runtime"
@@ -729,7 +729,7 @@ expect = "pass"
 [[case]]
 id = "bug-switch-init-shadow"
 kind = "file"
-path = "cases/bug_switch_init_shadow.vo"
+path = "cases/runtime/control_flow/bug_switch_init_shadow.vo"
 matrix = "default"
 tags = ["runtime", "regression", "control-flow"]
 owner = "runtime"
@@ -738,7 +738,7 @@ expect = "pass"
 [[case]]
 id = "bug-type-switch-closure-capture"
 kind = "file"
-path = "cases/bug_type_switch_closure_capture.vo"
+path = "cases/typechecker/bug_type_switch_closure_capture.vo"
 matrix = "default"
 tags = ["typechecker", "regression", "closure", "control-flow"]
 owner = "typechecker"
@@ -747,7 +747,7 @@ expect = "pass"
 [[case]]
 id = "bug-type-switch-default-multi-case"
 kind = "file"
-path = "cases/bug_type_switch_default_multi_case.vo"
+path = "cases/typechecker/bug_type_switch_default_multi_case.vo"
 matrix = "default"
 tags = ["typechecker", "regression", "control-flow"]
 owner = "typechecker"
@@ -756,7 +756,7 @@ expect = "pass"
 [[case]]
 id = "bug-type-switch-default-var"
 kind = "file"
-path = "cases/bug_type_switch_default_var.vo"
+path = "cases/typechecker/bug_type_switch_default_var.vo"
 matrix = "default"
 tags = ["typechecker", "regression", "control-flow"]
 owner = "typechecker"
@@ -765,7 +765,7 @@ expect = "pass"
 [[case]]
 id = "bug-type-switch-interface-case"
 kind = "file"
-path = "cases/bug_type_switch_interface_case.vo"
+path = "cases/runtime/interface/bug_type_switch_interface_case.vo"
 matrix = "default"
 tags = ["interface", "regression", "numeric", "control-flow"]
 owner = "runtime"
@@ -774,7 +774,7 @@ expect = "pass"
 [[case]]
 id = "bug-variadic-defer"
 kind = "file"
-path = "cases/bug_variadic_defer.vo"
+path = "cases/runtime/defer/bug_variadic_defer.vo"
 matrix = "default"
 tags = ["runtime", "regression", "defer"]
 owner = "runtime"
@@ -783,7 +783,7 @@ expect = "pass"
 [[case]]
 id = "bug-variadic-spread2"
 kind = "file"
-path = "cases/bug_variadic_spread2.vo"
+path = "cases/runtime/core/bug_variadic_spread2.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -792,7 +792,7 @@ expect = "pass"
 [[case]]
 id = "bug-zero-embed-minimal"
 kind = "file"
-path = "cases/bug_zero_embed_minimal.vo"
+path = "cases/runtime/struct/bug_zero_embed_minimal.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct"]
 owner = "runtime"
@@ -1071,7 +1071,7 @@ expect = "pass"
 [[case]]
 id = "bytes-buffer"
 kind = "file"
-path = "cases/bytes_buffer.vo"
+path = "cases/stdlib/general/bytes_buffer.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -1080,7 +1080,7 @@ expect = "pass"
 [[case]]
 id = "bytes-simple"
 kind = "file"
-path = "cases/bytes_simple.vo"
+path = "cases/runtime/core/bytes_simple.vo"
 matrix = "default"
 tags = ["legacy"]
 owner = "eng"
@@ -1092,7 +1092,7 @@ expect = "pass"
 [[case]]
 id = "bytes-strings-reader-test"
 kind = "file"
-path = "cases/bytes_strings_reader_test.vo"
+path = "cases/stdlib/bytes_strings_reader_test.vo"
 matrix = "default"
 tags = ["stdlib", "string"]
 owner = "stdlib"
@@ -1101,7 +1101,7 @@ expect = "pass"
 [[case]]
 id = "call-iface-ic-switch"
 kind = "file"
-path = "cases/call_iface_ic_switch.vo"
+path = "cases/runtime/interface/call_iface_ic_switch.vo"
 matrix = "default"
 tags = ["interface", "control-flow"]
 owner = "runtime"
@@ -1110,7 +1110,7 @@ expect = "pass"
 [[case]]
 id = "chained-type-assertion"
 kind = "file"
-path = "cases/chained_type_assertion.vo"
+path = "cases/typechecker/chained_type_assertion.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -1119,7 +1119,7 @@ expect = "pass"
 [[case]]
 id = "chan-of-chan"
 kind = "file"
-path = "cases/chan_of_chan.vo"
+path = "cases/runtime/scheduler/chan_of_chan.vo"
 matrix = "default"
 tags = ["scheduler", "channel"]
 owner = "runtime"
@@ -1128,7 +1128,7 @@ expect = "pass"
 [[case]]
 id = "channel-send"
 kind = "file"
-path = "cases/channel_send.vo"
+path = "cases/runtime/scheduler/channel_send.vo"
 matrix = "default"
 tags = ["scheduler", "channel"]
 owner = "runtime"
@@ -1137,7 +1137,7 @@ expect = "pass"
 [[case]]
 id = "clone-immediate-read"
 kind = "file"
-path = "cases/clone_immediate_read.vo"
+path = "cases/runtime/core/clone_immediate_read.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -1146,7 +1146,7 @@ expect = "pass"
 [[case]]
 id = "closure-as-map-value"
 kind = "file"
-path = "cases/closure_as_map_value.vo"
+path = "cases/runtime/closure/closure_as_map_value.vo"
 matrix = "default"
 tags = ["runtime", "closure", "map"]
 owner = "runtime"
@@ -1155,7 +1155,7 @@ expect = "pass"
 [[case]]
 id = "closure-capture-pointer"
 kind = "file"
-path = "cases/closure_capture_pointer.vo"
+path = "cases/runtime/closure/closure_capture_pointer.vo"
 matrix = "default"
 tags = ["runtime", "closure", "numeric"]
 owner = "runtime"
@@ -1164,7 +1164,7 @@ expect = "pass"
 [[case]]
 id = "closure-crash"
 kind = "file"
-path = "cases/closure_crash.vo"
+path = "cases/runtime/closure/closure_crash.vo"
 matrix = "default"
 tags = ["runtime", "closure"]
 owner = "runtime"
@@ -1173,7 +1173,7 @@ expect = "pass"
 [[case]]
 id = "closure-defer-interact"
 kind = "file"
-path = "cases/closure_defer_interact.vo"
+path = "cases/runtime/defer/closure_defer_interact.vo"
 matrix = "default"
 tags = ["runtime", "closure", "defer", "numeric"]
 owner = "runtime"
@@ -1182,7 +1182,7 @@ expect = "pass"
 [[case]]
 id = "closure-defer-recover-combo"
 kind = "file"
-path = "cases/closure_defer_recover_combo.vo"
+path = "cases/runtime/defer/closure_defer_recover_combo.vo"
 matrix = "default"
 tags = ["runtime", "closure", "defer", "panic"]
 owner = "runtime"
@@ -1191,7 +1191,7 @@ expect = "pass"
 [[case]]
 id = "closure-escape-local"
 kind = "file"
-path = "cases/closure_escape_local.vo"
+path = "cases/runtime/closure/closure_escape_local.vo"
 matrix = "default"
 tags = ["runtime", "closure"]
 owner = "runtime"
@@ -1200,7 +1200,7 @@ expect = "pass"
 [[case]]
 id = "closure-goroutine-immediate"
 kind = "file"
-path = "cases/closure_goroutine_immediate.vo"
+path = "cases/runtime/scheduler/closure_goroutine_immediate.vo"
 matrix = "default"
 tags = ["scheduler", "closure"]
 owner = "runtime"
@@ -1209,7 +1209,7 @@ expect = "pass"
 [[case]]
 id = "closure-loop-capture"
 kind = "file"
-path = "cases/closure_loop_capture.vo"
+path = "cases/runtime/closure/closure_loop_capture.vo"
 matrix = "default"
 tags = ["runtime", "closure"]
 owner = "runtime"
@@ -1218,7 +1218,7 @@ expect = "pass"
 [[case]]
 id = "closure-multilayer-capture"
 kind = "file"
-path = "cases/closure_multilayer_capture.vo"
+path = "cases/runtime/closure/closure_multilayer_capture.vo"
 matrix = "default"
 tags = ["runtime", "closure"]
 owner = "runtime"
@@ -1227,7 +1227,7 @@ expect = "pass"
 [[case]]
 id = "closure-mutual-recursion"
 kind = "file"
-path = "cases/closure_mutual_recursion.vo"
+path = "cases/runtime/closure/closure_mutual_recursion.vo"
 matrix = "default"
 tags = ["runtime", "closure"]
 owner = "runtime"
@@ -1236,7 +1236,7 @@ expect = "pass"
 [[case]]
 id = "closure-panic-recover"
 kind = "file"
-path = "cases/closure_panic_recover.vo"
+path = "cases/runtime/panic/closure_panic_recover.vo"
 matrix = "default"
 tags = ["runtime", "closure", "panic"]
 owner = "runtime"
@@ -1245,7 +1245,7 @@ expect = "pass"
 [[case]]
 id = "closure-range-capture"
 kind = "file"
-path = "cases/closure_range_capture.vo"
+path = "cases/runtime/closure/closure_range_capture.vo"
 matrix = "default"
 tags = ["runtime", "closure", "control-flow"]
 owner = "runtime"
@@ -1254,7 +1254,7 @@ expect = "pass"
 [[case]]
 id = "closure-type-switch"
 kind = "file"
-path = "cases/closure_type_switch.vo"
+path = "cases/typechecker/closure_type_switch.vo"
 matrix = "default"
 tags = ["typechecker", "closure", "control-flow"]
 owner = "typechecker"
@@ -1263,7 +1263,7 @@ expect = "pass"
 [[case]]
 id = "complex-literal"
 kind = "file"
-path = "cases/complex_literal.vo"
+path = "cases/typechecker/complex_literal.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -1272,7 +1272,7 @@ expect = "pass"
 [[case]]
 id = "composite-addr-method-call"
 kind = "file"
-path = "cases/composite_addr_method_call.vo"
+path = "cases/runtime/method/composite_addr_method_call.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -1281,7 +1281,7 @@ expect = "pass"
 [[case]]
 id = "composite-comparison"
 kind = "file"
-path = "cases/composite_comparison.vo"
+path = "cases/runtime/core/composite_comparison.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -1290,7 +1290,7 @@ expect = "pass"
 [[case]]
 id = "composite-literal-addr"
 kind = "file"
-path = "cases/composite_literal_addr.vo"
+path = "cases/typechecker/composite_literal_addr.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -1299,7 +1299,7 @@ expect = "pass"
 [[case]]
 id = "composite-literal-address"
 kind = "file"
-path = "cases/composite_literal_address.vo"
+path = "cases/typechecker/composite_literal_address.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -1308,7 +1308,7 @@ expect = "pass"
 [[case]]
 id = "composite-literal-method-call"
 kind = "file"
-path = "cases/composite_literal_method_call.vo"
+path = "cases/typechecker/composite_literal_method_call.vo"
 matrix = "default"
 tags = ["typechecker", "method"]
 owner = "typechecker"
@@ -1317,7 +1317,7 @@ expect = "pass"
 [[case]]
 id = "composite-literal-nested"
 kind = "file"
-path = "cases/composite_literal_nested.vo"
+path = "cases/typechecker/composite_literal_nested.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -1326,7 +1326,7 @@ expect = "pass"
 [[case]]
 id = "composite-ptr-method"
 kind = "file"
-path = "cases/composite_ptr_method.vo"
+path = "cases/runtime/method/composite_ptr_method.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -1335,7 +1335,7 @@ expect = "pass"
 [[case]]
 id = "compound-assign-eval-order"
 kind = "file"
-path = "cases/compound_assign_eval_order.vo"
+path = "cases/runtime/core/compound_assign_eval_order.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -1344,7 +1344,7 @@ expect = "pass"
 [[case]]
 id = "compound-assign-map"
 kind = "file"
-path = "cases/compound_assign_map.vo"
+path = "cases/runtime/map/compound_assign_map.vo"
 matrix = "default"
 tags = ["runtime", "map"]
 owner = "runtime"
@@ -1353,7 +1353,7 @@ expect = "pass"
 [[case]]
 id = "compound-assign-side-effect"
 kind = "file"
-path = "cases/compound_assign_side_effect.vo"
+path = "cases/runtime/core/compound_assign_side_effect.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -1362,7 +1362,7 @@ expect = "pass"
 [[case]]
 id = "const"
 kind = "file"
-path = "cases/const.vo"
+path = "cases/typechecker/const.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1371,7 +1371,7 @@ expect = "pass"
 [[case]]
 id = "const-bitwise-edge"
 kind = "file"
-path = "cases/const_bitwise_edge.vo"
+path = "cases/typechecker/const_bitwise_edge.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1380,7 +1380,7 @@ expect = "pass"
 [[case]]
 id = "const-div-overflow"
 kind = "file"
-path = "cases/const_div_overflow.vo"
+path = "cases/typechecker/const_div_overflow.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1389,7 +1389,7 @@ expect = "pass"
 [[case]]
 id = "const-expr-overflow"
 kind = "file"
-path = "cases/const_expr_overflow.vo"
+path = "cases/typechecker/const_expr_overflow.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1398,7 +1398,7 @@ expect = "pass"
 [[case]]
 id = "const-fold"
 kind = "file"
-path = "cases/const_fold.vo"
+path = "cases/typechecker/const_fold.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1407,7 +1407,7 @@ expect = "pass"
 [[case]]
 id = "const-iota-complex"
 kind = "file"
-path = "cases/const_iota_complex.vo"
+path = "cases/typechecker/const_iota_complex.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1416,7 +1416,7 @@ expect = "pass"
 [[case]]
 id = "const-typed-boundary"
 kind = "file"
-path = "cases/const_typed_boundary.vo"
+path = "cases/typechecker/const_typed_boundary.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1425,7 +1425,7 @@ expect = "pass"
 [[case]]
 id = "const-untyped-promotion"
 kind = "file"
-path = "cases/const_untyped_promotion.vo"
+path = "cases/typechecker/const_untyped_promotion.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1434,7 +1434,7 @@ expect = "pass"
 [[case]]
 id = "constant"
 kind = "file"
-path = "cases/constant.vo"
+path = "cases/typechecker/constant.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -1443,7 +1443,7 @@ expect = "pass"
 [[case]]
 id = "continue-label-defer"
 kind = "file"
-path = "cases/continue_label_defer.vo"
+path = "cases/runtime/defer/continue_label_defer.vo"
 matrix = "default"
 tags = ["runtime", "defer", "control-flow"]
 owner = "runtime"
@@ -1452,7 +1452,7 @@ expect = "pass"
 [[case]]
 id = "continue-with-label"
 kind = "file"
-path = "cases/continue_with_label.vo"
+path = "cases/runtime/control_flow/continue_with_label.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -1461,7 +1461,7 @@ expect = "pass"
 [[case]]
 id = "copy-builtin"
 kind = "file"
-path = "cases/copy_builtin.vo"
+path = "cases/runtime/core/copy_builtin.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -1470,7 +1470,7 @@ expect = "pass"
 [[case]]
 id = "copy-overlap"
 kind = "file"
-path = "cases/copy_overlap.vo"
+path = "cases/runtime/core/copy_overlap.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -1479,7 +1479,7 @@ expect = "pass"
 [[case]]
 id = "cross-pkg-error-method"
 kind = "file"
-path = "cases/cross_pkg_error_method.vo"
+path = "cases/runtime/method/cross_pkg_error_method.vo"
 matrix = "default"
 tags = ["legacy", "method"]
 owner = "eng"
@@ -1491,7 +1491,7 @@ expect = "pass"
 [[case]]
 id = "cross-pkg-interface-nil"
 kind = "file"
-path = "cases/cross_pkg_interface_nil.vo"
+path = "cases/module/cross_pkg_interface_nil.vo"
 matrix = "default"
 tags = ["module", "interface", "numeric"]
 owner = "module"
@@ -1500,7 +1500,7 @@ expect = "pass"
 [[case]]
 id = "deep-defer-stack"
 kind = "file"
-path = "cases/deep_defer_stack.vo"
+path = "cases/runtime/defer/deep_defer_stack.vo"
 matrix = "default"
 tags = ["runtime", "defer"]
 owner = "runtime"
@@ -1509,7 +1509,7 @@ expect = "pass"
 [[case]]
 id = "defer-eval-timing"
 kind = "file"
-path = "cases/defer_eval_timing.vo"
+path = "cases/runtime/defer/defer_eval_timing.vo"
 matrix = "default"
 tags = ["runtime", "defer"]
 owner = "runtime"
@@ -1518,7 +1518,7 @@ expect = "pass"
 [[case]]
 id = "defer-iface"
 kind = "file"
-path = "cases/defer_iface.vo"
+path = "cases/runtime/defer/defer_iface.vo"
 matrix = "default"
 tags = ["interface", "defer"]
 owner = "runtime"
@@ -1527,7 +1527,7 @@ expect = "pass"
 [[case]]
 id = "defer-loop-return"
 kind = "file"
-path = "cases/defer_loop_return.vo"
+path = "cases/runtime/defer/defer_loop_return.vo"
 matrix = "default"
 tags = ["runtime", "defer", "control-flow"]
 owner = "runtime"
@@ -1536,7 +1536,7 @@ expect = "pass"
 [[case]]
 id = "defer-multi-return-arg"
 kind = "file"
-path = "cases/defer_multi_return_arg.vo"
+path = "cases/runtime/defer/defer_multi_return_arg.vo"
 matrix = "default"
 tags = ["runtime", "defer", "control-flow"]
 owner = "runtime"
@@ -1545,7 +1545,7 @@ expect = "pass"
 [[case]]
 id = "defer-nil-func-recover"
 kind = "file"
-path = "cases/defer_nil_func_recover.vo"
+path = "cases/runtime/defer/defer_nil_func_recover.vo"
 matrix = "default"
 tags = ["runtime", "defer", "panic"]
 owner = "runtime"
@@ -1554,7 +1554,7 @@ expect = "pass"
 [[case]]
 id = "defer-named-return"
 kind = "file"
-path = "cases/defer_named_return.vo"
+path = "cases/runtime/defer/defer_named_return.vo"
 matrix = "default"
 tags = ["runtime", "defer", "control-flow"]
 owner = "runtime"
@@ -1563,7 +1563,7 @@ expect = "pass"
 [[case]]
 id = "defer-panic-chain"
 kind = "file"
-path = "cases/defer_panic_chain.vo"
+path = "cases/runtime/defer/defer_panic_chain.vo"
 matrix = "default"
 tags = ["runtime", "defer", "panic"]
 owner = "runtime"
@@ -1572,7 +1572,7 @@ expect = "pass"
 [[case]]
 id = "defer-panic-named-return"
 kind = "file"
-path = "cases/defer_panic_named_return.vo"
+path = "cases/runtime/defer/defer_panic_named_return.vo"
 matrix = "default"
 tags = ["runtime", "defer", "panic", "control-flow"]
 owner = "runtime"
@@ -1581,7 +1581,7 @@ expect = "pass"
 [[case]]
 id = "defer-panic-order"
 kind = "file"
-path = "cases/defer_panic_order.vo"
+path = "cases/runtime/defer/defer_panic_order.vo"
 matrix = "default"
 tags = ["runtime", "defer", "panic"]
 owner = "runtime"
@@ -1590,7 +1590,7 @@ expect = "pass"
 [[case]]
 id = "defer-pkg-func-call"
 kind = "file"
-path = "cases/defer_pkg_func_call.vo"
+path = "cases/module/defer_pkg_func_call.vo"
 matrix = "default"
 tags = ["module", "defer"]
 owner = "module"
@@ -1599,7 +1599,7 @@ expect = "pass"
 [[case]]
 id = "defer-println"
 kind = "file"
-path = "cases/defer_println.vo"
+path = "cases/runtime/defer/defer_println.vo"
 matrix = "default"
 tags = ["runtime", "defer", "numeric"]
 owner = "runtime"
@@ -1608,7 +1608,7 @@ expect = "pass"
 [[case]]
 id = "defer-repanic-chain"
 kind = "file"
-path = "cases/defer_repanic_chain.vo"
+path = "cases/runtime/defer/defer_repanic_chain.vo"
 matrix = "default"
 tags = ["runtime", "defer", "panic"]
 owner = "runtime"
@@ -1617,7 +1617,7 @@ expect = "pass"
 [[case]]
 id = "defer-return-modify-complex"
 kind = "file"
-path = "cases/defer_return_modify_complex.vo"
+path = "cases/runtime/defer/defer_return_modify_complex.vo"
 matrix = "default"
 tags = ["runtime", "defer", "numeric", "control-flow"]
 owner = "runtime"
@@ -1626,7 +1626,7 @@ expect = "pass"
 [[case]]
 id = "defer-return-shadow"
 kind = "file"
-path = "cases/defer_return_shadow.vo"
+path = "cases/runtime/defer/defer_return_shadow.vo"
 matrix = "default"
 tags = ["runtime", "defer", "control-flow"]
 owner = "runtime"
@@ -1635,7 +1635,7 @@ expect = "pass"
 [[case]]
 id = "defer-slice-map-modify"
 kind = "file"
-path = "cases/defer_slice_map_modify.vo"
+path = "cases/runtime/defer/defer_slice_map_modify.vo"
 matrix = "default"
 tags = ["runtime", "defer", "slice", "map", "numeric"]
 owner = "runtime"
@@ -1644,7 +1644,7 @@ expect = "pass"
 [[case]]
 id = "defer-stmt"
 kind = "file"
-path = "cases/defer_stmt.vo"
+path = "cases/runtime/defer/defer_stmt.vo"
 matrix = "default"
 tags = ["runtime", "defer"]
 owner = "runtime"
@@ -1653,7 +1653,7 @@ expect = "pass"
 [[case]]
 id = "directional-chan-runtime"
 kind = "file"
-path = "cases/directional_chan_runtime.vo"
+path = "cases/runtime/scheduler/directional_chan_runtime.vo"
 matrix = "default"
 tags = ["scheduler", "channel"]
 owner = "runtime"
@@ -2656,7 +2656,7 @@ expect = "pass"
 [[case]]
 id = "dyn-access-demo"
 kind = "file"
-path = "cases/dyn_access_demo.vo"
+path = "cases/dyn/dyn_access_demo.vo"
 matrix = "default"
 tags = ["dyn"]
 owner = "runtime"
@@ -2665,7 +2665,7 @@ expect = "pass"
 [[case]]
 id = "dyn-call-any-arg"
 kind = "file"
-path = "cases/dyn_call_any_arg.vo"
+path = "cases/dyn/dyn_call_any_arg.vo"
 matrix = "default"
 tags = ["dyn"]
 owner = "runtime"
@@ -2674,7 +2674,7 @@ expect = "pass"
 [[case]]
 id = "dyn-call-func-any-param"
 kind = "file"
-path = "cases/dyn_call_func_any_param.vo"
+path = "cases/dyn/dyn_call_func_any_param.vo"
 matrix = "default"
 tags = ["dyn"]
 owner = "runtime"
@@ -2683,7 +2683,7 @@ expect = "pass"
 [[case]]
 id = "dyn-call-no-return"
 kind = "file"
-path = "cases/dyn_call_no_return.vo"
+path = "cases/dyn/dyn_call_no_return.vo"
 matrix = "default"
 tags = ["dyn", "control-flow"]
 owner = "runtime"
@@ -2692,7 +2692,7 @@ expect = "pass"
 [[case]]
 id = "dyn-call-return"
 kind = "file"
-path = "cases/dyn_call_return.vo"
+path = "cases/dyn/dyn_call_return.vo"
 matrix = "default"
 tags = ["dyn", "control-flow"]
 owner = "runtime"
@@ -2701,7 +2701,7 @@ expect = "pass"
 [[case]]
 id = "dyn-call-return-multi"
 kind = "file"
-path = "cases/dyn_call_return_multi.vo"
+path = "cases/dyn/dyn_call_return_multi.vo"
 matrix = "default"
 tags = ["dyn", "control-flow"]
 owner = "runtime"
@@ -2710,7 +2710,7 @@ expect = "pass"
 [[case]]
 id = "dyn-embed-ptr-field"
 kind = "file"
-path = "cases/dyn_embed_ptr_field.vo"
+path = "cases/dyn/dyn_embed_ptr_field.vo"
 matrix = "default"
 tags = ["dyn", "struct"]
 owner = "runtime"
@@ -2719,7 +2719,7 @@ expect = "pass"
 [[case]]
 id = "embed-deep-method-shadow"
 kind = "file"
-path = "cases/embed_deep_method_shadow.vo"
+path = "cases/runtime/struct/embed_deep_method_shadow.vo"
 matrix = "default"
 tags = ["runtime", "method", "struct"]
 owner = "runtime"
@@ -2728,7 +2728,7 @@ expect = "pass"
 [[case]]
 id = "embed-iface-simple"
 kind = "file"
-path = "cases/embed_iface_simple.vo"
+path = "cases/runtime/interface/embed_iface_simple.vo"
 matrix = "default"
 tags = ["interface", "struct"]
 owner = "runtime"
@@ -2737,7 +2737,7 @@ expect = "pass"
 [[case]]
 id = "embed-interface"
 kind = "file"
-path = "cases/embed_interface.vo"
+path = "cases/runtime/interface/embed_interface.vo"
 matrix = "default"
 tags = ["interface", "struct", "numeric"]
 owner = "runtime"
@@ -2746,7 +2746,7 @@ expect = "pass"
 [[case]]
 id = "embed-interface-impl"
 kind = "file"
-path = "cases/embed_interface_impl.vo"
+path = "cases/runtime/interface/embed_interface_impl.vo"
 matrix = "default"
 tags = ["interface", "struct", "numeric"]
 owner = "runtime"
@@ -2755,7 +2755,7 @@ expect = "pass"
 [[case]]
 id = "embed-method"
 kind = "file"
-path = "cases/embed_method.vo"
+path = "cases/runtime/struct/embed_method.vo"
 matrix = "default"
 tags = ["runtime", "method", "struct"]
 owner = "runtime"
@@ -2764,7 +2764,7 @@ expect = "pass"
 [[case]]
 id = "embed-pointer"
 kind = "file"
-path = "cases/embed_pointer.vo"
+path = "cases/runtime/struct/embed_pointer.vo"
 matrix = "default"
 tags = ["runtime", "struct", "numeric"]
 owner = "runtime"
@@ -2773,7 +2773,7 @@ expect = "pass"
 [[case]]
 id = "embed-ptr-bugs-regression"
 kind = "file"
-path = "cases/embed_ptr_bugs_regression.vo"
+path = "cases/runtime/struct/embed_ptr_bugs_regression.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct"]
 owner = "runtime"
@@ -2782,7 +2782,7 @@ expect = "pass"
 [[case]]
 id = "embed-ptr-iface-complex"
 kind = "file"
-path = "cases/embed_ptr_iface_complex.vo"
+path = "cases/runtime/interface/embed_ptr_iface_complex.vo"
 matrix = "default"
 tags = ["interface", "struct"]
 owner = "runtime"
@@ -2791,7 +2791,7 @@ expect = "pass"
 [[case]]
 id = "embed-ptr-method-promote"
 kind = "file"
-path = "cases/embed_ptr_method_promote.vo"
+path = "cases/runtime/struct/embed_ptr_method_promote.vo"
 matrix = "default"
 tags = ["runtime", "method", "struct"]
 owner = "runtime"
@@ -2800,7 +2800,7 @@ expect = "pass"
 [[case]]
 id = "embed-shadow"
 kind = "file"
-path = "cases/embed_shadow.vo"
+path = "cases/runtime/struct/embed_shadow.vo"
 matrix = "default"
 tags = ["runtime", "struct"]
 owner = "runtime"
@@ -2809,7 +2809,7 @@ expect = "pass"
 [[case]]
 id = "embed-struct"
 kind = "file"
-path = "cases/embed_struct.vo"
+path = "cases/runtime/struct/embed_struct.vo"
 matrix = "default"
 tags = ["runtime", "struct"]
 owner = "runtime"
@@ -2818,7 +2818,7 @@ expect = "pass"
 [[case]]
 id = "embedded-interface-itab"
 kind = "file"
-path = "cases/embedded_interface_itab.vo"
+path = "cases/runtime/interface/embedded_interface_itab.vo"
 matrix = "default"
 tags = ["interface", "struct", "numeric"]
 owner = "runtime"
@@ -2827,7 +2827,7 @@ expect = "pass"
 [[case]]
 id = "empty-struct-chan-signal"
 kind = "file"
-path = "cases/empty_struct_chan_signal.vo"
+path = "cases/runtime/scheduler/empty_struct_chan_signal.vo"
 matrix = "default"
 tags = ["scheduler", "channel", "struct"]
 owner = "runtime"
@@ -2836,7 +2836,7 @@ expect = "pass"
 [[case]]
 id = "empty-struct-map-key"
 kind = "file"
-path = "cases/empty_struct_map_key.vo"
+path = "cases/runtime/map/empty_struct_map_key.vo"
 matrix = "default"
 tags = ["runtime", "map", "struct"]
 owner = "runtime"
@@ -2883,7 +2883,7 @@ expect = "pass"
 [[case]]
 id = "errdefer-closure-panic"
 kind = "file"
-path = "cases/errdefer_closure_panic.vo"
+path = "cases/runtime/defer/errdefer_closure_panic.vo"
 matrix = "default"
 tags = ["runtime", "closure", "defer", "panic"]
 owner = "runtime"
@@ -2892,7 +2892,7 @@ expect = "pass"
 [[case]]
 id = "errdefer-return-error"
 kind = "file"
-path = "cases/errdefer_return_error.vo"
+path = "cases/runtime/defer/errdefer_return_error.vo"
 matrix = "default"
 tags = ["runtime", "defer", "control-flow"]
 owner = "runtime"
@@ -2901,7 +2901,7 @@ expect = "pass"
 [[case]]
 id = "errdefer-stmt"
 kind = "file"
-path = "cases/errdefer_stmt.vo"
+path = "cases/runtime/defer/errdefer_stmt.vo"
 matrix = "default"
 tags = ["runtime", "defer"]
 owner = "runtime"
@@ -2910,7 +2910,7 @@ expect = "pass"
 [[case]]
 id = "error-handling-sugar"
 kind = "file"
-path = "cases/error_handling_sugar.vo"
+path = "cases/runtime/core/error_handling_sugar.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -2921,7 +2921,7 @@ expect = "pass"
 [[case]]
 id = "errors-custom-is"
 kind = "file"
-path = "cases/errors_custom_is.vo"
+path = "cases/stdlib/errors_custom_is.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -2930,7 +2930,7 @@ expect = "pass"
 [[case]]
 id = "errors-unwrap-custom"
 kind = "file"
-path = "cases/errors_unwrap_custom.vo"
+path = "cases/stdlib/errors_unwrap_custom.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -2939,7 +2939,7 @@ expect = "pass"
 [[case]]
 id = "escape-return-value"
 kind = "file"
-path = "cases/escape_return_value.vo"
+path = "cases/runtime/control_flow/escape_return_value.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -2948,7 +2948,7 @@ expect = "pass"
 [[case]]
 id = "escape-struct-assign"
 kind = "file"
-path = "cases/escape_struct_assign.vo"
+path = "cases/runtime/struct/escape_struct_assign.vo"
 matrix = "default"
 tags = ["runtime", "struct"]
 owner = "runtime"
@@ -2957,7 +2957,7 @@ expect = "pass"
 [[case]]
 id = "escaped-array-init"
 kind = "file"
-path = "cases/escaped_array_init.vo"
+path = "cases/runtime/array/escaped_array_init.vo"
 matrix = "default"
 tags = ["runtime", "array"]
 owner = "runtime"
@@ -2966,7 +2966,7 @@ expect = "pass"
 [[case]]
 id = "exec-basic"
 kind = "file"
-path = "cases/exec_basic.vo"
+path = "cases/stdlib/exec_basic.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -2977,7 +2977,7 @@ expect = "pass"
 [[case]]
 id = "exec-comprehensive"
 kind = "file"
-path = "cases/exec_comprehensive.vo"
+path = "cases/stdlib/exec_comprehensive.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -2988,7 +2988,7 @@ expect = "pass"
 [[case]]
 id = "fail-stmt"
 kind = "file"
-path = "cases/fail_stmt.vo"
+path = "cases/runtime/core/fail_stmt.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -2997,7 +2997,7 @@ expect = "pass"
 [[case]]
 id = "fallthrough"
 kind = "file"
-path = "cases/fallthrough.vo"
+path = "cases/runtime/control_flow/fallthrough.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3006,7 +3006,7 @@ expect = "pass"
 [[case]]
 id = "fallthrough-to-default"
 kind = "file"
-path = "cases/fallthrough_to_default.vo"
+path = "cases/runtime/control_flow/fallthrough_to_default.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3015,7 +3015,7 @@ expect = "pass"
 [[case]]
 id = "fib-goroutine"
 kind = "file"
-path = "cases/fib_goroutine.vo"
+path = "cases/runtime/scheduler/fib_goroutine.vo"
 matrix = "default"
 tags = ["scheduler"]
 owner = "runtime"
@@ -3024,7 +3024,7 @@ expect = "pass"
 [[case]]
 id = "filepath-basic"
 kind = "file"
-path = "cases/filepath_basic.vo"
+path = "cases/stdlib/filepath_basic.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -3035,7 +3035,7 @@ expect = "pass"
 [[case]]
 id = "filepath-comprehensive"
 kind = "file"
-path = "cases/filepath_comprehensive.vo"
+path = "cases/stdlib/filepath_comprehensive.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -3046,7 +3046,7 @@ expect = "pass"
 [[case]]
 id = "float-special-values"
 kind = "file"
-path = "cases/float_special_values.vo"
+path = "cases/runtime/numeric/float_special_values.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -3055,7 +3055,7 @@ expect = "pass"
 [[case]]
 id = "for-post-side-effect"
 kind = "file"
-path = "cases/for_post_side_effect.vo"
+path = "cases/runtime/control_flow/for_post_side_effect.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3064,7 +3064,7 @@ expect = "pass"
 [[case]]
 id = "for-range-channel"
 kind = "file"
-path = "cases/for_range_channel.vo"
+path = "cases/runtime/scheduler/for_range_channel.vo"
 matrix = "default"
 tags = ["scheduler", "channel", "control-flow"]
 owner = "runtime"
@@ -3073,7 +3073,7 @@ expect = "pass"
 [[case]]
 id = "for-range-defer-goroutine"
 kind = "file"
-path = "cases/for_range_defer_goroutine.vo"
+path = "cases/runtime/scheduler/for_range_defer_goroutine.vo"
 matrix = "default"
 tags = ["scheduler", "defer", "control-flow"]
 owner = "runtime"
@@ -3082,7 +3082,7 @@ expect = "pass"
 [[case]]
 id = "for-range-edge-cases"
 kind = "file"
-path = "cases/for_range_edge_cases.vo"
+path = "cases/runtime/control_flow/for_range_edge_cases.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3091,7 +3091,7 @@ expect = "pass"
 [[case]]
 id = "for-range-int"
 kind = "file"
-path = "cases/for_range_int.vo"
+path = "cases/runtime/numeric/for_range_int.vo"
 matrix = "default"
 tags = ["runtime", "numeric", "control-flow"]
 owner = "runtime"
@@ -3100,7 +3100,7 @@ expect = "pass"
 [[case]]
 id = "for-range-map-delete"
 kind = "file"
-path = "cases/for_range_map_delete.vo"
+path = "cases/runtime/map/for_range_map_delete.vo"
 matrix = "default"
 tags = ["runtime", "map", "control-flow"]
 owner = "runtime"
@@ -3109,7 +3109,7 @@ expect = "pass"
 [[case]]
 id = "for-stmt"
 kind = "file"
-path = "cases/for_stmt.vo"
+path = "cases/runtime/control_flow/for_stmt.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3118,7 +3118,7 @@ expect = "pass"
 [[case]]
 id = "forloop-init-var-regression"
 kind = "file"
-path = "cases/forloop_init_var_regression.vo"
+path = "cases/runtime/control_flow/forloop_init_var_regression.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3127,7 +3127,7 @@ expect = "pass"
 [[case]]
 id = "forloop-limit-expr-regression"
 kind = "file"
-path = "cases/forloop_limit_expr_regression.vo"
+path = "cases/runtime/control_flow/forloop_limit_expr_regression.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3136,7 +3136,7 @@ expect = "pass"
 [[case]]
 id = "forloop-limit-sideeffect"
 kind = "file"
-path = "cases/forloop_limit_sideeffect.vo"
+path = "cases/runtime/control_flow/forloop_limit_sideeffect.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3145,7 +3145,7 @@ expect = "pass"
 [[case]]
 id = "forloop-patterns"
 kind = "file"
-path = "cases/forloop_patterns.vo"
+path = "cases/runtime/control_flow/forloop_patterns.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -3154,7 +3154,7 @@ expect = "pass"
 [[case]]
 id = "func-literal-immediate-call"
 kind = "file"
-path = "cases/func_literal_immediate_call.vo"
+path = "cases/typechecker/func_literal_immediate_call.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -3163,7 +3163,7 @@ expect = "pass"
 [[case]]
 id = "gc-addr-of-local-struct-pointer-arg"
 kind = "file"
-path = "cases/gc_addr_of_local_struct_pointer_arg.vo"
+path = "cases/gc/gc_addr_of_local_struct_pointer_arg.vo"
 matrix = "gc-wasm"
 tags = ["gc", "contract", "struct", "numeric"]
 owner = "runtime-gc"
@@ -3172,7 +3172,7 @@ expect = "pass"
 [[case]]
 id = "gc-closure-capture"
 kind = "file"
-path = "cases/gc_closure_capture.vo"
+path = "cases/gc/gc_closure_capture.vo"
 matrix = "gc"
 tags = ["gc", "closure", "contract", "regression"]
 owner = "runtime-gc"
@@ -3181,7 +3181,7 @@ expect = "pass"
 [[case]]
 id = "gc-defer-closure-hidden-slot-args"
 kind = "file"
-path = "cases/gc_defer_closure_hidden_slot_args.vo"
+path = "cases/gc/gc_defer_closure_hidden_slot_args.vo"
 matrix = "default-gc"
 tags = ["gc", "contract", "closure", "defer"]
 owner = "runtime-gc"
@@ -3192,7 +3192,7 @@ expect = "pass"
 [[case]]
 id = "gc-incremental-sweep-barrier"
 kind = "file"
-path = "cases/gc_incremental_sweep_barrier.vo"
+path = "cases/gc/gc_incremental_sweep_barrier.vo"
 matrix = "gc-wasm"
 tags = ["gc", "contract"]
 owner = "runtime-gc"
@@ -3201,7 +3201,7 @@ expect = "pass"
 [[case]]
 id = "gc-large-array-slots-zero"
 kind = "file"
-path = "cases/gc_large_array_slots_zero.vo"
+path = "cases/gc/gc_large_array_slots_zero.vo"
 matrix = "gc-wasm"
 tags = ["gc", "contract", "array"]
 owner = "runtime-gc"
@@ -3210,7 +3210,7 @@ expect = "pass"
 [[case]]
 id = "gc-map-stress"
 kind = "file"
-path = "cases/gc_map_stress.vo"
+path = "cases/gc/gc_map_stress.vo"
 matrix = "gc-wasm"
 tags = ["gc", "contract", "map"]
 owner = "runtime-gc"
@@ -3219,7 +3219,7 @@ expect = "pass"
 [[case]]
 id = "gc-slice-grow"
 kind = "file"
-path = "cases/gc_slice_grow.vo"
+path = "cases/gc/gc_slice_grow.vo"
 matrix = "gc-wasm"
 tags = ["gc", "contract", "slice"]
 owner = "runtime-gc"
@@ -3228,7 +3228,7 @@ expect = "pass"
 [[case]]
 id = "gc-struct-nested"
 kind = "file"
-path = "cases/gc_struct_nested.vo"
+path = "cases/gc/gc_struct_nested.vo"
 matrix = "gc-wasm"
 tags = ["gc", "contract", "struct"]
 owner = "runtime-gc"
@@ -3237,7 +3237,7 @@ expect = "pass"
 [[case]]
 id = "ggggc-slice-grow"
 kind = "file"
-path = "cases/ggggc_slice_grow.vo"
+path = "cases/gc/ggggc_slice_grow.vo"
 matrix = "default-gc"
 tags = ["gc", "contract", "slice"]
 owner = "runtime-gc"
@@ -3246,7 +3246,7 @@ expect = "pass"
 [[case]]
 id = "global-func-var"
 kind = "file"
-path = "cases/global_func_var.vo"
+path = "cases/runtime/core/global_func_var.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -3255,7 +3255,7 @@ expect = "pass"
 [[case]]
 id = "global-interface-init"
 kind = "file"
-path = "cases/global_interface_init.vo"
+path = "cases/runtime/interface/global_interface_init.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3264,7 +3264,7 @@ expect = "pass"
 [[case]]
 id = "go-method-value"
 kind = "file"
-path = "cases/go_method_value.vo"
+path = "cases/runtime/method/go_method_value.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -3273,7 +3273,7 @@ expect = "pass"
 [[case]]
 id = "go-stmt"
 kind = "file"
-path = "cases/go_stmt.vo"
+path = "cases/runtime/scheduler/go_stmt.vo"
 matrix = "default"
 tags = ["scheduler"]
 owner = "runtime"
@@ -3282,7 +3282,7 @@ expect = "pass"
 [[case]]
 id = "goroutine-panic-crash"
 kind = "file"
-path = "cases/goroutine_panic_crash.vo"
+path = "cases/runtime/scheduler/goroutine_panic_crash.vo"
 matrix = "default"
 tags = ["scheduler", "panic"]
 owner = "runtime"
@@ -3291,7 +3291,7 @@ expect = "pass"
 [[case]]
 id = "goto-stmt"
 kind = "file"
-path = "cases/goto_stmt.vo"
+path = "cases/typechecker/goto_stmt.vo"
 matrix = "compile"
 tags = ["typechecker", "compile-fail", "parser", "control-flow"]
 owner = "typechecker"
@@ -3301,7 +3301,7 @@ expect = { fail = ["goto is not supported"] }
 [[case]]
 id = "grouped-decl"
 kind = "file"
-path = "cases/grouped_decl.vo"
+path = "cases/runtime/core/grouped_decl.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -3310,7 +3310,7 @@ expect = "pass"
 [[case]]
 id = "hex-float-literal"
 kind = "file"
-path = "cases/hex_float_literal.vo"
+path = "cases/typechecker/hex_float_literal.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -3319,7 +3319,7 @@ expect = "pass"
 [[case]]
 id = "iface-boxing-semantics"
 kind = "file"
-path = "cases/iface_boxing_semantics.vo"
+path = "cases/runtime/interface/iface_boxing_semantics.vo"
 matrix = "default"
 tags = ["interface"]
 owner = "runtime"
@@ -3328,7 +3328,7 @@ expect = "pass"
 [[case]]
 id = "iface-eq-comprehensive"
 kind = "file"
-path = "cases/iface_eq_comprehensive.vo"
+path = "cases/runtime/interface/iface_eq_comprehensive.vo"
 matrix = "default"
 tags = ["interface"]
 owner = "runtime"
@@ -3339,7 +3339,7 @@ expect = "pass"
 [[case]]
 id = "iface-escape-closure"
 kind = "file"
-path = "cases/iface_escape_closure.vo"
+path = "cases/runtime/closure/iface_escape_closure.vo"
 matrix = "default"
 tags = ["interface", "closure"]
 owner = "runtime"
@@ -3348,7 +3348,7 @@ expect = "pass"
 [[case]]
 id = "iface-noncomparable-panics"
 kind = "file"
-path = "cases/iface_noncomparable_panics.vo"
+path = "cases/runtime/panic/iface_noncomparable_panics.vo"
 matrix = "default"
 tags = ["interface", "panic"]
 owner = "runtime"
@@ -3357,7 +3357,7 @@ expect = "pass"
 [[case]]
 id = "iface-to-iface-assertion"
 kind = "file"
-path = "cases/iface_to_iface_assertion.vo"
+path = "cases/runtime/interface/iface_to_iface_assertion.vo"
 matrix = "default"
 tags = ["interface"]
 owner = "runtime"
@@ -3366,7 +3366,7 @@ expect = "pass"
 [[case]]
 id = "iface-to-iface-assign"
 kind = "file"
-path = "cases/iface_to_iface_assign.vo"
+path = "cases/runtime/interface/iface_to_iface_assign.vo"
 matrix = "default"
 tags = ["interface"]
 owner = "runtime"
@@ -3375,7 +3375,7 @@ expect = "pass"
 [[case]]
 id = "iface-to-iface-itab"
 kind = "file"
-path = "cases/iface_to_iface_itab.vo"
+path = "cases/runtime/interface/iface_to_iface_itab.vo"
 matrix = "default"
 tags = ["interface"]
 owner = "runtime"
@@ -3384,7 +3384,7 @@ expect = "pass"
 [[case]]
 id = "iface-uncomparable-panic"
 kind = "file"
-path = "cases/iface_uncomparable_panic.vo"
+path = "cases/runtime/panic/iface_uncomparable_panic.vo"
 matrix = "default"
 tags = ["interface", "panic"]
 owner = "runtime"
@@ -3393,7 +3393,7 @@ expect = "pass"
 [[case]]
 id = "immediate-func-literal"
 kind = "file"
-path = "cases/immediate_func_literal.vo"
+path = "cases/typechecker/immediate_func_literal.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -3402,7 +3402,7 @@ expect = "pass"
 [[case]]
 id = "index-bounds-panic"
 kind = "file"
-path = "cases/index_bounds_panic.vo"
+path = "cases/runtime/panic/index_bounds_panic.vo"
 matrix = "default"
 tags = ["runtime", "panic"]
 owner = "runtime"
@@ -3411,7 +3411,7 @@ expect = "pass"
 [[case]]
 id = "init-call-error"
 kind = "file"
-path = "cases/init_call_error.vo"
+path = "cases/typechecker/init_call_error.vo"
 matrix = "compile"
 tags = ["typechecker", "compile-fail"]
 owner = "typechecker"
@@ -3421,7 +3421,7 @@ expect = { fail = ["undeclared name: init"] }
 [[case]]
 id = "integer-div-mod-edge"
 kind = "file"
-path = "cases/integer_div_mod_edge.vo"
+path = "cases/runtime/numeric/integer_div_mod_edge.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -3430,7 +3430,7 @@ expect = "pass"
 [[case]]
 id = "integer-overflow-wrap"
 kind = "file"
-path = "cases/integer_overflow_wrap.vo"
+path = "cases/runtime/numeric/integer_overflow_wrap.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -3439,7 +3439,7 @@ expect = "pass"
 [[case]]
 id = "interface"
 kind = "file"
-path = "cases/interface.vo"
+path = "cases/runtime/interface/interface.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3448,7 +3448,7 @@ expect = "pass"
 [[case]]
 id = "interface-anon-params"
 kind = "file"
-path = "cases/interface_anon_params.vo"
+path = "cases/runtime/interface/interface_anon_params.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3457,7 +3457,7 @@ expect = "pass"
 [[case]]
 id = "interface-closure"
 kind = "file"
-path = "cases/interface_closure.vo"
+path = "cases/runtime/closure/interface_closure.vo"
 matrix = "default"
 tags = ["interface", "closure", "numeric"]
 owner = "runtime"
@@ -3466,7 +3466,7 @@ expect = "pass"
 [[case]]
 id = "interface-complex-subset"
 kind = "file"
-path = "cases/interface_complex_subset.vo"
+path = "cases/runtime/interface/interface_complex_subset.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3475,7 +3475,7 @@ expect = "pass"
 [[case]]
 id = "interface-conversion"
 kind = "file"
-path = "cases/interface_conversion.vo"
+path = "cases/runtime/interface/interface_conversion.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3484,7 +3484,7 @@ expect = "pass"
 [[case]]
 id = "interface-embed-assert-chain"
 kind = "file"
-path = "cases/interface_embed_assert_chain.vo"
+path = "cases/runtime/interface/interface_embed_assert_chain.vo"
 matrix = "default"
 tags = ["interface", "struct", "numeric"]
 owner = "runtime"
@@ -3493,7 +3493,7 @@ expect = "pass"
 [[case]]
 id = "interface-embed-diamond"
 kind = "file"
-path = "cases/interface_embed_diamond.vo"
+path = "cases/runtime/interface/interface_embed_diamond.vo"
 matrix = "default"
 tags = ["interface", "struct", "numeric"]
 owner = "runtime"
@@ -3502,7 +3502,7 @@ expect = "pass"
 [[case]]
 id = "interface-embed-hierarchy"
 kind = "file"
-path = "cases/interface_embed_hierarchy.vo"
+path = "cases/runtime/interface/interface_embed_hierarchy.vo"
 matrix = "default"
 tags = ["interface", "struct", "numeric"]
 owner = "runtime"
@@ -3511,7 +3511,7 @@ expect = "pass"
 [[case]]
 id = "interface-method-nil-recv"
 kind = "file"
-path = "cases/interface_method_nil_recv.vo"
+path = "cases/runtime/interface/interface_method_nil_recv.vo"
 matrix = "default"
 tags = ["interface", "method", "numeric"]
 owner = "runtime"
@@ -3520,7 +3520,7 @@ expect = "pass"
 [[case]]
 id = "interface-method-set"
 kind = "file"
-path = "cases/interface_method_set.vo"
+path = "cases/runtime/interface/interface_method_set.vo"
 matrix = "default"
 tags = ["interface", "method", "numeric"]
 owner = "runtime"
@@ -3529,7 +3529,7 @@ expect = "pass"
 [[case]]
 id = "interface-method-value"
 kind = "file"
-path = "cases/interface_method_value.vo"
+path = "cases/runtime/interface/interface_method_value.vo"
 matrix = "default"
 tags = ["interface", "method", "numeric"]
 owner = "runtime"
@@ -3538,7 +3538,7 @@ expect = "pass"
 [[case]]
 id = "interface-nested-embed"
 kind = "file"
-path = "cases/interface_nested_embed.vo"
+path = "cases/runtime/interface/interface_nested_embed.vo"
 matrix = "default"
 tags = ["interface", "struct", "numeric"]
 owner = "runtime"
@@ -3547,7 +3547,7 @@ expect = "pass"
 [[case]]
 id = "interface-nil-map-key"
 kind = "file"
-path = "cases/interface_nil_map_key.vo"
+path = "cases/runtime/interface/interface_nil_map_key.vo"
 matrix = "default"
 tags = ["interface", "map", "numeric"]
 owner = "runtime"
@@ -3556,7 +3556,7 @@ expect = "pass"
 [[case]]
 id = "interface-nil-semantics"
 kind = "file"
-path = "cases/interface_nil_semantics.vo"
+path = "cases/runtime/interface/interface_nil_semantics.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3565,7 +3565,7 @@ expect = "pass"
 [[case]]
 id = "interface-pointer"
 kind = "file"
-path = "cases/interface_pointer.vo"
+path = "cases/runtime/interface/interface_pointer.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3574,7 +3574,7 @@ expect = "pass"
 [[case]]
 id = "interface-ptr-embed-method"
 kind = "file"
-path = "cases/interface_ptr_embed_method.vo"
+path = "cases/runtime/interface/interface_ptr_embed_method.vo"
 matrix = "default"
 tags = ["interface", "method", "struct", "numeric"]
 owner = "runtime"
@@ -3583,7 +3583,7 @@ expect = "pass"
 [[case]]
 id = "interface-simple"
 kind = "file"
-path = "cases/interface_simple.vo"
+path = "cases/runtime/interface/interface_simple.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3592,7 +3592,7 @@ expect = "pass"
 [[case]]
 id = "interface-typed-nil"
 kind = "file"
-path = "cases/interface_typed_nil.vo"
+path = "cases/runtime/interface/interface_typed_nil.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3601,7 +3601,7 @@ expect = "pass"
 [[case]]
 id = "interface-value-compare"
 kind = "file"
-path = "cases/interface_value_compare.vo"
+path = "cases/runtime/interface/interface_value_compare.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -3610,7 +3610,7 @@ expect = "pass"
 [[case]]
 id = "io-package"
 kind = "file"
-path = "cases/io_package.vo"
+path = "cases/module/io_package.vo"
 matrix = "default"
 tags = ["module"]
 owner = "module"
@@ -3619,7 +3619,7 @@ expect = "pass"
 [[case]]
 id = "io-package-minimal"
 kind = "file"
-path = "cases/io_package_minimal.vo"
+path = "cases/runtime/core/io_package_minimal.vo"
 matrix = "default"
 tags = ["legacy"]
 owner = "eng"
@@ -3631,7 +3631,7 @@ expect = "pass"
 [[case]]
 id = "io-readfull-only"
 kind = "file"
-path = "cases/io_readfull_only.vo"
+path = "cases/stdlib/io_readfull_only.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -3640,7 +3640,7 @@ expect = "pass"
 [[case]]
 id = "iota-complex"
 kind = "file"
-path = "cases/iota_complex.vo"
+path = "cases/typechecker/iota_complex.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -3649,7 +3649,7 @@ expect = "pass"
 [[case]]
 id = "iota-skip-complex"
 kind = "file"
-path = "cases/iota_skip_complex.vo"
+path = "cases/typechecker/iota_skip_complex.vo"
 matrix = "default"
 tags = ["typechecker", "numeric"]
 owner = "typechecker"
@@ -3658,7 +3658,7 @@ expect = "pass"
 [[case]]
 id = "island-basic"
 kind = "file"
-path = "cases/island_basic.vo"
+path = "cases/runtime/scheduler/island_basic.vo"
 matrix = "default"
 tags = ["scheduler", "island"]
 owner = "runtime"
@@ -3669,7 +3669,7 @@ expect = "pass"
 [[case]]
 id = "island-chan-local"
 kind = "file"
-path = "cases/island_chan_local.vo"
+path = "cases/runtime/scheduler/island_chan_local.vo"
 matrix = "default"
 tags = ["scheduler", "channel", "island"]
 owner = "runtime"
@@ -3681,7 +3681,7 @@ expect = "pass"
 [[case]]
 id = "island-channel-alias-and-select"
 kind = "file"
-path = "cases/island_channel_alias_and_select.vo"
+path = "cases/runtime/scheduler/island_channel_alias_and_select.vo"
 matrix = "default"
 tags = ["scheduler", "channel", "island", "select"]
 owner = "runtime"
@@ -3693,7 +3693,7 @@ expect = "pass"
 [[case]]
 id = "island-direct-send-no-phantom"
 kind = "file"
-path = "cases/island_direct_send_no_phantom.vo"
+path = "cases/runtime/scheduler/island_direct_send_no_phantom.vo"
 matrix = "default"
 tags = ["scheduler", "island"]
 owner = "runtime"
@@ -3704,7 +3704,7 @@ expect = "pass"
 [[case]]
 id = "island-empty-struct-channel"
 kind = "file"
-path = "cases/island_empty_struct_channel.vo"
+path = "cases/runtime/scheduler/island_empty_struct_channel.vo"
 matrix = "default"
 tags = ["scheduler", "channel", "island", "struct"]
 owner = "runtime"
@@ -3715,7 +3715,7 @@ expect = "pass"
 [[case]]
 id = "island-nested-channel-transfer"
 kind = "file"
-path = "cases/island_nested_channel_transfer.vo"
+path = "cases/runtime/scheduler/island_nested_channel_transfer.vo"
 matrix = "default"
 tags = ["scheduler", "channel", "island"]
 owner = "runtime"
@@ -3727,7 +3727,7 @@ expect = "pass"
 [[case]]
 id = "island-nil-values-transfer"
 kind = "file"
-path = "cases/island_nil_values_transfer.vo"
+path = "cases/runtime/scheduler/island_nil_values_transfer.vo"
 matrix = "default"
 tags = ["scheduler", "island"]
 owner = "runtime"
@@ -3738,7 +3738,7 @@ expect = "pass"
 [[case]]
 id = "island-port-advanced"
 kind = "file"
-path = "cases/island_port_advanced.vo"
+path = "cases/runtime/scheduler/island_port_advanced.vo"
 matrix = "default"
 tags = ["scheduler", "island", "port"]
 owner = "runtime"
@@ -3750,7 +3750,7 @@ expect = "pass"
 [[case]]
 id = "island-port-close-advanced"
 kind = "file"
-path = "cases/island_port_close_advanced.vo"
+path = "cases/runtime/scheduler/island_port_close_advanced.vo"
 matrix = "default"
 tags = ["scheduler", "island", "port"]
 owner = "runtime"
@@ -3762,7 +3762,7 @@ expect = "pass"
 [[case]]
 id = "island-port-comm"
 kind = "file"
-path = "cases/island_port_comm.vo"
+path = "cases/runtime/scheduler/island_port_comm.vo"
 matrix = "default"
 tags = ["scheduler", "island", "port"]
 owner = "runtime"
@@ -3773,7 +3773,7 @@ expect = "pass"
 [[case]]
 id = "island-remote-close-notify"
 kind = "file"
-path = "cases/island_remote_close_notify.vo"
+path = "cases/runtime/scheduler/island_remote_close_notify.vo"
 matrix = "default"
 tags = ["scheduler", "island"]
 owner = "runtime"
@@ -3784,7 +3784,7 @@ expect = "pass"
 [[case]]
 id = "island-sendable-types"
 kind = "file"
-path = "cases/island_sendable_types.vo"
+path = "cases/runtime/scheduler/island_sendable_types.vo"
 matrix = "default"
 tags = ["scheduler", "island"]
 owner = "runtime"
@@ -3967,7 +3967,7 @@ expect = "pass"
 [[case]]
 id = "jit-crash-minimal5"
 kind = "file"
-path = "cases/jit_crash_minimal5.vo"
+path = "cases/jit/jit_crash_minimal5.vo"
 matrix = "default"
 tags = ["jit"]
 owner = "jit"
@@ -3976,7 +3976,7 @@ expect = "pass"
 [[case]]
 id = "jit-iface-assign-rttid-bug"
 kind = "file"
-path = "cases/jit_iface_assign_rttid_bug.vo"
+path = "cases/jit/jit_iface_assign_rttid_bug.vo"
 matrix = "default"
 tags = ["jit", "regression", "interface"]
 owner = "jit"
@@ -3985,7 +3985,7 @@ expect = "pass"
 [[case]]
 id = "jit-maketree-crash"
 kind = "file"
-path = "cases/jit_maketree_crash.vo"
+path = "cases/jit/jit_maketree_crash.vo"
 matrix = "default"
 tags = ["jit"]
 owner = "jit"
@@ -3994,7 +3994,7 @@ expect = "pass"
 [[case]]
 id = "jit-nil-callclosure-recover"
 kind = "file"
-path = "cases/jit_nil_callclosure_recover.vo"
+path = "cases/jit/jit_nil_callclosure_recover.vo"
 matrix = "default"
 tags = ["jit", "closure", "panic"]
 owner = "jit"
@@ -4003,7 +4003,7 @@ expect = "pass"
 [[case]]
 id = "jit-nil-calliface-recover"
 kind = "file"
-path = "cases/jit_nil_calliface_recover.vo"
+path = "cases/gc/jit_nil_calliface_recover.vo"
 matrix = "default-gc-jit-only"
 tags = ["gc", "contract", "panic", "interface"]
 owner = "runtime-gc"
@@ -4013,7 +4013,7 @@ expect = "pass"
 [[case]]
 id = "jit-direct-call-frame-contract"
 kind = "file"
-path = "cases/jit_direct_call_frame_contract.vo"
+path = "cases/gc/jit_direct_call_frame_contract.vo"
 matrix = "default-gc-jit-only"
 tags = ["gc", "contract"]
 owner = "runtime-gc"
@@ -4023,7 +4023,7 @@ expect = "pass"
 [[case]]
 id = "jit-panic-func-call"
 kind = "file"
-path = "cases/jit_panic_func_call.vo"
+path = "cases/jit/jit_panic_func_call.vo"
 matrix = "default"
 tags = ["jit", "panic"]
 owner = "jit"
@@ -4032,7 +4032,7 @@ expect = "pass"
 [[case]]
 id = "json-tag"
 kind = "file"
-path = "cases/json_tag.vo"
+path = "cases/stdlib/json_tag.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -4041,7 +4041,7 @@ expect = "pass"
 [[case]]
 id = "label-stmt"
 kind = "file"
-path = "cases/label_stmt.vo"
+path = "cases/runtime/core/label_stmt.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4105,7 +4105,7 @@ expect = "pass"
 [[case]]
 id = "large-shift-amount"
 kind = "file"
-path = "cases/large_shift_amount.vo"
+path = "cases/runtime/numeric/large_shift_amount.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -4114,7 +4114,7 @@ expect = "pass"
 [[case]]
 id = "local-type"
 kind = "file"
-path = "cases/local_type.vo"
+path = "cases/typechecker/local_type.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -4123,7 +4123,7 @@ expect = "pass"
 [[case]]
 id = "make-boundary-panic"
 kind = "file"
-path = "cases/make_boundary_panic.vo"
+path = "cases/runtime/panic/make_boundary_panic.vo"
 matrix = "default"
 tags = ["runtime", "panic"]
 owner = "runtime"
@@ -4132,7 +4132,7 @@ expect = "pass"
 [[case]]
 id = "make-negative-panic"
 kind = "file"
-path = "cases/make_negative_panic.vo"
+path = "cases/runtime/panic/make_negative_panic.vo"
 matrix = "default"
 tags = ["runtime", "panic"]
 owner = "runtime"
@@ -4141,7 +4141,7 @@ expect = "pass"
 [[case]]
 id = "map"
 kind = "file"
-path = "cases/map.vo"
+path = "cases/runtime/map/map.vo"
 matrix = "default"
 tags = ["runtime", "map"]
 owner = "runtime"
@@ -4150,7 +4150,7 @@ expect = "pass"
 [[case]]
 id = "map-any-key"
 kind = "file"
-path = "cases/map_any_key.vo"
+path = "cases/runtime/map/map_any_key.vo"
 matrix = "default"
 tags = ["legacy", "map"]
 owner = "eng"
@@ -4162,7 +4162,7 @@ expect = "pass"
 [[case]]
 id = "map-any-key-debug"
 kind = "file"
-path = "cases/map_any_key_debug.vo"
+path = "cases/runtime/map/map_any_key_debug.vo"
 matrix = "default"
 tags = ["legacy", "map"]
 owner = "eng"
@@ -4174,7 +4174,7 @@ expect = "pass"
 [[case]]
 id = "map-concurrent-safe"
 kind = "file"
-path = "cases/map_concurrent_safe.vo"
+path = "cases/runtime/map/map_concurrent_safe.vo"
 matrix = "default"
 tags = ["runtime", "map"]
 owner = "runtime"
@@ -4183,7 +4183,7 @@ expect = "pass"
 [[case]]
 id = "map-delete-iterate"
 kind = "file"
-path = "cases/map_delete_iterate.vo"
+path = "cases/runtime/map/map_delete_iterate.vo"
 matrix = "default"
 tags = ["runtime", "map"]
 owner = "runtime"
@@ -4192,7 +4192,7 @@ expect = "pass"
 [[case]]
 id = "map-iteration-order"
 kind = "file"
-path = "cases/map_iteration_order.vo"
+path = "cases/runtime/map/map_iteration_order.vo"
 matrix = "default"
 tags = ["runtime", "map"]
 owner = "runtime"
@@ -4201,7 +4201,7 @@ expect = "pass"
 [[case]]
 id = "map-key-types"
 kind = "file"
-path = "cases/map_key_types.vo"
+path = "cases/typechecker/map_key_types.vo"
 matrix = "default"
 tags = ["typechecker", "map"]
 owner = "typechecker"
@@ -4210,7 +4210,7 @@ expect = "pass"
 [[case]]
 id = "map-struct-key"
 kind = "file"
-path = "cases/map_struct_key.vo"
+path = "cases/runtime/map/map_struct_key.vo"
 matrix = "default"
 tags = ["runtime", "map", "struct"]
 owner = "runtime"
@@ -4219,7 +4219,7 @@ expect = "pass"
 [[case]]
 id = "method-chain-receiver"
 kind = "file"
-path = "cases/method_chain_receiver.vo"
+path = "cases/runtime/method/method_chain_receiver.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -4228,7 +4228,7 @@ expect = "pass"
 [[case]]
 id = "method-dispatch-bug"
 kind = "file"
-path = "cases/method_dispatch_bug.vo"
+path = "cases/runtime/method/method_dispatch_bug.vo"
 matrix = "default"
 tags = ["runtime", "regression", "method"]
 owner = "runtime"
@@ -4237,7 +4237,7 @@ expect = "pass"
 [[case]]
 id = "method-expr-embed-comprehensive"
 kind = "file"
-path = "cases/method_expr_embed_comprehensive.vo"
+path = "cases/runtime/struct/method_expr_embed_comprehensive.vo"
 matrix = "default"
 tags = ["runtime", "method", "struct"]
 owner = "runtime"
@@ -4246,7 +4246,7 @@ expect = "pass"
 [[case]]
 id = "method-expr-embed-iface"
 kind = "file"
-path = "cases/method_expr_embed_iface.vo"
+path = "cases/runtime/interface/method_expr_embed_iface.vo"
 matrix = "default"
 tags = ["interface", "method", "struct"]
 owner = "runtime"
@@ -4255,7 +4255,7 @@ expect = "pass"
 [[case]]
 id = "method-expr-embed-iface-deep-offset"
 kind = "file"
-path = "cases/method_expr_embed_iface_deep_offset.vo"
+path = "cases/runtime/interface/method_expr_embed_iface_deep_offset.vo"
 matrix = "default"
 tags = ["interface", "method", "struct"]
 owner = "runtime"
@@ -4264,7 +4264,7 @@ expect = "pass"
 [[case]]
 id = "method-expr-embed-iface-offset"
 kind = "file"
-path = "cases/method_expr_embed_iface_offset.vo"
+path = "cases/runtime/interface/method_expr_embed_iface_offset.vo"
 matrix = "default"
 tags = ["interface", "method", "struct"]
 owner = "runtime"
@@ -4273,7 +4273,7 @@ expect = "pass"
 [[case]]
 id = "method-expr-embed-iface-ptr-step"
 kind = "file"
-path = "cases/method_expr_embed_iface_ptr_step.vo"
+path = "cases/runtime/interface/method_expr_embed_iface_ptr_step.vo"
 matrix = "default"
 tags = ["interface", "method", "struct"]
 owner = "runtime"
@@ -4282,7 +4282,7 @@ expect = "pass"
 [[case]]
 id = "method-expr-embed-ptr"
 kind = "file"
-path = "cases/method_expr_embed_ptr.vo"
+path = "cases/runtime/struct/method_expr_embed_ptr.vo"
 matrix = "default"
 tags = ["runtime", "method", "struct"]
 owner = "runtime"
@@ -4291,7 +4291,7 @@ expect = "pass"
 [[case]]
 id = "method-expr-on-interface"
 kind = "file"
-path = "cases/method_expr_on_interface.vo"
+path = "cases/runtime/interface/method_expr_on_interface.vo"
 matrix = "default"
 tags = ["interface", "method", "numeric"]
 owner = "runtime"
@@ -4300,7 +4300,7 @@ expect = "pass"
 [[case]]
 id = "method-expr-promoted"
 kind = "file"
-path = "cases/method_expr_promoted.vo"
+path = "cases/runtime/method/method_expr_promoted.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -4309,7 +4309,7 @@ expect = "pass"
 [[case]]
 id = "method-expression"
 kind = "file"
-path = "cases/method_expression.vo"
+path = "cases/runtime/method/method_expression.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -4318,7 +4318,7 @@ expect = "pass"
 [[case]]
 id = "method-value"
 kind = "file"
-path = "cases/method_value.vo"
+path = "cases/runtime/method/method_value.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -4327,7 +4327,7 @@ expect = "pass"
 [[case]]
 id = "method-value-embed-iface"
 kind = "file"
-path = "cases/method_value_embed_iface.vo"
+path = "cases/runtime/interface/method_value_embed_iface.vo"
 matrix = "default"
 tags = ["interface", "method", "struct"]
 owner = "runtime"
@@ -4336,7 +4336,7 @@ expect = "pass"
 [[case]]
 id = "method-value-ptr-recv-regression"
 kind = "file"
-path = "cases/method_value_ptr_recv_regression.vo"
+path = "cases/runtime/method/method_value_ptr_recv_regression.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -4345,7 +4345,7 @@ expect = "pass"
 [[case]]
 id = "minimal-bug"
 kind = "file"
-path = "cases/minimal_bug.vo"
+path = "cases/runtime/core/minimal_bug.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -4354,7 +4354,7 @@ expect = "pass"
 [[case]]
 id = "minimal-bug2"
 kind = "file"
-path = "cases/minimal_bug2.vo"
+path = "cases/runtime/core/minimal_bug2.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -4363,7 +4363,7 @@ expect = "pass"
 [[case]]
 id = "multi-assign-eval-order"
 kind = "file"
-path = "cases/multi_assign_eval_order.vo"
+path = "cases/runtime/core/multi_assign_eval_order.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4372,7 +4372,7 @@ expect = "pass"
 [[case]]
 id = "multi-assign-index-modify"
 kind = "file"
-path = "cases/multi_assign_index_modify.vo"
+path = "cases/runtime/numeric/multi_assign_index_modify.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -4381,7 +4381,7 @@ expect = "pass"
 [[case]]
 id = "multi-assign-map-lhs"
 kind = "file"
-path = "cases/multi_assign_map_lhs.vo"
+path = "cases/runtime/map/multi_assign_map_lhs.vo"
 matrix = "default"
 tags = ["runtime", "map"]
 owner = "runtime"
@@ -4390,7 +4390,7 @@ expect = "pass"
 [[case]]
 id = "multi-assign-panic-order"
 kind = "file"
-path = "cases/multi_assign_panic_order.vo"
+path = "cases/runtime/panic/multi_assign_panic_order.vo"
 matrix = "default"
 tags = ["runtime", "panic"]
 owner = "runtime"
@@ -4399,7 +4399,7 @@ expect = "pass"
 [[case]]
 id = "multi-assign-swap"
 kind = "file"
-path = "cases/multi_assign_swap.vo"
+path = "cases/runtime/core/multi_assign_swap.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4408,7 +4408,7 @@ expect = "pass"
 [[case]]
 id = "multi-init"
 kind = "file"
-path = "cases/multi_init.vo"
+path = "cases/runtime/core/multi_init.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4417,7 +4417,7 @@ expect = "pass"
 [[case]]
 id = "multi-init-order"
 kind = "file"
-path = "cases/multi_init_order.vo"
+path = "cases/runtime/core/multi_init_order.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4426,7 +4426,7 @@ expect = "pass"
 [[case]]
 id = "multi-level-embedding"
 kind = "file"
-path = "cases/multi_level_embedding.vo"
+path = "cases/runtime/struct/multi_level_embedding.vo"
 matrix = "default"
 tags = ["runtime", "struct"]
 owner = "runtime"
@@ -4435,7 +4435,7 @@ expect = "pass"
 [[case]]
 id = "multi-return-as-arg"
 kind = "file"
-path = "cases/multi_return_as_arg.vo"
+path = "cases/runtime/control_flow/multi_return_as_arg.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -4444,7 +4444,7 @@ expect = "pass"
 [[case]]
 id = "multi-return-chain"
 kind = "file"
-path = "cases/multi_return_chain.vo"
+path = "cases/runtime/control_flow/multi_return_chain.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -4453,7 +4453,7 @@ expect = "pass"
 [[case]]
 id = "multi-return-discard"
 kind = "file"
-path = "cases/multi_return_discard.vo"
+path = "cases/runtime/control_flow/multi_return_discard.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -4462,7 +4462,7 @@ expect = "pass"
 [[case]]
 id = "multi-return-variadic-spread"
 kind = "file"
-path = "cases/multi_return_variadic_spread.vo"
+path = "cases/runtime/control_flow/multi_return_variadic_spread.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -4471,7 +4471,7 @@ expect = "pass"
 [[case]]
 id = "multi-type-method"
 kind = "file"
-path = "cases/multi_type_method.vo"
+path = "cases/typechecker/multi_type_method.vo"
 matrix = "default"
 tags = ["typechecker", "method"]
 owner = "typechecker"
@@ -4480,7 +4480,7 @@ expect = "pass"
 [[case]]
 id = "named-return"
 kind = "file"
-path = "cases/named_return.vo"
+path = "cases/runtime/control_flow/named_return.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -4489,7 +4489,7 @@ expect = "pass"
 [[case]]
 id = "named-type-slice-method"
 kind = "file"
-path = "cases/named_type_slice_method.vo"
+path = "cases/typechecker/named_type_slice_method.vo"
 matrix = "default"
 tags = ["typechecker", "slice", "method"]
 owner = "typechecker"
@@ -4498,7 +4498,7 @@ expect = "pass"
 [[case]]
 id = "nested-clone-test"
 kind = "file"
-path = "cases/nested_clone_test.vo"
+path = "cases/runtime/core/nested_clone_test.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4507,7 +4507,7 @@ expect = "pass"
 [[case]]
 id = "nested-closure-modify"
 kind = "file"
-path = "cases/nested_closure_modify.vo"
+path = "cases/runtime/closure/nested_closure_modify.vo"
 matrix = "default"
 tags = ["runtime", "closure", "numeric"]
 owner = "runtime"
@@ -4516,7 +4516,7 @@ expect = "pass"
 [[case]]
 id = "nested-label-break-continue"
 kind = "file"
-path = "cases/nested_label_break_continue.vo"
+path = "cases/runtime/control_flow/nested_label_break_continue.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -4525,7 +4525,7 @@ expect = "pass"
 [[case]]
 id = "nested-loop-label-defer"
 kind = "file"
-path = "cases/nested_loop_label_defer.vo"
+path = "cases/runtime/defer/nested_loop_label_defer.vo"
 matrix = "default"
 tags = ["runtime", "defer"]
 owner = "runtime"
@@ -4534,7 +4534,7 @@ expect = "pass"
 [[case]]
 id = "nested-struct-bug"
 kind = "file"
-path = "cases/nested_struct_bug.vo"
+path = "cases/runtime/struct/nested_struct_bug.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct"]
 owner = "runtime"
@@ -4543,7 +4543,7 @@ expect = "pass"
 [[case]]
 id = "nested-struct-zero"
 kind = "file"
-path = "cases/nested_struct_zero.vo"
+path = "cases/runtime/struct/nested_struct_zero.vo"
 matrix = "default"
 tags = ["runtime", "struct"]
 owner = "runtime"
@@ -4552,7 +4552,7 @@ expect = "pass"
 [[case]]
 id = "nested-type-switch"
 kind = "file"
-path = "cases/nested_type_switch.vo"
+path = "cases/typechecker/nested_type_switch.vo"
 matrix = "default"
 tags = ["typechecker", "control-flow"]
 owner = "typechecker"
@@ -4594,7 +4594,7 @@ expect = "pass"
 [[case]]
 id = "nil-func-call-panic"
 kind = "file"
-path = "cases/nil_func_call_panic.vo"
+path = "cases/runtime/panic/nil_func_call_panic.vo"
 matrix = "default"
 tags = ["runtime", "panic"]
 owner = "runtime"
@@ -4603,7 +4603,7 @@ expect = "pass"
 [[case]]
 id = "nil-map-assign-panic"
 kind = "file"
-path = "cases/nil_map_assign_panic.vo"
+path = "cases/runtime/panic/nil_map_assign_panic.vo"
 matrix = "default"
 tags = ["legacy", "panic", "map"]
 owner = "eng"
@@ -4615,7 +4615,7 @@ expect = "pass"
 [[case]]
 id = "nil-map-behavior"
 kind = "file"
-path = "cases/nil_map_behavior.vo"
+path = "cases/runtime/map/nil_map_behavior.vo"
 matrix = "default"
 tags = ["runtime", "map"]
 owner = "runtime"
@@ -4624,7 +4624,7 @@ expect = "pass"
 [[case]]
 id = "nil-pointer-method-panic"
 kind = "file"
-path = "cases/nil_pointer_method_panic.vo"
+path = "cases/runtime/panic/nil_pointer_method_panic.vo"
 matrix = "default"
 tags = ["runtime", "panic", "method", "numeric"]
 owner = "runtime"
@@ -4633,7 +4633,7 @@ expect = "pass"
 [[case]]
 id = "nil-slice-map"
 kind = "file"
-path = "cases/nil_slice_map.vo"
+path = "cases/runtime/slice/nil_slice_map.vo"
 matrix = "default"
 tags = ["runtime", "slice", "map"]
 owner = "runtime"
@@ -4642,7 +4642,7 @@ expect = "pass"
 [[case]]
 id = "nil-value-receiver-method"
 kind = "file"
-path = "cases/nil_value_receiver_method.vo"
+path = "cases/runtime/method/nil_value_receiver_method.vo"
 matrix = "default"
 tags = ["runtime", "method"]
 owner = "runtime"
@@ -4651,7 +4651,7 @@ expect = "pass"
 [[case]]
 id = "octal-test"
 kind = "file"
-path = "cases/octal_test.vo"
+path = "cases/runtime/numeric/octal_test.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -4660,7 +4660,7 @@ expect = "pass"
 [[case]]
 id = "os-pipe-chtimes"
 kind = "file"
-path = "cases/os_pipe_chtimes.vo"
+path = "cases/stdlib/os_pipe_chtimes.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -4671,7 +4671,7 @@ expect = "pass"
 [[case]]
 id = "os-simple-test"
 kind = "file"
-path = "cases/os_simple_test.vo"
+path = "cases/stdlib/os_simple_test.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -4682,7 +4682,7 @@ expect = "pass"
 [[case]]
 id = "os-test"
 kind = "file"
-path = "cases/os_test.vo"
+path = "cases/stdlib/os_test.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -4693,7 +4693,7 @@ expect = "pass"
 [[case]]
 id = "packed-array"
 kind = "file"
-path = "cases/packed_array.vo"
+path = "cases/runtime/array/packed_array.vo"
 matrix = "default"
 tags = ["runtime", "array"]
 owner = "runtime"
@@ -4702,7 +4702,7 @@ expect = "pass"
 [[case]]
 id = "panic-complex-value"
 kind = "file"
-path = "cases/panic_complex_value.vo"
+path = "cases/runtime/panic/panic_complex_value.vo"
 matrix = "default"
 tags = ["runtime", "panic"]
 owner = "runtime"
@@ -4711,7 +4711,7 @@ expect = "pass"
 [[case]]
 id = "panic-recover"
 kind = "file"
-path = "cases/panic_recover.vo"
+path = "cases/runtime/panic/panic_recover.vo"
 matrix = "default"
 tags = ["runtime", "panic"]
 owner = "runtime"
@@ -4720,7 +4720,7 @@ expect = "pass"
 [[case]]
 id = "point-then-rect"
 kind = "file"
-path = "cases/point_then_rect.vo"
+path = "cases/runtime/numeric/point_then_rect.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -4729,7 +4729,7 @@ expect = "pass"
 [[case]]
 id = "pointer-basic"
 kind = "file"
-path = "cases/pointer_basic.vo"
+path = "cases/runtime/numeric/pointer_basic.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -4738,7 +4738,7 @@ expect = "pass"
 [[case]]
 id = "pointer-comprehensive"
 kind = "file"
-path = "cases/pointer_comprehensive.vo"
+path = "cases/runtime/numeric/pointer_comprehensive.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -4747,7 +4747,7 @@ expect = "pass"
 [[case]]
 id = "pointer-embedded"
 kind = "file"
-path = "cases/pointer_embedded.vo"
+path = "cases/runtime/struct/pointer_embedded.vo"
 matrix = "default"
 tags = ["runtime", "struct", "numeric"]
 owner = "runtime"
@@ -4756,7 +4756,7 @@ expect = "pass"
 [[case]]
 id = "pointer-method-call"
 kind = "file"
-path = "cases/pointer_method_call.vo"
+path = "cases/runtime/method/pointer_method_call.vo"
 matrix = "default"
 tags = ["runtime", "method", "numeric"]
 owner = "runtime"
@@ -4765,7 +4765,7 @@ expect = "pass"
 [[case]]
 id = "print-format"
 kind = "file"
-path = "cases/print_format.vo"
+path = "cases/runtime/numeric/print_format.vo"
 matrix = "default"
 tags = ["runtime", "numeric", "control-flow"]
 owner = "runtime"
@@ -4774,7 +4774,7 @@ expect = "pass"
 [[case]]
 id = "private-type-itab"
 kind = "file"
-path = "cases/private_type_itab.vo"
+path = "cases/typechecker/private_type_itab.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -4810,7 +4810,7 @@ expect = "pass"
 [[case]]
 id = "qualified-embed-iface"
 kind = "file"
-path = "cases/qualified_embed_iface.vo"
+path = "cases/module/qualified_embed_iface.vo"
 matrix = "default"
 tags = ["module", "interface", "struct"]
 owner = "module"
@@ -4819,7 +4819,7 @@ expect = "pass"
 [[case]]
 id = "question-operator"
 kind = "file"
-path = "cases/question_operator.vo"
+path = "cases/runtime/core/question_operator.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4830,7 +4830,7 @@ expect = "pass"
 [[case]]
 id = "quicksort"
 kind = "file"
-path = "cases/quicksort.vo"
+path = "cases/runtime/core/quicksort.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4839,7 +4839,7 @@ expect = "pass"
 [[case]]
 id = "rand-basic"
 kind = "file"
-path = "cases/rand_basic.vo"
+path = "cases/stdlib/rand_basic.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -4850,7 +4850,7 @@ expect = "pass"
 [[case]]
 id = "rand-perm"
 kind = "file"
-path = "cases/rand_perm.vo"
+path = "cases/stdlib/rand_perm.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
@@ -4861,7 +4861,7 @@ expect = "pass"
 [[case]]
 id = "range-modify-container"
 kind = "file"
-path = "cases/range_modify_container.vo"
+path = "cases/runtime/numeric/range_modify_container.vo"
 matrix = "default"
 tags = ["runtime", "numeric", "control-flow"]
 owner = "runtime"
@@ -4870,7 +4870,7 @@ expect = "pass"
 [[case]]
 id = "range-string"
 kind = "file"
-path = "cases/range_string.vo"
+path = "cases/runtime/string/range_string.vo"
 matrix = "default"
 tags = ["runtime", "string", "control-flow"]
 owner = "runtime"
@@ -4879,7 +4879,7 @@ expect = "pass"
 [[case]]
 id = "range-string-index"
 kind = "file"
-path = "cases/range_string_index.vo"
+path = "cases/runtime/string/range_string_index.vo"
 matrix = "default"
 tags = ["runtime", "string", "control-flow"]
 owner = "runtime"
@@ -4888,7 +4888,7 @@ expect = "pass"
 [[case]]
 id = "range-var-modification"
 kind = "file"
-path = "cases/range_var_modification.vo"
+path = "cases/runtime/numeric/range_var_modification.vo"
 matrix = "default"
 tags = ["runtime", "numeric", "control-flow"]
 owner = "runtime"
@@ -4897,7 +4897,7 @@ expect = "pass"
 [[case]]
 id = "range-var-reassign"
 kind = "file"
-path = "cases/range_var_reassign.vo"
+path = "cases/runtime/control_flow/range_var_reassign.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -4906,7 +4906,7 @@ expect = "pass"
 [[case]]
 id = "raw-string-literal"
 kind = "file"
-path = "cases/raw_string_literal.vo"
+path = "cases/typechecker/raw_string_literal.vo"
 matrix = "default"
 tags = ["typechecker", "string"]
 owner = "typechecker"
@@ -4915,7 +4915,7 @@ expect = "pass"
 [[case]]
 id = "rect-only"
 kind = "file"
-path = "cases/rect_only.vo"
+path = "cases/runtime/core/rect_only.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4924,7 +4924,7 @@ expect = "pass"
 [[case]]
 id = "rect-only-sum"
 kind = "file"
-path = "cases/rect_only_sum.vo"
+path = "cases/runtime/core/rect_only_sum.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -4933,7 +4933,7 @@ expect = "pass"
 [[case]]
 id = "recursive-closure"
 kind = "file"
-path = "cases/recursive_closure.vo"
+path = "cases/runtime/closure/recursive_closure.vo"
 matrix = "default"
 tags = ["runtime", "closure"]
 owner = "runtime"
@@ -4942,7 +4942,7 @@ expect = "pass"
 [[case]]
 id = "recursive-struct"
 kind = "file"
-path = "cases/recursive_struct.vo"
+path = "cases/runtime/struct/recursive_struct.vo"
 matrix = "default"
 tags = ["runtime", "struct"]
 owner = "runtime"
@@ -4951,7 +4951,7 @@ expect = "pass"
 [[case]]
 id = "recv-on-closed-channel"
 kind = "file"
-path = "cases/recv_on_closed_channel.vo"
+path = "cases/runtime/scheduler/recv_on_closed_channel.vo"
 matrix = "default"
 tags = ["scheduler", "channel"]
 owner = "runtime"
@@ -4960,7 +4960,7 @@ expect = "pass"
 [[case]]
 id = "return-expr-panic-defer"
 kind = "file"
-path = "cases/return_expr_panic_defer.vo"
+path = "cases/runtime/defer/return_expr_panic_defer.vo"
 matrix = "default"
 tags = ["runtime", "defer", "panic", "control-flow"]
 owner = "runtime"
@@ -4969,7 +4969,7 @@ expect = "pass"
 [[case]]
 id = "rune-literal"
 kind = "file"
-path = "cases/rune_literal.vo"
+path = "cases/typechecker/rune_literal.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -4978,7 +4978,7 @@ expect = "pass"
 [[case]]
 id = "select-closed-channel"
 kind = "file"
-path = "cases/select_closed_channel.vo"
+path = "cases/runtime/scheduler/select_closed_channel.vo"
 matrix = "default"
 tags = ["scheduler", "channel", "select"]
 owner = "runtime"
@@ -4987,7 +4987,7 @@ expect = "pass"
 [[case]]
 id = "select-default-behavior"
 kind = "file"
-path = "cases/select_default_behavior.vo"
+path = "cases/runtime/scheduler/select_default_behavior.vo"
 matrix = "default"
 tags = ["scheduler", "select"]
 owner = "runtime"
@@ -4996,7 +4996,7 @@ expect = "pass"
 [[case]]
 id = "select-multi-ready"
 kind = "file"
-path = "cases/select_multi_ready.vo"
+path = "cases/runtime/scheduler/select_multi_ready.vo"
 matrix = "default"
 tags = ["scheduler", "select"]
 owner = "runtime"
@@ -5005,7 +5005,7 @@ expect = "pass"
 [[case]]
 id = "select-nested-break"
 kind = "file"
-path = "cases/select_nested_break.vo"
+path = "cases/runtime/scheduler/select_nested_break.vo"
 matrix = "default"
 tags = ["scheduler", "select", "control-flow"]
 owner = "runtime"
@@ -5014,7 +5014,7 @@ expect = "pass"
 [[case]]
 id = "select-nil-channel"
 kind = "file"
-path = "cases/select_nil_channel.vo"
+path = "cases/runtime/scheduler/select_nil_channel.vo"
 matrix = "default"
 tags = ["scheduler", "channel", "select"]
 owner = "runtime"
@@ -5023,7 +5023,7 @@ expect = "pass"
 [[case]]
 id = "select-send-eval-order"
 kind = "file"
-path = "cases/select_send_eval_order.vo"
+path = "cases/runtime/scheduler/select_send_eval_order.vo"
 matrix = "default"
 tags = ["scheduler", "select"]
 owner = "runtime"
@@ -5032,7 +5032,7 @@ expect = "pass"
 [[case]]
 id = "select-stmt"
 kind = "file"
-path = "cases/select_stmt.vo"
+path = "cases/runtime/scheduler/select_stmt.vo"
 matrix = "default"
 tags = ["scheduler", "select"]
 owner = "runtime"
@@ -5041,7 +5041,7 @@ expect = "pass"
 [[case]]
 id = "select-stmt-assert-fail"
 kind = "file"
-path = "cases/select_stmt_assert_fail.vo"
+path = "cases/typechecker/select_stmt_assert_fail.vo"
 matrix = "compile"
 tags = ["typechecker", "compile-fail", "select"]
 owner = "typechecker"
@@ -5051,7 +5051,7 @@ expect = { fail = ["assertion failed"] }
 [[case]]
 id = "select-type-switch-combo"
 kind = "file"
-path = "cases/select_type_switch_combo.vo"
+path = "cases/runtime/scheduler/select_type_switch_combo.vo"
 matrix = "default"
 tags = ["scheduler", "select", "control-flow"]
 owner = "runtime"
@@ -5060,7 +5060,7 @@ expect = "pass"
 [[case]]
 id = "setfield-getfield-test"
 kind = "file"
-path = "cases/setfield_getfield_test.vo"
+path = "cases/runtime/core/setfield_getfield_test.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -5069,7 +5069,7 @@ expect = "pass"
 [[case]]
 id = "setfield-test"
 kind = "file"
-path = "cases/setfield_test.vo"
+path = "cases/runtime/core/setfield_test.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -5078,7 +5078,7 @@ expect = "pass"
 [[case]]
 id = "shift-boundary"
 kind = "file"
-path = "cases/shift_boundary.vo"
+path = "cases/runtime/numeric/shift_boundary.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -5087,7 +5087,7 @@ expect = "pass"
 [[case]]
 id = "shift-ops"
 kind = "file"
-path = "cases/shift_ops.vo"
+path = "cases/runtime/numeric/shift_ops.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -5096,7 +5096,7 @@ expect = "pass"
 [[case]]
 id = "short-var-redecl"
 kind = "file"
-path = "cases/short_var_redecl.vo"
+path = "cases/runtime/core/short_var_redecl.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -5105,7 +5105,7 @@ expect = "pass"
 [[case]]
 id = "simple-clone-test"
 kind = "file"
-path = "cases/simple_clone_test.vo"
+path = "cases/runtime/core/simple_clone_test.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -8554,7 +8554,7 @@ expect = "pass"
 [[case]]
 id = "slice"
 kind = "file"
-path = "cases/slice.vo"
+path = "cases/runtime/slice/slice.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8563,7 +8563,7 @@ expect = "pass"
 [[case]]
 id = "slice-aliasing"
 kind = "file"
-path = "cases/slice_aliasing.vo"
+path = "cases/runtime/slice/slice_aliasing.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8572,7 +8572,7 @@ expect = "pass"
 [[case]]
 id = "slice-append-semantics"
 kind = "file"
-path = "cases/slice_append_semantics.vo"
+path = "cases/runtime/slice/slice_append_semantics.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8581,7 +8581,7 @@ expect = "pass"
 [[case]]
 id = "slice-cap-boundary"
 kind = "file"
-path = "cases/slice_cap_boundary.vo"
+path = "cases/runtime/slice/slice_cap_boundary.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8590,7 +8590,7 @@ expect = "pass"
 [[case]]
 id = "slice-func-elem-call"
 kind = "file"
-path = "cases/slice_func_elem_call.vo"
+path = "cases/runtime/slice/slice_func_elem_call.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8599,7 +8599,7 @@ expect = "pass"
 [[case]]
 id = "slice-int8-memory"
 kind = "file"
-path = "cases/slice_int8_memory.vo"
+path = "cases/runtime/slice/slice_int8_memory.vo"
 matrix = "default"
 tags = ["legacy", "slice", "numeric"]
 owner = "eng"
@@ -8611,7 +8611,7 @@ expect = "pass"
 [[case]]
 id = "slice-int8-new"
 kind = "file"
-path = "cases/slice_int8_new.vo"
+path = "cases/runtime/slice/slice_int8_new.vo"
 matrix = "default"
 tags = ["legacy", "slice", "numeric"]
 owner = "eng"
@@ -8623,7 +8623,7 @@ expect = "pass"
 [[case]]
 id = "slice-int8-struct"
 kind = "file"
-path = "cases/slice_int8_struct.vo"
+path = "cases/runtime/slice/slice_int8_struct.vo"
 matrix = "default"
 tags = ["legacy", "slice", "struct", "numeric"]
 owner = "eng"
@@ -8635,7 +8635,7 @@ expect = "pass"
 [[case]]
 id = "slice-large-struct"
 kind = "file"
-path = "cases/slice_large_struct.vo"
+path = "cases/runtime/slice/slice_large_struct.vo"
 matrix = "default"
 tags = ["runtime", "slice", "struct"]
 owner = "runtime"
@@ -8644,7 +8644,7 @@ expect = "pass"
 [[case]]
 id = "slice-map"
 kind = "file"
-path = "cases/slice_map.vo"
+path = "cases/runtime/slice/slice_map.vo"
 matrix = "default"
 tags = ["runtime", "slice", "map"]
 owner = "runtime"
@@ -8653,7 +8653,7 @@ expect = "pass"
 [[case]]
 id = "slice-nil-append"
 kind = "file"
-path = "cases/slice_nil_append.vo"
+path = "cases/runtime/slice/slice_nil_append.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8662,7 +8662,7 @@ expect = "pass"
 [[case]]
 id = "slice-ops"
 kind = "file"
-path = "cases/slice_ops.vo"
+path = "cases/runtime/slice/slice_ops.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8671,7 +8671,7 @@ expect = "pass"
 [[case]]
 id = "slice-reslice-cap"
 kind = "file"
-path = "cases/slice_reslice_cap.vo"
+path = "cases/runtime/slice/slice_reslice_cap.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8680,7 +8680,7 @@ expect = "pass"
 [[case]]
 id = "slice-spread-variadic"
 kind = "file"
-path = "cases/slice_spread_variadic.vo"
+path = "cases/runtime/slice/slice_spread_variadic.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8689,7 +8689,7 @@ expect = "pass"
 [[case]]
 id = "slice-three-index"
 kind = "file"
-path = "cases/slice_three_index.vo"
+path = "cases/runtime/slice/slice_three_index.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -8698,7 +8698,7 @@ expect = "pass"
 [[case]]
 id = "sparse-array-literal"
 kind = "file"
-path = "cases/sparse_array_literal.vo"
+path = "cases/typechecker/sparse_array_literal.vo"
 matrix = "default"
 tags = ["typechecker", "array"]
 owner = "typechecker"
@@ -8707,7 +8707,7 @@ expect = "pass"
 [[case]]
 id = "stack-array-iter"
 kind = "file"
-path = "cases/stack_array_iter.vo"
+path = "cases/runtime/array/stack_array_iter.vo"
 matrix = "default"
 tags = ["runtime", "array"]
 owner = "runtime"
@@ -8716,7 +8716,7 @@ expect = "pass"
 [[case]]
 id = "stack-vs-escaped-array"
 kind = "file"
-path = "cases/stack_vs_escaped_array.vo"
+path = "cases/runtime/array/stack_vs_escaped_array.vo"
 matrix = "default"
 tags = ["runtime", "array"]
 owner = "runtime"
@@ -9116,7 +9116,7 @@ expect = "pass"
 [[case]]
 id = "step4-known-target-devirt"
 kind = "file"
-path = "cases/step4_known_target_devirt.vo"
+path = "cases/runtime/core/step4_known_target_devirt.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9125,7 +9125,7 @@ expect = "pass"
 [[case]]
 id = "step4-schedule-devirt"
 kind = "file"
-path = "cases/step4_schedule_devirt.vo"
+path = "cases/runtime/core/step4_schedule_devirt.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9134,7 +9134,7 @@ expect = "pass"
 [[case]]
 id = "string-byte-rune-conv"
 kind = "file"
-path = "cases/string_byte_rune_conv.vo"
+path = "cases/runtime/string/string_byte_rune_conv.vo"
 matrix = "default"
 tags = ["runtime", "string"]
 owner = "runtime"
@@ -9143,7 +9143,7 @@ expect = "pass"
 [[case]]
 id = "string-byte-rune-convert"
 kind = "file"
-path = "cases/string_byte_rune_convert.vo"
+path = "cases/runtime/string/string_byte_rune_convert.vo"
 matrix = "default"
 tags = ["runtime", "string"]
 owner = "runtime"
@@ -9152,7 +9152,7 @@ expect = "pass"
 [[case]]
 id = "string-index-rune"
 kind = "file"
-path = "cases/string_index_rune.vo"
+path = "cases/runtime/string/string_index_rune.vo"
 matrix = "default"
 tags = ["runtime", "string"]
 owner = "runtime"
@@ -9161,7 +9161,7 @@ expect = "pass"
 [[case]]
 id = "struct-embed-method-shadow"
 kind = "file"
-path = "cases/struct_embed_method_shadow.vo"
+path = "cases/runtime/struct/struct_embed_method_shadow.vo"
 matrix = "default"
 tags = ["runtime", "method", "struct"]
 owner = "runtime"
@@ -9170,7 +9170,7 @@ expect = "pass"
 [[case]]
 id = "struct-func-field-any-bug"
 kind = "file"
-path = "cases/struct_func_field_any_bug.vo"
+path = "cases/runtime/struct/struct_func_field_any_bug.vo"
 matrix = "default"
 tags = ["runtime", "regression", "struct"]
 owner = "runtime"
@@ -9179,7 +9179,7 @@ expect = "pass"
 [[case]]
 id = "struct-func-iface"
 kind = "file"
-path = "cases/struct_func_iface.vo"
+path = "cases/runtime/interface/struct_func_iface.vo"
 matrix = "default"
 tags = ["interface", "struct"]
 owner = "runtime"
@@ -9188,7 +9188,7 @@ expect = "pass"
 [[case]]
 id = "struct-method-simple"
 kind = "file"
-path = "cases/struct_method_simple.vo"
+path = "cases/runtime/struct/struct_method_simple.vo"
 matrix = "default"
 tags = ["runtime", "method", "struct"]
 owner = "runtime"
@@ -9197,7 +9197,7 @@ expect = "pass"
 [[case]]
 id = "struct-object"
 kind = "file"
-path = "cases/struct_object.vo"
+path = "cases/runtime/struct/struct_object.vo"
 matrix = "default"
 tags = ["runtime", "struct"]
 owner = "runtime"
@@ -9206,7 +9206,7 @@ expect = "pass"
 [[case]]
 id = "switch-combined-debug"
 kind = "file"
-path = "cases/switch_combined_debug.vo"
+path = "cases/runtime/control_flow/switch_combined_debug.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
@@ -9218,7 +9218,7 @@ expect = "pass"
 [[case]]
 id = "switch-expr-eval-order"
 kind = "file"
-path = "cases/switch_expr_eval_order.vo"
+path = "cases/runtime/control_flow/switch_expr_eval_order.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -9227,7 +9227,7 @@ expect = "pass"
 [[case]]
 id = "switch-fallthrough-complex"
 kind = "file"
-path = "cases/switch_fallthrough_complex.vo"
+path = "cases/runtime/control_flow/switch_fallthrough_complex.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -9236,7 +9236,7 @@ expect = "pass"
 [[case]]
 id = "switch-init-debug"
 kind = "file"
-path = "cases/switch_init_debug.vo"
+path = "cases/runtime/control_flow/switch_init_debug.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
@@ -9248,7 +9248,7 @@ expect = "pass"
 [[case]]
 id = "switch-init-scope"
 kind = "file"
-path = "cases/switch_init_scope.vo"
+path = "cases/runtime/control_flow/switch_init_scope.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
@@ -9260,7 +9260,7 @@ expect = "pass"
 [[case]]
 id = "switch-map-ok-debug"
 kind = "file"
-path = "cases/switch_map_ok_debug.vo"
+path = "cases/runtime/map/switch_map_ok_debug.vo"
 matrix = "default"
 tags = ["legacy", "map", "control-flow"]
 owner = "eng"
@@ -9272,7 +9272,7 @@ expect = "pass"
 [[case]]
 id = "switch-multivar-debug"
 kind = "file"
-path = "cases/switch_multivar_debug.vo"
+path = "cases/runtime/control_flow/switch_multivar_debug.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
@@ -9284,7 +9284,7 @@ expect = "pass"
 [[case]]
 id = "switch-nested-break"
 kind = "file"
-path = "cases/switch_nested_break.vo"
+path = "cases/runtime/control_flow/switch_nested_break.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -9293,7 +9293,7 @@ expect = "pass"
 [[case]]
 id = "switch-stmt"
 kind = "file"
-path = "cases/switch_stmt.vo"
+path = "cases/runtime/control_flow/switch_stmt.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -9302,7 +9302,7 @@ expect = "pass"
 [[case]]
 id = "switch-string-debug"
 kind = "file"
-path = "cases/switch_string_debug.vo"
+path = "cases/runtime/string/switch_string_debug.vo"
 matrix = "default"
 tags = ["legacy", "string", "control-flow"]
 owner = "eng"
@@ -9314,7 +9314,7 @@ expect = "pass"
 [[case]]
 id = "switch-tagless"
 kind = "file"
-path = "cases/switch_tagless.vo"
+path = "cases/runtime/control_flow/switch_tagless.vo"
 matrix = "default"
 tags = ["runtime", "control-flow"]
 owner = "runtime"
@@ -9323,7 +9323,7 @@ expect = "pass"
 [[case]]
 id = "switch-tagless-debug"
 kind = "file"
-path = "cases/switch_tagless_debug.vo"
+path = "cases/runtime/control_flow/switch_tagless_debug.vo"
 matrix = "default"
 tags = ["legacy", "control-flow"]
 owner = "eng"
@@ -9335,7 +9335,7 @@ expect = "pass"
 [[case]]
 id = "task-queue"
 kind = "file"
-path = "cases/task_queue.vo"
+path = "cases/runtime/core/task_queue.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9344,7 +9344,7 @@ expect = "pass"
 [[case]]
 id = "test-fmt-print"
 kind = "file"
-path = "cases/test_fmt_print.vo"
+path = "cases/runtime/numeric/test_fmt_print.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -9353,7 +9353,7 @@ expect = "pass"
 [[case]]
 id = "test-func-jit"
 kind = "file"
-path = "cases/test_func_jit.vo"
+path = "cases/jit/test_func_jit.vo"
 matrix = "default"
 tags = ["jit"]
 owner = "jit"
@@ -9362,7 +9362,7 @@ expect = "pass"
 [[case]]
 id = "test-jit-func"
 kind = "file"
-path = "cases/test_jit_func.vo"
+path = "cases/jit/test_jit_func.vo"
 matrix = "default"
 tags = ["jit"]
 owner = "jit"
@@ -9371,7 +9371,7 @@ expect = "pass"
 [[case]]
 id = "test-osr"
 kind = "file"
-path = "cases/test_osr.vo"
+path = "cases/jit/test_osr.vo"
 matrix = "default"
 tags = ["osr"]
 owner = "jit"
@@ -9380,7 +9380,7 @@ expect = "pass"
 [[case]]
 id = "three-index-slice"
 kind = "file"
-path = "cases/three_index_slice.vo"
+path = "cases/runtime/slice/three_index_slice.vo"
 matrix = "default"
 tags = ["runtime", "slice"]
 owner = "runtime"
@@ -9389,7 +9389,7 @@ expect = "pass"
 [[case]]
 id = "toolchain-compile-file-error"
 kind = "file"
-path = "cases/toolchain_compile_file_error.vo"
+path = "cases/runtime/core/toolchain_compile_file_error.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9400,7 +9400,7 @@ expect = "pass"
 [[case]]
 id = "type-alias-method-chain"
 kind = "file"
-path = "cases/type_alias_method_chain.vo"
+path = "cases/typechecker/type_alias_method_chain.vo"
 matrix = "default"
 tags = ["typechecker", "method"]
 owner = "typechecker"
@@ -9409,7 +9409,7 @@ expect = "pass"
 [[case]]
 id = "type-assert-nil-recover"
 kind = "file"
-path = "cases/type_assert_nil_recover.vo"
+path = "cases/typechecker/type_assert_nil_recover.vo"
 matrix = "default"
 tags = ["typechecker", "panic"]
 owner = "typechecker"
@@ -9418,7 +9418,7 @@ expect = "pass"
 [[case]]
 id = "type-assertion"
 kind = "file"
-path = "cases/type_assertion.vo"
+path = "cases/typechecker/general/type_assertion.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -9427,7 +9427,7 @@ expect = "pass"
 [[case]]
 id = "type-assertion-chain-method"
 kind = "file"
-path = "cases/type_assertion_chain_method.vo"
+path = "cases/typechecker/type_assertion_chain_method.vo"
 matrix = "default"
 tags = ["typechecker", "method"]
 owner = "typechecker"
@@ -9436,7 +9436,7 @@ expect = "pass"
 [[case]]
 id = "type-assertion-ok"
 kind = "file"
-path = "cases/type_assertion_ok.vo"
+path = "cases/typechecker/type_assertion_ok.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -9445,7 +9445,7 @@ expect = "pass"
 [[case]]
 id = "type-conversion-edge"
 kind = "file"
-path = "cases/type_conversion_edge.vo"
+path = "cases/typechecker/type_conversion_edge.vo"
 matrix = "default"
 tags = ["typechecker"]
 owner = "typechecker"
@@ -9454,7 +9454,7 @@ expect = "pass"
 [[case]]
 id = "type-conversion-method-chain"
 kind = "file"
-path = "cases/type_conversion_method_chain.vo"
+path = "cases/typechecker/type_conversion_method_chain.vo"
 matrix = "default"
 tags = ["typechecker", "method"]
 owner = "typechecker"
@@ -9463,7 +9463,7 @@ expect = "pass"
 [[case]]
 id = "type-switch"
 kind = "file"
-path = "cases/type_switch.vo"
+path = "cases/typechecker/type_switch.vo"
 matrix = "default"
 tags = ["typechecker", "control-flow"]
 owner = "typechecker"
@@ -9472,7 +9472,7 @@ expect = "pass"
 [[case]]
 id = "type-switch-closure-capture"
 kind = "file"
-path = "cases/type_switch_closure_capture.vo"
+path = "cases/typechecker/type_switch_closure_capture.vo"
 matrix = "default"
 tags = ["typechecker", "closure", "control-flow"]
 owner = "typechecker"
@@ -9481,7 +9481,7 @@ expect = "pass"
 [[case]]
 id = "type-switch-multi-type"
 kind = "file"
-path = "cases/type_switch_multi_type.vo"
+path = "cases/typechecker/type_switch_multi_type.vo"
 matrix = "default"
 tags = ["typechecker", "control-flow"]
 owner = "typechecker"
@@ -9490,7 +9490,7 @@ expect = "pass"
 [[case]]
 id = "type-switch-nested-break"
 kind = "file"
-path = "cases/type_switch_nested_break.vo"
+path = "cases/typechecker/type_switch_nested_break.vo"
 matrix = "default"
 tags = ["typechecker", "control-flow"]
 owner = "typechecker"
@@ -9499,7 +9499,7 @@ expect = "pass"
 [[case]]
 id = "type-switch-nil"
 kind = "file"
-path = "cases/type_switch_nil.vo"
+path = "cases/typechecker/type_switch_nil.vo"
 matrix = "default"
 tags = ["typechecker", "control-flow"]
 owner = "typechecker"
@@ -9741,7 +9741,7 @@ expect = "pass"
 [[case]]
 id = "typed-nil-interface"
 kind = "file"
-path = "cases/typed_nil_interface.vo"
+path = "cases/runtime/interface/typed_nil_interface.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -9750,7 +9750,7 @@ expect = "pass"
 [[case]]
 id = "uint-ops"
 kind = "file"
-path = "cases/uint_ops.vo"
+path = "cases/runtime/numeric/uint_ops.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -9759,7 +9759,7 @@ expect = "pass"
 [[case]]
 id = "uint-overflow"
 kind = "file"
-path = "cases/uint_overflow.vo"
+path = "cases/runtime/numeric/uint_overflow.vo"
 matrix = "default"
 tags = ["runtime", "numeric"]
 owner = "runtime"
@@ -9768,7 +9768,7 @@ expect = "pass"
 [[case]]
 id = "value-receiver-bug"
 kind = "file"
-path = "cases/value_receiver_bug.vo"
+path = "cases/runtime/core/value_receiver_bug.vo"
 matrix = "default"
 tags = ["runtime", "regression"]
 owner = "runtime"
@@ -9777,7 +9777,7 @@ expect = "pass"
 [[case]]
 id = "var-dependency"
 kind = "file"
-path = "cases/var_dependency.vo"
+path = "cases/runtime/core/var_dependency.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9786,7 +9786,7 @@ expect = "pass"
 [[case]]
 id = "var-init-complex"
 kind = "file"
-path = "cases/var_init_complex.vo"
+path = "cases/runtime/core/var_init_complex.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9795,7 +9795,7 @@ expect = "pass"
 [[case]]
 id = "var-init-func"
 kind = "file"
-path = "cases/var_init_func.vo"
+path = "cases/runtime/core/var_init_func.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9804,7 +9804,7 @@ expect = "pass"
 [[case]]
 id = "var-init-order"
 kind = "file"
-path = "cases/var_init_order.vo"
+path = "cases/runtime/core/var_init_order.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9813,7 +9813,7 @@ expect = "pass"
 [[case]]
 id = "variadic-interface-combo"
 kind = "file"
-path = "cases/variadic_interface_combo.vo"
+path = "cases/runtime/interface/variadic_interface_combo.vo"
 matrix = "default"
 tags = ["interface", "numeric"]
 owner = "runtime"
@@ -9822,7 +9822,7 @@ expect = "pass"
 [[case]]
 id = "variadic-spread"
 kind = "file"
-path = "cases/variadic_spread.vo"
+path = "cases/runtime/core/variadic_spread.vo"
 matrix = "default"
 tags = ["runtime"]
 owner = "runtime"
@@ -9831,7 +9831,7 @@ expect = "pass"
 [[case]]
 id = "zero-embed-method"
 kind = "file"
-path = "cases/zero_embed_method.vo"
+path = "cases/runtime/struct/zero_embed_method.vo"
 matrix = "default"
 tags = ["runtime", "method", "struct"]
 owner = "runtime"

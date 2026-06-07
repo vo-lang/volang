@@ -6,7 +6,7 @@ import (
 )
 
 func main() {
-	_, err := toolchain.CompileFile("tests/lang/cases/select_stmt_assert_fail.vo")
+	_, err := toolchain.CompileFile("tests/lang/cases/typechecker/select_stmt_assert_fail.vo")
 	assert(err != nil, "CompileFile should return an error for select_stmt_assert_fail.vo")
 
 	msg := err.Error()

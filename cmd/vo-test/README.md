@@ -18,8 +18,8 @@ Use `vo-dev` or the `d.py` compatibility wrapper for normal workflows:
 ```sh
 cargo run -q -p vo-dev -- test lint --suite lang
 cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit
-cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit --path tests/lang/cases/foo.vo
-./d.py test both tests/lang/cases/foo.vo
+cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit --path tests/lang/cases/runtime/slice/append_self_slice.vo
+./d.py test both tests/lang/cases/runtime/slice/append_self_slice.vo
 ```
 
 ## Execution Interface

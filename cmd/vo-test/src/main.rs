@@ -747,7 +747,7 @@ mod tests {
             id: format!("{case_id}::{target}"),
             case_id: case_id.to_string(),
             kind: "file".to_string(),
-            path: format!("tests/lang/cases/{case_id}.vo"),
+            path: format!("tests/lang/cases/runtime/{case_id}.vo"),
             target: target.to_string(),
             backend: if target == "vm" || target == "gc-vm" {
                 "vm".to_string()

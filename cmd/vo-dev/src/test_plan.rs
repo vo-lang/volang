@@ -720,7 +720,7 @@ mod tests {
                 id: "case::vm".to_string(),
                 case_id: "case".to_string(),
                 kind: "file".to_string(),
-                path: "tests/lang/cases/case.vo".to_string(),
+                path: "tests/lang/cases/runtime/case.vo".to_string(),
                 target: "vm".to_string(),
                 backend: "vm".to_string(),
                 matrix: Some("default".to_string()),

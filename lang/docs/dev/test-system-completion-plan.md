@@ -118,6 +118,8 @@ Lint must reject:
 - Uppercase or whitespace in matrix, tag, or owner names.
 - Runtime targets on compile-fail cases.
 - Filename-inferred GC selection when `tags` or `matrix` are missing.
+- Root-level `cases/*.vo` files; language file cases must live in a domain
+  directory.
 - Explicit target arrays that match a named matrix.
 - Explicit target arrays without a reason.
 - Skip or timeout entries for targets not selected by the resolved matrix.
@@ -474,9 +476,9 @@ Implementation work:
 Acceptance gates:
 
 ```sh
-cargo run -q -p vo-dev -- test run --suite lang --matrix default --path tests/lang/cases/hello.vo --format json
-cargo run -q -p vo-dev -- test run --suite lang --targets wasm --path tests/lang/cases/hello.vo --format json
-cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit,wasm --path tests/lang/cases/hello.vo --format json
+cargo run -q -p vo-dev -- test run --suite lang --matrix default --path tests/lang/cases/runtime/slice/append_self_slice.vo --format json
+cargo run -q -p vo-dev -- test run --suite lang --targets wasm --path tests/lang/cases/runtime/slice/append_self_slice.vo --format json
+cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit,wasm --path tests/lang/cases/runtime/slice/append_self_slice.vo --format json
 cargo test -p vo-dev
 cargo test -p vo-test
 ```
@@ -782,6 +784,7 @@ Completion criteria:
 - 0 broad CI fallbacks for known repo paths.
 - 0 hidden test policy outside `eng/*.toml`, `cmd/vo-dev`, manifests, or
   runner implementations.
+- 0 loose root-level `.vo` language cases outside domain directories.
 
 ## Work Order
 

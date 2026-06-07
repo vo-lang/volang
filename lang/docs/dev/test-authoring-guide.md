@@ -14,7 +14,7 @@ manifest entry in `tests/lang/manifest.toml` must declare:
 [[case]]
 id = "slice-append-regression"
 kind = "file"
-path = "cases/slice_append_regression.vo"
+path = "cases/runtime/slice/slice_append_regression.vo"
 matrix = "default"
 tags = ["slice", "runtime", "regression"]
 owner = "runtime"

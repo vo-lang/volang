@@ -44,7 +44,7 @@ func main() {
     files := collectVoFiles("tests/lang/cases", []string{})
 
     assert(len(files) > 100, "expected many .vo files")
-    assert(contains(files, "tests/lang/cases/multi_return_as_arg.vo"), "missing multi_return_as_arg.vo")
+    assert(contains(files, "tests/lang/cases/runtime/control_flow/multi_return_as_arg.vo"), "missing multi_return_as_arg.vo")
     assert(!contains(files, "tests/lang/projects/proj_multifile/main.vo"), "project fixtures should not be collected from cases")
 
     fmt.Println("runner_collect_vo_files: ok")

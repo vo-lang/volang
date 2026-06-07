@@ -359,19 +359,46 @@ fn aggregate_json_outputs(outputs: Vec<JsonRunOutput>) -> Result<JsonRunOutput> 
 
 fn parse_json_run_output(stdout: &[u8], stderr: &[u8], command: &str) -> Result<JsonRunOutput> {
     let text = String::from_utf8_lossy(stdout);
-    let start = text
-        .find('{')
-        .ok_or_else(|| anyhow!("{command} did not emit JSON result on stdout"))?;
-    let end = text
-        .rfind('}')
-        .ok_or_else(|| anyhow!("{command} emitted truncated JSON result"))?;
+    let start = match text.find('{') {
+        Some(start) => start,
+        None => bail!(
+            "{command} did not emit JSON result on stdout\nstdout:\n{}\nstderr:\n{}",
+            summarize_process_output(stdout),
+            summarize_process_output(stderr)
+        ),
+    };
+    let end = match text.rfind('}') {
+        Some(end) => end,
+        None => bail!(
+            "{command} emitted truncated JSON result\nstdout:\n{}\nstderr:\n{}",
+            summarize_process_output(stdout),
+            summarize_process_output(stderr)
+        ),
+    };
     let json = &text[start..=end];
     serde_json::from_str(json).with_context(|| {
         format!(
-            "could not parse {command} JSON result; stderr: {}",
-            String::from_utf8_lossy(stderr).trim()
+            "could not parse {command} JSON result\nstdout:\n{}\nstderr:\n{}",
+            summarize_process_output(stdout),
+            summarize_process_output(stderr)
         )
     })
+}
+
+fn summarize_process_output(output: &[u8]) -> String {
+    const MAX_CHARS: usize = 4000;
+
+    let text = String::from_utf8_lossy(output);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "(empty)".to_string();
+    }
+
+    let mut summary: String = trimmed.chars().take(MAX_CHARS).collect();
+    if trimmed.chars().count() > MAX_CHARS {
+        summary.push_str("\n... <truncated>");
+    }
+    summary
 }
 
 fn plan_needs_loopback_preflight(plan: &TestPlan) -> bool {
@@ -425,4 +452,38 @@ fn build_vo_embed(root: &Path, release: bool) -> Result<()> {
         bail!("test command failed: cargo build -p vo-embed");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_json_run_output_reports_stderr_when_json_is_missing() {
+        let err = parse_json_run_output(
+            b"",
+            b"dyld: Library not loaded: libsimdjson.30.dylib",
+            "node lang/crates/vo-web/test_runner.mjs",
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+
+        assert!(message.contains("did not emit JSON result on stdout"));
+        assert!(message.contains("stderr:"));
+        assert!(message.contains("libsimdjson.30.dylib"));
+    }
+
+    #[test]
+    fn parse_json_run_output_allows_wrapped_json_payload() {
+        let output = parse_json_run_output(
+            br#"prefix {"schema":"volang.test-result.v1","suite":"lang","passed":1,"failed":0,"skipped":0,"jobs":[]} suffix"#,
+            b"",
+            "vo-test run-plan",
+        )
+        .unwrap();
+
+        assert_eq!(output.schema, "volang.test-result.v1");
+        assert_eq!(output.passed, 1);
+        assert_eq!(output.failed, 0);
+    }
 }

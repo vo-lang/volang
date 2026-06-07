@@ -982,6 +982,13 @@ fn validate_manifest_case_metadata(
             case.id
         );
     }
+    if case.kind == "file" && is_root_language_case_path(&case.path) {
+        bail!(
+            "case {} path {} is a loose root-level language case; move it into a domain directory",
+            case.id,
+            case.path
+        );
+    }
     if !case.timeout.is_empty() && !has_manifest_reason(case) {
         bail!("case {} has timeout but no reason", case.id);
     }
@@ -1144,6 +1151,13 @@ fn looks_like_gc_regression(case: &ManifestCase) -> bool {
         || path.contains("_gc")
 }
 
+fn is_root_language_case_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("cases/") else {
+        return false;
+    };
+    rest.ends_with(".vo") && !rest.contains('/')
+}
+
 fn discover_manifest_case_keys(root: &Path) -> Result<BTreeSet<(String, String)>> {
     let test_root = root.join("tests/lang");
     let mut keys = BTreeSet::new();
@@ -1249,6 +1263,14 @@ mod tests {
         assert_eq!(value["schema"], "volang.test-stats.v1");
         assert!(value.get("cases_by_matrix").is_some());
         assert!(value.get("jobs_by_target").is_some());
+    }
+
+    #[test]
+    fn root_language_case_path_detects_only_loose_cases() {
+        assert!(is_root_language_case_path("cases/foo.vo"));
+        assert!(!is_root_language_case_path("cases/gc/foo.vo"));
+        assert!(!is_root_language_case_path("cases/proj_foo/"));
+        assert!(!is_root_language_case_path("archives/foo.zip"));
     }
 }
 
