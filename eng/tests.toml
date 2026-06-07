@@ -3,6 +3,18 @@ default_targets = ["vm", "jit"]
 required_file_pass_targets = ["vm", "jit", "osr", "nostd", "wasm"]
 gc_regression_alias = "gc"
 
+[matrices.default]
+targets = ["vm", "jit", "osr", "nostd", "wasm"]
+
+[matrices.native]
+targets = ["vm", "jit", "osr"]
+
+[matrices.gc]
+targets = ["gc-vm", "gc-jit"]
+
+[matrices.compile]
+targets = ["compile"]
+
 [[alias]]
 name = "both"
 targets = ["vm", "jit"]

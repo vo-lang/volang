@@ -8,6 +8,10 @@ gc-contract = [
   "cargo-test-gc-jit",
 ]
 
+contract = [
+  "gc-contract",
+]
+
 quality = [
   "ci-self-check",
   "d-py-smoke",
@@ -272,7 +276,9 @@ needs = ["test-data-lint"]
 tools = ["rust", "vo-dev"]
 inputs = ["cmd/vo/**", "cmd/vo-test/**", "lang/crates/**", "lang/stdlib/**", "tests/lang/cases/**", "tests/lang/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "d.py", "eng/tests.toml", "cmd/vo-dev/**"]
 outputs = []
-tier = "test"
+tier = "contract"
+tags = ["gc", "lang-case", "contract"]
+owner = "runtime-gc"
 
 [[task]]
 name = "cargo-test-gc-runtime"
@@ -281,7 +287,9 @@ command = ["cargo", "test", "-p", "vo-runtime", "gc"]
 tools = ["rust"]
 inputs = ["lang/crates/vo-runtime/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
-tier = "test"
+tier = "contract"
+tags = ["gc", "runtime", "contract"]
+owner = "runtime-gc"
 
 [[task]]
 name = "cargo-test-gc-vm"
@@ -290,7 +298,9 @@ command = ["cargo", "test", "-p", "vo-vm", "gc"]
 tools = ["rust"]
 inputs = ["lang/crates/vo-vm/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
-tier = "test"
+tier = "contract"
+tags = ["gc", "vm", "contract"]
+owner = "runtime-gc"
 
 [[task]]
 name = "cargo-test-gc-vm-jit"
@@ -299,7 +309,9 @@ command = ["cargo", "test", "-p", "vo-vm", "--features", "jit", "gc"]
 tools = ["rust"]
 inputs = ["lang/crates/vo-vm/**", "lang/crates/vo-jit/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
-tier = "test"
+tier = "contract"
+tags = ["gc", "vm", "jit", "contract"]
+owner = "runtime-gc"
 
 [[task]]
 name = "cargo-test-gc-jit"
@@ -308,7 +320,9 @@ command = ["cargo", "test", "-p", "vo-jit", "gc"]
 tools = ["rust"]
 inputs = ["lang/crates/vo-jit/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
-tier = "test"
+tier = "contract"
+tags = ["gc", "jit", "contract"]
+owner = "runtime-gc"
 
 [[task]]
 name = "vo-test-osr"

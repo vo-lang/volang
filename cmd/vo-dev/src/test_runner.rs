@@ -1,5 +1,5 @@
 use crate::test_config::load_test_config;
-use crate::test_plan::{build_plan, TestArgs, TestPlan};
+use crate::test_plan::{build_plan, effective_test_targets, TestArgs, TestPlan};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
@@ -8,9 +8,10 @@ use std::process::Command;
 
 pub(crate) fn run_tests(root: &Path, opts: &TestArgs) -> Result<()> {
     let config = load_test_config(root)?;
+    let effective_targets = effective_test_targets(root, opts)?;
     let mut wasm_targets = Vec::new();
     let mut run_plan_targets = Vec::new();
-    for target_name in &opts.targets {
+    for target_name in &effective_targets {
         let target = config
             .targets
             .get(target_name)
@@ -55,6 +56,10 @@ pub(crate) fn run_tests(root: &Path, opts: &TestArgs) -> Result<()> {
     let native_opts = TestArgs {
         suite: opts.suite.clone(),
         targets: run_plan_targets,
+        targets_explicit: true,
+        matrices: opts.matrices.clone(),
+        tags: opts.tags.clone(),
+        owners: opts.owners.clone(),
         format: "json".to_string(),
         jobs: opts.jobs,
         paths: opts.paths.clone(),
@@ -107,6 +112,10 @@ fn run_wasm_tests(root: &Path, opts: &TestArgs, wasm_target_name: &str) -> Resul
     let wasm_opts = TestArgs {
         suite: opts.suite.clone(),
         targets: vec![wasm_target_name.to_string()],
+        targets_explicit: true,
+        matrices: opts.matrices.clone(),
+        tags: opts.tags.clone(),
+        owners: opts.owners.clone(),
         format: "json".to_string(),
         jobs: None,
         paths: opts.paths.clone(),

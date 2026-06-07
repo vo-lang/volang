@@ -1,6 +1,6 @@
 # Volang Test System Target State
 
-Status: target-state design.
+Status: target-state design with Phase 0-3 seed implementation in progress.
 
 Scope: the whole repository validation system, including language regression
 tests, Rust unit and contract tests, GC/JIT correctness checks, WASM execution,
@@ -11,6 +11,36 @@ The executable source of truth remains `eng/*.toml`, `cmd/vo-dev`,
 `tests/lang/manifest.toml`, `cmd/vo-test`, and the declared task scripts. This
 document describes the desired shape those sources should converge toward. It
 must not become a second copy of test policy.
+
+## Implementation Status
+
+The first control-plane seed has landed in `vo-dev` and the TOML policy files:
+
+- `eng/tests.toml` supports named `[matrices.*]` entries. Existing
+  `default_targets`, `targets`, and `alias` selectors remain compatible.
+- `tests/lang/manifest.toml` cases can now declare `matrix`, `tags`, and
+  `owner`. `targets` remains an explicit override and old cases are still
+  accepted during migration.
+- Language plan generation resolves case targets from `targets` first, then
+  from `matrix`. Runners still receive resolved jobs only.
+- `vo-dev test lint --suite lang` validates matrix references, target
+  references, skip/timeout consistency, and basic tag/owner shape.
+- `vo-dev test stats --suite lang` reports case, job, target, matrix, skip,
+  expected-fail, tag, and owner counts.
+- `vo-dev test catalog --suite lang --format json` reports the resolved case
+  catalog with targets, matrix, tags, owner, skip, timeout, reason, and
+  expectation metadata.
+- `vo-dev test plan|run` can filter cases by `--matrix`, `--tags`, `--owner`,
+  and `--path` before selecting concrete execution targets.
+- Native `vo-dev test run --format json` results carry matrix, tag, and owner
+  metadata from the resolved plan.
+- `eng/tasks.toml` and task lint accept `contract` and `stress` tiers. GC
+  contract tasks are now visible as `tier = "contract"` with owner/tag metadata.
+- `vo-dev task stats` reports task, group, tier, owner, and tag inventory.
+
+Only a small number of manifest cases have been migrated as examples. The
+remaining language catalog should be migrated in batches after reviewing stats
+output, without moving large groups of files in the same step.
 
 ## Goal
 
@@ -379,8 +409,8 @@ cargo run -q -p vo-dev -- test plan --suite lang --matrix gc
 cargo run -q -p vo-dev -- test run --suite lang --tags gc --format json
 ```
 
-These commands are target-state examples. They should be added only through
-`vo-dev` when implemented.
+These commands are implemented through `vo-dev`. The remaining result-schema
+work is native/WASM result aggregation, not catalog or case selection.
 
 ## CI Routing Target State
 
@@ -503,25 +533,30 @@ Rules:
 
 ### Phase 0: Inventory Lock
 
-- Add `vo-dev test stats --suite lang`.
-- Add `vo-dev task stats` or extend task lint output with counts by tier,
-  owner, domain, and group.
-- Record current counts for language cases, jobs, skips, expected failures,
-  task tiers, and excluded surfaces.
+- Implemented: `vo-dev test stats --suite lang`.
+- Implemented: `vo-dev test catalog --suite lang --format json`.
+- Implemented: `vo-dev task stats`.
+- Current stats expose language cases, jobs, skips, expected failures,
+  matrices, targets, tags, owners, task tiers, and group sizes.
 
 ### Phase 1: Metadata Schema
 
-- Extend `eng/tests.toml` with named matrices.
-- Extend language manifest parsing with `matrix`, `tags`, and `owner`.
-- Keep `targets` as a compatibility override.
-- Extend task lint to accept and enforce `contract` and `stress` tiers.
-- Add optional `tags` and `owner` fields to tasks, then make them required for
-  new tasks.
+- Implemented: `eng/tests.toml` has named matrices.
+- Implemented: language manifest parsing accepts `matrix`, `tags`, and `owner`.
+- Implemented: `targets` remains a compatibility override.
+- Implemented: `vo-dev test plan|run` filters by `--matrix`, `--tags`, and
+  `--owner`.
+- Implemented: task lint accepts `contract` and `stress` tiers.
+- Implemented: optional task `tags` and `owner` fields are parsed and linted.
+  Requiring them for all new tasks remains a follow-up policy step.
 
 ### Phase 2: Manifest Normalization
 
-- Convert repeated default target arrays to `matrix = "default"`.
-- Convert GC language cases to `matrix = "gc"` and `tags = ["gc", ...]`.
+- Started: a small default case uses `matrix = "default"`.
+- Started: a GC case uses `matrix = "gc"` and `tags = ["gc", ...]`.
+- Next: convert repeated default target arrays to `matrix = "default"` in
+  batches.
+- Next: convert GC language cases to `matrix = "gc"` or `tags = ["gc", ...]`.
 - Convert compile-fail cases to `matrix = "compile"` and
   `tags = ["compile-fail", ...]`.
 - Preserve existing case ids and expectations.
@@ -529,18 +564,22 @@ Rules:
 
 ### Phase 3: Contract Layer
 
-- Add `contract` and `stress` task tiers.
-- Reclassify GC contract tasks as `tier = "contract"`.
-- Add or rename groups so `gc-contract`, `jit-contract`, and
-  `runtime-contract` are visible.
-- Ensure `test`, `pr`, `full`, and any future `nightly` groups include the right
-  contract subset.
+- Implemented: `contract` and `stress` task tiers are accepted.
+- Implemented: GC contract tasks are `tier = "contract"`.
+- Started: a top-level `contract` group points at existing GC contract coverage.
+- Next: add or rename groups so `jit-contract` and `runtime-contract` are
+  visible alongside `gc-contract`.
+- Existing `test`, `pr`, and `full` group behavior remains compatible.
 
 ### Phase 4: Unified Results
 
 - Make the WASM runner emit the same language result schema as `cmd/vo-test`.
 - Let `vo-dev test run --format json` aggregate native and WASM jobs.
 - Add differential result metadata for JIT/OSR/GC-JIT baseline comparisons.
+- Implemented for native: carry resolved `matrix`, `tags`, and `owner` fields
+  from plan jobs into `vo-test run-plan --format json` results.
+- Next implementation milestone: carry the same fields through the WASM result
+  schema and aggregate mixed native/WASM results.
 
 ### Phase 5: Explainable CI
 

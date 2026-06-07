@@ -81,6 +81,7 @@ fn print_usage() {
         r#"usage:
   vo-dev task list
   vo-dev task show <task>
+  vo-dev task stats
   vo-dev task plan <selector> [--changed] [--base <sha>] [--head <sha>] [--format text|json]
   vo-dev task run <selector> [--changed] [--base <sha>] [--head <sha>]
   vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]
@@ -100,7 +101,7 @@ fn print_usage() {
   vo-dev release notes --tag <tag> --out <path>
   vo-dev release publish --tag <tag> --artifacts <dir> --notes <file>
   vo-dev release update-homebrew --repo <path> --artifacts <dir> --version <version>
-  vo-dev test plan|run [--suite lang] [--targets <list>] [--path <file-or-dir>] [--jobs <n>] [--format text|json] [--verbose] [--release]
+  vo-dev test plan|run [--suite lang] [--targets <list>] [--matrix <name>] [--tags <list>] [--owner <name>] [--path <file-or-dir>] [--jobs <n>] [--format text|json] [--verbose] [--release]
   vo-dev test run --format json is native-target only; wasm runs are text output
   vo-dev dpy <d.py-compatible command...>
   vo-dev first-party path <repo> [subdir]
@@ -110,6 +111,8 @@ fn print_usage() {
   vo-dev first-party release-verify <repo>
   vo-dev studio-install-local-vogui
   vo-dev test lint --suite lang
+  vo-dev test stats --suite lang
+  vo-dev test catalog --suite lang [--format text|json]
   vo-dev bench [all|vo|score|<name>] [--all-langs] [--runs N] [--warmup N] [--arch 32|64] [--jit-hot]
   vo-dev gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]
   vo-dev loc [--with-tests]

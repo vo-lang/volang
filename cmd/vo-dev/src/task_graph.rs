@@ -165,6 +165,8 @@ pub(crate) fn task_to_json(task: &Task) -> serde_json::Value {
         "inputs": task.inputs,
         "outputs": task.outputs,
         "tier": task.tier,
+        "tags": task.tags,
+        "owner": task.owner,
         "cwd": task.cwd,
         "env": task.env,
         "needs": task.needs,

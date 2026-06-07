@@ -130,6 +130,7 @@ fn test_selectors(root: &Path) -> Result<Vec<String>> {
     let config = load_test_config(root)?;
     let mut selectors: Vec<String> = config.targets.keys().cloned().collect();
     selectors.extend(config.aliases.keys().cloned());
+    selectors.extend(config.matrices.keys().cloned());
     Ok(selectors)
 }
 

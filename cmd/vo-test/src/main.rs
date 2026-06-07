@@ -140,6 +140,12 @@ struct TestJob {
     target: String,
     backend: String,
     #[serde(default)]
+    matrix: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
     env: BTreeMap<String, String>,
     timeout_sec: u64,
     expect: Expect,
@@ -163,6 +169,9 @@ struct PlanResult {
     path: String,
     target: String,
     backend: String,
+    matrix: Option<String>,
+    tags: Vec<String>,
+    owner: Option<String>,
     passed: bool,
     elapsed_ms: u128,
     stdout: String,
@@ -188,6 +197,9 @@ struct JsonJobResult {
     path: String,
     target: String,
     backend: String,
+    matrix: Option<String>,
+    tags: Vec<String>,
+    owner: Option<String>,
     status: String,
     elapsed_ms: u128,
     stdout: String,
@@ -234,6 +246,9 @@ fn run_plan(path: &str, opts: &RunPlanArgs) -> Result<i32, Box<dyn std::error::E
                     path: result.path.clone(),
                     target: result.target.clone(),
                     backend: result.backend.clone(),
+                    matrix: result.matrix.clone(),
+                    tags: result.tags.clone(),
+                    owner: result.owner.clone(),
                     status: if result.passed {
                         "passed".to_string()
                     } else {
@@ -413,6 +428,9 @@ fn run_jobs_parallel(
                 path: job.path.clone(),
                 target: job.target.clone(),
                 backend: job.backend.clone(),
+                matrix: job.matrix.clone(),
+                tags: job.tags.clone(),
+                owner: job.owner.clone(),
                 passed: false,
                 elapsed_ms: 0,
                 stdout: String::new(),
@@ -463,6 +481,9 @@ fn run_jobs_parallel(
                     path: job.path.clone(),
                     target: job.target.clone(),
                     backend: job.backend.clone(),
+                    matrix: job.matrix.clone(),
+                    tags: job.tags.clone(),
+                    owner: job.owner.clone(),
                     passed: false,
                     elapsed_ms: 0,
                     stdout: String::new(),
@@ -536,6 +557,9 @@ fn run_job_subprocess(job: &TestJob) -> Result<PlanResult, Box<dyn std::error::E
         path: job.path.clone(),
         target: job.target.clone(),
         backend: job.backend.clone(),
+        matrix: job.matrix.clone(),
+        tags: job.tags.clone(),
+        owner: job.owner.clone(),
         passed: output.status.success() && !timed_out,
         elapsed_ms: start.elapsed().as_millis(),
         stdout,
@@ -703,6 +727,9 @@ mod tests {
             } else {
                 "jit".to_string()
             },
+            matrix: None,
+            tags: Vec::new(),
+            owner: None,
             passed,
             elapsed_ms: 1,
             stdout: stdout.to_string(),

@@ -1,6 +1,6 @@
-use crate::test_config::load_test_config;
+use crate::test_config::{load_test_config, TestConfig};
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,10 @@ pub(crate) struct ManifestCase {
     pub(crate) path: String,
     #[serde(default)]
     pub(crate) targets: Vec<String>,
+    pub(crate) matrix: Option<String>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    pub(crate) owner: Option<String>,
     #[serde(default)]
     pub(crate) skip: Vec<String>,
     #[serde(default)]
@@ -32,11 +36,33 @@ pub(crate) struct ManifestCase {
     expect: Option<toml::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CaseExpect {
     pub(crate) kind: String,
     pub(crate) patterns: Vec<String>,
     pub(crate) jit_regular_call_side_exits_min: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestCatalog {
+    schema: &'static str,
+    suite: String,
+    cases: Vec<TestCatalogCase>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestCatalogCase {
+    id: String,
+    kind: String,
+    path: String,
+    targets: Vec<String>,
+    matrix: Option<String>,
+    tags: Vec<String>,
+    owner: Option<String>,
+    skip: Vec<String>,
+    timeout: BTreeMap<String, u64>,
+    reason: Option<String>,
+    expect: CaseExpect,
 }
 
 pub(crate) fn load_manifest(root: &Path) -> Result<ManifestFile> {
@@ -136,6 +162,28 @@ pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
     }
 }
 
+pub(crate) fn resolved_case_targets(
+    case: &ManifestCase,
+    test_config: &TestConfig,
+) -> Result<Vec<String>> {
+    if let Some(matrix) = case.matrix.as_deref() {
+        if !test_config.matrices.contains_key(matrix) {
+            bail!("case {} references unknown matrix {}", case.id, matrix);
+        }
+    }
+    if !case.targets.is_empty() {
+        return Ok(case.targets.clone());
+    }
+    let Some(matrix) = case.matrix.as_deref() else {
+        return Ok(Vec::new());
+    };
+    test_config
+        .matrices
+        .get(matrix)
+        .cloned()
+        .ok_or_else(|| anyhow!("case {} references unknown matrix {}", case.id, matrix))
+}
+
 fn parse_u64_expect_min(
     case: &ManifestCase,
     table: &toml::map::Map<String, toml::Value>,
@@ -218,11 +266,12 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             bail!("case {} has invalid kind {}", case.id, case.kind);
         }
         let expect = parse_case_expect(case)?;
-        if case.targets.is_empty() && expect.kind != "fail" {
-            bail!("case {} targets cannot be empty", case.id);
+        let resolved_targets = resolved_case_targets(case, &test_config)?;
+        if resolved_targets.is_empty() && expect.kind != "fail" {
+            bail!("case {} must declare matrix or targets", case.id);
         }
         let mut target_names = HashSet::new();
-        for target in &case.targets {
+        for target in &resolved_targets {
             if !target_names.insert(target) {
                 bail!("case {} has duplicate target {}", case.id, target);
             }
@@ -240,7 +289,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                 );
             }
         }
-        for target in case.targets.iter().chain(case.skip.iter()) {
+        for target in resolved_targets.iter().chain(case.skip.iter()) {
             if !targets.contains_key(target) {
                 bail!("case {} references unknown target {}", case.id, target);
             }
@@ -266,9 +315,8 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
         if !case.skip.is_empty() && !has_manifest_reason(case) {
             bail!("case {} has skips but no reason", case.id);
         }
-        if !case.targets.is_empty()
-            && case
-                .targets
+        if !resolved_targets.is_empty()
+            && resolved_targets
                 .iter()
                 .all(|target| has_target_name(&case.skip, target))
             && !case.blank
@@ -278,7 +326,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                 case.id
             );
         }
-        if case.targets.iter().any(|target| {
+        if resolved_targets.iter().any(|target| {
             targets
                 .get(target)
                 .is_some_and(|target| target.kind == "wasm")
@@ -296,7 +344,11 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             "zip" if !path.is_file() => bail!("case {} missing zip {}", case.id, case.path),
             _ => {}
         }
-        if expect.kind == "fail" && !case.targets.is_empty() {
+        if expect.kind == "fail"
+            && resolved_targets
+                .iter()
+                .any(|target| target.as_str() != "compile")
+        {
             bail!(
                 "case {} expected failure must not declare runtime targets",
                 case.id
@@ -323,10 +375,12 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             bail!("blank case {} must be explicitly skipped", case.id);
         }
         if case.kind == "file" && expect.kind == "pass" && !case.blank {
-            let missing_default_targets =
-                missing_required_targets(&case.targets, &test_config.required_file_pass_targets);
+            let missing_default_targets = missing_required_targets(
+                &resolved_targets,
+                &test_config.required_file_pass_targets,
+            );
             if !missing_default_targets.is_empty()
-                && !looks_like_gc_regression(case)
+                && !is_gc_regression_case(case)
                 && !has_manifest_reason(case)
             {
                 bail!(
@@ -335,8 +389,8 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                     missing_default_targets.join(",")
                 );
             }
-            if looks_like_gc_regression(case)
-                && !missing_required_targets(&case.targets, &test_config.gc_regression_targets)
+            if is_gc_regression_case(case)
+                && !missing_required_targets(&resolved_targets, &test_config.gc_regression_targets)
                     .is_empty()
             {
                 bail!(
@@ -358,7 +412,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                 bail!("case {} sets blank = true but file is not blank", case.id);
             }
             if case.blank {
-                for target in &case.targets {
+                for target in &resolved_targets {
                     if !has_target_name(&case.skip, target) {
                         bail!(
                             "blank case {} must skip target {} or remove it from targets",
@@ -368,6 +422,144 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn print_test_stats(root: &Path, suite: &str) -> Result<()> {
+    let manifest = load_manifest(root)?;
+    let test_config = load_test_config(root)?;
+    if manifest.suite != suite {
+        bail!(
+            "manifest suite {} does not match requested suite {}",
+            manifest.suite,
+            suite
+        );
+    }
+
+    let mut case_count = 0usize;
+    let mut job_count = 0usize;
+    let mut expected_fail_count = 0usize;
+    let mut skip_count = 0usize;
+    let mut by_kind = BTreeMap::new();
+    let mut by_matrix = BTreeMap::new();
+    let mut jobs_by_target = BTreeMap::new();
+    let mut skips_by_target = BTreeMap::new();
+    let mut by_tag = BTreeMap::new();
+    let mut by_owner = BTreeMap::new();
+
+    for case in &manifest.cases {
+        case_count += 1;
+        increment(&mut by_kind, &case.kind);
+        increment(
+            &mut by_matrix,
+            case.matrix
+                .as_deref()
+                .unwrap_or(if case.targets.is_empty() {
+                    "(none)"
+                } else {
+                    "(explicit-targets)"
+                }),
+        );
+        increment(&mut by_owner, case.owner.as_deref().unwrap_or("(missing)"));
+        if case.tags.is_empty() {
+            increment(&mut by_tag, "(missing)");
+        } else {
+            for tag in &case.tags {
+                increment(&mut by_tag, tag);
+            }
+        }
+
+        let expect = parse_case_expect(case)?;
+        let targets = resolved_case_targets(case, &test_config)?;
+        if expect.kind == "fail" {
+            expected_fail_count += 1;
+            if compile_fail_enabled_for_stats(&targets) {
+                job_count += 1;
+                increment(&mut jobs_by_target, "compile");
+            }
+        } else {
+            for target in &targets {
+                if has_target_name(&case.skip, target) {
+                    continue;
+                }
+                job_count += 1;
+                increment(&mut jobs_by_target, target);
+            }
+        }
+
+        skip_count += case.skip.len();
+        for target in &case.skip {
+            increment(&mut skips_by_target, target);
+        }
+    }
+
+    println!("{} test stats:", manifest.suite);
+    println!("  cases: {case_count}");
+    println!("  jobs: {job_count}");
+    println!("  expected-fail cases: {expected_fail_count}");
+    println!("  skip entries: {skip_count}");
+    print_count_map("cases by kind", &by_kind);
+    print_count_map("cases by matrix", &by_matrix);
+    print_count_map("jobs by target", &jobs_by_target);
+    print_count_map("skips by target", &skips_by_target);
+    print_count_map("cases by tag", &by_tag);
+    print_count_map("cases by owner", &by_owner);
+    Ok(())
+}
+
+pub(crate) fn print_test_catalog(root: &Path, suite: &str, format: &str) -> Result<()> {
+    let manifest = load_manifest(root)?;
+    let test_config = load_test_config(root)?;
+    if manifest.suite != suite {
+        bail!(
+            "manifest suite {} does not match requested suite {}",
+            manifest.suite,
+            suite
+        );
+    }
+    if format != "text" && format != "json" {
+        bail!("--format must be text or json");
+    }
+
+    let mut cases = Vec::new();
+    for case in &manifest.cases {
+        cases.push(TestCatalogCase {
+            id: case.id.clone(),
+            kind: case.kind.clone(),
+            path: manifest_case_path(root, &manifest, case)?,
+            targets: resolved_case_targets(case, &test_config)?,
+            matrix: case.matrix.clone(),
+            tags: case.tags.clone(),
+            owner: case.owner.clone(),
+            skip: case.skip.clone(),
+            timeout: case.timeout.clone(),
+            reason: case.reason.clone(),
+            expect: parse_case_expect(case)?,
+        });
+    }
+
+    if format == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&TestCatalog {
+                schema: "volang.test-catalog.v1",
+                suite: manifest.suite,
+                cases,
+            })?
+        );
+    } else {
+        for case in cases {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                case.id,
+                case.kind,
+                case.matrix.as_deref().unwrap_or("(explicit-targets)"),
+                case.targets.join(","),
+                case.owner.as_deref().unwrap_or("(missing)"),
+                case.path
+            );
         }
     }
     Ok(())
@@ -391,6 +583,19 @@ fn validate_manifest_case_shape(case: &ManifestCase) -> Result<()> {
         );
     }
     validate_manifest_relative_path(&case.id, "path", &case.path, true)?;
+    if let Some(matrix) = &case.matrix {
+        validate_manifest_label(&case.id, "matrix", matrix)?;
+    }
+    let mut seen_tags = BTreeSet::new();
+    for tag in &case.tags {
+        validate_manifest_label(&case.id, "tag", tag)?;
+        if !seen_tags.insert(tag) {
+            bail!("case {} has duplicate tag {}", case.id, tag);
+        }
+    }
+    if let Some(owner) = &case.owner {
+        validate_manifest_label(&case.id, "owner", owner)?;
+    }
     match case.kind.as_str() {
         "file" | "zip" if case.path.ends_with('/') => {
             bail!("case {} {} path cannot end with /", case.id, case.kind)
@@ -407,6 +612,24 @@ fn validate_manifest_case_shape(case: &ManifestCase) -> Result<()> {
         ("zip", None) => {}
         (_, Some(_)) => bail!("case {} zip_root is only valid for zip cases", case.id),
         (_, None) => {}
+    }
+    Ok(())
+}
+
+fn validate_manifest_label(case_id: &str, field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("case {case_id} {field} cannot be empty");
+    }
+    if value.trim() != value {
+        bail!("case {case_id} {field} cannot contain surrounding whitespace");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+    {
+        bail!(
+            "case {case_id} {field} {value} must use lowercase ASCII letters, digits, dot, hyphen, or underscore"
+        );
     }
     Ok(())
 }
@@ -467,6 +690,31 @@ fn missing_required_targets(targets: &[String], required: &[String]) -> Vec<Stri
         .filter(|target| !has_target_name(targets, target))
         .cloned()
         .collect()
+}
+
+fn compile_fail_enabled_for_stats(targets: &[String]) -> bool {
+    targets.is_empty() || targets.iter().any(|target| target == "compile")
+}
+
+fn increment(counts: &mut BTreeMap<String, usize>, key: &str) {
+    *counts.entry(key.to_string()).or_default() += 1;
+}
+
+fn print_count_map(title: &str, counts: &BTreeMap<String, usize>) {
+    println!("  {title}:");
+    if counts.is_empty() {
+        println!("    (none): 0");
+        return;
+    }
+    for (key, count) in counts {
+        println!("    {key}: {count}");
+    }
+}
+
+fn is_gc_regression_case(case: &ManifestCase) -> bool {
+    case.matrix.as_deref() == Some("gc")
+        || case.tags.iter().any(|tag| tag == "gc")
+        || looks_like_gc_regression(case)
 }
 
 fn looks_like_gc_regression(case: &ManifestCase) -> bool {

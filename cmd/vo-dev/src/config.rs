@@ -27,6 +27,9 @@ pub(crate) struct Task {
     #[serde(default)]
     pub(crate) outputs: Vec<String>,
     pub(crate) tier: String,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    pub(crate) owner: Option<String>,
     pub(crate) cwd: Option<String>,
     #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,

@@ -95,7 +95,9 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
         .iter()
         .map(|workspace| workspace.name.clone())
         .collect();
-    let allowed_tiers = ["fast", "test", "site", "release", "manual"];
+    let allowed_tiers = [
+        "fast", "test", "contract", "stress", "site", "release", "manual", "legacy",
+    ];
 
     for task in &config.tasks {
         if task.name.trim().is_empty() {
@@ -128,6 +130,13 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
         validate_unique_values("task", &task.name, "output", &task.outputs)?;
         validate_unique_values("task", &task.name, "dependency", &task.needs)?;
         validate_unique_values("task", &task.name, "platform", &task.platforms)?;
+        validate_unique_values("task", &task.name, "tag", &task.tags)?;
+        for tag in &task.tags {
+            validate_ascii_slug("task tag", tag, &['-', '_', '.'])?;
+        }
+        if let Some(owner) = &task.owner {
+            validate_ascii_slug("task owner", owner, &['-', '_', '.'])?;
+        }
         if task.inputs.is_empty() {
             bail!("task {} inputs cannot be empty", task.name);
         }
