@@ -221,6 +221,7 @@ Checks:
 cargo test -p vo-runtime gc
 cargo test -p vo-vm gc
 cargo test -p vo-jit
+cargo run -q -p vo-dev -- task run gc-contract
 cargo run -q -p vo-dev -- gc-perf --release --json dead-sweep
 ```
 
@@ -406,6 +407,7 @@ Checks:
 ```sh
 ./d.py ci task docs-lint
 node scripts/ci/docs_sync.mjs --check
+node scripts/ci/docs_sync.mjs
 ```
 
 Generated Playground docs include a provenance header and digest. Regenerate
@@ -480,10 +482,14 @@ cargo run -q -p vo-dev -- lint all
 cargo run -q -p vo-dev -- task plan pr
 cargo run -q -p vo-dev -- task run task:<task-name>
 cargo run -q -p vo-dev -- verify plan pr
+cargo run -q -p vo-dev -- task run contract
 ```
 
 Do not duplicate task policy in GitHub YAML, ad hoc shell snippets, or `d.py`.
 Add data to `eng/` and interpretation to `cmd/vo-dev`.
+For test-system completeness work, use
+`lang/docs/dev/test-system-completion-plan.md` as the acceptance contract and
+close with `contract`, `site`, and `release-verify`.
 
 ## Change Release Automation
 

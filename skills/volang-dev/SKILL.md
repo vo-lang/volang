@@ -32,6 +32,10 @@ validation, and treat stale docs as an expected maintenance hazard.
 - Treat this skill and its references as the compact maintainer guide.
 - Treat `eng/*.toml`, `cmd/vo-dev`, and `tests/lang/manifest.toml` as the
   authority for local and CI workflow behavior.
+- Treat `lang/docs/dev/test-system-completion-plan.md` as the acceptance
+  contract for test-system completeness, and
+  `lang/docs/dev/test-system-target-state.md` as the design map. Verify the
+  current source of truth before claiming the test system is complete.
 - Treat `lang/docs/spec/*.md` as canonical intended behavior for user-facing
   contracts, but verify source and tests before explaining current shipped
   implementation status.
@@ -101,7 +105,7 @@ Common focused checks:
 ./d.py test jit tests/lang/cases/foo.vo
 ./d.py test osr tests/lang/cases/foo.vo
 ./d.py test wasm tests/lang/cases/foo.vo
-cargo run -q -p vo-dev -- test lint --suite lang
+cargo run -q -p vo-dev -- test lint --suite lang --strict
 cargo run -q -p vo-dev -- task plan pr --changed
 cargo run -q -p vo-dev -- verify plan pr
 cargo run -q -p vo-dev -- lint all
@@ -114,6 +118,16 @@ cargo check -p vo-web --target wasm32-unknown-unknown
 Use `VOWORK=off` for hermetic language-test expectations unless the task is
 specifically about workspace overrides. Manifest-driven native/WASM test
 targets in `eng/tests.toml` already set this.
+
+For high-risk core or test-system changes, `contract` is the composed invariant
+gate. Before calling the test system complete, run the completion-plan final
+gates, including:
+
+```sh
+cargo run -q -p vo-dev -- task run contract
+cargo run -q -p vo-dev -- task run site
+cargo run -q -p vo-dev -- task run release-verify
+```
 
 ## High-Risk Areas
 

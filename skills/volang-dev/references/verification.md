@@ -35,9 +35,11 @@ single task as `task:<task-name>`.
 
 ```sh
 cargo run -q -p vo-dev -- lint all
+cargo run -q -p vo-dev -- test lint --suite lang --strict
 cargo run -q -p vo-dev -- tool check --task <task>
 cargo run -q -p vo-dev -- task plan pr --changed
 cargo run -q -p vo-dev -- task run task:<task-name>
+cargo run -q -p vo-dev -- task run contract
 cargo run -q -p vo-dev -- ci matrix pr --base <sha> --head <sha>
 cargo run -q -p vo-dev -- verify plan pr
 cargo run -q -p vo-dev -- verify run quality
@@ -72,7 +74,7 @@ cargo test -p vo-analysis
 cargo test -p vo-codegen
 ./d.py test both tests/lang/cases/<case>.vo
 ./d.py test both
-cargo run -q -p vo-dev -- test lint --suite lang
+cargo run -q -p vo-dev -- test lint --suite lang --strict
 ```
 
 The language suite is manifest-driven through `tests/lang/manifest.toml`; add or
@@ -203,6 +205,15 @@ cargo run -q -p vo-dev -- verify plan pr
 If a task declares outputs, run the task and confirm `vo-dev` output validation
 passes.
 
+For test-system, CI graph, release/site, or other cross-layer engineering
+changes, close with the completion-plan gates instead of only focused checks:
+
+```sh
+cargo run -q -p vo-dev -- task run contract
+cargo run -q -p vo-dev -- task run site
+cargo run -q -p vo-dev -- task run release-verify
+```
+
 ## Docs
 
 Use when touching `lang/docs/spec`, `lang/docs/vo-for-gophers.md`,
@@ -211,6 +222,7 @@ Use when touching `lang/docs/spec`, `lang/docs/vo-for-gophers.md`,
 ```sh
 ./d.py ci task docs-lint
 node scripts/ci/docs_sync.mjs --check
+node scripts/ci/docs_sync.mjs
 node scripts/ci/docs_lint.mjs
 ```
 
