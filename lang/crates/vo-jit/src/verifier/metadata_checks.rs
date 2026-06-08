@@ -28,9 +28,6 @@ pub(super) fn verify_metadata_kind(
             MetadataContractViolation::WrongKind { metadata } => {
                 wrong_kind(func, pc, opcode, metadata)
             }
-            MetadataContractViolation::UnsupportedLegacy { metadata } => {
-                unsupported_legacy_metadata(func, pc, opcode, metadata)
-            }
         });
     }
 
@@ -104,11 +101,6 @@ pub(super) fn verify_metadata_kind(
             validate_loop_end_backedge(func, pc, end_pc)?;
             Ok(())
         }
-        JitMetadataKind::LegacyMapGet
-        | JitMetadataKind::LegacyMapSet
-        | JitMetadataKind::LegacyMapDelete => {
-            Err(unsupported_legacy_metadata(func, pc, opcode, kind.name()))
-        }
         JitMetadataKind::MapGet
         | JitMetadataKind::MapSet
         | JitMetadataKind::MapDelete
@@ -170,20 +162,6 @@ fn wrong_kind(
     metadata: &'static str,
 ) -> JitMetadataError {
     JitMetadataError::WrongMetadataKind {
-        func: func.name.clone(),
-        pc,
-        opcode,
-        metadata,
-    }
-}
-
-fn unsupported_legacy_metadata(
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-    metadata: &'static str,
-) -> JitMetadataError {
-    JitMetadataError::UnsupportedLegacyMetadata {
         func: func.name.clone(),
         pc,
         opcode,

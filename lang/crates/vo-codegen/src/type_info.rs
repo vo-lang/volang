@@ -1531,7 +1531,7 @@ pub fn encode_map_new_slots(key_slots: u16, val_slots: u16) -> u16 {
 /// Encode Call args: (arg_slots << 8) | ret_slots_low8.
 ///
 /// Static Call execution must use FunctionDef.param_slots and FunctionDef.ret_slots
-/// as the source of truth; this legacy packed field only preserves 8 bits per side.
+/// as the source of truth; this packed operand only preserves 8 bits per side.
 #[inline]
 pub fn encode_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
     pack_call_shape(arg_slots, ret_slots).unwrap_or_else(|| {
@@ -1542,11 +1542,11 @@ pub fn encode_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
     })
 }
 
-/// Encode the legacy static Call shape mirror.
+/// Encode the static Call packed shape mirror.
 ///
 /// Static Call verifier/lowering use the callee FunctionDef param_slots/ret_slots
-/// as authority. When either side exceeds the legacy 8-bit mirror, encode zero
-/// instead of a truncated count so consumers cannot accidentally treat it as
+/// as authority. When either side exceeds the 8-bit mirror, encode zero instead
+/// of a truncated count so consumers cannot accidentally treat it as
 /// authoritative.
 #[inline]
 pub fn encode_static_call_args(arg_slots: u16, ret_slots: u16) -> u16 {
@@ -1590,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn static_call_args_do_not_encode_truncated_legacy_shape() {
+    fn static_call_args_do_not_encode_truncated_packed_shape() {
         assert_eq!(encode_static_call_args(2, 3), (2 << 8) | 3);
         assert_eq!(encode_static_call_args(1, 301), 0);
         assert_eq!(encode_static_call_args(301, 1), 0);

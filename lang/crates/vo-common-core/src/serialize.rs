@@ -32,7 +32,7 @@ use num_enum::TryFromPrimitive;
 
 const MAGIC: &[u8; 3] = b"VOB";
 const VERSION: u32 = 7;
-const MIN_SUPPORTED_VERSION: u32 = 2;
+const MIN_SUPPORTED_VERSION: u32 = VERSION;
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -260,107 +260,57 @@ fn write_jit_instruction_metadata(w: &mut ByteWriter, meta: &JitInstructionMetad
             w.write_u8(5);
             w.write_u32(*end_pc);
         }
-        JitInstructionMetadata::LegacyMapGet {
-            key_slots,
-            val_slots,
-            has_ok,
-        } => {
-            w.write_u8(6);
-            w.write_u16(*key_slots);
-            w.write_u16(*val_slots);
-            w.write_u8(*has_ok as u8);
-        }
-        JitInstructionMetadata::LegacyMapSet {
-            key_slots,
-            val_slots,
-        } => {
-            w.write_u8(7);
-            w.write_u16(*key_slots);
-            w.write_u16(*val_slots);
-        }
-        JitInstructionMetadata::LegacyMapDelete { key_slots } => {
-            w.write_u8(8);
-            w.write_u16(*key_slots);
-        }
     }
 }
 
 fn read_jit_instruction_metadata_for_version(
     r: &mut ByteReader,
-    version: u32,
+    _version: u32,
 ) -> Result<JitInstructionMetadata, SerializeError> {
     match r.read_u8()? {
         0 => Ok(JitInstructionMetadata::None),
         1 => Ok(JitInstructionMetadata::ElemLayout {
             elem_bytes: r.read_u32()?,
             needs_sign_extend: r.read_u8()? != 0,
-            slot_layout: if version >= 6 {
-                read_slot_layout(r)?
-            } else {
-                Vec::new()
-            },
+            slot_layout: read_slot_layout(r)?,
         }),
-        2 if version >= 5 => Ok(JitInstructionMetadata::MapGet {
+        2 => Ok(JitInstructionMetadata::MapGet {
             key_layout: read_slot_layout(r)?,
             val_layout: read_slot_layout(r)?,
             has_ok: r.read_u8()? != 0,
         }),
-        2 => Ok(JitInstructionMetadata::LegacyMapGet {
-            key_slots: r.read_u16()?,
-            val_slots: r.read_u16()?,
-            has_ok: r.read_u8()? != 0,
-        }),
-        3 if version >= 5 => Ok(JitInstructionMetadata::MapSet {
+        3 => Ok(JitInstructionMetadata::MapSet {
             key_layout: read_slot_layout(r)?,
             val_layout: read_slot_layout(r)?,
         }),
-        3 => Ok(JitInstructionMetadata::LegacyMapSet {
-            key_slots: r.read_u16()?,
-            val_slots: r.read_u16()?,
-        }),
-        4 if version >= 5 => Ok(JitInstructionMetadata::MapDelete {
+        4 => Ok(JitInstructionMetadata::MapDelete {
             key_layout: read_slot_layout(r)?,
-        }),
-        4 => Ok(JitInstructionMetadata::LegacyMapDelete {
-            key_slots: r.read_u16()?,
         }),
         5 => Ok(JitInstructionMetadata::LoopEnd {
             end_pc: r.read_u32()?,
         }),
-        6 => Ok(JitInstructionMetadata::LegacyMapGet {
-            key_slots: r.read_u16()?,
-            val_slots: r.read_u16()?,
-            has_ok: r.read_u8()? != 0,
-        }),
-        7 => Ok(JitInstructionMetadata::LegacyMapSet {
-            key_slots: r.read_u16()?,
-            val_slots: r.read_u16()?,
-        }),
-        8 => Ok(JitInstructionMetadata::LegacyMapDelete {
-            key_slots: r.read_u16()?,
-        }),
-        9 if version >= 6 => Ok(JitInstructionMetadata::PtrLayout {
+        9 => Ok(JitInstructionMetadata::PtrLayout {
             value_layout: read_slot_layout(r)?,
         }),
-        10 if version >= 6 => Ok(JitInstructionMetadata::SlotLayout {
+        10 => Ok(JitInstructionMetadata::SlotLayout {
             elem_layout: read_slot_layout(r)?,
         }),
-        11 if version >= 6 => Ok(JitInstructionMetadata::CallLayout {
+        11 => Ok(JitInstructionMetadata::CallLayout {
             arg_layout: read_slot_layout(r)?,
             ret_layout: read_slot_layout(r)?,
         }),
-        12 if version >= 6 => Ok(JitInstructionMetadata::CallExternLayout {
+        12 => Ok(JitInstructionMetadata::CallExternLayout {
             arg_layout: read_slot_layout(r)?,
             ret_layout: read_slot_layout(r)?,
         }),
-        13 if version >= 6 => Ok(JitInstructionMetadata::QueueLayout {
+        13 => Ok(JitInstructionMetadata::QueueLayout {
             elem_layout: read_slot_layout(r)?,
         }),
-        14 if version >= 6 => Ok(JitInstructionMetadata::MapIterNext {
+        14 => Ok(JitInstructionMetadata::MapIterNext {
             key_layout: read_slot_layout(r)?,
             val_layout: read_slot_layout(r)?,
         }),
-        15 if version >= 7 => Ok(JitInstructionMetadata::IfaceAssertLayout {
+        15 => Ok(JitInstructionMetadata::IfaceAssertLayout {
             result_layout: read_slot_layout(r)?,
         }),
         _ => Err(SerializeError::InvalidJitMetadata),
@@ -1360,51 +1310,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_map_metadata_is_reader_compat_surface() {
-        let mut legacy_v4_get = ByteWriter::new();
-        legacy_v4_get.write_u8(2);
-        legacy_v4_get.write_u16(2);
-        legacy_v4_get.write_u16(3);
-        legacy_v4_get.write_u8(1);
-        let bytes = legacy_v4_get.into_bytes();
-        let mut reader = ByteReader::new(&bytes);
-        assert_eq!(
-            read_jit_instruction_metadata_for_version(&mut reader, 4).unwrap(),
-            JitInstructionMetadata::LegacyMapGet {
-                key_slots: 2,
-                val_slots: 3,
-                has_ok: true,
-            }
-        );
-
-        for (expected_tag, expected) in [
-            (
-                6,
-                JitInstructionMetadata::LegacyMapGet {
-                    key_slots: 1,
-                    val_slots: 2,
-                    has_ok: false,
-                },
-            ),
-            (
-                7,
-                JitInstructionMetadata::LegacyMapSet {
-                    key_slots: 3,
-                    val_slots: 4,
-                },
-            ),
-            (8, JitInstructionMetadata::LegacyMapDelete { key_slots: 5 }),
-        ] {
+    fn removed_map_metadata_tags_are_rejected() {
+        for expected_tag in [6, 7, 8] {
             let mut writer = ByteWriter::new();
-            write_jit_instruction_metadata(&mut writer, &expected);
+            writer.write_u8(expected_tag);
+            writer.write_u16(1);
+            writer.write_u16(1);
             let bytes = writer.into_bytes();
             assert_eq!(bytes[0], expected_tag);
 
             let mut reader = ByteReader::new(&bytes);
-            assert_eq!(
-                read_jit_instruction_metadata(&mut reader).unwrap(),
-                expected
-            );
+            assert!(matches!(
+                read_jit_instruction_metadata(&mut reader),
+                Err(SerializeError::InvalidJitMetadata)
+            ));
         }
     }
 
@@ -1478,13 +1397,14 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_v2_empty_module() {
+    fn rejects_non_current_bytecode_versions() {
         let module = Module::new("test".into());
         let mut bytes = module.serialize();
-        bytes[3..7].copy_from_slice(&2u32.to_le_bytes());
+        bytes[3..7].copy_from_slice(&(VERSION - 1).to_le_bytes());
 
-        let module2 = Module::deserialize(&bytes).unwrap();
-        assert_eq!(module.name, module2.name);
-        assert!(module2.functions.is_empty());
+        assert!(matches!(
+            Module::deserialize(&bytes),
+            Err(SerializeError::UnsupportedVersion(version)) if version == VERSION - 1
+        ));
     }
 }

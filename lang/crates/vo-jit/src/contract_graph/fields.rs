@@ -252,46 +252,6 @@ pub(super) const FIELD_META_IFACE_ASSERT_LAYOUTS: &[SlotLayoutField] = &[SlotLay
     slot_type_bits: 8,
     authority: LayoutAuthority::CodegenTypeInfo,
 }];
-pub(super) const FIELD_META_LEGACY_MAP_GET: &[FieldWidth] = &[
-    FieldWidth {
-        name: "key_slots",
-        bits: 16,
-        max: None,
-        authority: LayoutAuthority::CodegenTypeInfo,
-    },
-    FieldWidth {
-        name: "val_slots",
-        bits: 16,
-        max: None,
-        authority: LayoutAuthority::CodegenTypeInfo,
-    },
-    FieldWidth {
-        name: "has_ok",
-        bits: 1,
-        max: Some(1),
-        authority: LayoutAuthority::CodegenTypeInfo,
-    },
-];
-pub(super) const FIELD_META_LEGACY_MAP_SET: &[FieldWidth] = &[
-    FieldWidth {
-        name: "key_slots",
-        bits: 16,
-        max: None,
-        authority: LayoutAuthority::CodegenTypeInfo,
-    },
-    FieldWidth {
-        name: "val_slots",
-        bits: 16,
-        max: None,
-        authority: LayoutAuthority::CodegenTypeInfo,
-    },
-];
-pub(super) const FIELD_META_LEGACY_MAP_DELETE: &[FieldWidth] = &[FieldWidth {
-    name: "key_slots",
-    bits: 16,
-    max: None,
-    authority: LayoutAuthority::CodegenTypeInfo,
-}];
 pub(super) const FIELD_META_LOOP_END: &[FieldWidth] = &[FieldWidth {
     name: "end_pc",
     bits: 32,

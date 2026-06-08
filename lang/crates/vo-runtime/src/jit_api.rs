@@ -4021,10 +4021,10 @@ mod tests {
         let method_idx = 7;
         let low = DynCallIC::iface_key(0x0000_0002, method_idx);
         let high = DynCallIC::iface_key(0x0001_0002, method_idx);
-        let legacy_low = (0x0000_0002_u32 << 16) | method_idx;
-        let legacy_high = (0x0001_0002_u32 << 16) | method_idx;
+        let truncated_low = (0x0000_0002_u32 << 16) | method_idx;
+        let truncated_high = (0x0001_0002_u32 << 16) | method_idx;
 
-        assert_eq!(legacy_low, legacy_high, "legacy u32 key collided");
+        assert_eq!(truncated_low, truncated_high, "truncated u32 key collided");
         assert_ne!(low, high, "tagged key must retain high itab_id bits");
         assert_ne!(low, DynCallIC::closure_key(0x0000_0002));
     }

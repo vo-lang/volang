@@ -183,16 +183,16 @@ effect contract derived from it.
 semantic row. Do not create a second opcode-to-metadata match. Missing metadata,
 wrong metadata kind, invalid references, call-shape drift, helper/callback ABI
 drift, and slot-layout mismatches are strict JIT errors, not implicit
-interpreter fallbacks.
+interpreter side paths.
 
-Keep verifier dispatch in `verifier/instruction_contracts/dispatch.rs` and
-shared helpers in `context.rs`, `layout.rs`, and `preflight.rs`. Concrete
-contracts belong to focused family modules such as `calls`, `collections`,
-`control`, `interface`, `memory`, and `scalar`.
+Keep VM-shared bytecode/module validation in
+`vo-common-core/src/verifier.rs`. Strict JIT verifier code should only add
+JIT-specific metadata policy and lowering/ABI capability checks after the shared
+`ModuleVerifier` has accepted the module.
 
 Use `RuntimePathPolicy`, `JitSideExitReason`, "VM call materialization", and
-"side exit" precisely. Avoid broad "fallback" language unless referring to
-legacy language-test manifest compatibility at the test boundary.
+"side exit" precisely. Avoid broad interpreter-path language unless referring to
+language-test manifest side-exit observation fields at the test boundary.
 
 For call work, follow `call_helpers/*`: plan route selection in `plan.rs`,
 dynamic call state in `dynamic/*`, extern behavior in `externs.rs`, prepared

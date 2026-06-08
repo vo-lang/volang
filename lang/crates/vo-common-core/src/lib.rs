@@ -23,6 +23,7 @@ pub mod serialize;
 pub mod source_provider;
 pub mod symbol;
 pub mod types;
+pub mod verifier;
 
 pub use bytecode::{
     Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Itab, JitInstructionMetadata,
@@ -40,3 +41,4 @@ pub use types::{
     elem_flags, MetaId, SlotType, ValueKind, ValueMeta, ELEM_FLAG_BYTES_MASK, ELEM_FLAG_FLOAT32,
     ELEM_FLAG_FLOAT_BIT, ELEM_FLAG_INT16, ELEM_FLAG_INT32, ELEM_FLAG_INT8, ELEM_FLAG_SIGN_BIT,
 };
+pub use verifier::{ModuleVerificationError, ModuleVerifier, VerifiedModule};

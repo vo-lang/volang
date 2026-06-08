@@ -79,8 +79,8 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
   panic recording.
 - Avoid using "fallback" for intentional JIT runtime paths. Prefer
   `RuntimePathPolicy`, `JitSideExitReason`, "side exit", and "VM call
-  materialization"; legacy fallback wording is only compatibility terminology
-  at the language-test manifest boundary.
+  materialization"; manifest side-exit wording is parsed only at the
+  language-test boundary.
 - Dynamic access and error-sugar specs are intended behavior; current support
   crosses parser, checker, codegen, runtime builtins, and manifest expectations.
   Do not infer implementation status from spec text alone.
@@ -89,7 +89,7 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
   browser dependency preparation.
 - Studio docs say all examples execute via WASM. That is true for web mode, not
   native Tauri sessions.
-- Older Studio/legacy Playground paths may leak previous product names such as
+- Older Studio/Playground paths may leak previous product names such as
   `Vibe`. Grep current source before broad rename or branding claims.
 - Native real-path inline modules with `require` can auto-install into the
   ephemeral cache through `vo-engine::compile_with_auto_install`; web and memory
@@ -97,7 +97,7 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 - `vo test` is a user CLI command for compiling/running a project or tests
   directory. Repo regression testing is `vo-dev test run` or `./d.py test`.
 - Studio and Playground do not share every runtime path. Studio uses
-  `vo-app-runtime`; Playground legacy still has independent WASM/Rust glue.
+  `vo-app-runtime`; the older Playground still has independent WASM/Rust glue.
 - `RenderBuffer` is keep-latest. It is not a replay queue.
 
 ## Module And Dependency Risks

@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_layout_metadata_drift_has_no_release_skip_or_legacy_fallback() {
+    fn gc_layout_metadata_drift_has_no_release_skip_or_all_gcref_substitute() {
         let src = include_str!("gc_types.rs");
 
         let barrier = section(
@@ -698,7 +698,7 @@ mod tests {
         );
         assert!(
             !scan_closure.contains("Compatibility fallback"),
-            "closure capture layout drift must not use legacy all-GcRef fallback"
+            "closure capture layout drift must not use all-GcRef substitute"
         );
 
         let scan_array = section(src, "fn trace_array_children", "fn trace_array_struct_elem");

@@ -13,7 +13,6 @@ use crate::verifier::JitMetadataError;
 pub struct FunctionAnalysis {
     pub memory_only_start: u16,
     pub reg_const_facts: Vec<HashMap<u16, i64>>,
-    pub effects: Vec<InstructionEffects>,
 }
 
 impl FunctionAnalysis {
@@ -63,7 +62,6 @@ impl FunctionAnalysis {
         Ok(Self {
             memory_only_start,
             reg_const_facts,
-            effects,
         })
     }
 }
@@ -149,8 +147,24 @@ mod tests {
 
         let analysis =
             FunctionAnalysis::for_function(&module.functions[0], &module).expect("valid analysis");
+        assert_eq!(analysis.memory_only_start, u16::MAX);
 
-        assert_eq!(analysis.effects[0].writes, vec![10, 11, 12, 13]);
-        assert_eq!(analysis.effects[1].writes, vec![20, 21]);
+        let map_get_effects = effects::try_instruction_effects_with_module_context(
+            &module.functions[0].code[0],
+            EffectFacts::from_instruction(module.functions[0].jit_metadata.first()),
+            &module.externs,
+            &module.functions,
+        )
+        .expect("valid map get effects");
+        let call_extern_effects = effects::try_instruction_effects_with_module_context(
+            &module.functions[0].code[1],
+            EffectFacts::from_instruction(module.functions[0].jit_metadata.get(1)),
+            &module.externs,
+            &module.functions,
+        )
+        .expect("valid call extern effects");
+
+        assert_eq!(map_get_effects.writes, vec![10, 11, 12, 13]);
+        assert_eq!(call_extern_effects.writes, vec![20, 21]);
     }
 }

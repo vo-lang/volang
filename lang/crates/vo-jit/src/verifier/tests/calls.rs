@@ -146,7 +146,7 @@ fn rejects_call_slot_contract_mismatches() {
 }
 
 #[test]
-fn rejects_large_static_call_with_nonzero_legacy_shape_mirror() {
+fn rejects_large_static_call_with_nonzero_packed_shape_mirror() {
     let callee = make_func_with_shape(
         vec![Instruction::new(Opcode::Return, 300, 1, 0)],
         vec![JitInstructionMetadata::None],

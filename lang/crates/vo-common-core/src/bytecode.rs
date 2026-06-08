@@ -26,11 +26,6 @@ impl ReturnFlags {
     }
 
     #[inline]
-    pub const fn from_bits_truncate(bits: u8) -> Self {
-        Self(bits & Self::ALLOWED_BITS)
-    }
-
-    #[inline]
     pub const fn stack_return(is_error_return: bool) -> Self {
         if is_error_return {
             Self::ERROR_RETURN
@@ -142,24 +137,6 @@ pub enum JitInstructionMetadata {
     },
     IfaceAssertLayout {
         result_layout: Vec<SlotType>,
-    },
-    /// Legacy serialized map metadata kept only for bytecode compatibility.
-    /// The strict JIT verifier rejects these variants before lowering.
-    LegacyMapGet {
-        key_slots: u16,
-        val_slots: u16,
-        has_ok: bool,
-    },
-    /// Legacy serialized map metadata kept only for bytecode compatibility.
-    /// The strict JIT verifier rejects these variants before lowering.
-    LegacyMapSet {
-        key_slots: u16,
-        val_slots: u16,
-    },
-    /// Legacy serialized map metadata kept only for bytecode compatibility.
-    /// The strict JIT verifier rejects these variants before lowering.
-    LegacyMapDelete {
-        key_slots: u16,
     },
     LoopEnd {
         end_pc: u32,
@@ -513,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn return_flags_separate_strict_schema_from_legacy_truncation() {
+    fn return_flags_reject_unknown_bits() {
         let strict = ReturnFlags::heap_returns(true);
         assert_eq!(
             strict.bits(),
@@ -523,9 +500,5 @@ mod tests {
         assert!(strict.is_error_return());
 
         assert!(ReturnFlags::from_bits(0x04).is_none());
-        assert_eq!(
-            ReturnFlags::from_bits_truncate(0x04 | RETURN_FLAG_ERROR_RETURN).bits(),
-            RETURN_FLAG_ERROR_RETURN
-        );
     }
 }

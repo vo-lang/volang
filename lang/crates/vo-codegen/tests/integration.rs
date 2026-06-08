@@ -1021,7 +1021,7 @@ func main() int {
                 } else {
                     assert_eq!(
                         inst.c, 0,
-                        "{} large Call at pc {} must use zero legacy shape mirror",
+                        "{} large Call at pc {} must use zero packed shape mirror",
                         func.name, pc
                     );
                 }

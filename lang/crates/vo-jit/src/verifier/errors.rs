@@ -5,6 +5,7 @@ use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 
 use crate::effects::{EffectError, SlotRangeError};
+use vo_common_core::verifier::ModuleVerificationError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JitMetadataError {
@@ -19,12 +20,6 @@ pub enum JitMetadataError {
         raw: u8,
     },
     WrongMetadataKind {
-        func: String,
-        pc: usize,
-        opcode: Opcode,
-        metadata: &'static str,
-    },
-    UnsupportedLegacyMetadata {
         func: String,
         pc: usize,
         opcode: Opcode,
@@ -184,15 +179,6 @@ impl fmt::Display for JitMetadataError {
             } => write!(
                 f,
                 "wrong JIT metadata kind {metadata} for {opcode:?} in {func} at pc {pc}"
-            ),
-            Self::UnsupportedLegacyMetadata {
-                func,
-                pc,
-                opcode,
-                metadata,
-            } => write!(
-                f,
-                "legacy JIT metadata kind {metadata} is not supported by strict {opcode:?} verification in {func} at pc {pc}"
             ),
             Self::InvalidElemLayout {
                 func,
@@ -376,6 +362,215 @@ impl fmt::Display for JitMetadataError {
 }
 
 impl std::error::Error for JitMetadataError {}
+
+impl From<ModuleVerificationError> for JitMetadataError {
+    fn from(err: ModuleVerificationError) -> Self {
+        match err {
+            ModuleVerificationError::LengthMismatch {
+                func,
+                code_len,
+                metadata_len,
+            } => Self::LengthMismatch {
+                func,
+                code_len,
+                metadata_len,
+            },
+            ModuleVerificationError::InvalidOpcode { func, pc, raw } => {
+                Self::InvalidOpcode { func, pc, raw }
+            }
+            ModuleVerificationError::MissingLayout {
+                func,
+                pc,
+                opcode,
+                layout,
+            } => Self::MissingLayout {
+                func,
+                pc,
+                opcode,
+                layout,
+            },
+            ModuleVerificationError::MissingExtern {
+                func,
+                pc,
+                extern_id,
+            } => Self::MissingExtern {
+                func,
+                pc,
+                extern_id,
+            },
+            ModuleVerificationError::MissingConstant { func, pc, const_id } => {
+                Self::MissingConstant { func, pc, const_id }
+            }
+            ModuleVerificationError::ConstantKindMismatch {
+                func,
+                pc,
+                opcode,
+                const_id,
+                expected,
+                actual,
+            } => Self::ConstantKindMismatch {
+                func,
+                pc,
+                opcode,
+                const_id,
+                expected,
+                actual,
+            },
+            ModuleVerificationError::InvalidBranchTarget {
+                func,
+                pc,
+                opcode,
+                target,
+                code_len,
+            } => Self::InvalidBranchTarget {
+                func,
+                pc,
+                opcode,
+                target,
+                code_len,
+            },
+            ModuleVerificationError::SlotRangeOverflow {
+                func,
+                pc,
+                start,
+                count,
+                access,
+            } => Self::SlotRangeOverflow {
+                func,
+                pc,
+                start,
+                count,
+                access: normalize_common_range_access(access),
+            },
+            ModuleVerificationError::SlotOutOfRange {
+                func,
+                pc,
+                slot,
+                local_slots,
+                access,
+            } => Self::SlotOutOfRange {
+                func,
+                pc,
+                slot,
+                local_slots,
+                access: normalize_common_range_access(access),
+            },
+            ModuleVerificationError::SlotTypeMismatch {
+                func,
+                pc,
+                opcode,
+                access,
+                slot,
+                expected,
+                actual,
+            } => Self::SlotTypeMismatch {
+                func,
+                pc,
+                opcode,
+                access,
+                slot,
+                expected,
+                actual,
+            },
+            ModuleVerificationError::InvalidInterfaceLayout {
+                func,
+                pc,
+                opcode,
+                access,
+                slot,
+                actual,
+            } => Self::InvalidInterfaceLayout {
+                func,
+                pc,
+                opcode,
+                access,
+                slot,
+                actual,
+            },
+            ModuleVerificationError::MissingFunction {
+                func,
+                pc,
+                callee_id,
+            } => Self::MissingFunction {
+                func,
+                pc,
+                callee_id,
+            },
+            ModuleVerificationError::CallShapeMismatch {
+                func,
+                pc,
+                opcode,
+                detail,
+            } => Self::CallShapeMismatch {
+                func,
+                pc,
+                opcode,
+                detail,
+            },
+            ModuleVerificationError::GlobalSlotOutOfRange {
+                func,
+                pc,
+                slot,
+                global_slots,
+                access,
+            } => Self::GlobalSlotOutOfRange {
+                func,
+                pc,
+                slot,
+                global_slots,
+                access,
+            },
+            ModuleVerificationError::FunctionInvariant { func, detail } => {
+                Self::FunctionInvariant { func, detail }
+            }
+            ModuleVerificationError::InvalidValueKind {
+                func,
+                pc,
+                opcode,
+                raw,
+            } => Self::InvalidValueKind {
+                func,
+                pc,
+                opcode,
+                raw,
+            },
+            ModuleVerificationError::InvalidInstructionFlags {
+                func,
+                pc,
+                opcode,
+                flags,
+                allowed,
+            } => Self::InvalidInstructionFlags {
+                func,
+                pc,
+                opcode,
+                flags,
+                allowed,
+            },
+            ModuleVerificationError::ModuleInvariant { detail }
+            | ModuleVerificationError::GcLayout { detail } => Self::FunctionInvariant {
+                func: "<module>".to_string(),
+                detail,
+            },
+        }
+    }
+}
+
+fn normalize_common_range_access(access: &'static str) -> &'static str {
+    if access == "MapGet ok"
+        || access.contains("destination")
+        || access.contains("Destination")
+        || access.contains("result")
+        || access.contains("Result")
+        || access.contains("returns")
+        || access.contains("Return")
+        || access.contains("ok")
+    {
+        "write"
+    } else {
+        "read"
+    }
+}
 
 impl JitMetadataError {
     pub(crate) fn slot_range(func: &FunctionDef, pc: usize, err: SlotRangeError) -> Self {

@@ -180,7 +180,7 @@ fn rejects_map_metadata_layout_slot_mismatches() {
 
     assert!(matches!(
         verify_jit_metadata(&module.functions[0], &module),
-        Err(JitMetadataError::SlotTypeMismatch {
+        Err(JitMetadataError::InvalidInterfaceLayout {
             opcode: Opcode::MapGet,
             access: "MapGet key",
             ..
@@ -188,7 +188,7 @@ fn rejects_map_metadata_layout_slot_mismatches() {
     ));
     assert!(matches!(
         verify_jit_metadata(&module.functions[1], &module),
-        Err(JitMetadataError::SlotTypeMismatch {
+        Err(JitMetadataError::InvalidInterfaceLayout {
             opcode: Opcode::MapSet,
             access: "MapSet value",
             ..
@@ -196,7 +196,7 @@ fn rejects_map_metadata_layout_slot_mismatches() {
     ));
     assert!(matches!(
         verify_jit_metadata(&module.functions[2], &module),
-        Err(JitMetadataError::SlotTypeMismatch {
+        Err(JitMetadataError::InvalidInterfaceLayout {
             opcode: Opcode::MapDelete,
             access: "MapDelete key",
             ..
@@ -283,28 +283,4 @@ fn accepts_dynamic_map_layout_metadata() {
     refresh_function_metadata(&mut module.functions[0]);
 
     verify_jit_metadata(&module.functions[0], &module).expect("valid metadata");
-}
-
-#[test]
-fn rejects_legacy_map_metadata_without_precise_slot_layouts() {
-    let mut module = VoModule::new("verify".to_string());
-    module.functions.push(make_func(
-        vec![Instruction::new(Opcode::MapSet, 1, 2, 4)],
-        vec![JitInstructionMetadata::LegacyMapSet {
-            key_slots: 1,
-            val_slots: 1,
-        }],
-        6,
-    ));
-    module.functions[0].slot_types[1] = SlotType::GcRef;
-    refresh_function_metadata(&mut module.functions[0]);
-
-    assert!(matches!(
-        verify_jit_metadata(&module.functions[0], &module),
-        Err(JitMetadataError::UnsupportedLegacyMetadata {
-            opcode: Opcode::MapSet,
-            metadata: "LegacyMapSet",
-            ..
-        })
-    ));
 }

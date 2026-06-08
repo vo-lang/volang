@@ -10,7 +10,7 @@
 
 本轮把 `vo-jit` 的 opcode 能力、effect、metadata contract、verifier requirement、trap/fail-fast、runtime dependency 与 lowering owner 收敛到 `vo-jit/src/semantics.rs` 的 row table。`effects.rs` 的常规读写寄存器、memory sync 和 may-call 事实从 row spec 派生；只保留依赖 metadata、module signature、extern/multi-result 或运行时上下文的动态例外。`metadata_contract.rs` 不再维护第二份 opcode metadata match。
 
-`verifier/instruction_contracts.rs` 现在只保留 dispatch、`VerifierCtx` 和共享 layout/range helper；具体校验拆到 `scalar/control/memory/collections/calls/interface` 子模块。`call_helpers.rs` 也收缩为共享 ABI/frame guard surface，dynamic inline cache、prepared call dispatch、extern call 与 VM call materialization 分别在子模块中维护。
+VM-shared bytecode/module validation now lives in `vo-common-core/src/verifier.rs`; `vo-jit/src/verifier.rs` only adds strict JIT metadata policy after that shared verifier accepts a module. `call_helpers.rs` stays as the shared ABI/frame guard surface, while dynamic inline cache, prepared call dispatch, extern call, and VM call materialization remain in focused submodules.
 
 命名上，JIT capability 使用 `RuntimePathPolicy`，合法 VM call materialization 明确命名为 `VmCallMaterialization`；`PreparedCall::vm_materialization` 表示没有 direct JIT entry 时走 prepared VM trampoline，不再叫 fallback。strict compile/metadata/ABI/contract 失败仍必须 fail fast，不能静默转解释器。维护细则见 `lang/docs/dev/jit-fact-source.md`。
 

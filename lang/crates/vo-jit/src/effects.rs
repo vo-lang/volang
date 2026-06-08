@@ -71,12 +71,12 @@ pub struct InstructionEffects {
     pub may_call: bool,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn try_read_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
     try_read_regs_with_module_context(inst, EffectFacts::none(), &[])
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn try_read_regs_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -121,7 +121,7 @@ pub fn try_multi_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError>
     Ok(regs)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn try_multi_write_regs_with_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -158,7 +158,7 @@ pub fn try_write_regs(inst: &Instruction) -> Result<Vec<u16>, EffectError> {
     Ok(regs)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn try_write_regs_with_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,

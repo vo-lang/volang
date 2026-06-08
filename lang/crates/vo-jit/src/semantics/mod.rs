@@ -16,8 +16,6 @@ mod tests;
 mod types;
 
 #[cfg(test)]
-pub use rows::opcode_helper_return_policy;
-#[cfg(test)]
 pub use rows::opcode_semantic_rows;
 pub(crate) use rows::{
     opcode_capability_contract, opcode_effect_contract, opcode_metadata_requirement_from_semantics,

@@ -1,19 +1,15 @@
 //! Verifier for bytecode facts consumed by the JIT.
 
-#![allow(clippy::too_many_arguments)]
-
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use vo_common_core::verifier as module_verifier;
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
+#[cfg(test)]
 use vo_runtime::instruction::Opcode;
 mod errors;
-mod function_invariants;
-mod instruction_contracts;
 mod metadata_checks;
 
 pub use errors::JitMetadataError;
-use function_invariants::verify_function_invariants;
-use instruction_contracts::{verify_slot, verify_slot_contract};
 use metadata_checks::verify_metadata_kind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,15 +44,19 @@ impl VerifiedModule {
 }
 
 fn forloop_target_i64(pc: usize, offset: i16) -> i64 {
-    instruction_contracts::forloop_target_i64(pc, offset)
+    pc as i64 + 1 + i64::from(offset)
 }
 
 pub fn verify_jit_metadata(
     func: &FunctionDef,
     vo_module: &VoModule,
 ) -> Result<(), JitMetadataError> {
-    verify_function_invariants(func)?;
+    verify_strict_jit_metadata_only(func).and_then(|()| {
+        module_verifier::verify_function(func, vo_module).map_err(JitMetadataError::from)
+    })
+}
 
+fn verify_strict_jit_metadata_only(func: &FunctionDef) -> Result<(), JitMetadataError> {
     if func.code.len() != func.jit_metadata.len() {
         return Err(JitMetadataError::LengthMismatch {
             func: func.name.clone(),
@@ -67,7 +67,7 @@ pub fn verify_jit_metadata(
 
     for (pc, inst) in func.code.iter().enumerate() {
         let opcode = inst.opcode();
-        if opcode == Opcode::Invalid {
+        if opcode == vo_runtime::instruction::Opcode::Invalid {
             return Err(JitMetadataError::InvalidOpcode {
                 func: func.name.clone(),
                 pc,
@@ -81,25 +81,22 @@ pub fn verify_jit_metadata(
             func.code[pc].flags,
             &func.jit_metadata[pc],
         )?;
-        verify_slot_contract(func, vo_module, pc)?;
-    }
-
-    let analysis = crate::analysis::FunctionAnalysis::for_function(func, vo_module)?;
-    for (pc, effects) in analysis.effects.iter().enumerate() {
-        for &slot in &effects.reads {
-            verify_slot(func, pc, slot, "read")?;
-        }
-        for &slot in &effects.writes {
-            verify_slot(func, pc, slot, "write")?;
-        }
     }
 
     Ok(())
 }
 
 pub fn verify_module(vo_module: &VoModule) -> Result<VerifiedModule, JitMetadataError> {
+    let verified = module_verifier::verify_module(vo_module).map_err(JitMetadataError::from)?;
+    verify_module_after_common(verified)
+}
+
+pub fn verify_module_after_common(
+    verified: module_verifier::VerifiedModule<'_>,
+) -> Result<VerifiedModule, JitMetadataError> {
+    let vo_module = verified.module();
     for func in &vo_module.functions {
-        verify_jit_metadata(func, vo_module)?;
+        verify_strict_jit_metadata_only(func)?;
     }
     Ok(VerifiedModule {
         digest: ModuleDigest::for_module(vo_module),

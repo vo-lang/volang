@@ -194,8 +194,10 @@ fn validate_externs_registered(
 
 #[cfg(feature = "jit")]
 #[allow(clippy::result_large_err)]
-fn validate_strict_jit_module(module: &Module) -> Result<(), vo_jit::JitError> {
-    vo_jit::verify_module(module)?;
+fn validate_strict_jit_module(
+    verified: vo_common_core::verifier::VerifiedModule<'_>,
+) -> Result<(), vo_jit::JitError> {
+    vo_jit::verify_module_after_common(verified)?;
     Ok(())
 }
 
@@ -208,8 +210,11 @@ fn invalid_module_metadata(msg: impl Into<String>) -> VmError {
     VmError::Jit(format!("invalid module metadata: {}", msg.into()))
 }
 
-fn validate_vm_module(module: &Module) -> Result<(), VmError> {
-    crate::gc_layout_validate::validate_module_gc_layout(module).map_err(invalid_module_metadata)
+fn validate_vm_module(
+    module: &Module,
+) -> Result<vo_common_core::verifier::VerifiedModule<'_>, VmError> {
+    vo_common_core::verifier::verify_module(module)
+        .map_err(|err| invalid_module_metadata(err.to_string()))
 }
 
 #[cfg(debug_assertions)]
@@ -470,8 +475,7 @@ impl Vm {
 
     /// Create a VM with custom JIT configuration, best effort.
     ///
-    /// This deliberately preserves the legacy non-strict API: JIT
-    /// initialization errors are swallowed and the VM runs interpreter-only.
+    /// JIT initialization errors are swallowed and the VM runs interpreter-only.
     /// Strict execution paths must call [`Vm::try_with_jit_config`] instead.
     #[cfg(feature = "jit")]
     pub fn with_best_effort_jit_config(config: JitConfig) -> Self {
@@ -510,7 +514,9 @@ impl Vm {
     #[allow(clippy::result_large_err)]
     pub fn try_init_jit(&mut self) -> Result<(), vo_jit::JitError> {
         if let Some(module) = self.module.as_ref() {
-            validate_strict_jit_module(module)?;
+            let verified = vo_common_core::verifier::verify_module(module)
+                .map_err(|err| vo_jit::JitError::Internal(err.to_string()))?;
+            validate_strict_jit_module(verified)?;
         }
         let jit_mgr = self.jit.ensure_strict()?;
         if let Some(module) = self.module.as_ref() {
@@ -521,12 +527,11 @@ impl Vm {
         Ok(())
     }
 
-    /// Best-effort legacy JIT initialization.
+    /// Best-effort JIT initialization.
     ///
-    /// This preserves the old non-strict behavior for embedding callers that
-    /// opportunistically enable JIT. It prints a warning on failure and leaves
-    /// the VM interpreter-only. Strict run paths must use [`Vm::try_init_jit`]
-    /// or [`Vm::try_with_jit_config`].
+    /// Embedding callers may use this to opportunistically enable JIT. It
+    /// prints a warning on failure and leaves the VM interpreter-only. Strict
+    /// run paths must use [`Vm::try_init_jit`] or [`Vm::try_with_jit_config`].
     #[cfg(feature = "jit")]
     pub fn init_jit_best_effort(&mut self) {
         if self.jit.is_enabled() {
@@ -627,12 +632,16 @@ impl Vm {
     #[cfg(not(feature = "std"))]
     pub fn load(&mut self, module: Module) -> Result<(), VmError> {
         self.ensure_can_load_module()?;
-        validate_vm_module(&module)?;
-        vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
+        {
+            let verified = validate_vm_module(&module)?;
+            vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
+            #[cfg(not(feature = "jit"))]
+            let _ = verified;
 
-        #[cfg(feature = "jit")]
-        if self.jit.is_strict() {
-            validate_strict_jit_module(&module).map_err(strict_jit_load_error)?;
+            #[cfg(feature = "jit")]
+            if self.jit.is_strict() {
+                validate_strict_jit_module(verified).map_err(strict_jit_load_error)?;
+            }
         }
 
         self.finish_load(module);
@@ -647,29 +656,33 @@ impl Vm {
         ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     ) -> Result<(), VmError> {
         self.ensure_can_load_module()?;
-        validate_vm_module(&module)?;
-        #[cfg(not(target_arch = "wasm32"))]
         {
-            vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
-        }
+            let verified = validate_vm_module(&module)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                vo_stdlib::register_externs(&mut self.state.extern_registry, &module.externs);
+            }
 
-        // Register extern functions from linkme distributed slices
-        self.state
-            .extern_registry
-            .register_from_linkme(&module.externs);
-
-        // Register extern functions from extension loader (if provided)
-        if let Some(loader) = ext_loader.as_ref() {
+            // Register extern functions from linkme distributed slices
             self.state
                 .extern_registry
-                .register_from_extension_loader(loader, &module.externs);
-        }
+                .register_from_linkme(&module.externs);
 
-        validate_externs_registered(&self.state.extern_registry, &module.externs)?;
+            // Register extern functions from extension loader (if provided)
+            if let Some(loader) = ext_loader.as_ref() {
+                self.state
+                    .extern_registry
+                    .register_from_extension_loader(loader, &module.externs);
+            }
 
-        #[cfg(feature = "jit")]
-        if self.jit.is_strict() {
-            validate_strict_jit_module(&module).map_err(strict_jit_load_error)?;
+            validate_externs_registered(&self.state.extern_registry, &module.externs)?;
+            #[cfg(not(feature = "jit"))]
+            let _ = verified;
+
+            #[cfg(feature = "jit")]
+            if self.jit.is_strict() {
+                validate_strict_jit_module(verified).map_err(strict_jit_load_error)?;
+            }
         }
 
         self.extension_specs = ext_loader.as_ref().map(|loader| loader.specs().to_vec());
@@ -2337,8 +2350,9 @@ impl Vm {
                     let result = if fiber.is_direct_defer_context() {
                         exec::handle_panic_unwind(&mut self.state.gc, fiber, module)
                     } else {
-                        let is_error_return =
-                            ReturnFlags::from_bits_truncate(inst.flags).is_error_return();
+                        let is_error_return = ReturnFlags::from_bits(inst.flags)
+                            .expect("Return flags must be verified before VM execution")
+                            .is_error_return();
                         exec::handle_return(
                             &mut self.state.gc,
                             fiber,
@@ -3458,7 +3472,8 @@ mod tests {
     #[cfg(feature = "std")]
     use std::sync::Arc;
     use vo_runtime::bytecode::{
-        Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, StructMeta,
+        Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, JitInstructionMetadata,
+        StructMeta,
     };
     use vo_runtime::ffi::{ExternCallContext, ExternResult};
     use vo_runtime::island::{EndpointResponseKind, IslandCommand};
@@ -3584,6 +3599,171 @@ mod tests {
         module
     }
 
+    fn assert_vm_load_rejects(module: Module, expected: &[&str]) {
+        let mut vm = Vm::new();
+        let err = vm
+            .load(module)
+            .expect_err("invalid module must be rejected during VM load");
+        match err {
+            VmError::Jit(msg) => {
+                assert!(msg.contains("invalid module metadata"), "{msg}");
+                for needle in expected {
+                    assert!(msg.contains(needle), "missing `{needle}` in `{msg}`");
+                }
+            }
+            other => panic!("invalid module load should return Jit error, got {other:?}"),
+        }
+    }
+
+    fn refresh_vm_test_function_metadata(func: &mut FunctionDef) {
+        func.gc_scan_slots = FunctionDef::compute_gc_scan_slots(&func.slot_types);
+        func.borrowed_scan_slots_prefix =
+            FunctionDef::compute_borrowed_scan_slots_prefix(&func.slot_types);
+        func.has_defer = func
+            .code
+            .iter()
+            .any(|inst| matches!(inst.opcode(), Opcode::DeferPush | Opcode::ErrDeferPush));
+        let (has_calls, has_call_extern) = FunctionDef::compute_call_flags(&func.code);
+        func.has_calls = has_calls;
+        func.has_call_extern = has_call_extern;
+    }
+
+    #[test]
+    fn vm_load_rejects_invalid_opcode_before_execution() {
+        let module = malformed_single_instruction_module(
+            "vm-load-invalid-opcode",
+            vec![Instruction {
+                op: 254,
+                flags: 0,
+                a: 0,
+                b: 0,
+                c: 0,
+            }],
+            Vec::new(),
+        );
+
+        assert_vm_load_rejects(module, &["invalid opcode 254"]);
+    }
+
+    #[test]
+    fn vm_load_rejects_metadata_length_mismatch_before_execution() {
+        let mut module = malformed_single_instruction_module(
+            "vm-load-metadata-length",
+            vec![Instruction::new(Opcode::Return, 0, 0, 0)],
+            Vec::new(),
+        );
+        module.functions[0].jit_metadata.clear();
+
+        assert_vm_load_rejects(module, &["instruction metadata length mismatch"]);
+    }
+
+    #[test]
+    fn vm_load_rejects_slot_out_of_range_before_execution() {
+        let module = malformed_single_instruction_module(
+            "vm-load-slot-out-of-range",
+            vec![Instruction::new(Opcode::Copy, 0, 7, 0)],
+            Vec::new(),
+        );
+
+        assert_vm_load_rejects(module, &["Copy", "slot 7 out of range"]);
+    }
+
+    #[test]
+    fn vm_load_rejects_map_new_missing_key_rttid_before_execution() {
+        let mut module = malformed_single_instruction_module(
+            "vm-load-map-new-missing-key-rttid",
+            vec![Instruction::new(Opcode::MapNew, 0, 3, 0)],
+            Vec::new(),
+        );
+        let func = &mut module.functions[0];
+        func.slot_types[0] = SlotType::GcRef;
+        refresh_vm_test_function_metadata(func);
+
+        assert_vm_load_rejects(
+            module,
+            &["MapNew metadata/key RTTID", "slot 4 out of range"],
+        );
+    }
+
+    #[test]
+    fn vm_load_rejects_invalid_branch_target_before_execution() {
+        let module = malformed_single_instruction_module(
+            "vm-load-invalid-branch-target",
+            vec![Instruction::new(Opcode::Jump, 0, 4, 0)],
+            Vec::new(),
+        );
+
+        assert_vm_load_rejects(module, &["branch target", "Jump", "outside code length"]);
+    }
+
+    #[test]
+    fn vm_load_rejects_call_extern_layout_mismatch_before_execution() {
+        let mut module = malformed_single_instruction_module(
+            "vm-load-call-extern-layout",
+            vec![Instruction::with_flags(Opcode::CallExtern, 1, 0, 0, 1)],
+            Vec::new(),
+        );
+        module.externs.push(ExternDef {
+            name: "vm.load.test.extern".to_string(),
+            param_slots: 1,
+            ret_slots: 1,
+            is_blocking: false,
+            param_kinds: Vec::new(),
+        });
+        let func = &mut module.functions[0];
+        func.jit_metadata = vec![JitInstructionMetadata::CallExternLayout {
+            arg_layout: vec![SlotType::GcRef],
+            ret_layout: vec![SlotType::Value],
+        }];
+        refresh_vm_test_function_metadata(func);
+
+        assert_vm_load_rejects(module, &["CallExtern", "CallExtern args"]);
+    }
+
+    #[test]
+    fn vm_load_rejects_gc_barrier_contract_violation_before_execution() {
+        let mut module = malformed_single_instruction_module(
+            "vm-load-missing-write-barrier",
+            vec![Instruction::with_flags(Opcode::PtrSet, 0, 0, 0, 1)],
+            Vec::new(),
+        );
+        let func = &mut module.functions[0];
+        func.slot_types = vec![
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+        ];
+        func.jit_metadata = vec![JitInstructionMetadata::PtrLayout {
+            value_layout: vec![SlotType::GcRef],
+        }];
+        refresh_vm_test_function_metadata(func);
+
+        assert_vm_load_rejects(module, &["PtrSet missing write barrier"]);
+    }
+
+    #[test]
+    fn vm_load_rejects_raw_value_collection_into_gcref_slot_before_execution() {
+        let mut module = malformed_single_instruction_module(
+            "vm-load-raw-value-array-get-into-gcref",
+            vec![Instruction::with_flags(Opcode::ArrayGet, 8, 1, 0, 2)],
+            Vec::new(),
+        );
+        let func = &mut module.functions[0];
+        func.slot_types = vec![
+            SlotType::GcRef,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+        ];
+        refresh_vm_test_function_metadata(func);
+
+        assert_vm_load_rejects(
+            module,
+            &["ArrayGet destination", "expected [Value]", "actual [GcRef]"],
+        );
+    }
+
     #[test]
     fn malformed_load_const_index_is_vm_error_instead_of_index_panic() {
         let module = malformed_single_instruction_module(
@@ -3591,21 +3771,8 @@ mod tests {
             vec![Instruction::new(Opcode::LoadConst, 0, 0, 0)],
             Vec::new(),
         );
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(
-                    msg.contains("LoadConst constant index 0 out of bounds"),
-                    "{msg}"
-                );
-            }
-            Ok(other) => panic!("malformed LoadConst should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed LoadConst must not panic"),
-        }
+        assert_vm_load_rejects(module, &["missing constant 0"]);
     }
 
     #[test]
@@ -3615,21 +3782,8 @@ mod tests {
             vec![Instruction::new(Opcode::StrNew, 0, 0, 0)],
             Vec::new(),
         );
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(
-                    msg.contains("StrNew constant index 0 out of bounds"),
-                    "{msg}"
-                );
-            }
-            Ok(other) => panic!("malformed StrNew should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed StrNew missing constant must not panic"),
-        }
+        assert_vm_load_rejects(module, &["missing constant 0"]);
     }
 
     #[test]
@@ -3639,18 +3793,16 @@ mod tests {
             vec![Instruction::new(Opcode::StrNew, 0, 0, 0)],
             vec![Constant::Int(7)],
         );
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(msg.contains("StrNew constant 0 expected string"), "{msg}");
-            }
-            Ok(other) => panic!("malformed StrNew should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed StrNew non-string constant must not panic"),
-        }
+        assert_vm_load_rejects(
+            module,
+            &[
+                "constant kind mismatch",
+                "StrNew",
+                "expected String",
+                "actual Int",
+            ],
+        );
     }
 
     #[test]
@@ -3681,21 +3833,8 @@ mod tests {
             vec![Instruction::new(Opcode::GlobalGet, 0, 0, 0)],
             Vec::new(),
         );
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(
-                    msg.contains("GlobalGet global range 0..1 out of bounds"),
-                    "{msg}"
-                );
-            }
-            Ok(other) => panic!("malformed GlobalGet should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed GlobalGet must not panic"),
-        }
+        assert_vm_load_rejects(module, &["global slot 0 out of range"]);
     }
 
     #[test]
@@ -3705,27 +3844,24 @@ mod tests {
             vec![Instruction::with_flags(Opcode::GoStart, 0, 7, 0, 0)],
             Vec::new(),
         );
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(msg.contains("GoStart missing function id 7"), "{msg}");
-            }
-            Ok(other) => panic!("malformed GoStart should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed GoStart must not panic"),
-        }
+        assert_vm_load_rejects(module, &["missing function 7"]);
     }
 
     #[test]
     fn malformed_go_start_closure_target_is_vm_error_instead_of_nil_call_trap() {
-        let module = malformed_single_instruction_module(
+        let mut module = malformed_single_instruction_module(
             "malformed-go-start-closure",
             vec![Instruction::with_flags(Opcode::GoStart, 1, 0, 0, 0)],
             Vec::new(),
         );
+        let func = &mut module.functions[0];
+        func.slot_types[0] = SlotType::GcRef;
+        func.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        }];
+        refresh_vm_test_function_metadata(func);
         let mut vm = Vm::new();
         vm.load(module).unwrap();
         let closure_ref = vo_runtime::objects::closure::create(&mut vm.state.gc, 7, 0);
@@ -3763,30 +3899,23 @@ mod tests {
             )],
             Vec::new(),
         );
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(
-                    msg.contains("IfaceAssign constant index 0 out of bounds"),
-                    "{msg}"
-                );
-            }
-            Ok(other) => panic!("malformed IfaceAssign should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed IfaceAssign must not panic"),
-        }
+        assert_vm_load_rejects(module, &["missing constant 0"]);
     }
 
     #[test]
     fn malformed_select_without_begin_is_vm_error_instead_of_state_panic() {
-        let module = malformed_single_instruction_module(
+        let mut module = malformed_single_instruction_module(
             "malformed-select-send",
             vec![Instruction::with_flags(Opcode::SelectSend, 1, 0, 1, 0)],
             Vec::new(),
         );
+        let func = &mut module.functions[0];
+        func.slot_types[0] = SlotType::GcRef;
+        func.jit_metadata = vec![JitInstructionMetadata::QueueLayout {
+            elem_layout: vec![SlotType::Value],
+        }];
+        refresh_vm_test_function_metadata(func);
         let mut vm = Vm::new();
         vm.load(module).unwrap();
 
@@ -3823,46 +3952,30 @@ mod tests {
                 methods: Vec::new(),
             },
         ];
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
-        let fid = vm.scheduler.spawn(Fiber::new(0));
-        {
-            let fiber = vm.scheduler.get_fiber_mut(fid);
-            fiber.push_frame(0, 4, 0, 0, 0);
-            fiber.stack[0] = vo_runtime::objects::interface::pack_slot0(0, 0, ValueKind::Int64);
-            fiber.stack[1] = 123;
-        }
+        let func = &mut module.functions[0];
+        func.slot_types = vec![
+            SlotType::Interface0,
+            SlotType::Interface1,
+            SlotType::Value,
+            SlotType::Value,
+        ];
+        refresh_vm_test_function_metadata(func);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_scheduled()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(msg.contains("IfaceAssert metadata missing"), "{msg}");
-            }
-            Ok(other) => panic!("malformed IfaceAssert should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed IfaceAssert metadata must not panic"),
-        }
+        assert_vm_load_rejects(module, &["missing IfaceAssertLayout layout"]);
     }
 
     #[test]
     fn malformed_defer_arg_layout_is_vm_error_instead_of_metadata_panic() {
-        let module = malformed_single_instruction_module(
+        let mut module = malformed_single_instruction_module(
             "malformed-defer-push",
-            vec![Instruction::new(Opcode::DeferPush, 0, 3, 2)],
+            vec![Instruction::with_flags(Opcode::DeferPush, 1, 0, 3, 2)],
             Vec::new(),
         );
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
+        let func = &mut module.functions[0];
+        func.slot_types[0] = SlotType::GcRef;
+        refresh_vm_test_function_metadata(func);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(msg.contains("DeferArgLayout metadata missing"), "{msg}");
-            }
-            Ok(other) => panic!("malformed DeferPush should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed DeferPush must not panic"),
-        }
+        assert_vm_load_rejects(module, &["missing CallLayout layout", "DeferPush"]);
     }
 
     #[test]
@@ -3890,32 +4003,36 @@ mod tests {
 
     #[test]
     fn malformed_call_extern_id_is_vm_error_instead_of_index_panic() {
-        let module = malformed_single_instruction_module(
+        let mut module = malformed_single_instruction_module(
             "malformed-call-extern",
             vec![Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0)],
             Vec::new(),
         );
-        let mut vm = Vm::new();
-        vm.load(module).unwrap();
+        let func = &mut module.functions[0];
+        func.jit_metadata = vec![JitInstructionMetadata::CallExternLayout {
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        }];
+        refresh_vm_test_function_metadata(func);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
-
-        match result {
-            Ok(Err(VmError::Jit(msg))) => {
-                assert!(msg.contains("CallExtern missing extern id 0"), "{msg}");
-            }
-            Ok(other) => panic!("malformed CallExtern should be a VM error, got {other:?}"),
-            Err(_) => panic!("malformed CallExtern extern id must not panic"),
-        }
+        assert_vm_load_rejects(module, &["missing extern 0"]);
     }
 
     #[test]
     fn malformed_go_island_closure_target_is_vm_error_instead_of_helper_panic() {
-        let module = malformed_single_instruction_module(
+        let mut module = malformed_single_instruction_module(
             "malformed-go-island",
             vec![Instruction::with_flags(Opcode::GoIsland, 0, 0, 1, 2)],
             Vec::new(),
         );
+        let func = &mut module.functions[0];
+        func.slot_types[0] = SlotType::GcRef;
+        func.slot_types[1] = SlotType::GcRef;
+        func.jit_metadata = vec![JitInstructionMetadata::CallLayout {
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        }];
+        refresh_vm_test_function_metadata(func);
         let mut vm = Vm::new();
         vm.load(module).unwrap();
         let island = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
@@ -4358,6 +4475,12 @@ mod tests {
             is_blocking: false,
             param_kinds: Vec::new(),
         });
+        let func = &mut module.functions[0];
+        func.jit_metadata = vec![JitInstructionMetadata::CallExternLayout {
+            arg_layout: Vec::new(),
+            ret_layout: Vec::new(),
+        }];
+        refresh_vm_test_function_metadata(func);
         let mut vm = Vm::new();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.load(module)));
@@ -4406,7 +4529,10 @@ mod tests {
             .expect_err("under-scanning function metadata should be rejected");
 
         match err {
-            VmError::Jit(msg) => assert!(msg.contains("under-scans"), "{msg}"),
+            VmError::Jit(msg) => {
+                assert!(msg.contains("gc_scan_slots"), "{msg}");
+                assert!(msg.contains("expected 1"), "{msg}");
+            }
             other => panic!("metadata validation should return Jit error, got {other:?}"),
         }
     }
@@ -4526,16 +4652,16 @@ mod tests {
     }
 
     #[cfg(feature = "jit")]
-    fn invalid_jit_return_shape_module() -> Module {
-        let mut module = Module::new("strict-jit-load-test".to_string());
+    fn strict_only_wrong_metadata_kind_module() -> Module {
+        let mut module = Module::new("strict-jit-metadata-policy-test".to_string());
         module.functions.push(FunctionDef {
             name: "main".to_string(),
             param_count: 0,
             param_slots: 0,
-            local_slots: 1,
+            local_slots: 0,
             gc_scan_slots: 0,
-            ret_slots: 1,
-            ret_slot_types: vec![SlotType::Value],
+            ret_slots: 0,
+            ret_slot_types: Vec::new(),
             recv_slots: 0,
             heap_ret_gcref_count: 0,
             heap_ret_gcref_start: 0,
@@ -4545,12 +4671,10 @@ mod tests {
             has_defer: false,
             has_calls: false,
             has_call_extern: false,
-            code: vec![Instruction::new(Opcode::Return, 0, 0, 0)],
-            jit_metadata: vec![vo_runtime::bytecode::JitInstructionMetadata::None],
-            slot_types: vec![SlotType::Value],
-            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[
-                SlotType::Value,
-            ]),
+            code: vec![Instruction::new(Opcode::Hint, 0, 0, 0)],
+            jit_metadata: vec![JitInstructionMetadata::LoopEnd { end_pc: 0 }],
+            slot_types: Vec::new(),
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(&[]),
             capture_types: Vec::new(),
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
@@ -4629,7 +4753,7 @@ mod tests {
     #[cfg(feature = "jit")]
     #[test]
     fn strict_jit_load_rejects_invalid_metadata_before_interpreter_dispatch() {
-        let module = invalid_jit_return_shape_module();
+        let module = strict_only_wrong_metadata_kind_module();
 
         let mut vm = Vm::try_with_jit_config(JitConfig {
             call_threshold: 1_000_000,
@@ -4639,10 +4763,10 @@ mod tests {
         .expect("strict JIT VM");
 
         match vm.load(module) {
-            Err(VmError::Jit(msg)) => assert!(
-                msg.contains("invalid JIT metadata"),
-                "unexpected strict load error: {msg}"
-            ),
+            Err(VmError::Jit(msg)) => {
+                assert!(msg.contains("invalid JIT metadata"), "{msg}");
+                assert!(msg.contains("wrong JIT metadata kind LoopEnd"), "{msg}");
+            }
             other => panic!("strict JIT load should fail fast, got {other:?}"),
         }
     }
@@ -4661,17 +4785,17 @@ mod tests {
 
         match vm.load(module) {
             Err(VmError::Jit(msg)) => {
-                assert!(msg.contains("invalid JIT metadata"), "{msg}");
+                assert!(msg.contains("invalid module metadata"), "{msg}");
                 assert!(msg.contains("invalid flags 0x04 for Return"), "{msg}");
             }
-            other => panic!("strict JIT load should reject Return unknown flags, got {other:?}"),
+            other => panic!("VM load should reject Return unknown flags, got {other:?}"),
         }
     }
 
     #[cfg(feature = "jit")]
     #[test]
-    fn best_effort_jit_config_keeps_legacy_non_strict_load_behavior() {
-        let module = invalid_jit_return_shape_module();
+    fn best_effort_jit_config_skips_strict_jit_only_load_policy() {
+        let module = strict_only_wrong_metadata_kind_module();
         let mut vm = Vm::with_best_effort_jit_config(JitConfig {
             call_threshold: 1_000_000,
             loop_threshold: 1_000_000,
@@ -4680,40 +4804,44 @@ mod tests {
 
         assert!(
             vm.load(module).is_ok(),
-            "legacy best-effort JIT entry point must remain explicit and non-strict"
+            "best-effort JIT load must skip strict JIT-only metadata policy"
         );
     }
 
     #[cfg(feature = "jit")]
     #[test]
     fn best_effort_init_jit_after_load_initializes_without_strict_metadata_validation() {
-        let module = invalid_jit_return_shape_module();
+        let module = strict_only_wrong_metadata_kind_module();
         let mut vm = Vm::new();
         vm.load(module)
-            .expect("non-strict VM load preserves interpreter compatibility");
+            .expect("VM load accepts bytecode that only violates strict JIT metadata policy");
 
         vm.init_jit_best_effort();
 
         assert_eq!(
             vm.jit.manager().map(|mgr| mgr.func_table_len()),
             Some(1),
-            "explicit best-effort JIT init keeps legacy non-strict load behavior"
+            "explicit best-effort JIT init skips strict JIT-only metadata policy"
         );
     }
 
     #[cfg(feature = "jit")]
     #[test]
     fn strict_try_init_jit_after_load_rejects_invalid_metadata() {
-        let module = invalid_jit_return_shape_module();
+        let module = strict_only_wrong_metadata_kind_module();
         let mut vm = Vm::new();
         vm.load(module)
-            .expect("non-strict VM load preserves interpreter compatibility");
+            .expect("VM load accepts bytecode that only violates strict JIT metadata policy");
 
         let err = vm
             .try_init_jit()
             .expect_err("strict post-load JIT init must validate loaded module");
         assert!(
             err.to_string().contains("invalid JIT metadata"),
+            "unexpected strict post-load init error: {err}"
+        );
+        assert!(
+            err.to_string().contains("wrong JIT metadata kind LoopEnd"),
             "unexpected strict post-load init error: {err}"
         );
     }
@@ -4776,10 +4904,8 @@ mod tests {
 
         match result {
             Ok(Err(VmError::Jit(msg))) => {
-                assert!(
-                    msg.contains("JIT call references missing function 7"),
-                    "{msg}"
-                );
+                assert!(msg.contains("invalid module metadata"), "{msg}");
+                assert!(msg.contains("missing function 7"), "{msg}");
             }
             Ok(other) => panic!("missing call target should be rejected at load, got {other:?}"),
             Err(_) => panic!("missing call target must not panic during strict JIT load"),

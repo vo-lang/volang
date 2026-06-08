@@ -228,7 +228,7 @@ fn call_helpers_jit_result_callbacks_use_typed_checked_lowering() {
     for opcode in [Opcode::CallExtern, Opcode::CallClosure, Opcode::CallIface] {
         assert!(
             matches!(
-                opcode_helper_return_policy(opcode),
+                opcode_semantics(opcode).helper_return,
                 HelperReturnPolicy::JitResultChecked | HelperReturnPolicy::DirectJitCall
             ),
             "{opcode:?} must declare a control-flow-significant call result policy"

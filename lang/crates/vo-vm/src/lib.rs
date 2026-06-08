@@ -5,7 +5,6 @@ extern crate alloc;
 
 pub mod exec;
 pub mod fiber;
-mod gc_layout_validate;
 mod gc_roots;
 pub mod scheduler;
 pub mod vm;

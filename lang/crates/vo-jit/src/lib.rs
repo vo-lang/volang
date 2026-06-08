@@ -29,7 +29,10 @@ pub use loop_analysis::LoopInfo;
 pub use loop_compiler::{CompiledLoop, LoopCompiler, LoopFunc};
 pub use semantics::{opcode_semantic_matrix, opcode_semantics, OpcodeSemantics};
 pub use translator::{HelperFuncs, IrEmitter, TranslateResult};
-pub use verifier::{verify_jit_metadata, verify_module, JitMetadataError, VerifiedModule};
+pub use verifier::{
+    verify_jit_metadata, verify_module, verify_module_after_common, JitMetadataError,
+    VerifiedModule,
+};
 
 use std::collections::HashMap;
 
@@ -512,11 +515,6 @@ pub fn can_enter_materialized_frame_for_jit(func: &vo_runtime::bytecode::Functio
     !func.has_defer
 }
 
-/// Backward-compatible spelling for direct-call-table eligibility.
-pub fn can_direct_jit_call(func: &vo_runtime::bytecode::FunctionDef) -> bool {
-    can_elide_frame_for_direct_jit(func)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,14 +647,15 @@ mod tests {
         assert!(defer_push.may_observe_frame);
         assert!(defer_push.needs_frame);
 
-        let helper =
-            crate::contract::runtime_helper_contract(crate::contract::RuntimeHelper::GcAlloc);
-        assert!(helper.may_gc && helper.may_alloc);
-
-        let callback =
-            crate::contract::jit_callback_contract(crate::contract::JitCallback::PrepareIfaceCall);
-        assert!(callback.needs_frame);
-        assert!(callback.touches_interface);
+        let graph = crate::contract_graph::jit_contract_graph();
+        assert!(graph.iter().any(|edge| matches!(
+            edge.subject,
+            crate::contract_graph::ContractSubject::RuntimeHelper(_)
+        )));
+        assert!(graph.iter().any(|edge| matches!(
+            edge.subject,
+            crate::contract_graph::ContractSubject::JitContextCallback(_)
+        )));
     }
 
     #[test]

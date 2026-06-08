@@ -3308,31 +3308,6 @@ pub fn opcode_register_effects(opcode: Opcode) -> OpcodeRegisterEffects {
     opcode_semantics_row(opcode).register_effects
 }
 
-#[allow(dead_code)]
-pub fn opcode_runtime_dependencies(opcode: Opcode) -> &'static [RuntimeDependency] {
-    opcode_semantics_row(opcode).runtime_dependencies
-}
-
-#[allow(dead_code)]
-pub fn opcode_helper_return_policy(opcode: Opcode) -> HelperReturnPolicy {
-    opcode_semantics_row(opcode).helper_return
-}
-
-#[allow(dead_code)]
-pub fn opcode_frame_policy(opcode: Opcode) -> FramePolicy {
-    opcode_semantics_row(opcode).frame_policy
-}
-
-#[allow(dead_code)]
-pub fn opcode_trap_policy(opcode: Opcode) -> TrapPolicy {
-    opcode_semantics_row(opcode).trap_policy
-}
-
-#[allow(dead_code)]
-pub fn opcode_fail_fast_conditions(opcode: Opcode) -> &'static [FailFastCondition] {
-    opcode_semantics_row(opcode).fail_fast
-}
-
 pub(crate) fn opcode_metadata_requirement_from_semantics(opcode: Opcode) -> JitMetadataRequirement {
     opcode_semantics_row(opcode).metadata
 }

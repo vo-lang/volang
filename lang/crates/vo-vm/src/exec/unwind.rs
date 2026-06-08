@@ -54,6 +54,15 @@ use crate::instruction::Instruction;
 use crate::vm::helpers::{self, stack_get, stack_set};
 use crate::vm::{ExecResult, RuntimeTrapKind};
 
+fn verified_return_flags(inst: &Instruction) -> Result<ReturnFlags, ExecResult> {
+    ReturnFlags::from_bits(inst.flags).ok_or_else(|| {
+        ExecResult::JitError(format!(
+            "Return instruction reached VM execution with unverified flags 0x{:02x}",
+            inst.flags
+        ))
+    })
+}
+
 /// Handle Return instruction. This is the ONLY entry point for return logic.
 ///
 /// Handles three cases:
@@ -356,7 +365,7 @@ fn compute_include_errdefers(
     let bp = frame.bp;
     let stack = fiber.stack.as_ptr();
 
-    let error_slot0 = if ReturnFlags::from_bits_truncate(inst.flags).has_heap_returns() {
+    let error_slot0 = if verified_return_flags(inst)?.has_heap_returns() {
         // heap_returns: each return value is a GcRef, error is always the last one
         // inst.a = gcref_start, inst.b = gcref_count
         let gcref_count = inst.b as usize;
@@ -526,7 +535,10 @@ fn handle_initial_return(
         return ExecResult::FrameChanged;
     }
 
-    let heap_returns = ReturnFlags::from_bits_truncate(inst.flags).has_heap_returns();
+    let heap_returns = match verified_return_flags(inst) {
+        Ok(flags) => flags.has_heap_returns(),
+        Err(err) => return err,
+    };
     let has_defers = fiber
         .defer_stack
         .last()

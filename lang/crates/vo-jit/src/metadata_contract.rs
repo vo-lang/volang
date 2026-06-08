@@ -2,9 +2,8 @@
 //!
 //! This module answers three related questions for every opcode:
 //! which current metadata kind it may consume, which metadata table entry is
-//! required before lowering, and which serialized legacy kinds are compatibility
-//! input only. Verifier, semantics, and contract graph code should depend on
-//! this table instead of maintaining parallel opcode lists.
+//! required before lowering. Verifier, semantics, and contract graph code
+//! should depend on this table instead of maintaining parallel opcode lists.
 
 use vo_runtime::bytecode::JitInstructionMetadata;
 use vo_runtime::instruction::{Opcode, HINT_LOOP};
@@ -83,9 +82,6 @@ pub enum JitMetadataKind {
     QueueLayout,
     MapIterNext,
     IfaceAssertLayout,
-    LegacyMapGet,
-    LegacyMapSet,
-    LegacyMapDelete,
     LoopEnd,
 }
 
@@ -106,12 +102,6 @@ impl JitMetadataKind {
         Self::LoopEnd,
     ];
 
-    pub const LEGACY_COMPAT: &'static [Self] = &[
-        Self::LegacyMapGet,
-        Self::LegacyMapSet,
-        Self::LegacyMapDelete,
-    ];
-
     pub fn name(self) -> &'static str {
         match self {
             Self::None => "None",
@@ -126,18 +116,8 @@ impl JitMetadataKind {
             Self::QueueLayout => "QueueLayout",
             Self::MapIterNext => "MapIterNext",
             Self::IfaceAssertLayout => "IfaceAssertLayout",
-            Self::LegacyMapGet => "LegacyMapGet",
-            Self::LegacyMapSet => "LegacyMapSet",
-            Self::LegacyMapDelete => "LegacyMapDelete",
             Self::LoopEnd => "LoopEnd",
         }
-    }
-
-    pub fn is_legacy_compat_only(self) -> bool {
-        matches!(
-            self,
-            Self::LegacyMapGet | Self::LegacyMapSet | Self::LegacyMapDelete
-        )
     }
 }
 
@@ -145,7 +125,6 @@ impl JitMetadataKind {
 pub enum MetadataContractViolation {
     MissingRequiredLayout { layout: &'static str },
     WrongKind { metadata: &'static str },
-    UnsupportedLegacy { metadata: &'static str },
 }
 
 pub fn metadata_kind(metadata: &JitInstructionMetadata) -> JitMetadataKind {
@@ -162,9 +141,6 @@ pub fn metadata_kind(metadata: &JitInstructionMetadata) -> JitMetadataKind {
         JitInstructionMetadata::QueueLayout { .. } => JitMetadataKind::QueueLayout,
         JitInstructionMetadata::MapIterNext { .. } => JitMetadataKind::MapIterNext,
         JitInstructionMetadata::IfaceAssertLayout { .. } => JitMetadataKind::IfaceAssertLayout,
-        JitInstructionMetadata::LegacyMapGet { .. } => JitMetadataKind::LegacyMapGet,
-        JitInstructionMetadata::LegacyMapSet { .. } => JitMetadataKind::LegacyMapSet,
-        JitInstructionMetadata::LegacyMapDelete { .. } => JitMetadataKind::LegacyMapDelete,
         JitInstructionMetadata::LoopEnd { .. } => JitMetadataKind::LoopEnd,
     }
 }
@@ -184,11 +160,6 @@ pub fn strict_metadata_contract_violation(
         return requirement
             .required_layout_name(flags)
             .map(|layout| MetadataContractViolation::MissingRequiredLayout { layout });
-    }
-    if kind.is_legacy_compat_only() {
-        return Some(MetadataContractViolation::UnsupportedLegacy {
-            metadata: kind.name(),
-        });
     }
     if requirement.accepts_kind(flags, kind) {
         None

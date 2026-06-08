@@ -154,19 +154,6 @@ fn metadata_contracts_cover_all_current_lowering_kinds() {
         jit_metadata_contract_edges().len(),
         "strict metadata graph must mirror metadata_contract::STRICT_CURRENT"
     );
-    assert_eq!(
-        JitMetadataKind::LEGACY_COMPAT.len(),
-        legacy_jit_metadata_compat_edges().len(),
-        "legacy metadata compat graph must mirror metadata_contract::LEGACY_COMPAT"
-    );
-    let legacy_kinds: BTreeSet<_> = JitMetadataKind::LEGACY_COMPAT
-        .iter()
-        .map(|kind| *kind as u8)
-        .collect();
-    assert!(
-        kinds.is_disjoint(&legacy_kinds),
-        "strict metadata graph must not include legacy compat-only kinds"
-    );
     for edge in jit_metadata_contract_edges() {
         if edge.subject != ContractSubject::JitMetadata(JitMetadataKind::None) {
             assert_eq!(
@@ -210,52 +197,6 @@ fn metadata_contracts_cover_all_current_lowering_kinds() {
                 other => panic!("{:?} has unexpected metadata width {other:?}", edge.subject),
             }
         }
-    }
-}
-
-#[test]
-fn strict_jit_metadata_contract_edges_exclude_legacy_schema() {
-    for edge in jit_metadata_contract_edges() {
-        assert!(
-            !matches!(
-                edge.subject,
-                ContractSubject::JitMetadata(
-                    JitMetadataKind::LegacyMapGet
-                        | JitMetadataKind::LegacyMapSet
-                        | JitMetadataKind::LegacyMapDelete
-                )
-            ),
-            "legacy metadata must stay out of the strict JIT metadata contract graph"
-        );
-    }
-}
-
-#[test]
-fn legacy_jit_metadata_schema_is_explicit_compat_only() {
-    let subjects: BTreeSet<_> = legacy_jit_metadata_compat_edges()
-        .iter()
-        .map(|edge| match edge.subject {
-            ContractSubject::JitMetadata(kind) => kind as u8,
-            other => panic!("unexpected legacy metadata compat subject {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        subjects,
-        JitMetadataKind::LEGACY_COMPAT
-            .iter()
-            .map(|kind| *kind as u8)
-            .collect()
-    );
-    for edge in legacy_jit_metadata_compat_edges() {
-        assert_eq!(edge.layout_authority, LayoutAuthority::None);
-        assert_eq!(
-            edge.producer,
-            ContractEndpoint::CommonCore("legacy bytecode deserializer compatibility")
-        );
-        assert_eq!(
-            edge.consumer,
-            ContractEndpoint::JitVerifier("strict verifier rejects before lowering")
-        );
     }
 }
 

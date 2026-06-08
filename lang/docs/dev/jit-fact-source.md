@@ -51,28 +51,20 @@ layout fallback.
 
 ## Verifier Modules
 
-`verifier/instruction_contracts.rs` is the dispatch and shared-tool module. It
-keeps `VerifierCtx`, common layout/range helpers, semantics-driven preflight,
-and domain dispatch. The root must not maintain an opcode-to-verifier-family
-match table.
+`vo-common-core/src/verifier.rs` is the VM-shared bytecode/module verifier. It
+owns layout/range checks, metadata shape checks, branch targets, call/extern
+shape checks, transfer metadata, GC layout validation, and write-barrier
+contracts before a module can execute.
 
-`VerifierRequirement` is an executable preflight contract. Before family
-verification, the root handles:
+`vo-jit/src/verifier.rs` runs only after the shared verifier. It owns strict JIT
+metadata policy and loop metadata consistency; lowering capability, helper ABI,
+frame materialization, side-exit, OSR, and direct-call contracts are enforced by
+the semantic row, contract graph, helper manifests, and lowering tests.
 
-- required JIT metadata presence
-- constant/string/interface-assignment constant checks
-- static/closure function, extern, and global range checks
-- branch target checks
-- basic local slot read/write range checks from the semantics row effects
-
-Concrete verifier helpers live in submodules:
-
-- `scalar.rs`: scalar, load, copy, and arithmetic contracts
-- `control.rs`: return and branch target contracts
-- `memory.rs`: pointer, slot, and global memory contracts
-- `collections.rs`: string, indexed, map, queue, select, and recv contracts
-- `calls.rs`: static, dynamic, extern, closure, and shared call contracts
-- `interface.rs`: interface assign/assert/equality contracts
+`VerifierRequirement` remains a semantic-row fact for fail-fast policy and
+contract graph coverage. VM-shared enforcement lives in `ModuleVerifier`; JIT
+uses the same semantic rows for lowering capability, runtime dependency, and
+ABI coverage instead of maintaining a second slot/layout verifier tree.
 
 Family verifiers should keep concrete layout shape, interface-pair,
 write-barrier, call-shape, and opcode-specific contracts. If a helper is shared
@@ -111,14 +103,14 @@ The capability API uses `RuntimePathPolicy`:
 - `InvalidOpcode`
 
 `PreparedCall::vm_materialization` means the prepared callee has no direct JIT
-entry and must return through the VM call trampoline. It is not a silent legacy
-fallback.
+entry and must return through the VM call trampoline. It is an explicit runtime
+path, not an implicit interpreter path.
 
 The VM exposes execution statistics as `JitSideExitReason`; those statistics
 count semantic side exits such as cold/not-hot execution, WaitIo, Replay, queue
-blocking, and regular/prepared VM call materialization. Legacy manifest keys
-that still contain "fallback" are parsed only at the language-test boundary and
-must map into side-exit observation fields before they reach runtime APIs.
+blocking, and regular/prepared VM call materialization. Historical
+language-test manifest side-exit observation keys are parsed only at the test
+boundary and must map into side-exit fields before they reach runtime APIs.
 
 ## Fail-Fast Rules
 
