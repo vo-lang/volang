@@ -204,12 +204,17 @@ fn validate_callback_callsite(
             | JitCallbackReturnPolicy::PreparedCallOutPointer
     );
     match expected_kind {
-        JitContextCallbackCallKind::CheckedJitResult
-        | JitContextCallbackCallKind::ReturningJitResult
-            if !is_jit_result =>
-        {
+        JitContextCallbackCallKind::CheckedJitResult if !is_jit_result => {
             Err(JitError::Internal(format!(
                 "{} is routed as JitResult but ABI policy is {:?}",
+                callsite.name, abi.return_policy
+            )))
+        }
+        JitContextCallbackCallKind::ReturningJitResult
+            if abi.return_policy != JitCallbackReturnPolicy::JitResult =>
+        {
+            Err(JitError::Internal(format!(
+                "{} is routed as returning callback but ABI policy is {:?}",
                 callsite.name, abi.return_policy
             )))
         }
@@ -274,5 +279,109 @@ mod tests {
             matches!(err, JitError::Internal(ref message) if message.contains("raw callback")),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn callback_callsite_returning_jit_result_rejects_out_pointer_policies_062() {
+        for callsite in [
+            JitContextCallbackCallsite {
+                call_kind: JitContextCallbackCallKind::ReturningJitResult,
+                ..PREPARE_CLOSURE_CALLSITE
+            },
+            JitContextCallbackCallsite {
+                name: "queue_len_fn",
+                lowering: "test_returning_wrapper",
+                kind: JitContextDependencyKind::QueueLenFn,
+                call_kind: JitContextCallbackCallKind::ReturningJitResult,
+            },
+        ] {
+            let err = validate_callback_callsite(
+                callsite,
+                JitContextCallbackCallKind::ReturningJitResult,
+            )
+            .expect_err("returning callbacks may not use out-pointer JitResult policies");
+
+            assert!(
+                matches!(err, JitError::Internal(ref message) if message.contains("returning callback")),
+                "unexpected error for {}: {err:?}",
+                callsite.name
+            );
+        }
+    }
+
+    #[test]
+    fn vm_arch_boundary_fact_sources_001_jit_callback_abi_manifest_owns_callsite_policy() {
+        let callsites = jit_context_callback_callsites();
+        assert!(!callsites.is_empty());
+
+        for callsite in callsites {
+            let abi = callsite.abi();
+            assert_eq!(
+                abi.kind, callsite.kind,
+                "{} callback ABI kind drifted from manifest",
+                callsite.name
+            );
+
+            let is_jit_result = matches!(
+                abi.return_policy,
+                JitCallbackReturnPolicy::JitResult
+                    | JitCallbackReturnPolicy::JitResultWithOutPointer
+                    | JitCallbackReturnPolicy::PreparedCallOutPointer
+            );
+            match callsite.call_kind {
+                JitContextCallbackCallKind::CheckedJitResult => assert!(
+                    is_jit_result,
+                    "{} must route through a JitResult-aware callback wrapper",
+                    callsite.name
+                ),
+                JitContextCallbackCallKind::ReturningJitResult => assert_eq!(
+                    abi.return_policy,
+                    JitCallbackReturnPolicy::JitResult,
+                    "{} returning callback wrapper can only return plain JitResult",
+                    callsite.name
+                ),
+                JitContextCallbackCallKind::Raw => assert!(
+                    !is_jit_result,
+                    "{} must stay raw only for non-control-flow callback ABI",
+                    callsite.name
+                ),
+            }
+
+            validate_callback_callsite(*callsite, callsite.call_kind)
+                .expect("declared callback callsite must match ABI fact source");
+        }
+    }
+
+    #[test]
+    fn vm_jit_callback_boundary_001_callback_abi_manifest_guards_control_flow_wrappers() {
+        for callsite in jit_context_callback_callsites() {
+            let abi = callsite.abi();
+            let returns_jit_result = matches!(
+                abi.return_policy,
+                JitCallbackReturnPolicy::JitResult
+                    | JitCallbackReturnPolicy::JitResultWithOutPointer
+                    | JitCallbackReturnPolicy::PreparedCallOutPointer
+            );
+            match callsite.call_kind {
+                JitContextCallbackCallKind::CheckedJitResult => assert!(
+                    returns_jit_result,
+                    "{} checked callback wrapper must return a JitResult policy",
+                    callsite.name
+                ),
+                JitContextCallbackCallKind::ReturningJitResult => assert_eq!(
+                    abi.return_policy,
+                    JitCallbackReturnPolicy::JitResult,
+                    "{} returning callback wrapper must return plain JitResult",
+                    callsite.name
+                ),
+                JitContextCallbackCallKind::Raw => assert!(
+                    !returns_jit_result,
+                    "{} raw callback wrapper must not return a JitResult policy",
+                    callsite.name
+                ),
+            }
+            validate_callback_callsite(*callsite, callsite.call_kind)
+                .expect("callback ABI manifest must reject wrapper drift");
+        }
     }
 }

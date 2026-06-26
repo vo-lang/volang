@@ -27,6 +27,7 @@ pub(super) fn panic_policy_from_trap(policy: TrapPolicy) -> PanicPolicy {
         TrapPolicy::UserPanic => PanicPolicy::UserPanic,
         TrapPolicy::CallbackJitResult => PanicPolicy::ReturnsJitResult,
         TrapPolicy::VmSideExit => PanicPolicy::VmSideExit,
+        TrapPolicy::VmSideExitOrRuntimeTrap => PanicPolicy::VmSideExitOrRuntimeTrap,
         TrapPolicy::CompileFailFast => PanicPolicy::CompileFailFast,
     }
 }
@@ -35,12 +36,14 @@ pub(super) fn layout_authority_for_metadata(req: JitMetadataRequirement) -> Layo
     match req {
         JitMetadataRequirement::None => LayoutAuthority::FunctionDefSlotTypes,
         JitMetadataRequirement::ElemLayoutWhenFlagsZero
+        | JitMetadataRequirement::MapNew
         | JitMetadataRequirement::MapGet
         | JitMetadataRequirement::MapSet
         | JitMetadataRequirement::MapDelete
         | JitMetadataRequirement::PtrLayout
         | JitMetadataRequirement::SlotLayout
         | JitMetadataRequirement::CallLayout
+        | JitMetadataRequirement::CallIfaceLayout
         | JitMetadataRequirement::CallLayoutWhenClosureShape
         | JitMetadataRequirement::CallExternLayout
         | JitMetadataRequirement::QueueLayout

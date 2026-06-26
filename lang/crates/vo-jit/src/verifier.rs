@@ -51,9 +51,29 @@ pub fn verify_jit_metadata(
     func: &FunctionDef,
     vo_module: &VoModule,
 ) -> Result<(), JitMetadataError> {
-    verify_strict_jit_metadata_only(func).and_then(|()| {
-        module_verifier::verify_function(func, vo_module).map_err(JitMetadataError::from)
-    })
+    let common_result =
+        module_verifier::verify_function(func, vo_module).map_err(JitMetadataError::from);
+    let strict_result = verify_strict_jit_metadata_only(func);
+
+    match (common_result, strict_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(common), _) if common_error_precedes_jit_metadata(&common) => Err(common),
+        (_, Err(strict)) => Err(strict),
+        (Err(common), Ok(())) => Err(common),
+    }
+}
+
+fn common_error_precedes_jit_metadata(error: &JitMetadataError) -> bool {
+    matches!(
+        error,
+        JitMetadataError::InvalidOpcode { .. }
+            | JitMetadataError::MissingExtern { .. }
+            | JitMetadataError::MissingConstant { .. }
+            | JitMetadataError::MissingFunction { .. }
+            | JitMetadataError::SlotRangeOverflow { .. }
+            | JitMetadataError::SlotOutOfRange { .. }
+            | JitMetadataError::GlobalSlotOutOfRange { .. }
+    )
 }
 
 fn verify_strict_jit_metadata_only(func: &FunctionDef) -> Result<(), JitMetadataError> {

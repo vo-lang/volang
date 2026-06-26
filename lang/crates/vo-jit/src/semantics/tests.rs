@@ -5,7 +5,9 @@ use crate::effects::{
     try_instruction_effects_with_module_context, EffectError, EffectFacts, MemorySyncEffect,
 };
 use crate::translate::translate_dispatch_lowering_owner;
-use vo_runtime::bytecode::{ExternDef, FunctionDef, JitInstructionMetadata};
+use vo_runtime::bytecode::{
+    ExternDef, FunctionDef, JitInstructionMetadata, ParamShape, ReturnShape,
+};
 use vo_runtime::instruction::Opcode;
 use vo_runtime::jit_api::{JitCallbackReturnPolicy, JitRuntimeHelperReturnPolicy};
 use vo_runtime::{Instruction, SlotType};
@@ -34,6 +36,125 @@ fn semantic_rows_are_the_single_ordered_opcode_source() {
         assert_eq!(row.opcode, opcode);
         assert_eq!(*row, opcode_semantics(opcode));
     }
+}
+
+#[test]
+fn static_call_target_helper_is_derived_from_semantic_rows() {
+    let call = Instruction::with_flags(Opcode::Call, 0x12, 0x3456, 0, 0);
+    assert_eq!(static_call_target_from_semantics(&call), Some(0x12_3456));
+
+    let call_extern = Instruction::with_flags(Opcode::CallExtern, 0, 0, 0, 0);
+    assert_eq!(static_call_target_from_semantics(&call_extern), None);
+
+    for raw in 0..Opcode::COUNT {
+        let opcode = Opcode::from_u8(raw as u8);
+        let inst = Instruction::new(opcode, 0, 0, 0);
+        let expects_static_target = opcode_semantics(opcode)
+            .packed_operands
+            .contains(&PackedOperand::StaticCallFuncId);
+        assert_eq!(
+            static_call_target_from_semantics(&inst).is_some(),
+            expects_static_target,
+            "{opcode:?} static-call target helper drifted from semantic row"
+        );
+    }
+}
+
+#[test]
+fn queue_send_flags_are_declared_by_queue_and_select_semantic_rows_026() {
+    for opcode in [Opcode::QueueSend, Opcode::SelectSend] {
+        assert!(
+            opcode_semantics(opcode)
+                .packed_operands
+                .contains(&PackedOperand::QueueSendFlags),
+            "{opcode:?} lowering reads flags.elem_slots, so the semantic row must own that packed operand"
+        );
+    }
+}
+
+#[test]
+fn call_boundary_flags_are_declared_by_semantic_rows_027() {
+    assert!(
+        opcode_semantics(Opcode::CallExtern)
+            .packed_operands
+            .contains(&PackedOperand::CallExternArgSlots),
+        "CallExtern lowering reads flags.arg_slots, so the semantic row must own that packed operand"
+    );
+
+    let call_iface = opcode_semantics(Opcode::CallIface);
+    assert!(
+        call_iface
+            .packed_operands
+            .contains(&PackedOperand::PackedCallShape),
+        "CallIface still owns its packed arg/ret shape"
+    );
+    assert!(
+        call_iface
+            .packed_operands
+            .contains(&PackedOperand::CallIfaceMethodIndex),
+        "CallIface lowering reads flags.method_idx, so the semantic row must own that packed operand"
+    );
+}
+
+#[test]
+fn go_island_arg_flags_are_not_shared_call_shape_027() {
+    let row = opcode_semantics(Opcode::GoIsland);
+    assert!(
+        row.packed_operands
+            .contains(&PackedOperand::GoIslandArgSlots),
+        "GoIsland lowering reads flags.arg_slots, so the semantic row must own that packed operand"
+    );
+    assert!(
+        !row.packed_operands
+            .contains(&PackedOperand::SharedCallShape),
+        "GoIsland encodes a=island, b=closure, c=args, flags=arg_slots; it must not advertise SharedCallShape"
+    );
+}
+
+#[test]
+fn vm_jit_packed_flag_semantic_rows_028_cover_flags_consumers() {
+    let for_loop = opcode_semantics(Opcode::ForLoop);
+    assert!(
+        for_loop
+            .packed_operands
+            .contains(&PackedOperand::ForLoopTarget),
+        "ForLoop still owns its relative branch target"
+    );
+    assert!(
+        for_loop
+            .packed_operands
+            .contains(&PackedOperand::ForLoopFlags),
+        "ForLoop lowering reads flags direction/unsigned/inclusive bits"
+    );
+
+    let hint = opcode_semantics(Opcode::Hint);
+    assert!(
+        hint.packed_operands.contains(&PackedOperand::HintLoopShape),
+        "HINT_LOOP loop analysis decodes flags, loop-info, end offset, and exit pc"
+    );
+    assert!(
+        !hint.packed_operands.contains(&PackedOperand::ForLoopTarget),
+        "HINT_LOOP is loop-discovery metadata, not a ForLoop relative branch target"
+    );
+
+    assert!(
+        opcode_semantics(Opcode::IfaceAssert)
+            .packed_operands
+            .contains(&PackedOperand::IfaceAssertFlags),
+        "IfaceAssert lowering reads flags.assert_kind/has_ok/target_slots"
+    );
+    assert!(
+        opcode_semantics(Opcode::Trunc)
+            .packed_operands
+            .contains(&PackedOperand::TruncFlags),
+        "Trunc lowering reads flags.width/signedness"
+    );
+    assert!(
+        opcode_semantics(Opcode::Return)
+            .packed_operands
+            .contains(&PackedOperand::ReturnFlags),
+        "Return lowering reads runtime-visible return flags"
+    );
 }
 
 #[test]
@@ -79,6 +200,73 @@ fn str_decode_rune_contract_matches_non_panicking_helper() {
         row.runtime_dependencies,
         &[RuntimeDependency::RuntimeHelper("vo_str_decode_rune")]
     );
+}
+
+#[test]
+fn dynamic_call_semantic_dependencies_cover_reachable_frame_callbacks_062() {
+    for (opcode, expected_callbacks) in [
+        (
+            Opcode::CallClosure,
+            [
+                "prepare_closure_call_fn",
+                "push_frame_fn",
+                "pop_frame_fn",
+                "stack_overflow_fn",
+                "push_resume_point_fn",
+                "ic_table",
+            ],
+        ),
+        (
+            Opcode::CallIface,
+            [
+                "prepare_iface_call_fn",
+                "push_frame_fn",
+                "pop_frame_fn",
+                "stack_overflow_fn",
+                "push_resume_point_fn",
+                "ic_table",
+            ],
+        ),
+    ] {
+        let row = opcode_semantics(opcode);
+        for callback in expected_callbacks {
+            assert!(
+                row.runtime_dependencies
+                    .contains(&RuntimeDependency::JitContextCallback(callback)),
+                "{opcode:?} semantic dependencies must declare reachable JitContext callback {callback}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dynamic_call_semantic_dependencies_cover_reachable_runtime_traps_062() {
+    for (opcode, lowering_source) in [
+        (
+            Opcode::CallClosure,
+            include_str!("../call_helpers/dynamic/closure.rs"),
+        ),
+        (
+            Opcode::CallIface,
+            include_str!("../call_helpers/dynamic/iface.rs"),
+        ),
+    ] {
+        assert!(
+            lowering_source.contains("emit_runtime_trap"),
+            "{opcode:?} lowering source should expose the runtime trap path this proof covers"
+        );
+        let row = opcode_semantics(opcode);
+        assert!(
+            row.runtime_dependencies
+                .contains(&RuntimeDependency::RuntimeHelper("vo_runtime_trap")),
+            "{opcode:?} semantic dependencies must declare reachable vo_runtime_trap helper"
+        );
+        assert_eq!(
+            row.trap_policy,
+            TrapPolicy::VmSideExitOrRuntimeTrap,
+            "{opcode:?} must record both VM materialization side exits and runtime-trap exits"
+        );
+    }
 }
 
 #[test]
@@ -191,7 +379,9 @@ fn non_raw_runtime_helper_returns_have_structured_lowering_policy() {
                 assert!(
                     matches!(
                         row.trap_policy,
-                        TrapPolicy::RuntimeTrap | TrapPolicy::HostTrapGuarded
+                        TrapPolicy::RuntimeTrap
+                            | TrapPolicy::HostTrapGuarded
+                            | TrapPolicy::VmSideExitOrRuntimeTrap
                     ),
                     "{:?} uses vo_runtime_trap without a runtime trap policy",
                     row.opcode
@@ -263,6 +453,77 @@ fn call_helpers_jit_result_callbacks_use_typed_checked_lowering() {
                 callsite.name
             );
         }
+    }
+}
+
+#[test]
+fn jit_context_callback_dependencies_match_abi_manifest_policy() {
+    let callback_abi: std::collections::BTreeMap<_, _> =
+        vo_runtime::jit_api::jit_callback_abi_fields()
+            .iter()
+            .map(|field| (field.name, field))
+            .collect();
+    let semantic_callback_names: std::collections::BTreeSet<_> = opcode_semantic_matrix()
+        .iter()
+        .flat_map(|row| row.runtime_dependencies.iter())
+        .filter_map(|dep| match dep {
+            RuntimeDependency::JitContextCallback(name) => Some(*name),
+            _ => None,
+        })
+        .collect();
+
+    for row in opcode_semantic_matrix() {
+        for dep in row.runtime_dependencies {
+            let RuntimeDependency::JitContextCallback(name) = *dep else {
+                continue;
+            };
+            let abi = callback_abi.get(name).unwrap_or_else(|| {
+                panic!(
+                    "{:?} references callback {name} without ABI manifest row",
+                    row.opcode
+                )
+            });
+            if matches!(
+                abi.return_policy,
+                JitCallbackReturnPolicy::JitResult
+                    | JitCallbackReturnPolicy::JitResultWithOutPointer
+                    | JitCallbackReturnPolicy::PreparedCallOutPointer
+            ) {
+                assert!(
+                    matches!(
+                        row.helper_return,
+                        HelperReturnPolicy::JitResultChecked | HelperReturnPolicy::DirectJitCall
+                    ),
+                    "{:?} depends on JitResult callback {name} but declares helper policy {:?}",
+                    row.opcode,
+                    row.helper_return
+                );
+            }
+            if abi.may_gc || abi.observes_frame {
+                assert_ne!(
+                    row.frame_policy,
+                    FramePolicy::NoSpill,
+                    "{:?} callback {name} may GC/observe frames but row has NoSpill",
+                    row.opcode
+                );
+            }
+            if abi.may_schedule {
+                assert!(
+                    row.contract.may_schedule || row.trap_policy == TrapPolicy::CallbackJitResult,
+                    "{:?} callback {name} may schedule without scheduling contract or callback trap policy",
+                    row.opcode
+                );
+            }
+        }
+    }
+
+    for callsite in jit_context_callback_callsites() {
+        let abi = callsite.abi();
+        assert!(
+            semantic_callback_names.contains(abi.name),
+            "{} has a lowering callsite but no semantic runtime dependency row",
+            abi.name
+        );
     }
 }
 
@@ -364,6 +625,30 @@ fn gc_layout_control_flow_value_slots_declare_layout_and_fail_fast_policy() {
 }
 
 #[test]
+fn vm_jit_semantic_rows_cover_shared_verifier_039_contracts() {
+    for opcode in [
+        Opcode::SlotGet,
+        Opcode::SlotSet,
+        Opcode::SlotGetN,
+        Opcode::SlotSetN,
+    ] {
+        let row = opcode_semantics(opcode);
+        assert!(
+            row.verifier_requirements
+                .contains(&VerifierRequirement::CheckedStackArraySpan),
+            "{opcode:?} JIT lowering indexes stack slots and must declare the shared verifier's checked stack-array span contract"
+        );
+    }
+
+    let row = opcode_semantics(Opcode::MapIterNext);
+    assert!(
+        row.verifier_requirements
+            .contains(&VerifierRequirement::MapIterNextOutputOwnership),
+        "MapIterNext writes iterator/key/value/ok slots and must declare the shared verifier's output ownership contract"
+    );
+}
+
+#[test]
 fn pointer_store_requirements_do_not_claim_global_slots() {
     for opcode in [Opcode::PtrSet, Opcode::PtrSetN] {
         let row = opcode_semantics(opcode);
@@ -429,6 +714,7 @@ fn representative_instruction(opcode: Opcode) -> Instruction {
         Opcode::MapDelete => Instruction::new(opcode, 10, 20, 0),
         Opcode::MapIterNext => Instruction::with_flags(opcode, 1 | (2 << 4), 10, 20, 30),
         Opcode::MapNew => Instruction::new(opcode, 10, 20, (1 << 8) | 2),
+        Opcode::QueueNew => Instruction::with_flags(opcode, 2, 10, 20, 30),
         Opcode::QueueSend | Opcode::SelectSend => Instruction::with_flags(opcode, 2, 10, 20, 30),
         Opcode::QueueRecv | Opcode::SelectRecv => {
             Instruction::with_flags(opcode, (2 << 1) | 1, 10, 20, 30)
@@ -471,12 +757,18 @@ fn metadata_for(opcode: Opcode) -> Option<JitInstructionMetadata> {
         Opcode::MapDelete => Some(JitInstructionMetadata::MapDelete {
             key_layout: vec![SlotType::Interface0, SlotType::Interface1],
         }),
-        Opcode::PtrGet | Opcode::PtrSet | Opcode::SlotGet | Opcode::SlotSet => {
+        Opcode::MapNew => Some(JitInstructionMetadata::MapNew {
+            key_layout: vec![SlotType::Value],
+            val_layout: vec![SlotType::Value, SlotType::Value],
+        }),
+        Opcode::PtrNew | Opcode::PtrGet | Opcode::PtrSet | Opcode::SlotGet | Opcode::SlotSet => {
             let layout = vec![SlotType::Value];
             match opcode {
-                Opcode::PtrGet | Opcode::PtrSet => Some(JitInstructionMetadata::PtrLayout {
-                    value_layout: layout,
-                }),
+                Opcode::PtrNew | Opcode::PtrGet | Opcode::PtrSet => {
+                    Some(JitInstructionMetadata::PtrLayout {
+                        value_layout: layout,
+                    })
+                }
                 _ => Some(JitInstructionMetadata::SlotLayout {
                     elem_layout: layout,
                 }),
@@ -493,7 +785,12 @@ fn metadata_for(opcode: Opcode) -> Option<JitInstructionMetadata> {
                 }),
             }
         }
-        Opcode::CallClosure | Opcode::CallIface => Some(JitInstructionMetadata::CallLayout {
+        Opcode::CallClosure => Some(JitInstructionMetadata::CallLayout {
+            arg_layout: vec![SlotType::Value, SlotType::Value],
+            ret_layout: vec![SlotType::Value],
+        }),
+        Opcode::CallIface => Some(JitInstructionMetadata::CallIfaceLayout {
+            iface_meta_id: 0,
             arg_layout: vec![SlotType::Value, SlotType::Value],
             ret_layout: vec![SlotType::Value],
         }),
@@ -501,16 +798,18 @@ fn metadata_for(opcode: Opcode) -> Option<JitInstructionMetadata> {
             arg_layout: vec![SlotType::Value, SlotType::Value],
             ret_layout: vec![SlotType::Value, SlotType::Value],
         }),
-        Opcode::QueueSend | Opcode::QueueRecv | Opcode::SelectSend | Opcode::SelectRecv => {
-            Some(JitInstructionMetadata::QueueLayout {
-                elem_layout: vec![SlotType::Value, SlotType::Value],
-            })
-        }
+        Opcode::QueueNew
+        | Opcode::QueueSend
+        | Opcode::QueueRecv
+        | Opcode::SelectSend
+        | Opcode::SelectRecv => Some(JitInstructionMetadata::QueueLayout {
+            elem_layout: vec![SlotType::Value, SlotType::Value],
+        }),
         Opcode::MapIterNext => Some(JitInstructionMetadata::MapIterNext {
             key_layout: vec![SlotType::Value],
             val_layout: vec![SlotType::Value, SlotType::Value],
         }),
-        Opcode::GoIsland => Some(JitInstructionMetadata::CallLayout {
+        Opcode::GoStart | Opcode::GoIsland => Some(JitInstructionMetadata::CallLayout {
             arg_layout: vec![SlotType::Value, SlotType::Value],
             ret_layout: Vec::new(),
         }),
@@ -562,9 +861,9 @@ fn test_function(param_slots: u16, ret_slots: u16) -> FunctionDef {
 fn test_extern(ret_slots: u16) -> ExternDef {
     ExternDef {
         name: "extern".to_string(),
-        param_slots: 0,
-        ret_slots,
-        is_blocking: false,
+        params: ParamShape::CallSiteVariadic,
+        returns: ReturnShape::slots(ret_slots),
+        allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
         param_kinds: Vec::new(),
     }
 }
@@ -678,6 +977,24 @@ fn runtime_dependency_policy_names_registered_helpers_and_callbacks() {
 }
 
 #[test]
+fn vm_call_request_rows_name_set_call_request_helper_054() {
+    for raw in 0..Opcode::COUNT {
+        let opcode = Opcode::from_u8(raw as u8);
+        let row = opcode_semantics(opcode);
+        if row
+            .runtime_dependencies
+            .contains(&RuntimeDependency::VmCallRequest)
+        {
+            assert!(
+                row.runtime_dependencies
+                    .contains(&RuntimeDependency::RuntimeHelper("vo_set_call_request")),
+                "{opcode:?} materializes VM calls and must name vo_set_call_request as a runtime helper dependency"
+            );
+        }
+    }
+}
+
+#[test]
 fn frame_policy_is_at_least_as_strict_as_effect_contract() {
     for raw in 0..Opcode::COUNT {
         let opcode = Opcode::from_u8(raw as u8);
@@ -712,7 +1029,9 @@ fn trap_policy_matches_runtime_panic_and_host_trap_capability() {
         let row = opcode_semantics(opcode);
         if matches!(
             row.trap_policy,
-            TrapPolicy::RuntimeTrap | TrapPolicy::HostTrapGuarded
+            TrapPolicy::RuntimeTrap
+                | TrapPolicy::HostTrapGuarded
+                | TrapPolicy::VmSideExitOrRuntimeTrap
         ) {
             assert!(
                 row.contract.may_panic

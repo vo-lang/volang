@@ -1,5 +1,6 @@
 //! Shared bytecode instruction effect facts used by JIT analysis and translation.
 
+use vo_common_core::bytecode::MAP_ITER_SLOTS as MAP_ITER_SLOT_COUNT;
 use vo_runtime::bytecode::{ExternDef, FunctionDef};
 use vo_runtime::instruction::{Instruction, Opcode};
 
@@ -16,7 +17,7 @@ pub(crate) use effect_analysis::try_instruction_effects_with_facts;
 pub use effect_analysis::try_instruction_effects_with_module_context;
 pub use memory_sync::{try_memory_sync_effect, MemorySyncEffect};
 
-pub const MAP_ITER_SLOTS: u16 = vo_runtime::objects::map::MAP_ITER_SLOTS as u16;
+pub const MAP_ITER_SLOTS: u16 = MAP_ITER_SLOT_COUNT as u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlotRangeError {
@@ -45,6 +46,9 @@ pub enum EffectError {
     MissingExtern {
         extern_id: u16,
     },
+    MissingFunction {
+        func_id: u32,
+    },
 }
 
 impl EffectError {
@@ -54,6 +58,10 @@ impl EffectError {
 
     fn missing_extern(extern_id: u16) -> Self {
         Self::MissingExtern { extern_id }
+    }
+
+    fn missing_function(func_id: u32) -> Self {
+        Self::MissingFunction { func_id }
     }
 }
 
@@ -199,7 +207,7 @@ pub fn try_write_regs_with_module_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_runtime::bytecode::JitInstructionMetadata;
+    use vo_runtime::bytecode::{JitInstructionMetadata, ParamShape, ReturnShape};
     use vo_runtime::SlotType;
 
     #[test]
@@ -373,6 +381,13 @@ mod tests {
     }
 
     #[test]
+    fn vm_select_zero_slot_send_contract_018_jit_read_effects_skip_value_slots() {
+        let inst = Instruction::with_flags(Opcode::SelectSend, 0, 12, 13, 0);
+
+        assert_eq!(try_read_regs(&inst).unwrap(), vec![12]);
+    }
+
+    #[test]
     fn slice_append_effects_use_instruction_elem_layout() {
         let inst = Instruction::with_flags(Opcode::SliceAppend, 0, 1, 2, 10);
         let meta = JitInstructionMetadata::ElemLayout {
@@ -459,13 +474,33 @@ mod tests {
     }
 
     #[test]
+    fn vm_jit_002_call_effects_fail_without_module_facts() {
+        let call = Instruction::with_flags(Opcode::Call, 0, 7, 20, (2 << 8) | 1);
+        let call_extern = Instruction::with_flags(Opcode::CallExtern, 2, 10, 7, 20);
+
+        assert!(matches!(
+            try_instruction_effects_with_module_context(&call, EffectFacts::none(), &[], &[]),
+            Err(EffectError::MissingFunction { func_id: 7 })
+        ));
+        assert!(matches!(
+            try_instruction_effects_with_module_context(
+                &call_extern,
+                EffectFacts::none(),
+                &[],
+                &[]
+            ),
+            Err(EffectError::MissingExtern { extern_id: 7 })
+        ));
+    }
+
+    #[test]
     fn call_extern_effects_use_declared_return_slots_when_available() {
         let inst = Instruction::with_flags(Opcode::CallExtern, 2, 10, 0, 20);
         let externs = vec![vo_runtime::bytecode::ExternDef {
             name: "multi".to_string(),
-            param_slots: 2,
-            ret_slots: 3,
-            is_blocking: false,
+            params: ParamShape::Exact { slots: 2 },
+            returns: ReturnShape::slots(3),
+            allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         }];
 

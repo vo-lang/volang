@@ -3,13 +3,11 @@ use cranelift_codegen::ir::{types, InstBuilder, StackSlot, StackSlotData, StackS
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 
-use crate::translator::{
-    emit_funcref_call, emit_funcref_call_with_effect, CollectionEmitter, HelperCallEffect,
-};
+use crate::translator::{emit_funcref_call, CollectionEmitter};
 use crate::JitError;
 
 use super::emit_return_if_u64_jit_error;
-use crate::translate::{emit_runtime_trap_if, require_helper};
+use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc, require_helper};
 
 pub(in crate::translate) fn map_new<'a>(
     e: &mut impl CollectionEmitter<'a>,
@@ -53,9 +51,12 @@ pub(in crate::translate) fn map_len<'a>(
     inst: &Instruction,
 ) -> Result<(), JitError> {
     let func = require_helper(e.helpers().map_len, "map_len")?;
+    let ctx = e.ctx_param();
     let m = e.read_var(inst.b);
-    let call = emit_funcref_call_with_effect(e, func, &[m], HelperCallEffect::FrameIndependent);
+    mark_runtime_trap_pc(e);
+    let call = emit_funcref_call(e, func, &[ctx, m]);
     let result = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, result);
     e.write_var(inst.a, result);
     Ok(())
 }
@@ -108,6 +109,7 @@ pub(in crate::translate) fn map_get<'a>(
     let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
 
     let ctx = e.ctx_param();
+    mark_runtime_trap_pc(e);
     let call = emit_funcref_call(
         e,
         func,
@@ -115,6 +117,10 @@ pub(in crate::translate) fn map_get<'a>(
     );
     let found = e.builder().inst_results(call)[0];
     emit_return_if_u64_jit_error(e, found);
+
+    let panic_code = e.builder().ins().iconst(types::I64, 2);
+    let is_panic = e.builder().ins().icmp(IntCC::Equal, found, panic_code);
+    emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
 
     for i in 0..val_slots {
         let val = e
@@ -143,6 +149,7 @@ pub(in crate::translate) fn map_set<'a>(
     let val_slots = layout.val_slots as usize;
 
     let m = e.read_var(inst.a);
+    mark_runtime_trap_pc(e);
 
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(IntCC::Equal, m, zero);
@@ -182,13 +189,17 @@ pub(in crate::translate) fn map_delete<'a>(
     let (_, key_ptr, key_slots_i32) = store_to_stack(e, inst.b + 1, key_slots);
 
     let ctx = e.ctx_param();
+    mark_runtime_trap_pc(e);
     let call = emit_funcref_call(e, func, &[ctx, m, key_ptr, key_slots_i32]);
     let result = e.builder().inst_results(call)[0];
     emit_return_if_u64_jit_error(e, result);
+    let zero = e.builder().ins().iconst(types::I64, 0);
+    let is_panic = e.builder().ins().icmp(IntCC::NotEqual, result, zero);
+    emit_runtime_trap_if(e, is_panic, JitRuntimeTrapKind::UnhashableType, None, None);
     Ok(())
 }
 
-const MAP_ITER_SLOTS: usize = vo_runtime::objects::map::MAP_ITER_SLOTS;
+const MAP_ITER_SLOTS: usize = vo_common_core::bytecode::MAP_ITER_SLOTS;
 const MAP_ITER_BYTES: u32 = (MAP_ITER_SLOTS * 8) as u32;
 
 pub(in crate::translate) fn map_iter_init<'a>(
@@ -203,7 +214,11 @@ pub(in crate::translate) fn map_iter_init<'a>(
         8,
     ));
     let iter_ptr = e.builder().ins().stack_addr(types::I64, iter_slot, 0);
-    emit_funcref_call(e, func, &[m, iter_ptr]);
+    let ctx = e.ctx_param();
+    mark_runtime_trap_pc(e);
+    let call = emit_funcref_call(e, func, &[ctx, m, iter_ptr]);
+    let result = e.builder().inst_results(call)[0];
+    emit_return_if_u64_jit_error(e, result);
     for i in 0..MAP_ITER_SLOTS {
         let val = e
             .builder()
@@ -219,8 +234,15 @@ pub(in crate::translate) fn map_iter_next<'a>(
     inst: &Instruction,
 ) -> Result<(), JitError> {
     let func = require_helper(e.helpers().map_iter_next, "map_iter_next")?;
-    let key_slots = inst.map_iter_key_slots() as usize;
-    let val_slots = inst.map_iter_val_slots() as usize;
+    let layout = e
+        .map_iter_next_layout(inst)
+        .ok_or(JitError::MissingJitLayout {
+            pc: e.current_pc(),
+            opcode: inst.opcode(),
+            layout: "MapIterNext",
+        })?;
+    let key_slots = layout.key_slots as usize;
+    let val_slots = layout.val_slots as usize;
 
     let iter_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
@@ -251,6 +273,7 @@ pub(in crate::translate) fn map_iter_next<'a>(
     let key_slots_i32 = e.builder().ins().iconst(types::I32, key_slots as i64);
     let val_slots_i32 = e.builder().ins().iconst(types::I32, val_slots as i64);
     let ctx = e.ctx_param();
+    mark_runtime_trap_pc(e);
 
     let call = emit_funcref_call(
         e,
@@ -291,4 +314,32 @@ pub(in crate::translate) fn map_iter_next<'a>(
     }
     e.write_var(inst.c, ok);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn jit_map_iter_next_lowering_uses_metadata_layout_061() {
+        let src =
+            vo_source_contract::production_source_without_test_modules(include_str!("map.rs"));
+        let body = src
+            .split("pub(in crate::translate) fn map_iter_next")
+            .nth(1)
+            .expect("map_iter_next lowering")
+            .split("fn emit_map_iter_result")
+            .next()
+            .expect("map_iter_next body");
+
+        assert!(
+            body.contains(".map_iter_next_layout(inst)")
+                && body.contains("JitError::MissingJitLayout")
+                && body.contains("layout: \"MapIterNext\""),
+            "MapIterNext lowering must use per-PC metadata as the ABI slot source"
+        );
+        assert!(
+            !body.contains("inst.map_iter_key_slots()")
+                && !body.contains("inst.map_iter_val_slots()"),
+            "MapIterNext lowering must not derive helper ABI width from encoded flags"
+        );
+    }
 }

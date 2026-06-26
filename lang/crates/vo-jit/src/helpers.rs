@@ -119,6 +119,7 @@ runtime_helper_table! {
     gc_alloc => "vo_gc_alloc",
     write_barrier => "vo_gc_write_barrier",
     typed_write_barrier_by_meta => "vo_gc_typed_write_barrier_by_meta",
+    gc_safepoint => "vo_gc_safepoint",
     panic => "vo_panic",
     runtime_trap => "vo_runtime_trap",
     call_extern => "vo_call_extern",
@@ -152,10 +153,12 @@ runtime_helper_table! {
     map_delete => "vo_map_delete",
     map_iter_init => "vo_map_iter_init",
     map_iter_next => "vo_map_iter_next",
+    iface_pack_slot0 => "vo_iface_pack_slot0",
     iface_assert => "vo_iface_assert",
     iface_to_iface => "vo_iface_to_iface",
     iface_eq => "vo_iface_eq",
     set_call_request => "vo_set_call_request",
+    copy_frame_slots => "vo_jit_copy_frame_slots",
     island_new => "vo_island_new",
     queue_close => "vo_chan_close",
     queue_send => "vo_chan_send",
@@ -201,6 +204,17 @@ mod tests {
                 "missing JIT helper symbol {required}"
             );
             runtime_helper_abi(required).expect("declared helper ABI row");
+        }
+    }
+
+    #[test]
+    fn declared_helper_imports_cover_runtime_helper_abi_manifest_060() {
+        for abi in runtime_helper_abi_fields() {
+            assert!(
+                declared_helper_names().contains(&abi.name),
+                "runtime helper ABI manifest row {} is not declared as a JIT import",
+                abi.name
+            );
         }
     }
 

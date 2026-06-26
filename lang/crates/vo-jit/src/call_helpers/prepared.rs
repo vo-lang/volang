@@ -7,7 +7,8 @@ use crate::translator::IrEmitter;
 
 use super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_checked_jit_result_indirect_callback_call,
-    emit_raw_jit_context_callback_call, import_jit_func_sig, JIT_RESULT_CALL, JIT_RESULT_OK,
+    emit_raw_jit_context_callback_call, import_jit_func_sig, load_current_func_id,
+    restore_caller_execution_context, JIT_RESULT_CALL, JIT_RESULT_OK,
     PREPARED_CALL_POP_FRAME_CALLSITE, PREPARED_CALL_PUSH_RESUME_POINT_CALLSITE,
 };
 
@@ -47,6 +48,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
 
     // caller_bp was saved BEFORE the prepare callback (which updates ctx.jit_bp via push_frame).
     let caller_bp = p.caller_bp;
+    let caller_func_id = load_current_func_id(emitter, ctx);
 
     // Load pop_frame resources before branching (needed in both trampoline and JIT-OK paths)
     let pop_frame_fn_ptr = emitter.builder().ins().load(
@@ -95,16 +97,14 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
 
     // === Trampoline path: return JitResult::Call with CALL_KIND_PREPARED ===
     // prepare callback already did push_frame + arg layout on fiber.stack,
-    // set caller_frame.pc via push_frame's caller_resume_pc.
+    // but it leaves caller frame pc uncommitted until VM materialization accepts
+    // the prepared transition.
     //
     // We save callee_bp in call_resume_pc field because ctx.jit_bp may be
     // overwritten by intermediate JIT non-OK blocks (their push_frame calls).
     // PREPARED handler reads callee_bp from call_resume_pc, not ctx.jit_bp.
     emitter.builder().switch_to_block(trampoline_block);
     emitter.builder().seal_block(trampoline_block);
-
-    // Spill SSA-only vars so VM can read caller state after callee returns.
-    emitter.spill_all_vars();
 
     // Save callee_bp (set by prepare's push_frame) into call_resume_pc
     let callee_bp_val = emitter.builder().ins().load(
@@ -114,6 +114,13 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         JitContext::OFFSET_JIT_BP,
     );
 
+    // Restore caller ctx before refreshing locals; prepare may have grown fiber.stack.
+    restore_caller_execution_context(emitter, ctx, caller_bp, p.old_fiber_sp, caller_func_id);
+    emitter.refresh_stack_base_after_reallocation();
+
+    // Spill SSA-only vars so VM can read caller state after callee returns.
+    emitter.spill_all_vars();
+
     let set_call_request_func =
         crate::translate::require_helper(emitter.helpers().set_call_request, "set_call_request")?;
     let prepared_kind = emitter
@@ -122,8 +129,8 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         .iconst(types::I32, JitContext::CALL_KIND_PREPARED as i64);
     // For PREPARED: arg_start field stores caller_resume_pc (not arg copying position).
     // PREPARED doesn't need arg_start: args are already copied by the prepare callback.
-    // The PREPARED handler uses this as the resume_pc for materialize_jit_frames so the
-    // innermost caller frame gets the correct pc in nested call scenarios.
+    // The PREPARED handler commits this resume pc only after callee resolution
+    // and materialization preflight succeed.
     crate::translator::emit_funcref_call_raw(
         emitter,
         set_call_request_func,
@@ -191,18 +198,8 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
     );
 
     // Restore ctx.jit_bp and ctx.fiber_sp to caller's values.
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        caller_bp,
-        ctx,
-        JitContext::OFFSET_JIT_BP,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        p.old_fiber_sp,
-        ctx,
-        JitContext::OFFSET_FIBER_SP,
-    );
+    restore_caller_execution_context(emitter, ctx, caller_bp, p.old_fiber_sp, caller_func_id);
+    emitter.refresh_stack_base_after_reallocation();
 
     emitter.spill_all_vars();
 
@@ -240,6 +237,7 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         pop_frame_fn_ptr,
         &[ctx, caller_bp],
     )?;
+    restore_caller_execution_context(emitter, ctx, caller_bp, p.old_fiber_sp, caller_func_id);
     emitter.builder().ins().jump(merge_block, &[]);
 
     // === Merge block ===
@@ -257,4 +255,162 @@ pub(super) fn emit_prepared_call<'a, E: IrEmitter<'a>>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    fn compact_source_without_non_dominating_blocks(compact: &[u8]) -> Vec<u8> {
+        vo_source_contract::compact_rust_source_without_non_dominating_blocks_for_contract(compact)
+    }
+
+    fn compact_pattern_position(compact: &[u8], pattern: &str) -> Option<usize> {
+        vo_source_contract::compact_pattern_position(compact, pattern)
+    }
+
+    fn compact_region_between(source: &str, marker: &str, terminator: &str) -> Option<Vec<u8>> {
+        vo_source_contract::compact_region_between(source, marker, terminator)
+    }
+
+    fn prepared_call_publishes_logical_call_depth_062(source: &str) -> bool {
+        let src = vo_source_contract::production_source_without_test_modules(source);
+        let Some(jit_region) = compact_region_between(
+            &src,
+            "letold_call_depth=emit_call_depth_enter(emitter,ctx)?;",
+            "letok_val=emitter",
+        ) else {
+            return false;
+        };
+        let jit_region = compact_source_without_non_dominating_blocks(&jit_region);
+        let Some(call_pos) = compact_pattern_position(&jit_region, ".call_indirect(") else {
+            return false;
+        };
+        let Some(leave_pos) = compact_pattern_position(
+            &jit_region,
+            "emit_call_depth_leave(emitter,ctx,old_call_depth);",
+        ) else {
+            return false;
+        };
+        call_pos < leave_pos
+    }
+
+    fn assert_refresh_before_spill(region_name: &str, region: &str) {
+        let refresh = region
+            .find("refresh_stack_base_after_reallocation")
+            .unwrap_or_else(|| panic!("{region_name} must refresh cached stack bases"));
+        let spill = region
+            .find("spill_all_vars")
+            .unwrap_or_else(|| panic!("{region_name} should still spill caller locals"));
+        assert!(
+            refresh < spill,
+            "{region_name} must refresh cached stack bases before spilling caller locals"
+        );
+    }
+
+    #[test]
+    fn vm_osr_slowpath_stack_001_prepared_slow_paths_refresh_before_spill() {
+        let src =
+            vo_source_contract::production_source_without_test_modules(include_str!("prepared.rs"));
+        let trampoline_region = src
+            .split("emitter.builder().switch_to_block(trampoline_block);")
+            .nth(1)
+            .expect("prepared trampoline block should exist")
+            .split("let set_call_request_func")
+            .next()
+            .expect("prepared trampoline should set call request");
+        let non_ok_region = src
+            .split("emitter.builder().switch_to_block(jit_non_ok_block);")
+            .nth(1)
+            .expect("prepared JIT non-OK block should exist")
+            .split("// Push resume point")
+            .next()
+            .expect("prepared JIT non-OK block should push resume point");
+
+        assert_refresh_before_spill("prepared-call trampoline", trampoline_region);
+        assert_refresh_before_spill("prepared-call JIT non-OK slow path", non_ok_region);
+    }
+
+    #[test]
+    fn vm_jit_current_func_metadata_037_prepared_ok_path_restores_caller_func_id() {
+        let src =
+            vo_source_contract::production_source_without_test_modules(include_str!("prepared.rs"));
+        let ok_region = src
+            .split("emitter.builder().switch_to_block(jit_ok_block);")
+            .nth(1)
+            .expect("prepared-call JIT OK block should exist")
+            .split("emitter.builder().ins().jump(merge_block")
+            .next()
+            .expect("prepared-call JIT OK block should jump to merge");
+        assert!(
+            ok_region.contains("restore_caller_execution_context"),
+            "prepared JIT-to-JIT OK path must restore the full caller execution context before returning to caller helpers"
+        );
+    }
+
+    #[test]
+    fn vm_jit_extern_replay_scope_062_prepared_calls_publish_logical_call_depth() {
+        assert!(
+            prepared_call_publishes_logical_call_depth_062(include_str!("prepared.rs")),
+            "prepared direct JIT call depth must cover callee execution"
+        );
+    }
+
+    #[test]
+    fn vm_jit_extern_replay_scope_062_rejects_comment_spoofed_prepared_call_depth() {
+        let spoof = r#"
+            fn lower_prepared_call() {
+                // let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
+                emitter.builder().ins().call_indirect(jit_func_sig, p.jit_func_ptr, &[ctx, p.callee_args_ptr, p.ret_ptr]);
+                // emit_call_depth_leave(emitter, ctx, old_call_depth);
+                let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
+            }
+        "#;
+
+        assert!(
+            !prepared_call_publishes_logical_call_depth_062(spoof),
+            "comment-only prepared JIT call-depth enter/leave facts must not satisfy source contracts"
+        );
+    }
+
+    #[test]
+    fn vm_jit_extern_replay_scope_062_rejects_non_dominating_prepared_call_depth_leave() {
+        let closure_spoof = r#"
+            fn lower_prepared_call() {
+                let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
+                emitter.builder().ins().call_indirect(jit_func_sig, p.jit_func_ptr, &[ctx, p.callee_args_ptr, p.ret_ptr]);
+                let _leave = || {
+                    emit_call_depth_leave(emitter, ctx, old_call_depth);
+                };
+                let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
+            }
+        "#;
+        let unreachable_spoof = r#"
+            fn lower_prepared_call() {
+                let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
+                emitter.builder().ins().call_indirect(jit_func_sig, p.jit_func_ptr, &[ctx, p.callee_args_ptr, p.ret_ptr]);
+                if false {
+                    emit_call_depth_leave(emitter, ctx, old_call_depth);
+                }
+                let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
+            }
+        "#;
+        let macro_spoof = r#"
+            fn lower_prepared_call() {
+                let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
+                emitter.builder().ins().call_indirect(jit_func_sig, p.jit_func_ptr, &[ctx, p.callee_args_ptr, p.ret_ptr]);
+                macro_rules! leave_depth {
+                    () => {
+                        emit_call_depth_leave(emitter, ctx, old_call_depth);
+                    };
+                }
+                let ok_val = emitter.builder().ins().iconst(types::I32, JIT_RESULT_OK as i64);
+            }
+        "#;
+
+        for spoof in [closure_spoof, unreachable_spoof, macro_spoof] {
+            assert!(
+                !prepared_call_publishes_logical_call_depth_062(spoof),
+                "prepared JIT call-depth leave must dominate the OK result path"
+            );
+        }
+    }
 }

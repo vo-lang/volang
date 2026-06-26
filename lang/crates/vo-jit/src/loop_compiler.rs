@@ -10,7 +10,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use crate::loop_analysis::LoopInfo;
 use crate::translate::translate_inst;
 use crate::translator::{HelperFuncs, SlotAccess, TranslateResult};
-use crate::JitError;
+use crate::{JitCompileEnv, JitError};
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::{JitContext, JitResult};
@@ -32,6 +32,7 @@ pub struct LoopCompiler<'a> {
     func_id: u32,
     func_def: &'a FunctionDef,
     vo_module: &'a VoModule,
+    env: JitCompileEnv<'a>,
     loop_info: &'a LoopInfo,
     vars: Vec<Variable>,
     blocks: HashMap<usize, Block>,
@@ -57,6 +58,7 @@ impl<'a> LoopCompiler<'a> {
         func_id: u32,
         func_def: &'a FunctionDef,
         vo_module: &'a VoModule,
+        env: JitCompileEnv<'a>,
         loop_info: &'a LoopInfo,
         helpers: HelperFuncs,
         callee_func_refs: &'a [Option<FuncRef>],
@@ -73,6 +75,7 @@ impl<'a> LoopCompiler<'a> {
             func_id,
             func_def,
             vo_module,
+            env,
             loop_info,
             vars: Vec::new(),
             blocks: HashMap::new(),
@@ -180,6 +183,16 @@ impl<'a> LoopCompiler<'a> {
         let params = self.builder.block_params(self.entry_block);
         self.ctx_ptr = params[0];
         let locals_ptr_init = params[1];
+        let current_func_id = self
+            .builder
+            .ins()
+            .iconst(types::I32, i64::from(self.func_id));
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            current_func_id,
+            self.ctx_ptr,
+            JitContext::OFFSET_CURRENT_FUNC_ID,
+        );
 
         // Wrap locals_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
         // it after any call that may have triggered fiber.stack reallocation.
@@ -235,14 +248,14 @@ impl<'a> LoopCompiler<'a> {
             }
             Opcode::Call => self.call(inst),
             Opcode::CallExtern => {
-                crate::call_helpers::emit_call_extern(
+                let terminated = crate::call_helpers::emit_call_extern(
                     self,
                     inst,
                     crate::call_helpers::CallExternConfig {
                         current_pc: self.current_pc,
                     },
                 )?;
-                Ok(false)
+                Ok(terminated)
             }
             Opcode::CallClosure => {
                 crate::call_helpers::emit_call_closure(self, inst)?;
@@ -621,6 +634,26 @@ impl<'a> crate::translator::RuntimeContext<'a> for LoopCompiler<'a> {
 impl crate::translator::MetadataAccess for LoopCompiler<'_> {
     fn vo_module(&self) -> &VoModule {
         self.vo_module
+    }
+
+    fn resolved_extern(
+        &self,
+        extern_id: u32,
+    ) -> Result<&vo_runtime::bytecode::ResolvedExtern, JitError> {
+        let resolved = self.env.externs.get(extern_id).ok_or_else(|| {
+            JitError::Internal(format!("CallExtern missing resolved extern {extern_id}"))
+        })?;
+        if matches!(
+            resolved.jit_route,
+            vo_runtime::bytecode::ExternJitRoute::DirectHelper
+        ) && !self.env.backend_caps.extern_suspend
+            && !resolved.effective_effects.is_empty()
+        {
+            return Err(JitError::Internal(format!(
+                "CallExtern extern {extern_id} requires extern suspend support"
+            )));
+        }
+        Ok(resolved)
     }
     fn current_pc(&self) -> usize {
         self.current_pc

@@ -17,3 +17,6 @@ cranelift-module = "0.116"
 cranelift-native = "0.116"
 
 target-lexicon = "0.12"
+
+[dev-dependencies]
+vo-source-contract = { path = "../vo-source-contract" }

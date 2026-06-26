@@ -89,12 +89,12 @@ pub(super) fn try_dynamic_read_regs(
     match dynamic {
         DynamicRegisterReadEffect::None => Ok(None),
         DynamicRegisterReadEffect::StaticCallSignature => {
-            if let Some(callee) = functions.get(inst.static_call_func_id() as usize) {
-                try_push_slot_range(&mut regs, inst.b, callee.param_slots, "read")?;
-                Ok(Some(regs))
-            } else {
-                Ok(None)
-            }
+            let func_id = inst.static_call_func_id();
+            let callee = functions
+                .get(func_id as usize)
+                .ok_or_else(|| EffectError::missing_function(func_id))?;
+            try_push_slot_range(&mut regs, inst.b, callee.param_slots, "read")?;
+            Ok(Some(regs))
         }
         DynamicRegisterReadEffect::IndexedSetValueLayout => {
             if !facts.has_facts() {
@@ -169,21 +169,18 @@ pub(super) fn try_dynamic_multi_write_regs(
     match dynamic {
         DynamicRegisterWriteEffect::None => Ok(None),
         DynamicRegisterWriteEffect::StaticCallSignature => {
-            if let Some(callee) = functions.get(inst.static_call_func_id() as usize) {
-                let ret_start = checked_slot_offset(inst.b, callee.param_slots, "write")?;
-                try_push_slot_range(&mut regs, ret_start, callee.ret_slots, "write")?;
-                Ok(Some(regs))
-            } else {
-                Ok(None)
-            }
+            let func_id = inst.static_call_func_id();
+            let callee = functions
+                .get(func_id as usize)
+                .ok_or_else(|| EffectError::missing_function(func_id))?;
+            let ret_start = checked_slot_offset(inst.b, callee.param_slots, "write")?;
+            try_push_slot_range(&mut regs, ret_start, callee.ret_slots, "write")?;
+            Ok(Some(regs))
         }
         DynamicRegisterWriteEffect::ExternSignature => {
-            if externs.is_empty() {
-                return Ok(None);
-            }
             let ret_slots = externs
                 .get(inst.b as usize)
-                .map(|extern_def| extern_def.ret_slots)
+                .map(|extern_def| extern_def.returns.slots)
                 .ok_or_else(|| EffectError::missing_extern(inst.b))?;
             try_push_slot_range(&mut regs, inst.a, ret_slots, "write")?;
             Ok(Some(regs))

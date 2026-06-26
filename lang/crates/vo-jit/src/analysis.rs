@@ -84,7 +84,7 @@ pub fn compute_memory_only_start_from_effects(effects: &[InstructionEffects]) ->
 mod tests {
     use super::*;
     use vo_runtime::bytecode::{
-        ExternDef, FunctionDef, JitInstructionMetadata, Module as VoModule,
+        ExternDef, FunctionDef, JitInstructionMetadata, Module as VoModule, ParamShape, ReturnShape,
     };
     use vo_runtime::instruction::Opcode;
     use vo_runtime::{instruction::Instruction, SlotType};
@@ -138,9 +138,9 @@ mod tests {
         let mut module = VoModule::new("analysis".to_string());
         module.externs.push(ExternDef {
             name: "multi".to_string(),
-            param_slots: 1,
-            ret_slots: 2,
-            is_blocking: false,
+            params: ParamShape::Exact { slots: 1 },
+            returns: ReturnShape::slots(2),
+            allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         });
         module.functions.push(make_func(code, metadata));

@@ -7,15 +7,26 @@ pub(super) const STATIC_CALL: &[PackedOperand] = &[
     PackedOperand::StaticCallFuncId,
     PackedOperand::PackedCallShape,
 ];
+pub(super) const CALL_EXTERN: &[PackedOperand] = &[PackedOperand::CallExternArgSlots];
 pub(super) const DYNAMIC_CALL: &[PackedOperand] = &[PackedOperand::PackedCallShape];
+pub(super) const CALL_IFACE: &[PackedOperand] = &[
+    PackedOperand::PackedCallShape,
+    PackedOperand::CallIfaceMethodIndex,
+];
 pub(super) const CLOSURE_NEW: &[PackedOperand] = &[PackedOperand::ClosureNewFuncId];
 pub(super) const SHARED_CALL: &[PackedOperand] = &[PackedOperand::SharedCallShape];
+pub(super) const GO_ISLAND: &[PackedOperand] = &[PackedOperand::GoIslandArgSlots];
 pub(super) const MAP_NEW: &[PackedOperand] = &[PackedOperand::MapNewSlots];
 pub(super) const QUEUE_NEW: &[PackedOperand] = &[PackedOperand::QueueNewFlags];
+pub(super) const QUEUE_SEND: &[PackedOperand] = &[PackedOperand::QueueSendFlags];
 pub(super) const RECV: &[PackedOperand] = &[PackedOperand::RecvFlags];
 pub(super) const MAP_ITER: &[PackedOperand] = &[PackedOperand::MapIterFlags];
-pub(super) const FOR_LOOP: &[PackedOperand] = &[PackedOperand::ForLoopTarget];
-pub(super) const HINT_LOOP: &[PackedOperand] = &[PackedOperand::ForLoopTarget];
+pub(super) const IFACE_ASSERT: &[PackedOperand] = &[PackedOperand::IfaceAssertFlags];
+pub(super) const TRUNC: &[PackedOperand] = &[PackedOperand::TruncFlags];
+pub(super) const RETURN: &[PackedOperand] = &[PackedOperand::ReturnFlags];
+pub(super) const FOR_LOOP: &[PackedOperand] =
+    &[PackedOperand::ForLoopTarget, PackedOperand::ForLoopFlags];
+pub(super) const HINT_LOOP: &[PackedOperand] = &[PackedOperand::HintLoopShape];
 
 pub(super) const REQ_NONE: &[VerifierRequirement] = &[];
 pub(super) const REQ_LOCAL_LAYOUT: &[VerifierRequirement] = &[
@@ -82,6 +93,18 @@ pub(super) const REQ_METADATA_LOCAL: &[VerifierRequirement] = &[
     VerifierRequirement::JitMetadata,
     VerifierRequirement::LocalSlotRange,
     VerifierRequirement::LocalSlotLayout,
+];
+pub(super) const REQ_STACK_SLOT_INDEX: &[VerifierRequirement] = &[
+    VerifierRequirement::JitMetadata,
+    VerifierRequirement::LocalSlotRange,
+    VerifierRequirement::LocalSlotLayout,
+    VerifierRequirement::CheckedStackArraySpan,
+];
+pub(super) const REQ_MAP_ITER_NEXT: &[VerifierRequirement] = &[
+    VerifierRequirement::JitMetadata,
+    VerifierRequirement::LocalSlotRange,
+    VerifierRequirement::LocalSlotLayout,
+    VerifierRequirement::MapIterNextOutputOwnership,
 ];
 pub(super) const REQ_METADATA_WRITE_BARRIER: &[VerifierRequirement] = &[
     VerifierRequirement::JitMetadata,

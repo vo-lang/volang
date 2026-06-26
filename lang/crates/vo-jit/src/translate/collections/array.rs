@@ -104,37 +104,32 @@ pub(in crate::translate) fn array_set<'a>(
     if elem_bytes <= 8 {
         let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(arr, off);
-        store_element(e, addr, val, elem_bytes);
-        // Write barrier for 8-byte elements that may be GcRefs.
-        // Read elem_meta from ArrayHeader (offset 8, low byte is value_kind).
-        // may_contain_gc_refs iff value_kind >= ValueKind::Array (14).
         if elem_bytes == 8 {
-            emit_array_write_barrier(e, arr, val)?;
+            emit_array_typed_write_barrier_single(e, arr, val)?;
         }
+        store_element(e, addr, val, elem_bytes);
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
+        // Use elem_meta from the array header so struct/interface barriers match the VM.
+        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots)?;
         for i in 0..elem_slots {
             let v = e.read_var(inst.c + i as u16);
             let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
             let addr = e.builder().ins().iadd(arr, slot_off);
             e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
         }
-        // Use elem_meta from the array header so struct/interface barriers match the VM.
-        emit_array_write_barrier_multi(e, arr, inst.c, elem_slots)?;
     }
     Ok(())
 }
 
-/// Emit write barrier for a single-slot array/slice element write.
-/// Checks elem_meta.value_kind >= Array (14) at runtime to skip non-GcRef elements.
-pub(in crate::translate) fn emit_array_write_barrier<'a>(
+/// Emit a typed write barrier for a single-slot array/slice element write.
+/// Checks elem_meta.value_kind >= Array (14) at runtime to skip primitive elements,
+/// then lets the shared metadata helper decide whether the slot is a real GcRef.
+pub(in crate::translate) fn emit_array_typed_write_barrier_single<'a>(
     e: &mut impl CollectionEmitter<'a>,
     arr: Value,
     val: Value,
 ) -> Result<(), JitError> {
-    // ArrayHeader layout: [len:8][elem_meta:4 (low byte = value_kind)][elem_bytes:4]
-    // elem_meta is at offset 8 from arr (which points to data after GcHeader).
-    // Read the low byte (value_kind) of elem_meta.
     let elem_meta_raw = e
         .builder()
         .ins()
@@ -157,10 +152,23 @@ pub(in crate::translate) fn emit_array_write_barrier<'a>(
 
     e.builder().switch_to_block(barrier_block);
     e.builder().seal_block(barrier_block);
-    let wb_ref = require_helper(e.helpers().write_barrier, "write_barrier")?;
-    let gc = e.gc_ptr();
-    let zero_offset = e.builder().ins().iconst(types::I32, 0);
-    emit_funcref_call(e, wb_ref, &[gc, arr, zero_offset, val]);
+    let typed_barrier = require_helper(
+        e.helpers().typed_write_barrier_by_meta,
+        "typed_write_barrier_by_meta",
+    )?;
+    let vals_slot =
+        e.builder()
+            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    e.builder().ins().stack_store(val, vals_slot, 0);
+    let vals_ptr = e.builder().ins().stack_addr(types::I64, vals_slot, 0);
+    let ctx = e.ctx_param();
+    let val_slots = e.builder().ins().iconst(types::I32, 1);
+    emit_checked_jit_result_helper_call(
+        e,
+        typed_barrier,
+        &[ctx, arr, vals_ptr, val_slots, elem_meta_raw],
+        true,
+    );
     e.builder().ins().jump(continue_block, &[]);
 
     e.builder().switch_to_block(continue_block);

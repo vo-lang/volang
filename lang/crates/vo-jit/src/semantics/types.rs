@@ -31,13 +31,22 @@ pub enum PackedOperand {
     CopyNCount,
     StaticCallFuncId,
     PackedCallShape,
+    CallExternArgSlots,
+    CallIfaceMethodIndex,
     ClosureNewFuncId,
     SharedCallShape,
+    GoIslandArgSlots,
     MapNewSlots,
     QueueNewFlags,
+    QueueSendFlags,
     RecvFlags,
     MapIterFlags,
+    IfaceAssertFlags,
+    TruncFlags,
+    ReturnFlags,
     ForLoopTarget,
+    ForLoopFlags,
+    HintLoopShape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +66,8 @@ pub enum VerifierRequirement {
     WriteBarrierLayout,
     JitMetadata,
     LoopMetadata,
+    CheckedStackArraySpan,
+    MapIterNextOutputOwnership,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +238,7 @@ pub enum TrapPolicy {
     UserPanic,
     CallbackJitResult,
     VmSideExit,
+    VmSideExitOrRuntimeTrap,
     CompileFailFast,
 }
 

@@ -101,12 +101,14 @@ pub(super) fn verify_metadata_kind(
             validate_loop_end_backedge(func, pc, end_pc)?;
             Ok(())
         }
-        JitMetadataKind::MapGet
+        JitMetadataKind::MapNew
+        | JitMetadataKind::MapGet
         | JitMetadataKind::MapSet
         | JitMetadataKind::MapDelete
         | JitMetadataKind::PtrLayout
         | JitMetadataKind::SlotLayout
         | JitMetadataKind::CallLayout
+        | JitMetadataKind::CallIfaceLayout
         | JitMetadataKind::CallExternLayout
         | JitMetadataKind::QueueLayout
         | JitMetadataKind::MapIterNext

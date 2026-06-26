@@ -3,7 +3,7 @@ use super::*;
 use crate::call_helpers::{jit_context_callback_callsites, JitContextCallbackCallKind};
 use crate::metadata_contract::JitMetadataKind;
 use crate::semantics::{
-    opcode_semantic_matrix, FailFastCondition, HelperReturnPolicy, RuntimeDependency,
+    opcode_semantic_matrix, FailFastCondition, HelperReturnPolicy, PackedOperand, RuntimeDependency,
 };
 use std::collections::BTreeSet;
 use vo_runtime::instruction::Opcode;
@@ -129,8 +129,99 @@ fn packed_operand_contracts_cover_semantic_matrix_and_have_widths() {
                 edge.subject,
                 field.name
             );
+            let bit_limit = if field.bits >= u16::BITS as u8 {
+                u16::MAX
+            } else {
+                (1u16 << field.bits) - 1
+            };
+            match field.domain {
+                FieldDomain::Any => {}
+                FieldDomain::AllowedMask(mask) => {
+                    assert!(
+                        mask <= bit_limit,
+                        "{:?} field {} domain mask {mask:#x} exceeds {} bits",
+                        edge.subject,
+                        field.name,
+                        field.bits
+                    );
+                    if let Some(max) = field.max {
+                        assert!(
+                            mask <= max,
+                            "{:?} field {} domain mask {mask:#x} exceeds max {max:#x}",
+                            edge.subject,
+                            field.name
+                        );
+                    }
+                }
+                FieldDomain::AllowedValues(values) => {
+                    assert!(
+                        !values.is_empty(),
+                        "{:?} field {} has an empty allowed-value domain",
+                        edge.subject,
+                        field.name
+                    );
+                    for value in values {
+                        assert!(
+                            *value <= bit_limit,
+                            "{:?} field {} value {value:#x} exceeds {} bits",
+                            edge.subject,
+                            field.name,
+                            field.bits
+                        );
+                        if let Some(max) = field.max {
+                            assert!(
+                                *value <= max,
+                                "{:?} field {} value {value:#x} exceeds max {max:#x}",
+                                edge.subject,
+                                field.name
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+#[test]
+fn packed_operand_contracts_describe_reserved_domains_029() {
+    fn field_for(operand: PackedOperand, name: &str) -> FieldWidth {
+        let edge = packed_operand_contract_edges()
+            .iter()
+            .find(|edge| edge.subject == ContractSubject::PackedOperand(operand))
+            .unwrap_or_else(|| panic!("missing packed operand edge for {operand:?}"));
+        let WidthPolicy::PackedFields(fields) = edge.width else {
+            panic!("{operand:?} does not expose packed fields");
+        };
+        *fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("{operand:?} missing field {name}"))
+    }
+
+    assert_eq!(
+        field_for(PackedOperand::TruncFlags, "flags.bytes").domain,
+        FieldDomain::AllowedValues(&[1, 2, 4])
+    );
+    assert_eq!(
+        field_for(PackedOperand::HintLoopShape, "flags.kind").domain,
+        FieldDomain::AllowedValues(&[
+            vo_runtime::instruction::HINT_NOP as u16,
+            vo_runtime::instruction::HINT_LOOP as u16,
+        ])
+    );
+    assert_eq!(
+        field_for(PackedOperand::HintLoopShape, "a.loop_flags").domain,
+        FieldDomain::AllowedMask(
+            (vo_runtime::instruction::LOOP_FLAG_HAS_DEFER
+                | vo_runtime::instruction::LOOP_FLAG_HAS_LABELED_BREAK
+                | vo_runtime::instruction::LOOP_FLAG_HAS_LABELED_CONTINUE) as u16
+        )
+    );
+    assert_eq!(
+        field_for(PackedOperand::ReturnFlags, "flags.allowed_mask").domain,
+        FieldDomain::AllowedMask(vo_runtime::bytecode::ReturnFlags::ALLOWED_BITS as u16)
+    );
 }
 
 #[test]

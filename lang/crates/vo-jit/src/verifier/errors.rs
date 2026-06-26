@@ -557,7 +557,8 @@ impl From<ModuleVerificationError> for JitMetadataError {
 }
 
 fn normalize_common_range_access(access: &'static str) -> &'static str {
-    if access == "MapGet ok"
+    if access == "MapGet value"
+        || access == "MapGet ok"
         || access.contains("destination")
         || access.contains("Destination")
         || access.contains("result")
@@ -596,6 +597,11 @@ impl JitMetadataError {
                 func: func.name.clone(),
                 pc,
                 extern_id,
+            },
+            EffectError::MissingFunction { func_id } => Self::MissingFunction {
+                func: func.name.clone(),
+                pc,
+                callee_id: func_id,
             },
         }
     }

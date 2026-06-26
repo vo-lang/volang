@@ -9,15 +9,17 @@ use super::fields::{
 };
 use super::types::*;
 
-static JIT_METADATA_CONTRACT_EDGES: [ContractEdge; 13] = [
+static JIT_METADATA_CONTRACT_EDGES: [ContractEdge; 15] = [
     metadata_edge(JitMetadataKind::None),
     metadata_edge(JitMetadataKind::ElemLayout),
+    metadata_edge(JitMetadataKind::MapNew),
     metadata_edge(JitMetadataKind::MapGet),
     metadata_edge(JitMetadataKind::MapSet),
     metadata_edge(JitMetadataKind::MapDelete),
     metadata_edge(JitMetadataKind::PtrLayout),
     metadata_edge(JitMetadataKind::SlotLayout),
     metadata_edge(JitMetadataKind::CallLayout),
+    metadata_edge(JitMetadataKind::CallIfaceLayout),
     metadata_edge(JitMetadataKind::CallExternLayout),
     metadata_edge(JitMetadataKind::QueueLayout),
     metadata_edge(JitMetadataKind::MapIterNext),
@@ -66,6 +68,10 @@ const fn metadata_width_const(kind: JitMetadataKind) -> WidthPolicy {
             fields: FIELD_META_MAP_GET_SCALARS,
             slot_layouts: FIELD_META_MAP_GET_LAYOUTS,
         },
+        JitMetadataKind::MapNew => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_MAP_SET_LAYOUTS,
+        },
         JitMetadataKind::MapSet => WidthPolicy::Structured {
             fields: &[],
             slot_layouts: FIELD_META_MAP_SET_LAYOUTS,
@@ -82,12 +88,12 @@ const fn metadata_width_const(kind: JitMetadataKind) -> WidthPolicy {
             fields: &[],
             slot_layouts: FIELD_META_SLOT_LAYOUTS,
         },
-        JitMetadataKind::CallLayout | JitMetadataKind::CallExternLayout => {
-            WidthPolicy::Structured {
-                fields: &[],
-                slot_layouts: FIELD_META_CALL_LAYOUTS,
-            }
-        }
+        JitMetadataKind::CallLayout
+        | JitMetadataKind::CallIfaceLayout
+        | JitMetadataKind::CallExternLayout => WidthPolicy::Structured {
+            fields: &[],
+            slot_layouts: FIELD_META_CALL_LAYOUTS,
+        },
         JitMetadataKind::QueueLayout => WidthPolicy::Structured {
             fields: &[],
             slot_layouts: FIELD_META_QUEUE_LAYOUTS,

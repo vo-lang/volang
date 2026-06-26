@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn rejects_param_transfer_slot_drift_before_jit_load() {
     let mut module = VoModule::new("verify".to_string());
+    module.runtime_types = vec![vo_runtime::RuntimeType::Basic(vo_runtime::ValueKind::Int)];
     let mut func = make_func_with_shape(
         vec![Instruction::new(Opcode::Return, 0, 0, 0)],
         vec![JitInstructionMetadata::None],

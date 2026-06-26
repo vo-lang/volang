@@ -9,7 +9,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 
 use crate::translate::translate_inst;
 use crate::translator::{HelperFuncs, SelectSyncCase, SlotAccess, TranslateResult};
-use crate::JitError;
+use crate::{JitCompileEnv, JitError};
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::jit_api::JitContext;
@@ -19,6 +19,7 @@ pub struct FunctionCompiler<'a> {
     func_id: u32,
     func_def: &'a FunctionDef,
     vo_module: &'a VoModule,
+    env: JitCompileEnv<'a>,
     vars: Vec<Variable>,
     blocks: HashMap<usize, Block>,
     entry_block: Block,
@@ -57,6 +58,7 @@ impl<'a> FunctionCompiler<'a> {
         func_id: u32,
         func_def: &'a FunctionDef,
         vo_module: &'a VoModule,
+        env: JitCompileEnv<'a>,
         helpers: HelperFuncs,
         callee_func_refs: &'a [Option<FuncRef>],
     ) -> Self {
@@ -71,6 +73,7 @@ impl<'a> FunctionCompiler<'a> {
             func_id,
             func_def,
             vo_module,
+            env,
             vars: Vec::new(),
             blocks: HashMap::new(),
             entry_block,
@@ -172,12 +175,21 @@ impl<'a> FunctionCompiler<'a> {
     fn emit_variable_spill(&mut self) {
         let dst_ptr = self.fiber_stack_args_ptr();
         let args_ptr = self.current_memory_base_ptr();
+        let copy_frame_slots = self
+            .helpers
+            .copy_frame_slots
+            .expect("vo_jit_copy_frame_slots helper must be declared");
         crate::compile_common::CompilerStorage::for_function(
             self.func_def,
             &self.vars,
             self.memory_only_start,
         )
-        .spill_for_materialized_frame(&mut self.builder, args_ptr, dst_ptr);
+        .spill_for_materialized_frame(
+            &mut self.builder,
+            args_ptr,
+            dst_ptr,
+            copy_frame_slots,
+        );
     }
 
     fn current_memory_base_ptr(&mut self) -> Value {
@@ -217,17 +229,17 @@ impl<'a> FunctionCompiler<'a> {
         );
         self.store_local(result_reg, result_val);
 
-        let recv_cases: Vec<(usize, u16, usize, bool)> = self
+        let recv_cases: Vec<(u16, u16, usize, bool)> = self
             .pending_select_cases
             .iter()
-            .enumerate()
-            .filter_map(|(idx, case)| match *case {
+            .filter_map(|case| match *case {
                 SelectSyncCase::Send => None,
                 SelectSyncCase::Recv {
+                    case_idx,
                     dst_reg,
                     elem_slots,
                     has_ok,
-                } => Some((idx, dst_reg, elem_slots as usize, has_ok)),
+                } => Some((case_idx, dst_reg, elem_slots as usize, has_ok)),
             })
             .collect();
 
@@ -321,6 +333,16 @@ impl<'a> FunctionCompiler<'a> {
         let ctx = params[0];
         let args_ptr = params[1]; // Points to fiber.stack[jit_bp]
         let _ret = params[2];
+        let current_func_id = self
+            .builder
+            .ins()
+            .iconst(types::I32, i64::from(self.func_id));
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            current_func_id,
+            ctx,
+            JitContext::OFFSET_CURRENT_FUNC_ID,
+        );
 
         // Wrap args_ptr in a Variable so refresh_stack_base_after_reallocation can redefine
         // it after any call that may have triggered fiber.stack reallocation.
@@ -427,14 +449,14 @@ impl<'a> FunctionCompiler<'a> {
             }
             Opcode::Call => self.call(inst),
             Opcode::CallExtern => {
-                crate::call_helpers::emit_call_extern(
+                let terminated = crate::call_helpers::emit_call_extern(
                     self,
                     inst,
                     crate::call_helpers::CallExternConfig {
                         current_pc: self.current_pc,
                     },
                 )?;
-                Ok(false)
+                Ok(terminated)
             }
             Opcode::CallClosure => {
                 crate::call_helpers::emit_call_closure(self, inst)?;
@@ -877,6 +899,26 @@ impl crate::translator::MetadataAccess for FunctionCompiler<'_> {
     fn vo_module(&self) -> &VoModule {
         self.vo_module
     }
+
+    fn resolved_extern(
+        &self,
+        extern_id: u32,
+    ) -> Result<&vo_runtime::bytecode::ResolvedExtern, JitError> {
+        let resolved = self.env.externs.get(extern_id).ok_or_else(|| {
+            JitError::Internal(format!("CallExtern missing resolved extern {extern_id}"))
+        })?;
+        if matches!(
+            resolved.jit_route,
+            vo_runtime::bytecode::ExternJitRoute::DirectHelper
+        ) && !self.env.backend_caps.extern_suspend
+            && !resolved.effective_effects.is_empty()
+        {
+            return Err(JitError::Internal(format!(
+                "CallExtern extern {extern_id} requires extern suspend support"
+            )));
+        }
+        Ok(resolved)
+    }
     fn current_pc(&self) -> usize {
         self.current_pc
     }
@@ -922,11 +964,18 @@ impl<'a> crate::translator::SelectSync<'a> for FunctionCompiler<'a> {
     fn begin_select_tracking(&mut self) {
         self.pending_select_cases.clear();
     }
-    fn record_select_send_case(&mut self) {
+    fn record_select_send_case(&mut self, _case_idx: u16) {
         self.pending_select_cases.push(SelectSyncCase::Send);
     }
-    fn record_select_recv_case(&mut self, dst_reg: u16, elem_slots: u8, has_ok: bool) {
+    fn record_select_recv_case(
+        &mut self,
+        case_idx: u16,
+        dst_reg: u16,
+        elem_slots: u8,
+        has_ok: bool,
+    ) {
         self.pending_select_cases.push(SelectSyncCase::Recv {
+            case_idx,
             dst_reg,
             elem_slots,
             has_ok,

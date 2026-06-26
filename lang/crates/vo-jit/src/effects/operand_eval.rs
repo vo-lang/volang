@@ -76,11 +76,7 @@ fn register_count(
                 .checked_add(u16::from(has_ok))
                 .ok_or_else(|| SlotRangeError::new(access, inst.a, dst_slots).into())
         }
-        RegisterCount::SelectSendElemSlots => Ok(if inst.flags == 0 {
-            1
-        } else {
-            inst.flags as u16
-        }),
+        RegisterCount::SelectSendElemSlots => Ok(inst.flags as u16),
     }
 }
 

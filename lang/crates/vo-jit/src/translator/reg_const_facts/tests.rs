@@ -1,4 +1,4 @@
-use vo_runtime::bytecode::{Constant, ExternDef, JitInstructionMetadata};
+use vo_runtime::bytecode::{Constant, ExternDef, JitInstructionMetadata, ParamShape, ReturnShape};
 use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
 
@@ -126,9 +126,9 @@ fn reg_const_facts_call_extern_only_kills_return_slots() {
     let constants = vec![Constant::Int(258), Constant::Int(1234)];
     let externs = vec![ExternDef {
         name: "native".to_string(),
-        param_slots: 1,
-        ret_slots: 1,
-        is_blocking: false,
+        params: ParamShape::Exact { slots: 1 },
+        returns: ReturnShape::slots(1),
+        allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
         param_kinds: Vec::new(),
     }];
     let code = vec![

@@ -225,41 +225,6 @@ pub fn emit_runtime_trap_if<'a>(
     e.builder().seal_block(ok_block);
 }
 
-pub fn emit_return_if_runtime_trap_recorded<'a>(e: &mut impl TrapEmitter<'a>) {
-    let ctx = e.ctx_param();
-    let kind = e.builder().ins().load(
-        types::I8,
-        MemFlags::trusted(),
-        ctx,
-        JitContext::OFFSET_RUNTIME_TRAP_KIND,
-    );
-    let none = e
-        .builder()
-        .ins()
-        .iconst(types::I8, JitRuntimeTrapKind::None as i64);
-    let has_trap = e.builder().ins().icmp(
-        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-        kind,
-        none,
-    );
-    let panic_block = e.builder().create_block();
-    let ok_block = e.builder().create_block();
-    e.builder()
-        .ins()
-        .brif(has_trap, panic_block, &[], ok_block, &[]);
-
-    e.builder().switch_to_block(panic_block);
-    e.builder().seal_block(panic_block);
-    let panic_val = e
-        .builder()
-        .ins()
-        .iconst(types::I32, JitResult::Panic as i64);
-    e.builder().ins().return_(&[panic_val]);
-
-    e.builder().switch_to_block(ok_block);
-    e.builder().seal_block(ok_block);
-}
-
 pub fn emit_nil_func_trap_if<'a>(e: &mut impl TrapEmitter<'a>, closure_ref: Value) {
     let zero = e.builder().ins().iconst(types::I64, 0);
     let is_nil = e.builder().ins().icmp(

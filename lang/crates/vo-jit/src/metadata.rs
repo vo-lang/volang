@@ -44,6 +44,20 @@ impl<'a> MetadataFacts<'a> {
         self.instruction
             .and_then(map_delete_key_slots_from_instruction)
     }
+
+    fn map_iter_next_layout(self) -> Option<MapIterNextLayout> {
+        self.instruction
+            .and_then(map_iter_next_layout_from_instruction)
+    }
+
+    fn iface_assert_layout(self) -> Option<IfaceAssertLayout> {
+        self.instruction
+            .and_then(iface_assert_layout_from_instruction)
+    }
+
+    fn queue_elem_slots(self) -> Option<u16> {
+        self.instruction.and_then(queue_elem_slots_from_instruction)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +89,20 @@ pub struct MapSetLayout {
     pub val_layout: Vec<SlotType>,
     pub key_slots: u16,
     pub val_slots: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapIterNextLayout {
+    pub key_layout: Vec<SlotType>,
+    pub val_layout: Vec<SlotType>,
+    pub key_slots: u16,
+    pub val_slots: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceAssertLayout {
+    pub result_layout: Vec<SlotType>,
+    pub result_slots: u16,
 }
 
 pub fn elem_layout_from_flags(flags: u8) -> ElemLayout {
@@ -117,11 +145,17 @@ fn elem_layout_from_bytes(
     slot_layout: &[SlotType],
 ) -> Option<ElemLayout> {
     if bytes == 0 {
-        return (!needs_sign_extend && slot_layout.is_empty()).then_some(ElemLayout {
+        if needs_sign_extend {
+            return None;
+        }
+        if !slot_layout.is_empty() && slot_layout != [SlotType::Value] {
+            return None;
+        }
+        return Some(ElemLayout {
             bytes: 0,
             slots: 0,
             needs_sign_extend: false,
-            slot_layout: Vec::new(),
+            slot_layout: slot_layout.to_vec(),
         });
     }
     let slots = u16::try_from(bytes.div_ceil(8)).ok()?;
@@ -137,11 +171,9 @@ fn elem_layout_from_bytes(
 }
 
 fn elem_layout_from_flags_or_fact(flags: u8, facts: MetadataFacts<'_>) -> Option<ElemLayout> {
-    if flags == 0 {
-        facts.elem_layout()
-    } else {
-        Some(elem_layout_from_flags(flags))
-    }
+    facts
+        .elem_layout()
+        .or_else(|| (flags != 0).then(|| elem_layout_from_flags(flags)))
 }
 
 pub fn indexed_get_result_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
@@ -212,6 +244,65 @@ pub fn map_delete_key_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Opt
     facts.map_delete_key_slots()
 }
 
+pub fn map_iter_next_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<MapIterNextLayout> {
+    match metadata {
+        JitInstructionMetadata::MapIterNext {
+            key_layout,
+            val_layout,
+        } => Some(MapIterNextLayout {
+            key_layout: key_layout.clone(),
+            val_layout: val_layout.clone(),
+            key_slots: u16::try_from(key_layout.len()).ok()?,
+            val_slots: u16::try_from(val_layout.len()).ok()?,
+        }),
+        _ => None,
+    }
+}
+
+pub fn map_iter_next_layout(
+    inst: &Instruction,
+    facts: MetadataFacts<'_>,
+) -> Option<MapIterNextLayout> {
+    let _ = inst;
+    facts.map_iter_next_layout()
+}
+
+pub fn iface_assert_layout_from_instruction(
+    metadata: &JitInstructionMetadata,
+) -> Option<IfaceAssertLayout> {
+    match metadata {
+        JitInstructionMetadata::IfaceAssertLayout { result_layout } => Some(IfaceAssertLayout {
+            result_layout: result_layout.clone(),
+            result_slots: u16::try_from(result_layout.len()).ok()?,
+        }),
+        _ => None,
+    }
+}
+
+pub fn iface_assert_layout(
+    inst: &Instruction,
+    facts: MetadataFacts<'_>,
+) -> Option<IfaceAssertLayout> {
+    let _ = inst;
+    facts.iface_assert_layout()
+}
+
+pub fn queue_elem_slots_from_instruction(metadata: &JitInstructionMetadata) -> Option<u16> {
+    match metadata {
+        JitInstructionMetadata::QueueLayout { elem_layout } => {
+            Some(u16::try_from(elem_layout.len()).ok()?)
+        }
+        _ => None,
+    }
+}
+
+pub fn queue_elem_slots(inst: &Instruction, facts: MetadataFacts<'_>) -> Option<u16> {
+    let _ = inst;
+    facts.queue_elem_slots()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +318,39 @@ mod tests {
                 needs_sign_extend: true,
                 slot_layout: vec![SlotType::Value]
             }
+        );
+    }
+
+    #[test]
+    fn metadata_facts_prefer_precise_elem_layout_over_compact_flags() {
+        let slice_get = Instruction::with_flags(Opcode::SliceGet, 8, 20, 2, 7);
+        let elem_meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 8,
+            needs_sign_extend: false,
+            slot_layout: vec![SlotType::GcRef],
+        };
+
+        assert_eq!(
+            elem_layout_from_flags(8),
+            ElemLayout {
+                bytes: 8,
+                slots: 1,
+                needs_sign_extend: false,
+                slot_layout: vec![SlotType::Value]
+            }
+        );
+        assert_eq!(
+            indexed_get_result_slots(
+                &slice_get,
+                MetadataFacts::from_instruction(Some(&elem_meta))
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            elem_layout_from_flags_or_fact(8, MetadataFacts::from_instruction(Some(&elem_meta)))
+                .unwrap()
+                .slot_layout,
+            vec![SlotType::GcRef]
         );
     }
 
@@ -269,6 +393,29 @@ mod tests {
             slot_layout: Vec::new(),
         };
 
+        assert_eq!(
+            indexed_get_result_slots(
+                &slice_get,
+                MetadataFacts::from_instruction(Some(&elem_meta))
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn metadata_facts_allow_zero_size_empty_struct_logical_layout() {
+        let slice_get = Instruction::with_flags(Opcode::SliceGet, 0, 20, 2, 7);
+        let elem_meta = JitInstructionMetadata::ElemLayout {
+            elem_bytes: 0,
+            needs_sign_extend: false,
+            slot_layout: vec![SlotType::Value],
+        };
+
+        let layout =
+            elem_layout_from_flags_or_fact(0, MetadataFacts::from_instruction(Some(&elem_meta)))
+                .expect("zero-byte empty struct sentinel layout should decode");
+        assert_eq!(layout.slots, 0);
+        assert_eq!(layout.slot_layout, vec![SlotType::Value]);
         assert_eq!(
             indexed_get_result_slots(
                 &slice_get,

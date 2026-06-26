@@ -81,7 +81,15 @@ pub struct FieldWidth {
     pub name: &'static str,
     pub bits: u8,
     pub max: Option<u16>,
+    pub domain: FieldDomain,
     pub authority: LayoutAuthority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldDomain {
+    Any,
+    AllowedMask(u16),
+    AllowedValues(&'static [u16]),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +143,7 @@ pub enum PanicPolicy {
     RuntimeTrap,
     UserPanic,
     VmSideExit,
+    VmSideExitOrRuntimeTrap,
     CompileFailFast,
     InternalRustPanicOnly,
 }
