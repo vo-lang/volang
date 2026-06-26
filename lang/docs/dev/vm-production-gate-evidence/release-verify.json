@@ -1,0 +1,13 @@
+{
+  "schema": "vo-dev-task-run-evidence-v1",
+  "selector": "release-verify",
+  "changed": false,
+  "passed": true,
+  "source_state": "vm-production-current-source:b625c2ddd82eb7b3e0fb8e84397176edb590d072e1a3847fa170287ecaa00282",
+  "tasks": [
+    "release-verify-vogui",
+    "release-verify-voplay",
+    "release-verify-vopack",
+    "release-verify-vostore"
+  ]
+}
