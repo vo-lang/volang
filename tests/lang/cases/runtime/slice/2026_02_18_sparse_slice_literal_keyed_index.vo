@@ -1,0 +1,11 @@
+package main
+
+import "fmt"
+
+func main() {
+	s := []int{70000: 7}
+	assert(len(s) == 70001, "sparse slice literal length should follow max keyed index")
+	assert(s[0] == 0, "sparse slice literal should zero-fill gaps")
+	assert(s[70000] == 7, "sparse slice literal should preserve keyed high index")
+	fmt.Println("sparse_slice_literal_keyed_index: ok")
+}

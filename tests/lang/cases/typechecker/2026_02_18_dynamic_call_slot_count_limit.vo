@@ -1,0 +1,16 @@
+package main
+
+type Big [256]int
+
+type I interface {
+	M(Big)
+}
+
+func main() {
+	var f func(Big)
+	var b Big
+	f(b)
+
+	var i I
+	i.M(b)
+}

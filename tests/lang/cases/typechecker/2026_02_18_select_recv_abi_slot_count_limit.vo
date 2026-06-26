@@ -1,0 +1,14 @@
+package main
+
+type Wide struct {
+	a [128]int
+}
+
+var ch chan Wide
+
+func main() {
+	select {
+	case <-ch:
+	default:
+	}
+}

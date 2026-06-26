@@ -1,0 +1,60 @@
+package main
+
+import "fmt"
+
+type SliceStruct struct {
+	xs []int
+}
+
+func mustPanic(name string, f func()) {
+	var caught any
+	func() {
+		defer func() {
+			caught = recover()
+		}()
+		f()
+	}()
+	assert(caught != nil, name)
+}
+
+func mapGet(m map[any]int, key any) {
+	_ = m[key]
+}
+
+func mapSet(m map[any]int, key any) {
+	m[key] = 1
+}
+
+func mapDelete(m map[any]int, key any) {
+	delete(m, key)
+}
+
+func main() {
+	m := make(map[any]int)
+	m["ok"] = 7
+	assert(m["ok"] == 7, "sanity: comparable key should work")
+
+	var sliceKey any = []int{1}
+	mustPanic("map[any] get with slice key should panic", func() {
+		mapGet(m, sliceKey)
+	})
+	mustPanic("map[any] set with slice key should panic", func() {
+		mapSet(m, sliceKey)
+	})
+	mustPanic("map[any] delete with slice key should panic", func() {
+		mapDelete(m, sliceKey)
+	})
+
+	var nestedKey any = SliceStruct{xs: []int{1}}
+	mustPanic("map[any] get with nested unhashable key should panic", func() {
+		mapGet(m, nestedKey)
+	})
+	mustPanic("map[any] set with nested unhashable key should panic", func() {
+		mapSet(m, nestedKey)
+	})
+	mustPanic("map[any] delete with nested unhashable key should panic", func() {
+		mapDelete(m, nestedKey)
+	})
+
+	fmt.Println("map_any_unhashable_panics: ok")
+}

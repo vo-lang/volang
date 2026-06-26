@@ -21,6 +21,15 @@ owner = "jit"
 expect = "pass"
 
 [[case]]
+id = "2026-02-18-jit-select-default-middle-recv-value"
+kind = "file"
+path = "cases/jit/2026_02_18_jit_select_default_middle_recv_value.vo"
+matrix = "default"
+tags = ["jit", "regression", "select"]
+owner = "jit"
+expect = "pass"
+
+[[case]]
 id = "2026-01-30-jit-to-jit-direct"
 kind = "file"
 path = "cases/jit/2026_01_30_jit_to_jit_direct.vo"
@@ -175,6 +184,334 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "2026-02-18-select-operand-call-nested-select"
+kind = "file"
+path = "cases/runtime/scheduler/2026_02_18_select_operand_call_nested_select.vo"
+matrix = "default"
+tags = ["scheduler", "regression", "select"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "2026-02-18-select-send-zero-slot-array"
+kind = "file"
+path = "cases/runtime/scheduler/2026_02_18_select_send_zero_slot_array.vo"
+matrix = "default"
+tags = ["scheduler", "regression", "select"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "2026-02-18-slot-count-u16-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_slot_count_u16_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "array", "vm-contract"]
+owner = "typechecker"
+reason = "VM slot operands and metadata use u16 widths; oversized value layouts must fail before bytecode emission"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
+id = "2026-02-18-struct-total-slot-count-u16-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_struct_total_slot_count_u16_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "struct", "array", "vm-contract"]
+owner = "typechecker"
+reason = "StructMeta field offsets use u16 widths; cumulative struct layouts must fail before metadata emission"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
+id = "2026-02-18-anonymous-struct-total-slot-count-u16-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_anonymous_struct_total_slot_count_u16_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "struct", "array", "vm-contract"]
+owner = "typechecker"
+reason = "Anonymous StructMeta field offsets use u16 widths; cumulative layouts must fail before runtime type interning"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
+id = "2026-02-18-function-param-total-slot-count-u16-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_function_param_total_slot_count_u16_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "function", "array", "vm-contract"]
+owner = "typechecker"
+reason = "Function param_slots use u16 widths; aggregate parameter layouts must fail before FunctionDef emission"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
+id = "2026-02-18-function-return-total-slot-count-u16-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_function_return_total_slot_count_u16_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "function", "array", "vm-contract"]
+owner = "typechecker"
+reason = "Function ret_slots use u16 widths; aggregate return layouts must fail before FunctionDef emission"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
+id = "2026-02-18-function-local-total-slot-count-u16-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_function_local_total_slot_count_u16_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "function", "array", "vm-contract"]
+owner = "typechecker"
+reason = "Function local_slots and GC scan high-water marks use u16 widths; aggregate local layouts must fail before FunctionDef emission"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
+id = "2026-02-18-select-recv-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_select_recv_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "select", "scheduler", "vm-contract"]
+owner = "typechecker"
+reason = "SelectRecv packs receive element slots into a 7-bit ABI field and must fail without panicking"
+expect = { fail = ["SelectRecv ABI supports at most 127 element slots"] }
+
+[[case]]
+id = "2026-02-18-dynamic-call-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_dynamic_call_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "function", "interface", "vm-contract"]
+owner = "typechecker"
+reason = "Dynamic CallClosure and CallIface encode arg/return slots in 8-bit ABI fields and must fail deliberately"
+expect = { fail = ["dynamic call slot count exceeds u8"] }
+
+[[case]]
+id = "2026-02-18-dynamic-iface-call-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_dynamic_iface_call_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "interface", "vm-contract"]
+owner = "typechecker"
+reason = "Dynamic CallIface encodes arg/return slots in 8-bit ABI fields and must fail deliberately"
+expect = { fail = ["dynamic call slot count exceeds u8"] }
+
+[[case]]
+id = "2026-02-18-dynamic-call-aggregate-slot-count-u16-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_dynamic_call_aggregate_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "function", "interface", "method-value", "method-expression", "scheduler", "vm-contract"]
+owner = "typechecker"
+reason = "Dynamic call and wrapper aggregate argument layouts must fail before u16 slot counts can truncate"
+expect = { fail = ["slot count exceeds u16"] }
+
+[[case]]
+id = "2026-02-18-interface-method-value-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_interface_method_value_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "interface", "method-value", "vm-contract"]
+owner = "typechecker"
+reason = "Interface method-value wrappers use dynamic CallIface ABI widths and must fail deliberately"
+expect = { fail = ["dynamic call slot count exceeds u8"] }
+
+[[case]]
+id = "2026-02-18-embedded-iface-method-expr-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_embedded_iface_method_expr_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "interface", "method-expression", "embedding", "vm-contract"]
+owner = "typechecker"
+reason = "Embedded-interface method-expression wrappers use dynamic CallIface ABI widths and must fail deliberately"
+expect = { fail = ["dynamic call slot count exceeds u8"] }
+
+[[case]]
+id = "2026-02-18-call-iface-method-index-u8-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_call_iface_method_index_u8_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "interface", "method-value", "method-expression", "vm-contract"]
+owner = "typechecker"
+reason = "CallIface encodes method index in an 8-bit operand field and must fail deliberately before bytecode emission"
+expect = { fail = ["CallIface method index exceeds u8"] }
+
+[[case]]
+id = "2026-02-18-go-island-arg-slot-count-u8-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_go_island_arg_slot_count_u8_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "scheduler", "island", "vm-contract"]
+owner = "typechecker"
+reason = "GoIsland encodes argument slot count in an 8-bit operand field and must fail deliberately before bytecode emission"
+expect = { fail = ["GoIsland arg slot count exceeds u8"] }
+
+[[case]]
+id = "2026-02-18-call-extern-arg-slot-count-u8-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_call_extern_arg_slot_count_u8_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "extern", "builtin", "vm-contract"]
+owner = "typechecker"
+reason = "Builtin extern calls encode argument slot count in an 8-bit operand field and must fail deliberately before bytecode emission"
+expect = { fail = ["CallExtern arg slot count exceeds u8"] }
+
+[[case]]
+id = "2026-02-18-queue-make-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_queue_make_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "queue", "vm-contract"]
+owner = "typechecker"
+reason = "QueueNew packs element slots into a 7-bit ABI field and must fail deliberately before bytecode emission"
+expect = { fail = ["QueueNew ABI supports at most 127 element slots"] }
+
+[[case]]
+id = "2026-02-18-queue-send-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_queue_send_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "queue", "vm-contract"]
+owner = "typechecker"
+reason = "QueueSend packs element slots into an 8-bit ABI field and must fail deliberately before bytecode emission"
+expect = { fail = ["QueueSend ABI supports at most 255 element slots"] }
+
+[[case]]
+id = "2026-02-18-select-send-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_select_send_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "select", "scheduler", "vm-contract"]
+owner = "typechecker"
+reason = "SelectSend shares the QueueSend ABI width owner and must fail deliberately before bytecode emission"
+expect = { fail = ["QueueSend ABI supports at most 255 element slots"] }
+
+[[case]]
+id = "2026-02-18-map-make-key-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_make_key_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapNew packs key slots into an 8-bit ABI field and must fail deliberately for make(map[K]V)"
+expect = { fail = ["MapNew key slot count exceeds u8 packed operand width"] }
+
+[[case]]
+id = "2026-02-18-map-make-value-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_make_value_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapNew packs value slots into an 8-bit ABI field and must fail deliberately for make(map[K]V)"
+expect = { fail = ["MapNew value slot count exceeds u8 packed operand width"] }
+
+[[case]]
+id = "2026-02-18-map-make-key-u16-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_make_key_u16_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapNew key layout metadata must fail deliberately before u16 slot counts can panic or truncate"
+expect = { fail = ["type slot count exceeds u16::MAX"] }
+
+[[case]]
+id = "2026-02-18-map-make-value-u16-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_make_value_u16_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapNew value layout metadata must fail deliberately before u16 slot counts can panic or truncate"
+expect = { fail = ["type slot count exceeds u16::MAX"] }
+
+[[case]]
+id = "2026-02-18-map-literal-key-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_literal_key_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapNew packs key slots into an 8-bit ABI field and must fail deliberately for map literals"
+expect = { fail = ["MapNew key slot count exceeds u8 packed operand width"] }
+
+[[case]]
+id = "2026-02-18-map-literal-value-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_literal_value_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapNew packs value slots into an 8-bit ABI field and must fail deliberately for map literals"
+expect = { fail = ["MapNew value slot count exceeds u8 packed operand width"] }
+
+[[case]]
+id = "2026-02-18-map-set-key-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_set_key_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapSet packs key slots into an 8-bit ABI field and must fail deliberately before bytecode emission"
+expect = { fail = ["MapSet key slot count exceeds u8 packed operand width"] }
+
+[[case]]
+id = "2026-02-18-map-set-value-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_set_value_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapSet packs value slots into an 8-bit ABI field and must fail deliberately before bytecode emission"
+expect = { fail = ["MapSet value slot count exceeds u8 packed operand width"] }
+
+[[case]]
+id = "2026-02-18-map-get-value-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_get_value_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapGet packs value slots into a 15-bit ABI field and must fail deliberately before bytecode emission"
+expect = { fail = ["MapGet value slot count exceeds 15-bit packed operand width"] }
+
+[[case]]
+id = "2026-02-18-map-iter-key-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_iter_key_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapIterNext packs key slots into a 4-bit flags field and must fail deliberately before bytecode emission"
+expect = { fail = ["MapIterNext ABI supports at most 15 key/value slots"] }
+
+[[case]]
+id = "2026-02-18-map-iter-value-abi-slot-count-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_map_iter_value_abi_slot_count_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+owner = "typechecker"
+reason = "MapIterNext packs value slots into a 4-bit flags field and must fail deliberately before bytecode emission"
+expect = { fail = ["MapIterNext ABI supports at most 15 key/value slots"] }
+
+[[case]]
+id = "2026-02-18-stack-array-get-element-slot-count-u8-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_stack_array_get_element_slot_count_u8_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "array", "vm-contract"]
+owner = "typechecker"
+reason = "SlotGetN packs stack-array element slot count into an 8-bit flags field and must fail deliberately before bytecode emission"
+expect = { fail = ["SlotGetN element slot count exceeds u8 packed operand width"] }
+
+[[case]]
+id = "2026-02-18-stack-array-set-element-slot-count-u8-limit"
+kind = "file"
+path = "cases/typechecker/2026_02_18_stack_array_set_element_slot_count_u8_limit.vo"
+matrix = "compile"
+tags = ["typechecker", "compile-fail", "array", "vm-contract"]
+owner = "typechecker"
+reason = "SlotSetN packs stack-array element slot count into an 8-bit flags field and must fail deliberately before bytecode emission"
+expect = { fail = ["SlotSetN element slot count exceeds u8 packed operand width"] }
+
+[[case]]
 id = "2026-03-13-jit-port-queue-builtins"
 kind = "file"
 path = "cases/jit/2026_03_13_jit_port_queue_builtins.vo"
@@ -249,6 +586,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "2026-02-18-sparse-slice-literal-keyed-index"
+kind = "file"
+path = "cases/runtime/slice/2026_02_18_sparse_slice_literal_keyed_index.vo"
+matrix = "default"
+tags = ["runtime", "regression", "slice", "literal"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "array-as-map-key"
 kind = "file"
 path = "cases/runtime/map/array_as_map_key.vo"
@@ -298,7 +644,7 @@ id = "big-array"
 kind = "file"
 path = "cases/runtime/array/big_array.vo"
 matrix = "default"
-tags = ["runtime", "array"]
+tags = ["runtime", "array", "jit", "contract"]
 owner = "runtime"
 expect = "pass"
 
@@ -803,11 +1149,22 @@ id = "bugs.2026-01-31-jit-http-server-client"
 kind = "file"
 path = "cases/bugs/2026_01_31_jit_http_server_client.vo"
 matrix = "default"
-tags = ["jit", "regression"]
+tags = ["jit", "regression", "contract"]
 owner = "jit"
-skip = ["jit", "osr", "nostd", "wasm"]
-reason = "net requires native externs; concurrent IO read on fd causes crash under JIT; nostd: time externs are not registered in vo-embed"
+skip = ["osr", "nostd", "wasm"]
+timeout = { jit = 120 }
+reason = "net requires native externs; OSR is not the intended HTTP readiness mode; nostd: time externs are not registered in vo-embed; timeout records the known long-running JIT HTTP server/client target"
 expect = "pass"
+
+[[case]]
+id = "bugs.2026-01-31-jit-http-server-client-osr"
+kind = "file"
+path = "cases/bugs/2026_01_31_jit_http_server_client.vo"
+matrix = "osr-only"
+tags = ["jit", "osr", "contract", "stdlib", "regression"]
+owner = "jit"
+reason = "OSR readiness proof for the HTTP server/client hot loop"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
 
 [[case]]
 id = "bugs.2026-04-29-borrowed-call-frame-depth-oob"
@@ -1019,6 +1376,26 @@ path = "cases/bugs/2026_05_31_jit_runtime_trap_spills_defer.vo"
 matrix = "default-gc"
 tags = ["gc", "contract", "regression", "defer"]
 owner = "runtime-gc"
+expect = "pass"
+
+[[case]]
+id = "bugs.2026-06-15-osr-prepared-call-stack"
+kind = "file"
+path = "cases/bugs/2026_06_15_osr_prepared_call_stack.vo"
+matrix = "osr-only"
+tags = ["jit", "osr", "regression", "closure", "contract"]
+owner = "jit"
+reason = "native OSR regression for prepared closure-call OK path stack-base refresh after fiber stack growth"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
+
+[[case]]
+id = "bugs.2026-06-17-scheduled-iface-return-layout"
+kind = "file"
+path = "cases/bugs/2026_06_17_scheduled_iface_return_layout.vo"
+matrix = "native"
+tags = ["jit", "osr", "regression", "interface", "defer", "scheduler"]
+owner = "vm"
+reason = "native scheduler regression for defer/go interface calls whose callee returns values discarded by scheduling"
 expect = "pass"
 
 [[case]]
@@ -1781,8 +2158,9 @@ id = "dyn.dyn-access-map-interface-val"
 kind = "file"
 path = "cases/dyn/dyn_access_map_interface_val.vo"
 matrix = "default"
-tags = ["dyn", "interface", "map", "numeric"]
+tags = ["dyn", "interface", "map", "contract"]
 owner = "runtime"
+reason = "Dynamic map access must preserve interface value itabs and reject values that do not implement the map's non-empty interface value type"
 expect = "pass"
 
 [[case]]
@@ -1809,6 +2187,15 @@ kind = "file"
 path = "cases/dyn/dyn_api.vo"
 matrix = "default"
 tags = ["dyn"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "dyn.dyn-map-any-unhashable-key"
+kind = "file"
+path = "cases/dyn/dyn_map_any_unhashable_key.vo"
+matrix = "default"
+tags = ["dyn", "map", "regression", "contract"]
 owner = "runtime"
 expect = "pass"
 
@@ -2213,6 +2600,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "dyn.dyn-method-value-receiver-multi-slot"
+kind = "file"
+path = "cases/dyn/dyn_method_value_receiver_multi_slot.vo"
+matrix = "default"
+tags = ["dyn", "method", "regression", "contract"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "dyn.dyn-multi-ret-func-arg"
 kind = "file"
 path = "cases/dyn/dyn_multi_ret_func_arg.vo"
@@ -2379,7 +2775,7 @@ id = "dyn.dyn-set-from-get"
 kind = "file"
 path = "cases/dyn/dyn_set_from_get.vo"
 matrix = "default"
-tags = ["dyn"]
+tags = ["dyn", "jit", "osr", "contract"]
 owner = "runtime"
 expect = "pass"
 
@@ -2388,8 +2784,18 @@ id = "dyn.dyn-set-index-map-key-validation"
 kind = "file"
 path = "cases/dyn/dyn_set_index_map_key_validation.vo"
 matrix = "default"
-tags = ["dyn", "map"]
+tags = ["dyn", "map", "jit", "osr", "contract"]
 owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "dyn.dynamic-packed-signed-array"
+kind = "file"
+path = "cases/dyn/dynamic_packed_signed_array.vo"
+matrix = "default"
+tags = ["dyn", "array", "numeric", "jit", "osr", "contract"]
+owner = "runtime"
+reason = "VM readiness contract: dynamic array indexing and aggregate assignment must preserve logical signed values for packed elements"
 expect = "pass"
 
 [[case]]
@@ -2523,9 +2929,39 @@ id = "dyn.int-index-variants"
 kind = "file"
 path = "cases/dyn/int_index_variants.vo"
 matrix = "default"
-tags = ["dyn", "numeric"]
+tags = ["dyn", "numeric", "jit", "osr", "contract"]
 owner = "runtime"
 expect = "pass"
+
+[[case]]
+id = "dyn.osr-dynamic-set-from-get-contract"
+kind = "file"
+path = "cases/dyn/osr_dynamic_set_from_get_contract.vo"
+matrix = "osr-only"
+tags = ["dyn", "jit", "osr", "contract"]
+owner = "runtime"
+reason = "VM readiness OSR contract: dynamic get-to-set value pairs and aggregate unboxing must execute inside loop JIT"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
+
+[[case]]
+id = "dyn.osr-dynamic-integer-key-contract"
+kind = "file"
+path = "cases/dyn/osr_dynamic_integer_key_contract.vo"
+matrix = "osr-only"
+tags = ["dyn", "map", "numeric", "jit", "osr", "contract"]
+owner = "runtime"
+reason = "VM readiness OSR contract: dynamic integer map keys and slice indexes must execute inside loop JIT"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
+
+[[case]]
+id = "dyn.osr-dynamic-protocol-index-contract"
+kind = "file"
+path = "cases/dyn/osr_dynamic_protocol_index_contract.vo"
+matrix = "osr-only"
+tags = ["dyn", "method", "jit", "osr", "contract"]
+owner = "runtime"
+reason = "VM readiness OSR contract: dynamic DynIndex/DynSetIndex replay must preserve interface pairs inside loop JIT"
+expect = { kind = "pass", jit_loop_entries_min = 1 }
 
 [[case]]
 id = "dyn.interface-field-dyn"
@@ -3190,6 +3626,17 @@ reason = "GC debug not available in wasm"
 expect = "pass"
 
 [[case]]
+id = "gc-panic-recover-named-return-string"
+kind = "file"
+path = "cases/gc/gc_panic_recover_named_return_string.vo"
+matrix = "default-gc"
+tags = ["gc", "contract", "defer", "panic"]
+owner = "runtime-gc"
+skip = ["nostd", "wasm"]
+reason = "GC debug not available in wasm; nostd: time externs are not registered in vo-embed"
+expect = "pass"
+
+[[case]]
 id = "gc-incremental-sweep-barrier"
 kind = "file"
 path = "cases/gc/gc_incremental_sweep_barrier.vo"
@@ -3351,6 +3798,15 @@ kind = "file"
 path = "cases/runtime/panic/iface_noncomparable_panics.vo"
 matrix = "default"
 tags = ["interface", "panic"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "iface-nested-uncomparable-panics"
+kind = "file"
+path = "cases/runtime/panic/iface_nested_uncomparable_panics.vo"
+matrix = "default"
+tags = ["interface", "panic", "regression", "contract"]
 owner = "runtime"
 expect = "pass"
 
@@ -3661,6 +4117,17 @@ kind = "file"
 path = "cases/runtime/scheduler/island_basic.vo"
 matrix = "default"
 tags = ["scheduler", "island"]
+owner = "runtime"
+skip = ["nostd", "wasm"]
+reason = "island/goroutine not supported in wasm; nostd: time externs are not registered in vo-embed"
+expect = "pass"
+
+[[case]]
+id = "direct-method-value-cross-island-multi-slot"
+kind = "file"
+path = "cases/runtime/scheduler/direct_method_value_cross_island_multi_slot.vo"
+matrix = "default"
+tags = ["scheduler", "island", "method", "contract", "regression"]
 owner = "runtime"
 skip = ["nostd", "wasm"]
 reason = "island/goroutine not supported in wasm; nostd: time externs are not registered in vo-embed"
@@ -4169,6 +4636,15 @@ owner = "eng"
 skip = ["jit", "nostd", "osr", "vm", "wasm"]
 reason = "blank placeholder"
 blank = true
+expect = "pass"
+
+[[case]]
+id = "map-any-unhashable-panics"
+kind = "file"
+path = "cases/runtime/panic/map_any_unhashable_panics.vo"
+matrix = "default"
+tags = ["map", "interface", "panic", "regression", "contract"]
+owner = "runtime"
 expect = "pass"
 
 [[case]]
@@ -8761,6 +9237,15 @@ owner = "stdlib"
 expect = "pass"
 
 [[case]]
+id = "stdlib.bytes-casefold-title"
+kind = "file"
+path = "cases/stdlib/bytes_casefold_title.vo"
+matrix = "default"
+tags = ["stdlib", "regression"]
+owner = "stdlib"
+expect = "pass"
+
+[[case]]
 id = "stdlib.bytes-buffer"
 kind = "file"
 path = "cases/stdlib/bytes_buffer.vo"
@@ -9024,8 +9509,8 @@ path = "cases/stdlib/time.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["nostd", "wasm"]
-reason = "time module uses unreachable in wasm; nostd: time externs are not registered in vo-embed"
+skip = ["nostd"]
+reason = "time externs are not registered in vo-embed"
 expect = "pass"
 
 [[case]]

@@ -1,0 +1,18 @@
+package main
+
+type Big [256]int
+
+type I interface {
+	M(Big)
+}
+
+type Holder struct {
+	I
+}
+
+func main() {
+	f := Holder.M
+	var h Holder
+	var b Big
+	f(h, b)
+}

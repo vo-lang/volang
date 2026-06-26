@@ -1,0 +1,32 @@
+package main
+
+type Pair struct {
+	out port int
+	a int
+	b int
+}
+
+func (p Pair) SendSum() {
+	p.out <- p.a + p.b
+}
+
+func (p Pair) SendMix(n int) {
+	p.out <- p.a*100 + p.b*10 + n
+}
+
+func main() {
+	worker := make(island)
+	out := make(port int, 2)
+	p := Pair{out: out, a: 3, b: 4}
+
+	go @(worker) p.SendSum()
+	assert(<-out == 7, "cross-island direct value method must preserve all receiver slots")
+
+	go @(worker) p.SendMix(8)
+	assert(<-out == 348, "cross-island direct value method must pass receiver and args")
+
+	println("direct method value cross island multi slot: ok")
+}
+
+// expected output:
+// direct method value cross island multi slot: ok

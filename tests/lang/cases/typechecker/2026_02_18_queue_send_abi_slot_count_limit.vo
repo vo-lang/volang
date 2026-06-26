@@ -1,0 +1,9 @@
+package main
+
+type Big [256]int
+
+func main() {
+	var ch chan Big
+	var b Big
+	ch <- b
+}

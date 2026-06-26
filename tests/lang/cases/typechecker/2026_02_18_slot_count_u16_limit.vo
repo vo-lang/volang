@@ -1,0 +1,10 @@
+package main
+
+type TooWide struct {
+	x [65536]int
+	y string
+}
+
+func main() {
+	_ = TooWide{}
+}

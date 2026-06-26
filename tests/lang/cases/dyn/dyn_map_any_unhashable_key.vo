@@ -1,0 +1,22 @@
+package main
+
+import "dyn"
+import "errors"
+import "fmt"
+
+func main() {
+	m := make(map[any]int)
+	m["ok"] = 7
+	var base any = m
+	var key any = []int{1}
+
+	_, err := dyn.GetIndex(base, key)
+	assert(errors.Is(err, dyn.ErrBadIndex), "dyn.GetIndex must preserve unhashable map key as ErrBadIndex")
+
+	err = dyn.SetIndex(base, key, 9)
+	assert(errors.Is(err, dyn.ErrBadIndex), "dyn.SetIndex must preserve unhashable map key as ErrBadIndex")
+	assert(len(m) == 1, "dyn.SetIndex with unhashable key must not mutate map")
+	assert(m["ok"] == 7, "dyn.SetIndex with unhashable key must preserve existing entries")
+
+	fmt.Println("dyn_map_any_unhashable_key: ok")
+}

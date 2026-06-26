@@ -1,0 +1,7 @@
+package main
+
+type Big [256]int
+
+func main() {
+	_ = map[Big]int{}
+}

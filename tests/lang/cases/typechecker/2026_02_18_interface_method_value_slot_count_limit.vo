@@ -1,0 +1,14 @@
+package main
+
+type Big [256]int
+
+type I interface {
+	M(Big)
+}
+
+func main() {
+	var i I
+	mv := i.M
+	var b Big
+	mv(b)
+}

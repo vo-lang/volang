@@ -1,0 +1,8 @@
+package main
+
+type Big [32768]int
+
+func main() {
+	var m map[int]Big
+	_ = m[0]
+}

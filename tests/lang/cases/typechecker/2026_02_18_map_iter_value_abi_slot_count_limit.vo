@@ -1,0 +1,10 @@
+package main
+
+type Big [16]int
+
+func main() {
+	var m map[int]Big
+	for _, v := range m {
+		_ = v
+	}
+}

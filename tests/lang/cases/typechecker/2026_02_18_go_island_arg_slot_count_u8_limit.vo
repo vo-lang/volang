@@ -1,0 +1,10 @@
+package main
+
+type Big [256]int
+
+func main() {
+    i := make(island)
+    var b Big
+    go @(i) func(x Big) {
+    }(b)
+}

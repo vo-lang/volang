@@ -1,0 +1,50 @@
+// OSR contract: dynamic protocol index calls replay key/value interface pairs intact.
+package main
+
+import (
+	"dyn"
+	"fmt"
+)
+
+type CheckedArray struct {
+	data []any
+}
+
+func NewCheckedArray(size int) *CheckedArray {
+	return &CheckedArray{data: make([]any, size)}
+}
+
+func (a *CheckedArray) DynIndex(key any) (any, error) {
+	idx, ok := key.(int)
+	assert(ok, "DynIndex key should arrive as int")
+	if idx < 0 || idx >= len(a.data) {
+		return nil, dyn.ErrOutOfBounds
+	}
+	return a.data[idx], nil
+}
+
+func (a *CheckedArray) DynSetIndex(key any, value any) error {
+	idx, ok := key.(int)
+	assert(ok, "DynSetIndex key should arrive as int")
+	v, ok := value.(int)
+	assert(ok, "DynSetIndex value should arrive as int")
+	if idx < 0 || idx >= len(a.data) {
+		return dyn.ErrOutOfBounds
+	}
+	a.data[idx] = v
+	return nil
+}
+
+func main() {
+	arr := NewCheckedArray(5)
+	var obj any = arr
+
+	for i := 0; i < 150; i++ {
+		idx := i % 5
+		obj~>[idx] = i
+		got := obj~>[idx]?
+		assert(got.(int) == i, "dynamic protocol index replay should preserve value")
+	}
+
+	fmt.Println("osr_dynamic_protocol_index_contract: ok")
+}

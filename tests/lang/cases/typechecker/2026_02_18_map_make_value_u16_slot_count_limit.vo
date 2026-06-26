@@ -1,0 +1,7 @@
+package main
+
+type Huge [65536]int
+
+func main() {
+	_ = make(map[int]Huge)
+}

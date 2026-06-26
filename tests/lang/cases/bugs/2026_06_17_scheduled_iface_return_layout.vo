@@ -1,0 +1,37 @@
+package main
+
+type Closer interface {
+	Close() error
+}
+
+type DeferSink struct{}
+
+type GoSink struct{}
+
+var deferCount int
+var done chan int
+
+func (s *DeferSink) Close() error {
+	deferCount = deferCount + 1
+	return nil
+}
+
+func (s *GoSink) Close() error {
+	done <- 1
+	return nil
+}
+
+func runDeferredClose() {
+	var c Closer = &DeferSink{}
+	defer c.Close()
+}
+
+func main() {
+	runDeferredClose()
+	assert(deferCount == 1, "deferred interface Close should run")
+
+	done = make(chan int, 1)
+	var c Closer = &GoSink{}
+	go c.Close()
+	<-done
+}

@@ -1,0 +1,44 @@
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type Box struct {
+	name string
+	next *Box
+}
+
+var sink int
+
+func churn() {
+	var head *Box
+	for i := 0; i < 512; i++ {
+		head = &Box{name: fmt.Sprintf("box-%d", i), next: head}
+		sink += len(head.name)
+		if i%32 == 0 {
+			time.Sleep(0 * time.Millisecond)
+		}
+	}
+	if head != nil {
+		sink += len(head.name)
+	}
+}
+
+func recoverKeepsNamedString() (s string) {
+	s = "live-before-panic"
+	defer func() {
+		if recover() != nil {
+			churn()
+		}
+	}()
+	panic("boom")
+	return
+}
+
+func main() {
+	got := recoverKeepsNamedString()
+	assert(got == "live-before-panic", "named string return should survive panic/recover GC")
+	fmt.Println("gc_panic_recover_named_return_string: ok", sink)
+}

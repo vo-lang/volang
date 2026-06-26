@@ -1,0 +1,31 @@
+package main
+
+import "fmt"
+
+func selectDefaultMiddleLaterRecv() int {
+	var nilCh chan int
+	ready := make(chan int, 1)
+	ready <- 77
+
+	result := 0
+	select {
+	case v := <-nilCh:
+		result = v + 1000
+	default:
+		result = -1
+	case v := <-ready:
+		result = v
+	}
+	return result
+}
+
+func main() {
+	for i := 0; i < 100; i++ {
+		got := selectDefaultMiddleLaterRecv()
+		if got != 77 {
+			fmt.Println("got", got)
+			panic("later recv after default must reload selected value")
+		}
+	}
+	fmt.Println("jit select default middle recv value ok")
+}

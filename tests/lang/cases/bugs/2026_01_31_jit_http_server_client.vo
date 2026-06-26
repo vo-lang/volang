@@ -2,6 +2,7 @@ package main
 
 import (
  	"io"
+	"net"
 	"net/http"
  	"strconv"
 	"time"
@@ -16,12 +17,25 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK"))
 	})
-	srv := &http.Server{Addr: "127.0.0.1:19123", Handler: mux}
-	go func() { srv.ListenAndServe() }()
-	time.Sleep(200 * time.Millisecond)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		panic("Listen failed: " + err.Error())
+	}
+	addr := ln.Addr().String()
+	srv := &http.Server{Handler: mux}
+	serverDone := make(chan error, 1)
+	go func() {
+		err := srv.Serve(ln)
+		if err != nil && err.Error() != http.ErrServerClosed.Error() {
+			serverDone <- err
+			return
+		}
+		serverDone <- nil
+	}()
+	client := &http.Client{Timeout: 2 * time.Second}
 
 	for i := 0; i < 105; i++ {
-		resp, err := http.Get("http://127.0.0.1:19123/")
+		resp, err := client.Get("http://" + addr + "/")
 		if err != nil {
 			panic("http.Get failed at " + strconv.Itoa(i) + ": " + err.Error())
 		}
@@ -36,5 +50,8 @@ func main() {
 	}
 
 	srv.Close()
+	if err := <-serverDone; err != nil {
+		panic("server failed: " + err.Error())
+	}
 	println("[VO:OK]")
 }

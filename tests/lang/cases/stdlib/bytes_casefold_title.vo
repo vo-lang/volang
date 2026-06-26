@@ -1,0 +1,11 @@
+package main
+
+import "bytes"
+
+func main() {
+    titled := bytes.ToTitle([]byte("Hello, gophers"))
+    assert(string(titled) == "HELLO, GOPHERS", "bytes.ToTitle should title-case every letter")
+
+    assert(bytes.EqualFold([]byte("MiXeD"), []byte("mixed")), "bytes.EqualFold should ignore case")
+    assert(!bytes.EqualFold([]byte("mixed"), []byte("mismatch")), "bytes.EqualFold should reject different bytes")
+}

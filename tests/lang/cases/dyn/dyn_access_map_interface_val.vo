@@ -24,23 +24,31 @@ func main() {
     v, err = a~>a
     assert(err == nil, "unexpected error")
 
-    f := func () error {
-        a~>a = "xxxxx"
-        var x string
-        x = a~>a?
-        assert(x == "xxxxx", "dyn set get error")
-        return nil
-    }
-    
-    f()
-    
     // Type assert to error
     e, ok := v.(error)
     assert(ok, "type assertion to error failed")
     assert(e != nil, "error is nil")
     assert(e.Error() == "err_a", "error message mismatch")
+
+    panicked := testSetStringMismatch(a)
+    assert(panicked, "string write to map[string]error should panic")
+
+    a~>a = errors.New("err_replaced")
+    e = a~>a?.(error)
+    assert(e != nil, "replaced error is nil")
+    assert(e.Error() == "err_replaced", "replaced error message mismatch")
     
     fmt.Println("PASS")
+}
+
+func testSetStringMismatch(a any) (panicked bool) {
+    defer func() {
+        if recover() != nil {
+            panicked = true
+        }
+    }()
+    a~>a = "xxxxx"
+    return false
 }
 
 // Expected output:
