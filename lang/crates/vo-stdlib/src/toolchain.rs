@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use vo_module::schema::lockfile::LockedModule;
 use vo_runtime::bytecode::ExternDef;
 use vo_runtime::ext_loader::NativeExtensionSpec;
-use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult, StdlibEntry};
 use vo_runtime::objects::interface::InterfaceSlot;
 use vo_runtime::Module;
 
@@ -399,38 +399,142 @@ fn toolchain_get(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[doc(hidden)]
+pub const REGISTERED_EXTERNS: &[StdlibEntry] = &[
+    StdlibEntry {
+        name: "toolchain_CompileFile",
+        func: toolchain_compile_file,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_CompileDir",
+        func: toolchain_compile_dir,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_CompileString",
+        func: toolchain_compile_string,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_Run",
+        func: toolchain_run,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_RunJit",
+        func: toolchain_run_jit,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_RunCapture",
+        func: toolchain_run_capture,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_RunJitCapture",
+        func: toolchain_run_jit_capture,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_RunFile",
+        func: toolchain_run_file,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_RunFileJit",
+        func: toolchain_run_file_jit,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_Free",
+        func: toolchain_free,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_FreeAst",
+        func: toolchain_free_ast,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_Name",
+        func: toolchain_name,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_FormatSource",
+        func: toolchain_format_source,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_FormatBytecode",
+        func: toolchain_format_bytecode,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_ParseFile",
+        func: toolchain_parse_file,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_ParseString",
+        func: toolchain_parse_string,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_PrintAst",
+        func: toolchain_print_ast,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_SaveBytecodeText",
+        func: toolchain_save_bytecode_text,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_LoadBytecodeText",
+        func: toolchain_load_bytecode_text,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_SaveBytecodeBinary",
+        func: toolchain_save_bytecode_binary,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_LoadBytecodeBinary",
+        func: toolchain_load_bytecode_binary,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_CompileCheck",
+        func: compile_check,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_InitProject",
+        func: toolchain_init_project,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_InitFile",
+        func: toolchain_init_file,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "toolchain_Get",
+        func: toolchain_get,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+];
+
 pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     for (id, def) in externs.iter().enumerate() {
-        let func = match def.name.as_str() {
-            "toolchain_CompileFile" => Some(toolchain_compile_file as _),
-            "toolchain_CompileDir" => Some(toolchain_compile_dir as _),
-            "toolchain_CompileString" => Some(toolchain_compile_string as _),
-            "toolchain_Run" => Some(toolchain_run as _),
-            "toolchain_RunJit" => Some(toolchain_run_jit as _),
-            "toolchain_RunCapture" => Some(toolchain_run_capture as _),
-            "toolchain_RunJitCapture" => Some(toolchain_run_jit_capture as _),
-            "toolchain_RunFile" => Some(toolchain_run_file as _),
-            "toolchain_RunFileJit" => Some(toolchain_run_file_jit as _),
-            "toolchain_Free" => Some(toolchain_free as _),
-            "toolchain_FreeAst" => Some(toolchain_free_ast as _),
-            "toolchain_Name" => Some(toolchain_name as _),
-            "toolchain_FormatSource" => Some(toolchain_format_source as _),
-            "toolchain_FormatBytecode" => Some(toolchain_format_bytecode as _),
-            "toolchain_ParseFile" => Some(toolchain_parse_file as _),
-            "toolchain_ParseString" => Some(toolchain_parse_string as _),
-            "toolchain_PrintAst" => Some(toolchain_print_ast as _),
-            "toolchain_SaveBytecodeText" => Some(toolchain_save_bytecode_text as _),
-            "toolchain_LoadBytecodeText" => Some(toolchain_load_bytecode_text as _),
-            "toolchain_SaveBytecodeBinary" => Some(toolchain_save_bytecode_binary as _),
-            "toolchain_LoadBytecodeBinary" => Some(toolchain_load_bytecode_binary as _),
-            "toolchain_CompileCheck" => Some(compile_check as _),
-            "toolchain_InitProject" => Some(toolchain_init_project as _),
-            "toolchain_InitFile" => Some(toolchain_init_file as _),
-            "toolchain_Get" => Some(toolchain_get as _),
-            _ => None,
-        };
-        if let Some(func) = func {
-            registry.register(id as u32, func);
+        for entry in REGISTERED_EXTERNS {
+            if def.name == entry.name() {
+                entry.register(registry, id as u32);
+                break;
+            }
         }
     }
 }

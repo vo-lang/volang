@@ -46,20 +46,30 @@ fn make_ext_const_name(raw_pkg: &str, func_name: &str) -> syn::Ident {
 /// `raw_pkg` is the pre-resolution package name from the macro argument (e.g. "vogui").
 /// It is used to derive the Rust symbol name, which is stable regardless of the full
 /// resolved module path. `pkg_path` is the full resolved path used for the VM lookup name.
+pub struct FnRegistration<'a> {
+    pub entry_fn: &'a syn::Ident,
+    pub raw_pkg: &'a str,
+    pub pkg_path: &'a str,
+    pub func_name: &'a str,
+    pub is_std_only: bool,
+    pub flavor: &'a RegistrationFlavor,
+    pub effects: &'a TokenStream2,
+}
+
 pub fn emit_fn_registration(
     fn_tokens: TokenStream2,
-    entry_fn: &syn::Ident,
-    raw_pkg: &str,
-    pkg_path: &str,
-    func_name: &str,
-    is_std_only: bool,
-    flavor: &RegistrationFlavor,
+    registration: FnRegistration<'_>,
 ) -> TokenStream2 {
-    let lookup_name = make_lookup_name(pkg_path, func_name);
-    let stdlib_entry_name = make_stdlib_const_name(raw_pkg, func_name);
+    let lookup_name = make_lookup_name(registration.pkg_path, registration.func_name);
+    let stdlib_entry_name = make_stdlib_const_name(registration.raw_pkg, registration.func_name);
 
-    if is_std_only {
-        let panic_msg = format!("{}::{} requires std", pkg_path, func_name);
+    if registration.is_std_only {
+        let panic_msg = format!(
+            "{}::{} requires std",
+            registration.pkg_path, registration.func_name
+        );
+        let entry_fn = registration.entry_fn;
+        let effects = registration.effects;
         quote! {
             #[cfg(feature = "std")]
             #fn_tokens
@@ -67,7 +77,11 @@ pub fn emit_fn_registration(
             #[cfg(feature = "std")]
             #[doc(hidden)]
             pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry =
-                vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #entry_fn };
+                vo_runtime::ffi::StdlibEntry {
+                    name: #lookup_name,
+                    func: #entry_fn,
+                    effects: #effects,
+                };
 
             #[cfg(not(feature = "std"))]
             #[doc(hidden)]
@@ -78,7 +92,11 @@ pub fn emit_fn_registration(
             #[cfg(not(feature = "std"))]
             #[doc(hidden)]
             pub const #stdlib_entry_name: vo_runtime::ffi::StdlibEntry =
-                vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #entry_fn };
+                vo_runtime::ffi::StdlibEntry {
+                    name: #lookup_name,
+                    func: #entry_fn,
+                    effects: #effects,
+                };
         }
     } else {
         // Compute the Rust symbol name for the generated constant.
@@ -86,12 +104,22 @@ pub fn emit_fn_registration(
         // Extension (WASM): __EXT_<raw_pkg>_<func_name> — uses the pre-resolution short name
         //   so the Rust symbol is stable even if the module path changes.
         // Extension (native): const_name is unused (linkme handles it), but still computed.
-        let const_name = match flavor {
-            RegistrationFlavor::Extension => make_ext_const_name(raw_pkg, func_name),
+        let const_name = match registration.flavor {
+            RegistrationFlavor::Extension => {
+                make_ext_const_name(registration.raw_pkg, registration.func_name)
+            }
             _ => format_ident!("__STDLIB_{}", lookup_name),
         };
-        let registration = emit_registration(flavor, &lookup_name, entry_fn, &const_name);
-        quote! { #fn_tokens #registration }
+        let entry_fn = registration.entry_fn;
+        let effects = registration.effects;
+        let registration_tokens = emit_registration_with_effects(
+            registration.flavor,
+            &lookup_name,
+            entry_fn,
+            &const_name,
+            effects,
+        );
+        quote! { #fn_tokens #registration_tokens }
     }
 }
 
@@ -107,13 +135,33 @@ pub fn emit_registration(
     entry_fn: &syn::Ident,
     const_name: &syn::Ident,
 ) -> TokenStream2 {
+    emit_registration_with_effects(
+        flavor,
+        lookup_name,
+        entry_fn,
+        const_name,
+        &quote! { vo_runtime::bytecode::ExternEffects::NONE },
+    )
+}
+
+pub fn emit_registration_with_effects(
+    flavor: &RegistrationFlavor,
+    lookup_name: &str,
+    entry_fn: &syn::Ident,
+    const_name: &syn::Ident,
+    effects: &TokenStream2,
+) -> TokenStream2 {
     match flavor {
         RegistrationFlavor::Internal | RegistrationFlavor::Stdlib => {
             quote! {
                 #[doc(hidden)]
                 #[allow(non_upper_case_globals)]
                 pub const #const_name: vo_runtime::ffi::StdlibEntry =
-                    vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #entry_fn };
+                    vo_runtime::ffi::StdlibEntry {
+                    name: #lookup_name,
+                    func: #entry_fn,
+                    effects: #effects,
+                };
             }
         }
         RegistrationFlavor::Extension => {
@@ -135,12 +183,17 @@ pub fn emit_registration(
                     name_ptr: #lookup_name.as_ptr(),
                     name_len: #lookup_name.len() as u32,
                     func: #trampoline_name,
+                    effects_bits: (#effects).bits(),
                 };
 
                 #[cfg(target_arch = "wasm32")]
                 #[doc(hidden)]
                 pub const #const_name: vo_runtime::ffi::StdlibEntry =
-                    vo_runtime::ffi::StdlibEntry { name: #lookup_name, func: #entry_fn };
+                    vo_runtime::ffi::StdlibEntry {
+                    name: #lookup_name,
+                    func: #entry_fn,
+                    effects: #effects,
+                };
             }
         }
     }
@@ -194,8 +247,8 @@ fn generate_ext_trampoline(
                     ctx_ref.set_ext_host_event_wait(token, delay_ms);
                     vo_runtime::ffi::ext_abi::RESULT_HOST_EVENT_WAIT
                 }
-                Ok(vo_runtime::ffi::ExternResult::HostEventWaitAndReplay { token }) => {
-                    ctx_ref.set_ext_host_event_wait(token, 0);
+                Ok(vo_runtime::ffi::ExternResult::HostEventWaitAndReplay { token, source }) => {
+                    ctx_ref.set_ext_host_event_wait_replay(token, source);
                     vo_runtime::ffi::ext_abi::RESULT_HOST_EVENT_WAIT_REPLAY
                 }
                 Err(panic_payload) => {

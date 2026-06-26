@@ -24,7 +24,7 @@ mod pipeline;
 mod tests;
 
 const MOD_CACHE_DIR: &str = ".vo/mod";
-const COMPILE_CACHE_SCHEMA_VERSION: &str = "4";
+const COMPILE_CACHE_SCHEMA_VERSION: &str = "5";
 const COMPILE_CACHE_SLOT_NAMESPACE: &str = "vo-compile-cache-slot";
 const COMPILE_CACHE_NATIVE_NAMESPACE: &str = "vo-compile-cache-native";
 

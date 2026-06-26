@@ -148,14 +148,16 @@ pub fn run_gc_scenario(config: GcScenarioConfig) -> GcPerfReport {
     while gc.should_step() {
         count_phase(&mut report, gc.state());
         let step_start = Instant::now();
-        let work = gc.step_with_root_scanner(
-            GcRootState::StableSinceLastScan,
-            |gc, kind, limit| root_scanner.scan(gc, kind, limit, &root_slots, &root_slot_types),
-            |gc, obj| {
-                scan_struct_like_object(gc, obj);
-            },
-            |_| {},
-        );
+        let work = unsafe {
+            gc.step_with_root_scanner(
+                GcRootState::StableSinceLastScan,
+                |gc, kind, limit| root_scanner.scan(gc, kind, limit, &root_slots, &root_slot_types),
+                |gc, obj| {
+                    scan_struct_like_object(gc, obj);
+                },
+                |_| {},
+            )
+        };
         let step_stats = gc.last_step_stats();
         let step_ms = step_start.elapsed().as_secs_f64() * 1000.0;
         report.steps += 1;
@@ -360,13 +362,22 @@ fn scan_struct_like_object(gc: &mut Gc, obj: GcRef) {
     }
 }
 
+fn gc_step<R, S, F>(gc: &mut Gc, scan_roots: R, scan_object: S, finalize_object: F) -> usize
+where
+    R: FnMut(&mut Gc),
+    S: FnMut(&mut Gc, GcRef),
+    F: FnMut(GcRef),
+{
+    unsafe { gc.step(scan_roots, scan_object, finalize_object) }
+}
+
 fn cleanup_gc(mut gc: Gc, max_steps: usize) {
     if gc.object_count() == 0 {
         return;
     }
     gc.set_stress_every_step(true);
     for _ in 0..max_steps.max(128) {
-        gc.step(|_| {}, scan_struct_like_object, |_| {});
+        gc_step(&mut gc, |_| {}, scan_struct_like_object, |_| {});
         if gc.object_count() == 0 && gc.state() == GcState::Pause {
             break;
         }

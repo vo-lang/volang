@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use vo_vm::scheduler::HostWaitKey;
 use vo_vm::vm::Vm;
 
 use crate::{AppSession, PendingHostEvent, SessionDispatchError, SessionError, StepResult};
@@ -172,8 +173,8 @@ impl GuiAppSession {
         self.session.emit_outbound_frames(emit)
     }
 
-    pub fn wake_host_event(&mut self, token: u64) {
-        self.session.wake_host_event(token);
+    pub fn wake_host_event(&mut self, key: HostWaitKey) -> Result<(), SessionError> {
+        self.session.wake_host_event(key)
     }
 
     pub fn shutdown(&mut self) {

@@ -39,7 +39,8 @@ pub fn create(gc: &mut Gc, elem_meta: ValueMeta, elem_bytes: usize, length: usiz
     if arr.is_null() {
         return arr; // allocation failed
     }
-    let header = ArrayHeader::as_mut(arr);
+    // Safety: `arr` is freshly allocated and not visible to the collector yet.
+    let header = unsafe { ArrayHeader::as_mut(arr) };
     header.len = length as Slot;
     header.elem_meta = elem_meta;
     header.elem_bytes = elem_bytes as u32;
@@ -109,7 +110,7 @@ pub fn data_ptr_bytes(arr: GcRef) -> *mut u8 {
 
 /// Read single element (returns u64, small types zero-extended)
 #[inline]
-pub fn get(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
+pub unsafe fn get(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
     let byte_offset = idx * elem_bytes;
     let ptr = data_ptr_bytes(arr);
     unsafe {
@@ -127,7 +128,7 @@ pub fn get(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
 /// - Float32: f32 → f64 conversion
 /// - Others: zero extension
 #[inline]
-pub fn get_auto(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
+pub unsafe fn get_auto(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
     let byte_offset = idx * elem_bytes;
     let ptr = data_ptr_bytes(arr);
     let vk = elem_kind(arr);
@@ -155,7 +156,7 @@ pub fn get_auto(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
 
 /// Write single element (val is u64, small types truncated)
 #[inline]
-pub fn set(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
+pub unsafe fn set(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
     let byte_offset = idx * elem_bytes;
     let ptr = data_ptr_bytes(arr);
     unsafe {
@@ -168,11 +169,35 @@ pub fn set(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
     }
 }
 
+#[cfg(test)]
+mod public_api_contract_tests {
+    #[test]
+    fn raw_array_element_accessors_are_unsafe_public_primitives_055() {
+        let src = include_str!("array.rs");
+        for name in ["get", "get_auto", "set", "set_auto", "get_n", "set_n"] {
+            assert!(
+                src.contains(&format!("pub unsafe fn {name}(")),
+                "array::{name} is an unchecked raw heap element primitive and must require unsafe at public call sites"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_array_bulk_copy_is_unsafe_public_primitive_056() {
+        let src = include_str!("array.rs");
+        let needle = ["pub unsafe fn ", "copy_range("].concat();
+        assert!(
+            src.contains(&needle),
+            "array::copy_range is an unchecked raw heap copy primitive and must require unsafe at public call sites"
+        );
+    }
+}
+
 /// Write single element with automatic type-aware conversion
 /// - Float32: f64 → f32 conversion
 /// - Others: truncation
 #[inline]
-pub fn set_auto(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
+pub unsafe fn set_auto(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
     let byte_offset = idx * elem_bytes;
     let ptr = data_ptr_bytes(arr);
     let vk = elem_kind(arr);
@@ -195,7 +220,7 @@ pub fn set_auto(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
 }
 
 /// Read element to dest (supports packed and multi-slot)
-pub fn get_n(arr: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
+pub unsafe fn get_n(arr: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
     let byte_offset = idx * elem_bytes;
     let ptr = unsafe { data_ptr_bytes(arr).add(byte_offset) };
     match elem_bytes {
@@ -212,7 +237,7 @@ pub fn get_n(arr: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
 }
 
 /// Write element from src (supports packed and multi-slot)
-pub fn set_n(arr: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
+pub unsafe fn set_n(arr: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
     let byte_offset = idx * elem_bytes;
     let ptr = unsafe { data_ptr_bytes(arr).add(byte_offset) };
     match elem_bytes {
@@ -229,7 +254,7 @@ pub fn set_n(arr: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
 }
 
 /// Copy element range (by elem_bytes)
-pub fn copy_range(
+pub unsafe fn copy_range(
     src: GcRef,
     src_idx: usize,
     dst: GcRef,

@@ -1,19 +1,22 @@
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec::Vec;
 
-use vo_vm::scheduler::PendingHostEvent as VmPendingHostEvent;
+use vo_vm::scheduler::{HostWaitKey, HostWaitSource, PendingHostEvent as VmPendingHostEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingHostEvent {
+    pub key: HostWaitKey,
+    pub source: HostWaitSource,
     pub token: u64,
     pub delay_ms: u32,
+    pub replay: bool,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct SessionMailbox {
-    replay_event_wait_token: Option<u64>,
+    replay_event_wait_key: Option<HostWaitKey>,
     pending_host_events: VecDeque<PendingHostEvent>,
-    pending_host_event_tokens: BTreeSet<u64>,
+    pending_host_event_keys: BTreeSet<HostWaitKey>,
     outbound_frames: VecDeque<Vec<u8>>,
 }
 
@@ -22,24 +25,34 @@ impl SessionMailbox {
         Self::default()
     }
 
-    pub fn replay_event_wait_token(&self) -> Option<u64> {
-        self.replay_event_wait_token
+    pub fn replay_event_wait_key(&self) -> Option<HostWaitKey> {
+        self.replay_event_wait_key
     }
 
-    pub fn remove_pending_host_event_token(&mut self, token: u64) {
-        self.pending_host_event_tokens.remove(&token);
+    pub fn replay_event_wait_token(&self) -> Option<u64> {
+        self.replay_event_wait_key.map(|key| key.token)
+    }
+
+    pub fn remove_pending_host_event_key(&mut self, key: HostWaitKey) {
+        self.pending_host_event_keys.remove(&key);
     }
 
     pub fn record_pending_host_events(&mut self, events: Vec<VmPendingHostEvent>) {
-        self.replay_event_wait_token = events
+        self.replay_event_wait_key = events
             .iter()
-            .find(|event| event.replay)
-            .map(|event| event.token);
-        for event in events.into_iter().filter(|event| !event.replay) {
-            if self.pending_host_event_tokens.insert(event.token) {
+            .find(|event| event.key.source.is_gui_event_replay())
+            .map(|event| event.key);
+        for event in events
+            .into_iter()
+            .filter(|event| !event.key.source.is_gui_event_replay())
+        {
+            if self.pending_host_event_keys.insert(event.key) {
                 self.pending_host_events.push_back(PendingHostEvent {
+                    key: event.key,
+                    source: event.source,
                     token: event.token,
                     delay_ms: event.delay_ms,
+                    replay: event.replay,
                 });
             }
         }
@@ -82,7 +95,22 @@ mod tests {
     use alloc::vec;
 
     use super::{PendingHostEvent, SessionMailbox};
-    use vo_vm::scheduler::PendingHostEvent as VmPendingHostEvent;
+    use vo_runtime::ffi::HostEventReplaySource;
+    use vo_vm::scheduler::{
+        FiberWakeKey, HostWaitKey, HostWaitSource, PendingHostEvent as VmPendingHostEvent,
+        WaitRegistrationKey,
+    };
+
+    fn host_key(source: HostWaitSource, token: u64, registration: u64) -> HostWaitKey {
+        HostWaitKey {
+            source,
+            token,
+            wake_key: FiberWakeKey::new(0, 1),
+            registration: WaitRegistrationKey {
+                token: registration,
+            },
+        }
+    }
 
     #[test]
     fn record_pending_host_events_tracks_replay_and_dedups_non_replay() {
@@ -90,16 +118,33 @@ mod tests {
 
         mailbox.record_pending_host_events(vec![
             VmPendingHostEvent {
+                key: host_key(HostWaitSource::replay(HostEventReplaySource::Fetch), 99, 9),
+                source: HostWaitSource::replay(HostEventReplaySource::Fetch),
+                token: 99,
+                delay_ms: 0,
+                replay: true,
+            },
+            VmPendingHostEvent {
+                key: host_key(
+                    HostWaitSource::replay(HostEventReplaySource::GuiEvent),
+                    11,
+                    1,
+                ),
+                source: HostWaitSource::replay(HostEventReplaySource::GuiEvent),
                 token: 11,
                 delay_ms: 0,
                 replay: true,
             },
             VmPendingHostEvent {
+                key: host_key(HostWaitSource::Timer, 22, 2),
+                source: HostWaitSource::Timer,
                 token: 22,
                 delay_ms: 16,
                 replay: false,
             },
             VmPendingHostEvent {
+                key: host_key(HostWaitSource::Timer, 22, 2),
+                source: HostWaitSource::Timer,
                 token: 22,
                 delay_ms: 16,
                 replay: false,
@@ -109,10 +154,22 @@ mod tests {
         assert_eq!(mailbox.replay_event_wait_token(), Some(11));
         assert_eq!(
             mailbox.take_pending_host_events(),
-            vec![PendingHostEvent {
-                token: 22,
-                delay_ms: 16,
-            }]
+            vec![
+                PendingHostEvent {
+                    key: host_key(HostWaitSource::replay(HostEventReplaySource::Fetch), 99, 9),
+                    source: HostWaitSource::replay(HostEventReplaySource::Fetch),
+                    token: 99,
+                    delay_ms: 0,
+                    replay: true,
+                },
+                PendingHostEvent {
+                    key: host_key(HostWaitSource::Timer, 22, 2),
+                    source: HostWaitSource::Timer,
+                    token: 22,
+                    delay_ms: 16,
+                    replay: false,
+                }
+            ]
         );
     }
 
@@ -121,14 +178,18 @@ mod tests {
         let mut mailbox = SessionMailbox::new();
 
         mailbox.record_pending_host_events(vec![VmPendingHostEvent {
+            key: host_key(HostWaitSource::Timer, 22, 1),
+            source: HostWaitSource::Timer,
             token: 22,
             delay_ms: 16,
             replay: false,
         }]);
         assert_eq!(mailbox.take_pending_host_events().len(), 1);
 
-        mailbox.remove_pending_host_event_token(22);
+        mailbox.remove_pending_host_event_key(host_key(HostWaitSource::Timer, 22, 1));
         mailbox.record_pending_host_events(vec![VmPendingHostEvent {
+            key: host_key(HostWaitSource::Timer, 22, 2),
+            source: HostWaitSource::Timer,
             token: 22,
             delay_ms: 32,
             replay: false,
@@ -137,8 +198,11 @@ mod tests {
         assert_eq!(
             mailbox.take_pending_host_events(),
             vec![PendingHostEvent {
+                key: host_key(HostWaitSource::Timer, 22, 2),
+                source: HostWaitSource::Timer,
                 token: 22,
                 delay_ms: 32,
+                replay: false,
             }]
         );
     }

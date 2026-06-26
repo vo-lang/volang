@@ -28,7 +28,7 @@ impl NativeGuiRuntime {
             Box::new(move || take_captured_stdout(sink.as_ref()).unwrap_or_default())
         };
         let mut session = GuiAppSession::new(vm, stdout_source);
-        session.vm_mut().state.output = capture_sink;
+        session.vm_mut().set_output_sink(capture_sink);
         Self {
             session,
             island_frame_sink,

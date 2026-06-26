@@ -25,8 +25,9 @@ use crate::gc::{Gc, GcRef};
 use crate::itab::ItabCache;
 use crate::objects::interface::InterfaceSlot;
 use crate::slot::slots_for_bytes;
-use crate::ValueKind;
-use vo_common_core::bytecode::Module;
+use crate::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
+use vo_common_core::bytecode::{JitInstructionMetadata, Module};
+use vo_common_core::instruction::iface_assert_result_slots_from_flags;
 
 // =============================================================================
 // JitContext
@@ -86,7 +87,8 @@ impl JitRuntimeTrapKind {
 }
 
 /// Function pointer type for pushing a JIT frame.
-/// Also updates caller's frame.pc to caller_resume_pc for nested Call handling.
+/// Reserves the callee stack window; caller pc is committed only when VM
+/// transition materialization accepts the prepared call.
 /// Returns: args_ptr for the new frame (fiber.stack_ptr + new_bp)
 pub type JitPushFrameFn = extern "C" fn(
     ctx: *mut JitContext,
@@ -124,13 +126,20 @@ pub type JitPushResumePointFn = extern "C" fn(
 /// skips the prepare callback entirely and does a direct JIT-to-JIT call
 /// with native stack args.
 ///
-/// Layout: 40 bytes, 8-aligned.
+/// Layout: 56 bytes, 8-aligned.
 #[derive(Debug)]
 #[repr(C)]
 pub struct DynCallIC {
-    /// Tagged cache key: closure func_id or full iface (itab_id, method_idx).
+    /// Stable owner key for the JIT callsite that populated this entry.
+    /// Hash collisions in the shared IC table must miss rather than reuse a
+    /// target validated for a different caller/callsite.
+    pub owner_key: u64,
+    /// Tagged cache key: closure func_id or iface (itab_id, method_idx).
     /// 0 = empty/invalid entry.
     pub key: u64,
+    /// Extra exact key material. Interface calls store the full receiver slot0
+    /// here so same-itab forged receiver metadata cannot hit the cache.
+    pub key_extra: u64,
     /// Cached JIT function pointer (0 = callee not compiled or not in direct_call_table).
     pub jit_func_ptr: u64,
     /// Callee's local_slots count.
@@ -159,7 +168,9 @@ impl Default for DynCallIC {
 
 impl DynCallIC {
     pub const SIZE: usize = core::mem::size_of::<DynCallIC>();
+    pub const OFFSET_OWNER_KEY: i32 = core::mem::offset_of!(DynCallIC, owner_key) as i32;
     pub const OFFSET_KEY: i32 = core::mem::offset_of!(DynCallIC, key) as i32;
+    pub const OFFSET_KEY_EXTRA: i32 = core::mem::offset_of!(DynCallIC, key_extra) as i32;
     pub const OFFSET_JIT_FUNC_PTR: i32 = core::mem::offset_of!(DynCallIC, jit_func_ptr) as i32;
     pub const OFFSET_LOCAL_SLOTS: i32 = core::mem::offset_of!(DynCallIC, local_slots) as i32;
     pub const OFFSET_ARG_OFFSET: i32 = core::mem::offset_of!(DynCallIC, arg_offset) as i32;
@@ -181,6 +192,11 @@ impl DynCallIC {
     pub const TABLE_MASK: u32 = (Self::TABLE_SIZE - 1) as u32;
 
     #[inline]
+    pub const fn owner_key(caller_func_id: u32, callsite_pc: u32) -> u64 {
+        ((caller_func_id as u64) << 32) | callsite_pc as u64
+    }
+
+    #[inline]
     pub const fn closure_key(func_id: u32) -> u64 {
         (Self::KEY_KIND_CLOSURE << Self::KEY_KIND_SHIFT) | func_id as u64
     }
@@ -193,7 +209,7 @@ impl DynCallIC {
     }
 }
 
-const _: () = assert!(DynCallIC::SIZE == 40);
+const _: () = assert!(DynCallIC::SIZE == 56);
 const _: () = assert!(DynCallIC::TABLE_SIZE.is_power_of_two());
 
 /// Allocate a zeroed IC table with TABLE_SIZE entries.
@@ -333,6 +349,20 @@ pub struct JitContext {
     pub runtime_trap_arg1: u64,
     pub runtime_trap_pc: u32,
 
+    /// Function id for the currently executing JIT body.
+    ///
+    /// Runtime helpers use this with `runtime_trap_pc` to recover per-PC
+    /// `JitInstructionMetadata` from the module. `u32::MAX` means the context
+    /// was built for a direct callback/unit test and has no current bytecode PC.
+    pub current_func_id: u32,
+
+    /// Optional JIT infrastructure diagnostic text owned by VM-side context.
+    ///
+    /// Machine-readable infra errors continue to use runtime_trap_arg0/arg1/pc.
+    /// This string carries the source contract message when a Rust callback can
+    /// provide one without forcing it through numeric trap fields.
+    pub infra_error_message: *mut String,
+
     /// Opaque pointer to VM instance.
     /// Cast to `*mut Vm` in trampoline code.
     pub vm: *mut c_void,
@@ -402,7 +432,7 @@ pub struct JitContext {
     pub call_func_id: u32,
 
     /// Call request: arg_start offset in JIT's local variable area
-    pub call_arg_start: u16,
+    pub call_arg_start: u32,
 
     /// Call request: resume PC for VM to continue execution
     pub call_resume_pc: u32,
@@ -412,7 +442,8 @@ pub struct JitContext {
 
     /// Call request: ret_reg offset in caller's frame where return values should go.
     /// For REGULAR calls, this may differ from call_arg_start (inst.a vs inst.c).
-    /// For PREPARED calls, this equals call_arg_start.
+    /// For PREPARED calls, `call_arg_start` carries the caller resume pc and
+    /// `call_resume_pc` carries the callee frame base.
     pub call_ret_reg: u16,
 
     /// Call request: call kind (0=regular, 253=yield, 254=block)
@@ -476,6 +507,12 @@ pub struct JitContext {
     /// Callback to create a new island.
     /// Returns the island handle as u64.
     pub create_island_fn: Option<extern "C" fn(*mut JitContext) -> u64>,
+
+    /// Callback to read channel length through VM-owned queue validation.
+    pub queue_len_fn: Option<extern "C" fn(*mut JitContext, chan: u64, out: *mut u64) -> JitResult>,
+
+    /// Callback to read channel capacity through VM-owned queue validation.
+    pub queue_cap_fn: Option<extern "C" fn(*mut JitContext, chan: u64, out: *mut u64) -> JitResult>,
 
     /// Callback to close a channel.
     /// Returns JitResult (Ok or Panic).
@@ -648,6 +685,10 @@ impl JitContext {
         std::mem::offset_of!(JitContext, runtime_trap_arg1) as i32;
     pub const OFFSET_RUNTIME_TRAP_PC: i32 =
         std::mem::offset_of!(JitContext, runtime_trap_pc) as i32;
+    pub const OFFSET_CURRENT_FUNC_ID: i32 =
+        std::mem::offset_of!(JitContext, current_func_id) as i32;
+    pub const OFFSET_INFRA_ERROR_MESSAGE: i32 =
+        std::mem::offset_of!(JitContext, infra_error_message) as i32;
     pub const OFFSET_USER_PANIC_PC: i32 = std::mem::offset_of!(JitContext, user_panic_pc) as i32;
     #[cfg(feature = "std")]
     pub const OFFSET_WAIT_IO_TOKEN: i32 = std::mem::offset_of!(JitContext, wait_io_token) as i32;
@@ -687,6 +728,8 @@ impl JitContext {
     // VM callback offsets
     pub const OFFSET_CREATE_ISLAND_FN: i32 =
         std::mem::offset_of!(JitContext, create_island_fn) as i32;
+    pub const OFFSET_QUEUE_LEN_FN: i32 = std::mem::offset_of!(JitContext, queue_len_fn) as i32;
+    pub const OFFSET_QUEUE_CAP_FN: i32 = std::mem::offset_of!(JitContext, queue_cap_fn) as i32;
     pub const OFFSET_QUEUE_CLOSE_FN: i32 = std::mem::offset_of!(JitContext, queue_close_fn) as i32;
     pub const OFFSET_QUEUE_SEND_FN: i32 = std::mem::offset_of!(JitContext, queue_send_fn) as i32;
     pub const OFFSET_QUEUE_RECV_FN: i32 = std::mem::offset_of!(JitContext, queue_recv_fn) as i32;
@@ -790,6 +833,14 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
             offset: JitContext::OFFSET_RUNTIME_TRAP_PC,
         },
         JitContextAbiField {
+            name: "current_func_id",
+            offset: JitContext::OFFSET_CURRENT_FUNC_ID,
+        },
+        JitContextAbiField {
+            name: "infra_error_message",
+            offset: JitContext::OFFSET_INFRA_ERROR_MESSAGE,
+        },
+        JitContextAbiField {
             name: "user_panic_pc",
             offset: JitContext::OFFSET_USER_PANIC_PC,
         },
@@ -849,6 +900,14 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
         JitContextAbiField {
             name: "create_island_fn",
             offset: JitContext::OFFSET_CREATE_ISLAND_FN,
+        },
+        JitContextAbiField {
+            name: "queue_len_fn",
+            offset: JitContext::OFFSET_QUEUE_LEN_FN,
+        },
+        JitContextAbiField {
+            name: "queue_cap_fn",
+            offset: JitContext::OFFSET_QUEUE_CAP_FN,
         },
         JitContextAbiField {
             name: "queue_close_fn",
@@ -950,12 +1009,14 @@ pub enum JitResult {
     /// Unlike WaitIo, no token is needed - fiber is woken via ChannelWaiter.
     /// After being woken, VM resumes execution in interpreter at call_resume_pc.
     WaitQueue = 4,
-    /// JIT requests VM to replay the current CallExtern instruction in interpreter mode.
-    /// Used when an extern returns CallClosure — JIT exits, frames are materialized,
-    /// and VM re-executes the CallExtern which handles suspend/replay natively.
+    /// JIT requests VM to materialize frames and re-enter at the current
+    /// bytecode pc before calling an extern that cannot use direct-helper
+    /// lowering.
     Replay = 5,
     /// Fatal JIT infrastructure error. User code cannot recover this.
     JitError = 6,
+    /// JIT extern helper published a VM-owned suspend payload on the fiber.
+    ExternSuspend = 7,
 }
 
 pub const JIT_INFRA_ERROR_SENTINEL: u64 = u64::MAX;
@@ -967,7 +1028,10 @@ pub const JIT_HELPER_MAP_GET_LAYOUT: u64 = 101;
 pub const JIT_HELPER_MAP_SET_LAYOUT: u64 = 102;
 pub const JIT_HELPER_MAP_DELETE_LAYOUT: u64 = 103;
 pub const JIT_HELPER_MAP_ITER_NEXT_LAYOUT: u64 = 104;
-pub const JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT: u64 = 105;
+pub const JIT_HELPER_MAP_LEN_LAYOUT: u64 = 105;
+pub const JIT_HELPER_MAP_ITER_INIT_LAYOUT: u64 = 106;
+pub const JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT: u64 = 107;
+pub const JIT_HELPER_IFACE_TO_IFACE_LAYOUT: u64 = 108;
 pub const JIT_CALLBACK_DEFER_PUSH: u64 = 1;
 pub const JIT_CALLBACK_RECOVER: u64 = 2;
 pub const JIT_CALLBACK_GO_START: u64 = 3;
@@ -982,6 +1046,8 @@ pub const JIT_CALLBACK_SELECT_EXEC: u64 = 11;
 pub const JIT_CALLBACK_CREATE_ISLAND: u64 = 12;
 pub const JIT_CALLBACK_IFACE_ASSERT: u64 = 13;
 pub const JIT_CALLBACK_CALL_EXTERN: u64 = 14;
+pub const JIT_CALLBACK_QUEUE_LEN: u64 = 15;
+pub const JIT_CALLBACK_QUEUE_CAP: u64 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitContextDependencyKind {
@@ -991,6 +1057,8 @@ pub enum JitContextDependencyKind {
     StackOverflowFn,
     PushResumePointFn,
     CreateIslandFn,
+    QueueLenFn,
+    QueueCapFn,
     QueueCloseFn,
     QueueSendFn,
     QueueRecvFn,
@@ -1016,6 +1084,8 @@ impl JitContextDependencyKind {
             Self::StackOverflowFn => ctx.stack_overflow_fn.is_none(),
             Self::PushResumePointFn => ctx.push_resume_point_fn.is_none(),
             Self::CreateIslandFn => ctx.create_island_fn.is_none(),
+            Self::QueueLenFn => ctx.queue_len_fn.is_none(),
+            Self::QueueCapFn => ctx.queue_cap_fn.is_none(),
             Self::QueueCloseFn => ctx.queue_close_fn.is_none(),
             Self::QueueSendFn => ctx.queue_send_fn.is_none(),
             Self::QueueRecvFn => ctx.queue_recv_fn.is_none(),
@@ -1183,6 +1253,28 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
             return_policy: Ret::RawHandle,
             may_gc: true,
             may_schedule: true,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::QueueLenFn,
+            name: "queue_len_fn",
+            params: &[T::Ptr, T::U64, T::Ptr],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_QUEUE_LEN),
+            return_policy: Ret::JitResultWithOutPointer,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: true,
+        },
+        JitCallbackAbiField {
+            kind: Kind::QueueCapFn,
+            name: "queue_cap_fn",
+            params: &[T::Ptr, T::U64, T::Ptr],
+            ret: T::JitResult,
+            infra_error_id: Some(JIT_CALLBACK_QUEUE_CAP),
+            return_policy: Ret::JitResultWithOutPointer,
+            may_gc: false,
+            may_schedule: false,
             observes_frame: true,
         },
         JitCallbackAbiField {
@@ -1377,6 +1469,9 @@ pub fn jit_callback_abi_fields() -> &'static [JitCallbackAbiField] {
 pub fn set_jit_infra_error(ctx: *mut JitContext, code: u64, detail: u64) -> JitResult {
     unsafe {
         let ctx = &mut *ctx;
+        if let Some(message) = ctx.infra_error_message.as_mut() {
+            message.clear();
+        }
         *ctx.panic_flag = false;
         *ctx.is_user_panic = false;
         ctx.runtime_trap_kind = JitRuntimeTrapKind::None as u8;
@@ -1385,6 +1480,24 @@ pub fn set_jit_infra_error(ctx: *mut JitContext, code: u64, detail: u64) -> JitR
         ctx.runtime_trap_pc = detail as u32;
     }
     JitResult::JitError
+}
+
+#[inline]
+pub fn set_jit_infra_error_with_message(
+    ctx: *mut JitContext,
+    code: u64,
+    detail: u64,
+    message: impl AsRef<str>,
+) -> JitResult {
+    let result = set_jit_infra_error(ctx, code, detail);
+    unsafe {
+        let ctx = &mut *ctx;
+        if let Some(slot) = ctx.infra_error_message.as_mut() {
+            slot.clear();
+            slot.push_str(message.as_ref());
+        }
+    }
+    result
 }
 
 #[inline]
@@ -1473,10 +1586,10 @@ pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
     if ctx.is_null() {
         return JitResult::JitError;
     }
-    if parent == 0 || val_slots == 0 {
+    if parent == 0 {
         return JitResult::Ok;
     }
-    if vals.is_null() {
+    if vals.is_null() && val_slots != 0 {
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
@@ -1492,7 +1605,11 @@ pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
         );
     }
     let gc = unsafe { &mut *ctx.gc };
-    let vals = unsafe { std::slice::from_raw_parts(vals, val_slots as usize) };
+    let vals = if val_slots == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(vals, val_slots as usize) }
+    };
     let module = unsafe { ctx.module.as_ref() };
     match crate::gc_types::try_typed_write_barrier_by_meta(
         gc,
@@ -1548,13 +1665,59 @@ pub extern "C" fn vo_set_call_request(
     ret_reg: u32,
     call_kind: u32,
 ) {
+    let Ok(call_kind) = u8::try_from(call_kind) else {
+        let _ = set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            call_kind as u64,
+        );
+        return;
+    };
+    if call_kind != JitContext::CALL_KIND_PREPARED && u16::try_from(arg_start).is_err() {
+        let _ = set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            arg_start as u64,
+        );
+        return;
+    }
+    let Ok(ret_slots) = u16::try_from(ret_slots) else {
+        let _ = set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            ret_slots as u64,
+        );
+        return;
+    };
+    let Ok(ret_reg) = u16::try_from(ret_reg) else {
+        let _ = set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, ret_reg as u64);
+        return;
+    };
     unsafe {
         (*ctx).call_func_id = func_id;
-        (*ctx).call_arg_start = arg_start as u16;
+        (*ctx).call_arg_start = arg_start;
         (*ctx).call_resume_pc = resume_pc;
-        (*ctx).call_ret_slots = ret_slots as u16;
-        (*ctx).call_ret_reg = ret_reg as u16;
-        (*ctx).call_kind = call_kind as u8;
+        (*ctx).call_ret_slots = ret_slots;
+        (*ctx).call_ret_reg = ret_reg;
+        (*ctx).call_kind = call_kind;
+    }
+}
+
+/// Copy raw JIT frame slots while materializing a native-stack frame into
+/// `fiber.stack`.
+///
+/// This helper is deliberately narrower than language `copy`: it only moves
+/// already-verified frame storage for the same compiled function layout.
+#[no_mangle]
+pub extern "C" fn vo_jit_copy_frame_slots(dst: *mut u64, src: *const u64, slot_count: u32) {
+    if slot_count == 0 || core::ptr::eq(dst.cast_const(), src) {
+        return;
+    }
+    if dst.is_null() || src.is_null() {
+        return;
+    }
+    unsafe {
+        core::ptr::copy(src, dst, slot_count as usize);
     }
 }
 
@@ -1714,31 +1877,420 @@ pub extern "C" fn vo_map_new(
     use crate::ValueMeta;
     unsafe {
         let gc = &mut *gc;
+        let Ok(key_slots) = u16::try_from(key_slots) else {
+            return 0;
+        };
+        let Ok(val_slots) = u16::try_from(val_slots) else {
+            return 0;
+        };
         map::create(
             gc,
             ValueMeta::from_raw(key_meta),
             ValueMeta::from_raw(val_meta),
-            key_slots as u16,
-            val_slots as u16,
+            key_slots,
+            val_slots,
             key_rttid,
         ) as u64
     }
 }
 
+fn set_invalid_map_metadata(ctx: *mut JitContext, detail: u64) -> u64 {
+    if ctx.is_null() {
+        return JIT_HELPER_U64_ERROR;
+    }
+    set_invalid_metadata_u64(ctx, detail)
+}
+
+fn set_invalid_callback_state_u64(ctx: *mut JitContext, detail: u64) -> u64 {
+    if ctx.is_null() {
+        return JIT_HELPER_U64_ERROR;
+    }
+    let _ = set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, detail);
+    JIT_HELPER_U64_ERROR
+}
+
+fn validate_jit_raw_in_buffer(
+    ctx: *mut JitContext,
+    ptr: *const u64,
+    slots: usize,
+    detail: u64,
+) -> Result<(), u64> {
+    if slots == 0 || !ptr.is_null() {
+        return Ok(());
+    }
+    Err(set_invalid_callback_state_u64(ctx, detail))
+}
+
+fn validate_jit_raw_out_buffer(
+    ctx: *mut JitContext,
+    ptr: *mut u64,
+    slots: usize,
+    detail: u64,
+) -> Result<(), u64> {
+    if slots == 0 || !ptr.is_null() {
+        return Ok(());
+    }
+    Err(set_invalid_callback_state_u64(ctx, detail))
+}
+
+fn validate_jit_raw_inout_buffer(
+    ctx: *mut JitContext,
+    ptr: *mut u64,
+    slots: usize,
+    detail: u64,
+) -> Result<(), u64> {
+    validate_jit_raw_out_buffer(ctx, ptr, slots, detail)
+}
+
+fn validate_map_handle(
+    ctx: *mut JitContext,
+    m: crate::gc::GcRef,
+    detail: u64,
+) -> Result<crate::gc::GcRef, u64> {
+    if ctx.is_null() {
+        return Err(JIT_HELPER_U64_ERROR);
+    }
+    let Some(gc) = (unsafe { (*ctx).gc.as_ref() }) else {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    };
+    let Some(base) = gc.canonicalize_ref(m) else {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    };
+    if base != m {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    }
+    if Gc::header(base).kind() != ValueKind::Map {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    }
+    Ok(base)
+}
+
+fn jit_metadata_lookup_required(ctx_ref: &JitContext) -> bool {
+    ctx_ref.jit_func_count != 0 || ctx_ref.direct_call_count != 0
+}
+
+fn current_jit_metadata<'a>(
+    ctx_ref: &'a JitContext,
+    ctx: *mut JitContext,
+    detail: u64,
+) -> Result<Option<&'a JitInstructionMetadata>, u64> {
+    if ctx_ref.current_func_id == u32::MAX || ctx_ref.runtime_trap_pc == u32::MAX {
+        if jit_metadata_lookup_required(ctx_ref) {
+            return Err(set_invalid_map_metadata(ctx, detail));
+        }
+        return Ok(None);
+    }
+    let Some(module) = (unsafe { ctx_ref.module.as_ref() }) else {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    };
+    let Some(func) = module.functions.get(ctx_ref.current_func_id as usize) else {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    };
+    let Some(metadata) = func.jit_metadata.get(ctx_ref.runtime_trap_pc as usize) else {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    };
+    Ok(Some(metadata))
+}
+
+fn current_jit_metadata_result<'a>(
+    ctx_ref: &'a JitContext,
+    ctx: *mut JitContext,
+    detail: u64,
+) -> Result<Option<&'a JitInstructionMetadata>, JitResult> {
+    if ctx_ref.current_func_id == u32::MAX || ctx_ref.runtime_trap_pc == u32::MAX {
+        if jit_metadata_lookup_required(ctx_ref) {
+            return Err(set_jit_infra_error(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_METADATA,
+                detail,
+            ));
+        }
+        return Ok(None);
+    }
+    let Some(module) = (unsafe { ctx_ref.module.as_ref() }) else {
+        return Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_METADATA,
+            detail,
+        ));
+    };
+    let Some(func) = module.functions.get(ctx_ref.current_func_id as usize) else {
+        return Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_METADATA,
+            detail,
+        ));
+    };
+    let Some(metadata) = func.jit_metadata.get(ctx_ref.runtime_trap_pc as usize) else {
+        return Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_METADATA,
+            detail,
+        ));
+    };
+    Ok(Some(metadata))
+}
+
+fn jit_map_key_value_layout_for_current_pc<'a>(
+    ctx_ref: &'a JitContext,
+    ctx: *mut JitContext,
+    detail: u64,
+) -> Result<Option<(&'a [SlotType], &'a [SlotType])>, u64> {
+    match current_jit_metadata(ctx_ref, ctx, detail)? {
+        None => Ok(None),
+        Some(
+            JitInstructionMetadata::MapGet {
+                key_layout,
+                val_layout,
+                ..
+            }
+            | JitInstructionMetadata::MapSet {
+                key_layout,
+                val_layout,
+            }
+            | JitInstructionMetadata::MapIterNext {
+                key_layout,
+                val_layout,
+            },
+        ) => Ok(Some((key_layout.as_slice(), val_layout.as_slice()))),
+        Some(_) => Err(set_invalid_map_metadata(ctx, detail)),
+    }
+}
+
+fn jit_map_key_layout_for_current_pc<'a>(
+    ctx_ref: &'a JitContext,
+    ctx: *mut JitContext,
+    detail: u64,
+) -> Result<Option<&'a [SlotType]>, u64> {
+    match current_jit_metadata(ctx_ref, ctx, detail)? {
+        None => Ok(None),
+        Some(JitInstructionMetadata::MapDelete { key_layout }) => Ok(Some(key_layout.as_slice())),
+        Some(_) => Err(set_invalid_map_metadata(ctx, detail)),
+    }
+}
+
+fn validate_jit_map_key_value_abi_slots_for_current_pc(
+    ctx: *mut JitContext,
+    key_slots: usize,
+    val_slots: usize,
+    detail: u64,
+) -> Result<(), u64> {
+    if ctx.is_null() {
+        return Err(JIT_HELPER_U64_ERROR);
+    }
+    let ctx_ref = unsafe { &*ctx };
+    if let Some((key_layout, val_layout)) =
+        jit_map_key_value_layout_for_current_pc(ctx_ref, ctx, detail)?
+    {
+        if key_layout.len() != key_slots || val_layout.len() != val_slots {
+            return Err(set_invalid_map_metadata(ctx, detail));
+        }
+    }
+    Ok(())
+}
+
+fn iface_assert_target_value_kind(module: &Module, target_id: usize) -> Option<ValueKind> {
+    match module.runtime_types.get(target_id)? {
+        RuntimeType::Basic(kind) => Some(*kind),
+        RuntimeType::Named { id, .. } => module
+            .named_type_metas
+            .get(*id as usize)
+            .map(|named| named.underlying_rttid.value_kind()),
+        RuntimeType::Pointer(_) => Some(ValueKind::Pointer),
+        RuntimeType::Array { .. } => Some(ValueKind::Array),
+        RuntimeType::Slice(_) => Some(ValueKind::Slice),
+        RuntimeType::Map { .. } => Some(ValueKind::Map),
+        RuntimeType::Chan { .. } => Some(ValueKind::Channel),
+        RuntimeType::Port { .. } => Some(ValueKind::Port),
+        RuntimeType::Func { .. } => Some(ValueKind::Closure),
+        RuntimeType::Struct { .. } => Some(ValueKind::Struct),
+        RuntimeType::Interface { .. } => Some(ValueKind::Interface),
+        RuntimeType::Tuple(_) => Some(ValueKind::Void),
+        RuntimeType::Island => Some(ValueKind::Island),
+    }
+}
+
+fn iface_assert_expected_result_layout(
+    module: &Module,
+    target_id: u32,
+    flags: u16,
+) -> Option<Vec<SlotType>> {
+    let encoded_result_slots = iface_assert_result_slots_from_flags(flags)? as usize;
+    let assert_kind = flags & 0x3;
+    let layout = match assert_kind {
+        0 => {
+            let target_id = target_id as usize;
+            let target_kind = iface_assert_target_value_kind(module, target_id)?;
+            if target_kind == ValueKind::Interface {
+                return None;
+            }
+            module.slot_layout_for_value_rttid(ValueRttid::new(target_id as u32, target_kind))
+        }
+        1 => {
+            module.interface_metas.get(target_id as usize)?;
+            Some(vec![SlotType::Interface0, SlotType::Interface1])
+        }
+        _ => None,
+    }?;
+    if layout.len() == encoded_result_slots {
+        Some(layout)
+    } else {
+        None
+    }
+}
+
+fn validate_jit_iface_assert_abi_for_current_pc(
+    ctx: *mut JitContext,
+    target_id: u32,
+    flags: u16,
+) -> Result<(), JitResult> {
+    if ctx.is_null() {
+        return Err(JitResult::JitError);
+    }
+    let ctx_ref = unsafe { &*ctx };
+    match current_jit_metadata_result(ctx_ref, ctx, JIT_CALLBACK_IFACE_ASSERT)? {
+        None => Ok(()),
+        Some(JitInstructionMetadata::IfaceAssertLayout { result_layout }) => {
+            let Some(module) = (unsafe { ctx_ref.module.as_ref() }) else {
+                return Err(set_jit_infra_error(
+                    ctx,
+                    JIT_INFRA_ERROR_INVALID_METADATA,
+                    JIT_CALLBACK_IFACE_ASSERT,
+                ));
+            };
+            let Some(expected_layout) =
+                iface_assert_expected_result_layout(module, target_id, flags)
+            else {
+                return Err(set_jit_infra_error(
+                    ctx,
+                    JIT_INFRA_ERROR_INVALID_METADATA,
+                    JIT_CALLBACK_IFACE_ASSERT,
+                ));
+            };
+            if result_layout != &expected_layout {
+                return Err(set_jit_infra_error(
+                    ctx,
+                    JIT_INFRA_ERROR_INVALID_METADATA,
+                    JIT_CALLBACK_IFACE_ASSERT,
+                ));
+            }
+            Ok(())
+        }
+        Some(_) => Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_METADATA,
+            JIT_CALLBACK_IFACE_ASSERT,
+        )),
+    }
+}
+
+fn jit_value_meta_layout(
+    ctx: *mut JitContext,
+    module: Option<&Module>,
+    meta: ValueMeta,
+    slots: usize,
+    detail: u64,
+) -> Result<Vec<SlotType>, u64> {
+    match meta.value_kind() {
+        ValueKind::Struct => {
+            let Some(module) = module else {
+                return Err(set_invalid_map_metadata(ctx, detail));
+            };
+            module
+                .struct_metas
+                .get(meta.meta_id() as usize)
+                .map(|meta| meta.slot_types.clone())
+                .ok_or_else(|| set_invalid_map_metadata(ctx, detail))
+        }
+        ValueKind::Array => {
+            let Some(module) = module else {
+                return Err(set_invalid_map_metadata(ctx, detail));
+            };
+            module
+                .slot_layout_for_value_rttid(ValueRttid::new(meta.meta_id(), ValueKind::Array))
+                .ok_or_else(|| set_invalid_map_metadata(ctx, detail))
+        }
+        ValueKind::Interface => Ok(vec![SlotType::Interface0, SlotType::Interface1]),
+        ValueKind::Float32 | ValueKind::Float64 => Ok(vec![SlotType::Float; slots]),
+        kind if kind.may_contain_gc_refs() => Ok(vec![SlotType::GcRef; slots]),
+        _ => Ok(vec![SlotType::Value; slots]),
+    }
+}
+
+fn validate_map_key_value_layout(
+    ctx: *mut JitContext,
+    m: crate::gc::GcRef,
+    key_layout: &[SlotType],
+    val_layout: &[SlotType],
+    detail: u64,
+) -> Result<(), u64> {
+    let module = if ctx.is_null() {
+        None
+    } else {
+        unsafe { (*ctx).module.as_ref() }
+    };
+    let expected_key = jit_value_meta_layout(
+        ctx,
+        module,
+        crate::objects::map::key_meta(m),
+        crate::objects::map::key_slots(m) as usize,
+        detail,
+    )?;
+    let expected_val = jit_value_meta_layout(
+        ctx,
+        module,
+        crate::objects::map::val_meta(m),
+        crate::objects::map::val_slots(m) as usize,
+        detail,
+    )?;
+    if key_layout != expected_key.as_slice() || val_layout != expected_val.as_slice() {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    }
+    Ok(())
+}
+
+fn validate_map_key_layout(
+    ctx: *mut JitContext,
+    m: crate::gc::GcRef,
+    key_layout: &[SlotType],
+    detail: u64,
+) -> Result<(), u64> {
+    let module = if ctx.is_null() {
+        None
+    } else {
+        unsafe { (*ctx).module.as_ref() }
+    };
+    let expected_key = jit_value_meta_layout(
+        ctx,
+        module,
+        crate::objects::map::key_meta(m),
+        crate::objects::map::key_slots(m) as usize,
+        detail,
+    )?;
+    if key_layout != expected_key.as_slice() {
+        return Err(set_invalid_map_metadata(ctx, detail));
+    }
+    Ok(())
+}
+
 /// Get map length.
 #[no_mangle]
-pub extern "C" fn vo_map_len(m: u64) -> u64 {
+pub extern "C" fn vo_map_len(ctx: *mut JitContext, m: u64) -> u64 {
     use crate::objects::map;
     if m == 0 {
         return 0;
     }
-    map::len(m as crate::gc::GcRef) as u64
+    let m_ref = match validate_map_handle(ctx, m as crate::gc::GcRef, JIT_HELPER_MAP_LEN_LAYOUT) {
+        Ok(m_ref) => m_ref,
+        Err(result) => return result,
+    };
+    map::len(m_ref) as u64
 }
 
 /// Get value from map. Returns pointer to value slots, or null if not found.
 /// key_ptr points to key_slots u64 values.
 /// val_ptr is output buffer for val_slots u64 values.
-/// Returns 1 if found, 0 if not found.
+/// Returns 1 if found, 0 if not found, 2 if the interface key is unhashable.
 #[no_mangle]
 pub extern "C" fn vo_map_get(
     ctx: *mut JitContext,
@@ -1749,6 +2301,24 @@ pub extern "C" fn vo_map_get(
     val_slots: u32,
 ) -> u64 {
     use crate::objects::map;
+    if let Err(result) =
+        validate_jit_raw_in_buffer(ctx, key_ptr, key_slots as usize, JIT_HELPER_MAP_GET_LAYOUT)
+    {
+        return result;
+    }
+    if let Err(result) =
+        validate_jit_raw_out_buffer(ctx, val_ptr, val_slots as usize, JIT_HELPER_MAP_GET_LAYOUT)
+    {
+        return result;
+    }
+    if let Err(result) = validate_jit_map_key_value_abi_slots_for_current_pc(
+        ctx,
+        key_slots as usize,
+        val_slots as usize,
+        JIT_HELPER_MAP_GET_LAYOUT,
+    ) {
+        return result;
+    }
     if m == 0 {
         // nil map read returns zero value (Go semantics)
         unsafe {
@@ -1757,14 +2327,39 @@ pub extern "C" fn vo_map_get(
         return 0;
     }
 
-    let m_ref = m as crate::gc::GcRef;
+    let m_ref = match validate_map_handle(ctx, m as crate::gc::GcRef, JIT_HELPER_MAP_GET_LAYOUT) {
+        Ok(m_ref) => m_ref,
+        Err(result) => return result,
+    };
     if map::key_slots(m_ref) as u32 != key_slots || map::val_slots(m_ref) as u32 != val_slots {
         return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
+    }
+    let ctx_ref = unsafe { &*ctx };
+    match jit_map_key_value_layout_for_current_pc(ctx_ref, ctx, JIT_HELPER_MAP_GET_LAYOUT) {
+        Ok(Some((key_layout, val_layout))) => {
+            if let Err(result) = validate_map_key_value_layout(
+                ctx,
+                m_ref,
+                key_layout,
+                val_layout,
+                JIT_HELPER_MAP_GET_LAYOUT,
+            ) {
+                return result;
+            }
+        }
+        Ok(None) => {}
+        Err(result) => return result,
     }
 
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    let (val_opt, ok) = map::get_with_ok(m_ref, key, module);
+    let (val_opt, ok) = match map::get_with_ok_checked(m_ref, key, module) {
+        Ok(result) => result,
+        Err(map::MapKeyError::UnhashableInterfaceKey) => return 2,
+        Err(map::MapKeyError::SlotCountMismatch) => {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
+        }
+    };
 
     if let Some(val) = val_opt {
         if val.len() != val_slots as usize {
@@ -1793,37 +2388,48 @@ pub extern "C" fn vo_map_set(
     val_ptr: *const u64,
     val_slots: u32,
 ) -> u64 {
-    use crate::objects::{interface, map};
-    use crate::ValueKind;
+    use crate::objects::map;
     if m == 0 {
         return 0;
     }
+    if let Err(result) =
+        validate_jit_raw_in_buffer(ctx, key_ptr, key_slots as usize, JIT_HELPER_MAP_SET_LAYOUT)
+    {
+        return result;
+    }
+    if let Err(result) =
+        validate_jit_raw_in_buffer(ctx, val_ptr, val_slots as usize, JIT_HELPER_MAP_SET_LAYOUT)
+    {
+        return result;
+    }
 
-    let m_ref = m as crate::gc::GcRef;
+    let m_ref = match validate_map_handle(ctx, m as crate::gc::GcRef, JIT_HELPER_MAP_SET_LAYOUT) {
+        Ok(m_ref) => m_ref,
+        Err(result) => return result,
+    };
     if map::key_slots(m_ref) as u32 != key_slots || map::val_slots(m_ref) as u32 != val_slots {
         return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+    }
+    let ctx_ref = unsafe { &*ctx };
+    match jit_map_key_value_layout_for_current_pc(ctx_ref, ctx, JIT_HELPER_MAP_SET_LAYOUT) {
+        Ok(Some((key_layout, val_layout))) => {
+            if let Err(result) = validate_map_key_value_layout(
+                ctx,
+                m_ref,
+                key_layout,
+                val_layout,
+                JIT_HELPER_MAP_SET_LAYOUT,
+            ) {
+                return result;
+            }
+        }
+        Ok(None) => {}
+        Err(result) => return result,
     }
 
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
     let val = unsafe { core::slice::from_raw_parts(val_ptr, val_slots as usize) };
-
-    // Check if key is interface (2 slots) with uncomparable underlying type
-    if key_slots == 2 {
-        let key_vk = map::key_kind(m_ref);
-        if key_vk == ValueKind::Interface {
-            let slot0 = key[0];
-            let inner_vk = interface::unpack_value_kind(slot0);
-            match inner_vk {
-                ValueKind::Slice | ValueKind::Map | ValueKind::Closure => {
-                    return 1; // Uncomparable type - should panic
-                }
-                _ => {}
-            }
-        }
-    }
-
-    map::set(m_ref, key, val, module);
 
     // Write barrier: use map's stored metadata to barrier only actual GcRef slots.
     let gc = unsafe { &mut *(*ctx).gc };
@@ -1838,6 +2444,17 @@ pub extern "C" fn vo_map_set(
         && crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, val, vm, module).is_err()
     {
         return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+    }
+    let set_result = unsafe {
+        // SAFETY: vo_map_set validated the map handle/layout and applied key/value barriers above.
+        map::set_checked(m_ref, key, val, module)
+    };
+    match set_result {
+        Ok(()) => {}
+        Err(map::MapKeyError::UnhashableInterfaceKey) => return 1,
+        Err(map::MapKeyError::SlotCountMismatch) => {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+        }
     }
     0
 }
@@ -1854,24 +2471,66 @@ pub extern "C" fn vo_map_delete(
     if m == 0 {
         return 0;
     }
+    if let Err(result) = validate_jit_raw_in_buffer(
+        ctx,
+        key_ptr,
+        key_slots as usize,
+        JIT_HELPER_MAP_DELETE_LAYOUT,
+    ) {
+        return result;
+    }
 
-    let m_ref = m as crate::gc::GcRef;
+    let m_ref = match validate_map_handle(ctx, m as crate::gc::GcRef, JIT_HELPER_MAP_DELETE_LAYOUT)
+    {
+        Ok(m_ref) => m_ref,
+        Err(result) => return result,
+    };
     if map::key_slots(m_ref) as u32 != key_slots {
         return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT);
+    }
+    let ctx_ref = unsafe { &*ctx };
+    match jit_map_key_layout_for_current_pc(ctx_ref, ctx, JIT_HELPER_MAP_DELETE_LAYOUT) {
+        Ok(Some(key_layout)) => {
+            if let Err(result) =
+                validate_map_key_layout(ctx, m_ref, key_layout, JIT_HELPER_MAP_DELETE_LAYOUT)
+            {
+                return result;
+            }
+        }
+        Ok(None) => {}
+        Err(result) => return result,
     }
 
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    map::delete(m_ref, key, module);
-    0
+    match map::delete_checked(m_ref, key, module) {
+        Ok(()) => 0,
+        Err(map::MapKeyError::UnhashableInterfaceKey) => 1,
+        Err(map::MapKeyError::SlotCountMismatch) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
+        }
+    }
 }
 
 /// Initialize a map iterator. Writes MAP_ITER_SLOTS * SLOT_BYTES bytes to iter_ptr.
 #[no_mangle]
-pub extern "C" fn vo_map_iter_init(m: u64, iter_ptr: *mut u64) {
+pub extern "C" fn vo_map_iter_init(ctx: *mut JitContext, m: u64, iter_ptr: *mut u64) -> u64 {
     use crate::objects::map;
     const SLOTS: usize = map::MAP_ITER_SLOTS;
-    let iter = map::iter_init(m as crate::gc::GcRef);
+    if let Err(result) =
+        validate_jit_raw_out_buffer(ctx, iter_ptr, SLOTS, JIT_HELPER_MAP_ITER_INIT_LAYOUT)
+    {
+        return result;
+    }
+    let m_ref = if m == 0 {
+        0 as crate::gc::GcRef
+    } else {
+        match validate_map_handle(ctx, m as crate::gc::GcRef, JIT_HELPER_MAP_ITER_INIT_LAYOUT) {
+            Ok(m_ref) => m_ref,
+            Err(result) => return result,
+        }
+    };
+    let iter = map::iter_init(m_ref);
     unsafe {
         core::ptr::copy_nonoverlapping(
             &iter as *const map::MapIterator as *const u64,
@@ -1879,6 +2538,7 @@ pub extern "C" fn vo_map_iter_init(m: u64, iter_ptr: *mut u64) {
             SLOTS,
         );
     }
+    0
 }
 
 /// Advance map iterator and get next key-value pair.
@@ -1893,16 +2553,64 @@ pub extern "C" fn vo_map_iter_next(
     val_slots: u32,
 ) -> u64 {
     use crate::objects::map;
-    let iter = unsafe { &mut *(iter_ptr as *mut map::MapIterator) };
     let key_slots = key_slots as usize;
     let val_slots = val_slots as usize;
-    let map_ref = iter.map_ref as crate::gc::GcRef;
-
-    if !map_ref.is_null()
-        && (map::key_slots(map_ref) as usize != key_slots
-            || map::val_slots(map_ref) as usize != val_slots)
+    if let Err(result) = validate_jit_raw_inout_buffer(
+        ctx,
+        iter_ptr,
+        map::MAP_ITER_SLOTS,
+        JIT_HELPER_MAP_ITER_NEXT_LAYOUT,
+    ) {
+        return result;
+    }
+    if let Err(result) =
+        validate_jit_raw_out_buffer(ctx, key_ptr, key_slots, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
     {
-        return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT);
+        return result;
+    }
+    if let Err(result) =
+        validate_jit_raw_out_buffer(ctx, val_ptr, val_slots, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
+    {
+        return result;
+    }
+    if let Err(result) = validate_jit_map_key_value_abi_slots_for_current_pc(
+        ctx,
+        key_slots,
+        val_slots,
+        JIT_HELPER_MAP_ITER_NEXT_LAYOUT,
+    ) {
+        return result;
+    }
+    let iter = unsafe { &mut *(iter_ptr as *mut map::MapIterator) };
+    let mut map_ref = iter.map_ref as crate::gc::GcRef;
+
+    if !map_ref.is_null() {
+        match validate_map_handle(ctx, map_ref, JIT_HELPER_MAP_ITER_NEXT_LAYOUT) {
+            Ok(validated) => map_ref = validated,
+            Err(result) => return result,
+        }
+        if map::key_slots(map_ref) as usize != key_slots
+            || map::val_slots(map_ref) as usize != val_slots
+        {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT);
+        }
+        let ctx_ref = unsafe { &*ctx };
+        match jit_map_key_value_layout_for_current_pc(ctx_ref, ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
+        {
+            Ok(Some((key_layout, val_layout))) => {
+                if let Err(result) = validate_map_key_value_layout(
+                    ctx,
+                    map_ref,
+                    key_layout,
+                    val_layout,
+                    JIT_HELPER_MAP_ITER_NEXT_LAYOUT,
+                ) {
+                    return result;
+                }
+            }
+            Ok(None) => {}
+            Err(result) => return result,
+        }
     }
 
     unsafe {
@@ -2053,7 +2761,7 @@ pub extern "C" fn vo_closure_new(gc: *mut Gc, func_id: u32, capture_count: u32) 
 /// Create a new queue with validation (unified logic for VM and JIT).
 #[no_mangle]
 pub extern "C" fn vo_queue_new_checked(
-    gc: *mut Gc,
+    ctx: *mut JitContext,
     kind: u32,
     elem_type: u64,
     elem_slots: u32,
@@ -2061,68 +2769,53 @@ pub extern "C" fn vo_queue_new_checked(
     out: *mut u64,
 ) -> i32 {
     unsafe {
-        queue_new_checked(
-            gc,
-            crate::objects::queue_state::QueueKind::from_raw(kind as u16),
-            elem_type,
-            elem_slots,
-            cap,
-            out,
-        )
+        use crate::objects::alloc_error;
+        let kind = match kind {
+            0 => crate::objects::queue_state::QueueKind::Chan,
+            1 => crate::objects::queue_state::QueueKind::Port,
+            _ => return alloc_error::OVERFLOW,
+        };
+        queue_new_checked(ctx, kind, elem_type, elem_slots, cap, out)
     }
 }
 
 unsafe fn queue_new_checked(
-    gc: *mut Gc,
+    ctx: *mut JitContext,
     kind: crate::objects::queue_state::QueueKind,
     elem_type: u64,
     elem_slots: u32,
     cap: i64,
     out: *mut u64,
 ) -> i32 {
+    use crate::objects::alloc_error;
     use crate::objects::queue;
     use crate::{ValueMeta, ValueRttid};
+    if ctx.is_null() || out.is_null() {
+        return alloc_error::OVERFLOW;
+    }
+    let ctx = &mut *ctx;
+    if ctx.gc.is_null() || ctx.module.is_null() {
+        return alloc_error::OVERFLOW;
+    }
+    let Ok(elem_slots) = u16::try_from(elem_slots) else {
+        return alloc_error::OVERFLOW;
+    };
     let elem_meta = ValueMeta::from_raw(elem_type as u32);
     let elem_rttid = ValueRttid::from_raw((elem_type >> 32) as u32);
-    match queue::create_checked(
-        &mut *gc,
+    match queue::create_checked_with_module(
+        &mut *ctx.gc,
         kind,
         elem_meta,
         elem_rttid,
-        elem_slots as u16,
+        elem_slots,
         cap,
+        &*ctx.module,
     ) {
         Ok(result) => {
             *out = result as u64;
             0
         }
         Err(code) => code,
-    }
-}
-
-/// Get channel length (number of elements in buffer).
-#[no_mangle]
-pub extern "C" fn vo_chan_len(ch: u64) -> u64 {
-    use crate::gc::GcRef;
-    use crate::objects::queue;
-    let ch = ch as GcRef;
-    if ch.is_null() {
-        0
-    } else {
-        queue::len(ch) as u64
-    }
-}
-
-/// Get channel capacity.
-#[no_mangle]
-pub extern "C" fn vo_chan_cap(ch: u64) -> u64 {
-    use crate::gc::GcRef;
-    use crate::objects::queue_state;
-    let ch = ch as GcRef;
-    if ch.is_null() {
-        0
-    } else {
-        queue_state::capacity(ch) as u64
     }
 }
 
@@ -2145,27 +2838,6 @@ pub extern "C" fn vo_array_new(gc: *mut Gc, elem_meta: u32, elem_bytes: u32, len
             len as usize,
         ) as u64
     }
-}
-
-/// Get element from array with automatic sign extension.
-/// idx is element index, elem_bytes is byte size per element.
-#[no_mangle]
-pub extern "C" fn vo_array_get(arr: u64, idx: u64, elem_bytes: u64) -> u64 {
-    use crate::objects::array;
-    array::get_auto(arr as crate::gc::GcRef, idx as usize, elem_bytes as usize)
-}
-
-/// Set element in array with automatic type conversion.
-/// idx is element index, elem_bytes is byte size per element.
-#[no_mangle]
-pub extern "C" fn vo_array_set(arr: u64, idx: u64, val: u64, elem_bytes: u64) {
-    use crate::objects::array;
-    array::set_auto(
-        arr as crate::gc::GcRef,
-        idx as usize,
-        val,
-        elem_bytes as usize,
-    );
 }
 
 /// Get array length.
@@ -2193,7 +2865,11 @@ pub extern "C" fn vo_slice_new_checked(
     cap: i64,
     out: *mut u64,
 ) -> i32 {
+    use crate::objects::alloc_error;
     use crate::objects::slice;
+    if gc.is_null() || out.is_null() {
+        return alloc_error::OVERFLOW;
+    }
     unsafe {
         match slice::create_checked(&mut *gc, elem_meta, elem_bytes as usize, len, cap) {
             Ok(result) => {
@@ -2223,28 +2899,6 @@ pub extern "C" fn vo_slice_cap(s: u64) -> u64 {
     }
     use crate::objects::slice;
     slice::cap(s as crate::gc::GcRef) as u64
-}
-
-/// Get element from slice with automatic sign extension.
-/// idx is element index, elem_bytes is byte size per element.
-#[no_mangle]
-pub extern "C" fn vo_slice_get(s: u64, idx: u64, elem_bytes: u64) -> u64 {
-    use crate::objects::slice;
-    let s_ref = s as crate::gc::GcRef;
-    let base_ptr = slice::data_ptr(s_ref);
-    let elem_kind = slice::elem_kind(s_ref);
-    slice::get_auto(base_ptr, idx as usize, elem_bytes as usize, elem_kind)
-}
-
-/// Set element in slice with automatic type conversion.
-/// idx is element index, elem_bytes is byte size per element.
-#[no_mangle]
-pub extern "C" fn vo_slice_set(s: u64, idx: u64, val: u64, elem_bytes: u64) {
-    use crate::objects::slice;
-    let s_ref = s as crate::gc::GcRef;
-    let base_ptr = slice::data_ptr(s_ref);
-    let elem_kind = slice::elem_kind(s_ref);
-    slice::set_auto(base_ptr, idx as usize, val, elem_bytes as usize, elem_kind);
 }
 
 /// Create a sub-slice (two-index: s[lo:hi]).
@@ -2432,15 +3086,20 @@ pub extern "C" fn vo_iface_to_iface(
     let new_itab_id = if let Some(named_type_id) = named_type_id_opt {
         // Value types (non-pointer) cannot use pointer receiver methods
         let src_is_pointer = src_vk == ValueKind::Pointer;
-        itab_cache.get_or_create(
+        match itab_cache.try_get_or_create(
             named_type_id,
             iface_meta_id,
             src_is_pointer,
             &module.named_type_metas,
             &module.interface_metas,
-        )
-    } else {
+        ) {
+            Some(itab_id) => itab_id,
+            None => return set_invalid_metadata_u64(ctx, JIT_HELPER_IFACE_TO_IFACE_LAYOUT),
+        }
+    } else if iface_meta_id == 0 {
         0
+    } else {
+        return set_invalid_metadata_u64(ctx, JIT_HELPER_IFACE_TO_IFACE_LAYOUT);
     };
 
     interface::pack_slot0(new_itab_id, src_rttid, src_vk)
@@ -2480,6 +3139,20 @@ pub extern "C" fn vo_iface_assert(
     use crate::objects::interface;
     use crate::ValueKind;
 
+    if ctx.is_null() {
+        return JitResult::JitError;
+    }
+    if dst.is_null() {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_CALLBACK_IFACE_ASSERT,
+        );
+    }
+    if let Err(result) = validate_jit_iface_assert_abi_for_current_pc(ctx, target_id, flags) {
+        return result;
+    }
+
     let assert_kind = flags & 0x3;
     let has_ok = ((flags >> 2) & 0x1) != 0;
     let target_slots = (flags >> 3) as usize;
@@ -2503,7 +3176,6 @@ pub extern "C" fn vo_iface_assert(
 
     unsafe {
         if has_ok {
-            // Write ok flag
             let ok_slot = if assert_kind == 1 {
                 2
             } else if target_slots > 1 {
@@ -2511,21 +3183,25 @@ pub extern "C" fn vo_iface_assert(
             } else {
                 1
             };
-            *dst.add(ok_slot) = matches as u64;
 
             if matches {
-                let result = write_iface_assert_success(
+                let mut result_slots = [0; 32];
+                let result_len = match materialize_iface_assert_success(
                     ctx,
                     slot0,
                     slot1,
                     assert_kind,
                     target_slots,
                     target_id,
-                    dst,
-                );
-                if result != JitResult::Ok {
-                    return result;
+                    &mut result_slots,
+                ) {
+                    Ok(result_len) => result_len,
+                    Err(result) => return result,
+                };
+                for (idx, value) in result_slots.iter().take(result_len).enumerate() {
+                    *dst.add(idx) = *value;
                 }
+                *dst.add(ok_slot) = 1;
             } else {
                 // Zero out on failure
                 let dst_slots = if assert_kind == 1 {
@@ -2536,20 +3212,25 @@ pub extern "C" fn vo_iface_assert(
                 for i in 0..dst_slots {
                     *dst.add(i) = 0;
                 }
+                *dst.add(ok_slot) = 0;
             }
             JitResult::Ok
         } else if matches {
-            let result = write_iface_assert_success(
+            let mut result_slots = [0; 32];
+            let result_len = match materialize_iface_assert_success(
                 ctx,
                 slot0,
                 slot1,
                 assert_kind,
                 target_slots,
                 target_id,
-                dst,
-            );
-            if result != JitResult::Ok {
-                return result;
+                &mut result_slots,
+            ) {
+                Ok(result_len) => result_len,
+                Err(result) => return result,
+            };
+            for (idx, value) in result_slots.iter().take(result_len).enumerate() {
+                *dst.add(idx) = *value;
             }
             JitResult::Ok
         } else {
@@ -2564,15 +3245,15 @@ pub extern "C" fn vo_iface_assert(
     }
 }
 
-unsafe fn write_iface_assert_success(
+unsafe fn materialize_iface_assert_success(
     ctx: *mut JitContext,
     slot0: u64,
     slot1: u64,
     assert_kind: u16,
     target_slots: usize,
     target_id: u32,
-    dst: *mut u64,
-) -> JitResult {
+    out: &mut [u64; 32],
+) -> Result<usize, JitResult> {
     use crate::gc::GcRef;
     use crate::objects::interface;
     use crate::ValueKind;
@@ -2594,38 +3275,48 @@ unsafe fn write_iface_assert_success(
                 .get(src_rttid as usize)
                 .and_then(|rt| extract_named_type_id(rt, &module.runtime_types))
             else {
-                return set_jit_infra_error(
+                return Err(set_jit_infra_error(
                     ctx,
                     JIT_INFRA_ERROR_INVALID_METADATA,
                     JIT_CALLBACK_IFACE_ASSERT,
-                );
+                ));
             };
             // Value types (non-pointer) cannot use pointer receiver methods
             let src_is_pointer = src_vk == ValueKind::Pointer;
-            itab_cache.get_or_create(
+            match itab_cache.try_get_or_create(
                 named_type_id,
                 target_id,
                 src_is_pointer,
                 &module.named_type_metas,
                 &module.interface_metas,
-            )
+            ) {
+                Some(itab_id) => itab_id,
+                None => {
+                    return Err(set_jit_infra_error(
+                        ctx,
+                        JIT_INFRA_ERROR_INVALID_METADATA,
+                        JIT_CALLBACK_IFACE_ASSERT,
+                    ));
+                }
+            }
         };
-        let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
-        *dst = new_slot0;
-        *dst.add(1) = slot1;
+        out[0] = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
+        out[1] = slot1;
+        Ok(2)
     } else if src_vk == ValueKind::Struct {
         // Copy value from GcRef (struct layout: [GcHeader][data...])
         let gc_ref = slot1 as GcRef;
         let slots = target_slots.max(1);
         if slot1 != 0 {
             for i in 0..slots {
-                *dst.add(i) = *gc_ref.add(i);
+                out[i] = *gc_ref.add(i);
             }
         } else {
             for i in 0..slots {
-                *dst.add(i) = 0;
+                out[i] = 0;
             }
         }
+        Ok(slots)
     } else if src_vk == ValueKind::Array {
         // Copy elements from array (layout: [GcHeader][ArrayHeader][elements...])
         use crate::objects::array;
@@ -2634,54 +3325,19 @@ unsafe fn write_iface_assert_success(
         if slot1 != 0 {
             let data_ptr = array::data_ptr_bytes(gc_ref) as *const u64;
             for i in 0..slots {
-                *dst.add(i) = *data_ptr.add(i);
+                out[i] = *data_ptr.add(i);
             }
         } else {
             for i in 0..slots {
-                *dst.add(i) = 0;
+                out[i] = 0;
             }
         }
+        Ok(slots)
     } else {
         // Other types: slot1 is the value
-        *dst = slot1;
+        out[0] = slot1;
+        Ok(1)
     }
-    JitResult::Ok
-}
-
-// =============================================================================
-// Slice Copy
-// =============================================================================
-
-/// Copy elements from src slice to dst slice (for JIT).
-/// Returns the number of elements copied (min of dst len and src len).
-#[no_mangle]
-pub extern "C" fn vo_copy(dst: u64, src: u64) -> u64 {
-    use crate::gc::GcRef;
-    use crate::objects::{array, slice};
-
-    if dst == 0 || src == 0 {
-        return 0;
-    }
-
-    let dst_ref = dst as GcRef;
-    let src_ref = src as GcRef;
-
-    let dst_len = slice::len(dst_ref);
-    let src_len = slice::len(src_ref);
-    let copy_len = dst_len.min(src_len);
-
-    if copy_len == 0 {
-        return 0;
-    }
-
-    let dst_arr = slice::array_ref(dst_ref);
-    let elem_bytes = array::elem_bytes(dst_arr);
-    let dst_ptr = slice::data_ptr(dst_ref);
-    let src_ptr = slice::data_ptr(src_ref);
-
-    unsafe { core::ptr::copy(src_ptr, dst_ptr, copy_len * elem_bytes) };
-
-    copy_len as u64
 }
 
 // =============================================================================
@@ -2717,14 +3373,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_chan_len", vo_chan_len as *const u8),
         ("vo_chan_cap", vo_chan_cap as *const u8),
         ("vo_array_new", vo_array_new as *const u8),
-        ("vo_array_get", vo_array_get as *const u8),
-        ("vo_array_set", vo_array_set as *const u8),
         ("vo_array_len", vo_array_len as *const u8),
         ("vo_slice_new_checked", vo_slice_new_checked as *const u8),
         ("vo_slice_len", vo_slice_len as *const u8),
         ("vo_slice_cap", vo_slice_cap as *const u8),
-        ("vo_slice_get", vo_slice_get as *const u8),
-        ("vo_slice_set", vo_slice_set as *const u8),
         ("vo_slice_slice", vo_slice_slice as *const u8),
         ("vo_slice_slice3", vo_slice_slice3 as *const u8),
         ("vo_slice_append", vo_slice_append as *const u8),
@@ -2735,6 +3387,10 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_iface_eq", vo_iface_eq as *const u8),
         ("vo_iface_assert", vo_iface_assert as *const u8),
         ("vo_set_call_request", vo_set_call_request as *const u8),
+        (
+            "vo_jit_copy_frame_slots",
+            vo_jit_copy_frame_slots as *const u8,
+        ),
         ("vo_ptr_clone", vo_ptr_clone as *const u8),
         ("vo_map_new", vo_map_new as *const u8),
         ("vo_map_len", vo_map_len as *const u8),
@@ -2743,7 +3399,6 @@ pub fn get_runtime_symbols() -> &'static [(&'static str, *const u8)] {
         ("vo_map_delete", vo_map_delete as *const u8),
         ("vo_map_iter_init", vo_map_iter_init as *const u8),
         ("vo_map_iter_next", vo_map_iter_next as *const u8),
-        ("vo_copy", vo_copy as *const u8),
         ("vo_island_new", vo_island_new as *const u8),
         ("vo_chan_close", vo_chan_close as *const u8),
         ("vo_chan_send", vo_chan_send as *const u8),
@@ -2781,14 +3436,10 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_chan_len",
         "vo_chan_cap",
         "vo_array_new",
-        "vo_array_get",
-        "vo_array_set",
         "vo_array_len",
         "vo_slice_new_checked",
         "vo_slice_len",
         "vo_slice_cap",
-        "vo_slice_get",
-        "vo_slice_set",
         "vo_slice_slice",
         "vo_slice_slice3",
         "vo_slice_append",
@@ -2799,6 +3450,7 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_iface_eq",
         "vo_iface_assert",
         "vo_set_call_request",
+        "vo_jit_copy_frame_slots",
         "vo_ptr_clone",
         "vo_map_new",
         "vo_map_len",
@@ -2807,7 +3459,6 @@ pub fn runtime_symbol_names() -> &'static [&'static str] {
         "vo_map_delete",
         "vo_map_iter_init",
         "vo_map_iter_next",
-        "vo_copy",
         "vo_island_new",
         "vo_chan_close",
         "vo_chan_send",
@@ -3001,23 +3652,23 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
         },
         JitRuntimeHelperAbi {
             name: "vo_chan_len",
-            params: &[T::U64],
-            ret: T::U64,
-            return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
+            params: &[T::Ptr, T::U64, T::Ptr],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
             may_gc: false,
             may_schedule: false,
-            observes_frame: false,
+            observes_frame: true,
         },
         JitRuntimeHelperAbi {
             name: "vo_chan_cap",
-            params: &[T::U64],
-            ret: T::U64,
-            return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
+            params: &[T::Ptr, T::U64, T::Ptr],
+            ret: T::JitResult,
+            return_policy: Ret::JitResult,
+            panic_policy: Panic::ReturnsJitResult,
             may_gc: false,
             may_schedule: false,
-            observes_frame: false,
+            observes_frame: true,
         },
         JitRuntimeHelperAbi {
             name: "vo_array_new",
@@ -3026,26 +3677,6 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             return_policy: Ret::RawU64,
             panic_policy: Panic::MustNotPanicAcrossAbi,
             may_gc: true,
-            may_schedule: false,
-            observes_frame: false,
-        },
-        JitRuntimeHelperAbi {
-            name: "vo_array_get",
-            params: &[T::U64, T::U64, T::U64],
-            ret: T::U64,
-            return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
-            may_gc: false,
-            may_schedule: false,
-            observes_frame: false,
-        },
-        JitRuntimeHelperAbi {
-            name: "vo_array_set",
-            params: &[T::U64, T::U64, T::U64, T::U64],
-            ret: T::Void,
-            return_policy: Ret::Void,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
-            may_gc: false,
             may_schedule: false,
             observes_frame: false,
         },
@@ -3084,26 +3715,6 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             params: &[T::U64],
             ret: T::U64,
             return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
-            may_gc: false,
-            may_schedule: false,
-            observes_frame: false,
-        },
-        JitRuntimeHelperAbi {
-            name: "vo_slice_get",
-            params: &[T::U64, T::U64, T::U64],
-            ret: T::U64,
-            return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
-            may_gc: false,
-            may_schedule: false,
-            observes_frame: false,
-        },
-        JitRuntimeHelperAbi {
-            name: "vo_slice_set",
-            params: &[T::U64, T::U64, T::U64, T::U64],
-            ret: T::Void,
-            return_policy: Ret::Void,
             panic_policy: Panic::MustNotPanicAcrossAbi,
             may_gc: false,
             may_schedule: false,
@@ -3173,8 +3784,8 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             name: "vo_iface_to_iface",
             params: &[T::Ptr, T::U64, T::U32],
             ret: T::U64,
-            return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: false,
             may_schedule: false,
             observes_frame: false,
@@ -3210,6 +3821,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             observes_frame: true,
         },
         JitRuntimeHelperAbi {
+            name: "vo_jit_copy_frame_slots",
+            params: &[T::Ptr, T::Ptr, T::U32],
+            ret: T::Void,
+            return_policy: Ret::Void,
+            panic_policy: Panic::MustNotPanicAcrossAbi,
+            may_gc: false,
+            may_schedule: false,
+            observes_frame: false,
+        },
+        JitRuntimeHelperAbi {
             name: "vo_ptr_clone",
             params: &[T::Ptr, T::U64],
             ret: T::U64,
@@ -3231,13 +3852,13 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
         },
         JitRuntimeHelperAbi {
             name: "vo_map_len",
-            params: &[T::U64],
+            params: &[T::Ptr, T::U64],
             ret: T::U64,
-            return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: false,
             may_schedule: false,
-            observes_frame: false,
+            observes_frame: true,
         },
         JitRuntimeHelperAbi {
             name: "vo_map_get",
@@ -3271,13 +3892,13 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
         },
         JitRuntimeHelperAbi {
             name: "vo_map_iter_init",
-            params: &[T::U64, T::Ptr],
-            ret: T::Void,
-            return_policy: Ret::Void,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
+            params: &[T::Ptr, T::U64, T::Ptr],
+            ret: T::U64,
+            return_policy: Ret::U64ErrorSentinel,
+            panic_policy: Panic::ReturnsStatusOrSentinel,
             may_gc: false,
             may_schedule: false,
-            observes_frame: false,
+            observes_frame: true,
         },
         JitRuntimeHelperAbi {
             name: "vo_map_iter_next",
@@ -3288,16 +3909,6 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
             may_gc: false,
             may_schedule: false,
             observes_frame: true,
-        },
-        JitRuntimeHelperAbi {
-            name: "vo_copy",
-            params: &[T::U64, T::U64],
-            ret: T::U64,
-            return_policy: Ret::RawU64,
-            panic_policy: Panic::MustNotPanicAcrossAbi,
-            may_gc: false,
-            may_schedule: false,
-            observes_frame: false,
         },
         JitRuntimeHelperAbi {
             name: "vo_island_new",
@@ -3439,6 +4050,16 @@ pub fn runtime_helper_abi_fields() -> &'static [JitRuntimeHelperAbi] {
 /// Calls into VM via callback to properly register with scheduler.
 #[no_mangle]
 pub extern "C" fn vo_island_new(ctx: *mut JitContext, out: *mut u64) -> JitResult {
+    if ctx.is_null() {
+        return JitResult::JitError;
+    }
+    if out.is_null() {
+        return set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            JIT_CALLBACK_CREATE_ISLAND,
+        );
+    }
     let ctx = unsafe { &mut *ctx };
     let Some(create_fn) = ctx.create_island_fn else {
         return missing_callback(ctx, JIT_CALLBACK_CREATE_ISLAND);
@@ -3451,6 +4072,26 @@ pub extern "C" fn vo_island_new(ctx: *mut JitContext, out: *mut u64) -> JitResul
         *out = handle;
     }
     JitResult::Ok
+}
+
+/// Get channel length through VM-owned queue validation.
+#[no_mangle]
+pub extern "C" fn vo_chan_len(ctx: *mut JitContext, chan: u64, out: *mut u64) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let Some(len_fn) = ctx.queue_len_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_QUEUE_LEN);
+    };
+    len_fn(ctx, chan, out)
+}
+
+/// Get channel capacity through VM-owned queue validation.
+#[no_mangle]
+pub extern "C" fn vo_chan_cap(ctx: *mut JitContext, chan: u64, out: *mut u64) -> JitResult {
+    let ctx = unsafe { &mut *ctx };
+    let Some(cap_fn) = ctx.queue_cap_fn else {
+        return missing_callback(ctx, JIT_CALLBACK_QUEUE_CAP);
+    };
+    cap_fn(ctx, chan, out)
 }
 
 /// Close a channel.
@@ -3605,528 +4246,4 @@ pub extern "C" fn vo_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitRe
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_symbols_include_jit_control_helpers() {
-        let symbols = get_runtime_symbols();
-        assert!(symbols
-            .iter()
-            .any(|(name, _)| *name == "vo_set_call_request"));
-        assert!(symbols.iter().any(|(name, _)| *name == "vo_defer_push"));
-        assert!(symbols.iter().any(|(name, _)| *name == "vo_recover"));
-    }
-
-    #[test]
-    fn jit_abi_wrappers_do_not_unwrap_missing_callbacks() {
-        let src = include_str!("jit_api.rs");
-        let start = src
-            .find("// Island/Channel JIT Helpers")
-            .expect("JIT helper section");
-        let end = src.find("#[cfg(test)]").expect("test section");
-        let wrappers = &src[start..end];
-        assert!(
-            !wrappers.contains(".expect("),
-            "JIT ABI wrappers must return JitResult::JitError instead of panicking"
-        );
-        assert!(
-            !wrappers.contains("JIT ABI violation"),
-            "JIT ABI wrappers must use the machine-readable infra-error path"
-        );
-        assert!(
-            !wrappers.contains("*result_ptr = 0"),
-            "JIT ABI wrappers must not write default zero values before surfacing missing callbacks"
-        );
-        let recover_start = src
-            .find("pub extern \"C\" fn vo_recover")
-            .expect("vo_recover wrapper");
-        let recover_end = src[recover_start..]
-            .find("/// Trigger a user panic")
-            .map(|offset| recover_start + offset)
-            .expect("vo_recover end marker");
-        let recover_wrapper = &src[recover_start..recover_end];
-        assert!(
-            !recover_wrapper.contains("*result_ptr = 0"),
-            "vo_recover must not write a default nil interface before surfacing a missing callback"
-        );
-    }
-
-    #[test]
-    fn jit_map_helpers_do_not_min_copy_layout_mismatches() {
-        let src = include_str!("jit_api.rs");
-        let start = src
-            .find("pub extern \"C\" fn vo_map_get")
-            .expect("vo_map_get helper");
-        let end = src[start..]
-            .find("// =============================================================================\n// String Helpers")
-            .map(|offset| start + offset)
-            .expect("string helper section");
-        let map_helpers = &src[start..end];
-
-        assert!(
-            !map_helpers.contains(".min(") && !map_helpers.contains("copy_len"),
-            "JIT map helpers must treat key/value slot counts as exact ABI metadata, not silently min-copy layout mismatches"
-        );
-    }
-
-    #[test]
-    fn jit_copy_helper_uses_overlap_safe_memmove_semantics() {
-        let src = include_str!("jit_api.rs");
-        let start = src
-            .find("pub extern \"C\" fn vo_copy")
-            .expect("vo_copy helper");
-        let end = src[start..]
-            .find("// =============================================================================\n// Symbol Registration")
-            .map(|offset| start + offset)
-            .expect("symbol registration section");
-        let copy_helper = &src[start..end];
-
-        assert!(
-            copy_helper.contains("core::ptr::copy("),
-            "JIT copy helper must use overlap-safe memmove semantics for slice copy"
-        );
-        assert!(
-            !copy_helper.contains("copy_nonoverlapping"),
-            "JIT copy helper must not use non-overlap copy; source and destination slices can alias"
-        );
-    }
-
-    #[test]
-    fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let output = crate::output::CaptureSink::new();
-        let program_args = Vec::new();
-        let mut sentinel_errors = crate::ffi::SentinelErrorCache::new();
-        let mut host_output = None;
-        let mut module = Module::new("test".to_string());
-        module.struct_metas.clear();
-        let mut gc = Gc::new();
-        let parent = gc.alloc(crate::ValueMeta::new(0, ValueKind::Array), 1);
-        let vals = [0_u64];
-        let mut ctx = JitContext {
-            gc: &mut gc,
-            globals: core::ptr::null_mut(),
-            safepoint_flag: &safepoint_flag,
-            panic_flag: &mut panic_flag,
-            is_user_panic: &mut is_user_panic,
-            panic_msg: &mut panic_msg,
-            user_panic_pc: u32::MAX,
-            runtime_trap_kind: JitRuntimeTrapKind::None as u8,
-            runtime_trap_arg0: 0,
-            runtime_trap_arg1: 0,
-            runtime_trap_pc: u32::MAX,
-            vm: core::ptr::null_mut(),
-            fiber: core::ptr::null_mut(),
-            itab_cache: core::ptr::null_mut(),
-            extern_registry: core::ptr::null(),
-            call_extern_fn: None,
-            module: &module,
-            jit_func_table: core::ptr::null(),
-            jit_func_count: 0,
-            direct_call_table: core::ptr::null(),
-            direct_call_count: 0,
-            program_args: &program_args,
-            sentinel_errors: &mut sentinel_errors,
-            output: &*output as *const dyn crate::output::OutputSink,
-            host_output: &mut host_output,
-            #[cfg(feature = "std")]
-            io: core::ptr::null_mut(),
-            call_func_id: 0,
-            call_arg_start: 0,
-            call_resume_pc: 0,
-            call_ret_slots: 0,
-            call_ret_reg: 0,
-            call_kind: 0,
-            #[cfg(feature = "std")]
-            wait_io_token: 0,
-            loop_exit_pc: 0,
-            stack_ptr: core::ptr::null_mut(),
-            stack_cap: 0,
-            stack_limit: 0,
-            call_depth: 0,
-            call_depth_limit: 0,
-            jit_bp: 0,
-            fiber_sp: 0,
-            push_frame_fn: None,
-            pop_frame_fn: None,
-            stack_overflow_fn: None,
-            push_resume_point_fn: None,
-            create_island_fn: None,
-            queue_close_fn: None,
-            queue_send_fn: None,
-            queue_recv_fn: None,
-            go_start_fn: None,
-            go_island_fn: None,
-            defer_push_fn: None,
-            recover_fn: None,
-            select_begin_fn: None,
-            select_send_fn: None,
-            select_recv_fn: None,
-            select_exec_fn: None,
-            is_error_return: 0,
-            ret_gcref_start: 0,
-            ret_is_heap: 0,
-            ret_start: 0,
-            prepare_closure_call_fn: None,
-            prepare_iface_call_fn: None,
-            ic_table: core::ptr::null_mut(),
-        };
-
-        let result = vo_gc_typed_write_barrier_by_meta(
-            &mut ctx,
-            parent as u64,
-            vals.as_ptr(),
-            vals.len() as u32,
-            crate::ValueMeta::new(123, ValueKind::Struct).to_raw(),
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(ctx.runtime_trap_arg1, JIT_INFRA_ERROR_INVALID_METADATA);
-        assert_eq!(
-            ctx.runtime_trap_pc,
-            JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT as u32
-        );
-    }
-
-    #[test]
-    fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let output = crate::output::CaptureSink::new();
-        let program_args = Vec::new();
-        let mut sentinel_errors = crate::ffi::SentinelErrorCache::new();
-        let mut host_output = None;
-        let mut module = Module::new("test".to_string());
-        module.struct_metas.clear();
-        let mut gc = Gc::new();
-        let elem_meta = crate::ValueMeta::new(123, ValueKind::Struct);
-        let slice = crate::objects::slice::create(&mut gc, elem_meta, 8, 1, 2);
-        let vals = [0_u64];
-        let mut ctx = JitContext {
-            gc: &mut gc,
-            globals: core::ptr::null_mut(),
-            safepoint_flag: &safepoint_flag,
-            panic_flag: &mut panic_flag,
-            is_user_panic: &mut is_user_panic,
-            panic_msg: &mut panic_msg,
-            user_panic_pc: u32::MAX,
-            runtime_trap_kind: JitRuntimeTrapKind::None as u8,
-            runtime_trap_arg0: 0,
-            runtime_trap_arg1: 0,
-            runtime_trap_pc: u32::MAX,
-            vm: core::ptr::null_mut(),
-            fiber: core::ptr::null_mut(),
-            itab_cache: core::ptr::null_mut(),
-            extern_registry: core::ptr::null(),
-            call_extern_fn: None,
-            module: &module,
-            jit_func_table: core::ptr::null(),
-            jit_func_count: 0,
-            direct_call_table: core::ptr::null(),
-            direct_call_count: 0,
-            program_args: &program_args,
-            sentinel_errors: &mut sentinel_errors,
-            output: &*output as *const dyn crate::output::OutputSink,
-            host_output: &mut host_output,
-            #[cfg(feature = "std")]
-            io: core::ptr::null_mut(),
-            call_func_id: 0,
-            call_arg_start: 0,
-            call_resume_pc: 0,
-            call_ret_slots: 0,
-            call_ret_reg: 0,
-            call_kind: 0,
-            #[cfg(feature = "std")]
-            wait_io_token: 0,
-            loop_exit_pc: 0,
-            stack_ptr: core::ptr::null_mut(),
-            stack_cap: 0,
-            stack_limit: 0,
-            call_depth: 0,
-            call_depth_limit: 0,
-            jit_bp: 0,
-            fiber_sp: 0,
-            push_frame_fn: None,
-            pop_frame_fn: None,
-            stack_overflow_fn: None,
-            push_resume_point_fn: None,
-            create_island_fn: None,
-            queue_close_fn: None,
-            queue_send_fn: None,
-            queue_recv_fn: None,
-            go_start_fn: None,
-            go_island_fn: None,
-            defer_push_fn: None,
-            recover_fn: None,
-            select_begin_fn: None,
-            select_send_fn: None,
-            select_recv_fn: None,
-            select_exec_fn: None,
-            is_error_return: 0,
-            ret_gcref_start: 0,
-            ret_is_heap: 0,
-            ret_start: 0,
-            prepare_closure_call_fn: None,
-            prepare_iface_call_fn: None,
-            ic_table: core::ptr::null_mut(),
-        };
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            vo_slice_append(&mut ctx, elem_meta.to_raw(), 8, slice as u64, vals.as_ptr())
-        }));
-
-        let result = result.expect("vo_slice_append must not panic across extern C ABI");
-        assert_eq!(result, JIT_HELPER_U64_ERROR);
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(ctx.runtime_trap_arg1, JIT_INFRA_ERROR_INVALID_METADATA);
-        assert_eq!(
-            ctx.runtime_trap_pc,
-            JIT_HELPER_TYPED_WRITE_BARRIER_LAYOUT as u32
-        );
-    }
-
-    #[test]
-    fn nil_slice_slice_helpers_only_accept_zero_bounds() {
-        let mut gc = Gc::new();
-
-        assert_eq!(vo_slice_slice(&mut gc, 0, 0, 0), 0);
-        assert_eq!(vo_slice_slice(&mut gc, 0, 1, 1), JIT_HELPER_U64_ERROR);
-        assert_eq!(vo_slice_slice(&mut gc, 0, 0, 1), JIT_HELPER_U64_ERROR);
-
-        assert_eq!(vo_slice_slice3(&mut gc, 0, 0, 0, 0), 0);
-        assert_eq!(vo_slice_slice3(&mut gc, 0, 0, 0, 1), JIT_HELPER_U64_ERROR);
-        assert_eq!(vo_slice_slice3(&mut gc, 0, 1, 1, 1), JIT_HELPER_U64_ERROR);
-    }
-
-    #[test]
-    fn str_slice_helper_reports_bounds_errors_with_sentinel() {
-        let mut gc = Gc::new();
-        let s = crate::objects::string::from_rust_str(&mut gc, "abc") as u64;
-
-        assert_ne!(vo_str_slice(&mut gc, s, 1, 1), JIT_HELPER_U64_ERROR);
-        assert_eq!(vo_str_slice(&mut gc, s, 2, 1), JIT_HELPER_U64_ERROR);
-        assert_eq!(vo_str_slice(&mut gc, s, 0, 4), JIT_HELPER_U64_ERROR);
-        assert_eq!(vo_str_slice(&mut gc, 0, 1, 1), JIT_HELPER_U64_ERROR);
-    }
-
-    #[test]
-    fn runtime_symbol_name_manifest_matches_registered_symbols() {
-        let symbols = get_runtime_symbols();
-        let names = runtime_symbol_names();
-        assert_eq!(symbols.len(), names.len());
-        for ((registered, _), manifest) in symbols.iter().zip(names.iter()) {
-            assert_eq!(registered, manifest);
-        }
-    }
-
-    #[test]
-    fn runtime_helper_abi_manifest_matches_registered_symbols() {
-        let names = runtime_symbol_names();
-        let abi = runtime_helper_abi_fields();
-        assert_eq!(abi.len(), names.len());
-        for (field, manifest) in abi.iter().zip(names.iter()) {
-            assert_eq!(field.name, *manifest);
-            assert!(
-                !field.params.is_empty()
-                    || matches!(field.return_policy, JitRuntimeHelperReturnPolicy::RawU64),
-                "{} should declare its ABI parameters explicitly",
-                field.name
-            );
-            if field.may_schedule {
-                assert!(
-                    field.observes_frame,
-                    "{} may schedule and must observe/materialize the frame",
-                    field.name
-                );
-            }
-            if field.ret == JitAbiType::JitResult {
-                assert_eq!(
-                    field.return_policy,
-                    JitRuntimeHelperReturnPolicy::JitResult,
-                    "{} returns JitResult and must be checked by lowering",
-                    field.name
-                );
-            }
-            if matches!(
-                field.return_policy,
-                JitRuntimeHelperReturnPolicy::JitResult
-                    | JitRuntimeHelperReturnPolicy::I32StatusOutPointer
-                    | JitRuntimeHelperReturnPolicy::U64ErrorSentinel
-            ) {
-                assert_ne!(
-                    field.panic_policy,
-                    JitRuntimeHelperPanicPolicy::MustNotPanicAcrossAbi,
-                    "{} has a control-flow-significant status but no failure policy",
-                    field.name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn jit_callback_abi_manifest_is_sorted_unique_and_machine_readable() {
-        let fields = jit_callback_abi_fields();
-        assert!(!fields.is_empty());
-        let mut names = std::collections::BTreeSet::new();
-        let mut ids = std::collections::BTreeSet::new();
-        for field in fields {
-            assert!(
-                names.insert(field.name),
-                "duplicate callback {}",
-                field.name
-            );
-            if let Some(id) = field.infra_error_id {
-                assert!(ids.insert(id), "duplicate JIT callback infra-error id {id}");
-                assert!(id > 0, "callback infra-error id must be non-zero");
-            }
-            if field.may_schedule {
-                assert!(
-                    field.observes_frame,
-                    "{} may schedule and must observe/materialize the frame",
-                    field.name
-                );
-            }
-            if field.kind != JitContextDependencyKind::InlineCacheTable {
-                assert_eq!(
-                    field.params.first(),
-                    Some(&JitAbiType::Ptr),
-                    "{} callback must take JitContext as its first ABI parameter",
-                    field.name
-                );
-            }
-            match field.return_policy {
-                JitCallbackReturnPolicy::RawVoid => assert_eq!(field.ret, JitAbiType::Void),
-                JitCallbackReturnPolicy::RawPointer | JitCallbackReturnPolicy::TablePointer => {
-                    assert_eq!(field.ret, JitAbiType::Ptr)
-                }
-                JitCallbackReturnPolicy::RawHandle => assert_eq!(field.ret, JitAbiType::U64),
-                JitCallbackReturnPolicy::JitResult
-                | JitCallbackReturnPolicy::JitResultWithOutPointer
-                | JitCallbackReturnPolicy::PreparedCallOutPointer => {
-                    assert_eq!(field.ret, JitAbiType::JitResult)
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn dyn_call_iface_key_keeps_full_itab_id() {
-        let method_idx = 7;
-        let low = DynCallIC::iface_key(0x0000_0002, method_idx);
-        let high = DynCallIC::iface_key(0x0001_0002, method_idx);
-        let truncated_low = (0x0000_0002_u32 << 16) | method_idx;
-        let truncated_high = (0x0001_0002_u32 << 16) | method_idx;
-
-        assert_eq!(truncated_low, truncated_high, "truncated u32 key collided");
-        assert_ne!(low, high, "tagged key must retain high itab_id bits");
-        assert_ne!(low, DynCallIC::closure_key(0x0000_0002));
-    }
-
-    #[test]
-    fn call_extern_missing_callback_uses_infra_error_path() {
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let output = crate::output::CaptureSink::new();
-        let program_args = Vec::new();
-        let mut sentinel_errors = crate::ffi::SentinelErrorCache::new();
-        let mut host_output = None;
-        let module = Module::new("test".to_string());
-        let mut ctx = JitContext {
-            gc: core::ptr::null_mut(),
-            globals: core::ptr::null_mut(),
-            safepoint_flag: &safepoint_flag,
-            panic_flag: &mut panic_flag,
-            is_user_panic: &mut is_user_panic,
-            panic_msg: &mut panic_msg,
-            user_panic_pc: u32::MAX,
-            runtime_trap_kind: JitRuntimeTrapKind::None as u8,
-            runtime_trap_arg0: 0,
-            runtime_trap_arg1: 0,
-            runtime_trap_pc: u32::MAX,
-            vm: core::ptr::null_mut(),
-            fiber: core::ptr::null_mut(),
-            itab_cache: core::ptr::null_mut(),
-            extern_registry: core::ptr::null(),
-            call_extern_fn: None,
-            module: &module,
-            jit_func_table: core::ptr::null(),
-            jit_func_count: 0,
-            direct_call_table: core::ptr::null(),
-            direct_call_count: 0,
-            program_args: &program_args,
-            sentinel_errors: &mut sentinel_errors,
-            output: &*output as *const dyn crate::output::OutputSink,
-            host_output: &mut host_output,
-            #[cfg(feature = "std")]
-            io: core::ptr::null_mut(),
-            call_func_id: 0,
-            call_arg_start: 0,
-            call_resume_pc: 0,
-            call_ret_slots: 0,
-            call_ret_reg: 0,
-            call_kind: 0,
-            #[cfg(feature = "std")]
-            wait_io_token: 0,
-            loop_exit_pc: 0,
-            stack_ptr: core::ptr::null_mut(),
-            stack_cap: 0,
-            stack_limit: 0,
-            call_depth: 0,
-            call_depth_limit: 0,
-            jit_bp: 0,
-            fiber_sp: 0,
-            push_frame_fn: None,
-            pop_frame_fn: None,
-            stack_overflow_fn: None,
-            push_resume_point_fn: None,
-            create_island_fn: None,
-            queue_close_fn: None,
-            queue_send_fn: None,
-            queue_recv_fn: None,
-            go_start_fn: None,
-            go_island_fn: None,
-            defer_push_fn: None,
-            recover_fn: None,
-            select_begin_fn: None,
-            select_send_fn: None,
-            select_recv_fn: None,
-            select_exec_fn: None,
-            is_error_return: 0,
-            ret_gcref_start: 0,
-            ret_is_heap: 0,
-            ret_start: 0,
-            prepare_closure_call_fn: None,
-            prepare_iface_call_fn: None,
-            ic_table: core::ptr::null_mut(),
-        };
-
-        let result = vo_call_extern(&mut ctx, 7, core::ptr::null(), 0, core::ptr::null_mut(), 0);
-
-        assert_eq!(result, JitResult::JitError);
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(ctx.runtime_trap_arg1, JIT_INFRA_ERROR_MISSING_CALLBACK);
-        assert_eq!(ctx.runtime_trap_pc, JIT_CALLBACK_CALL_EXTERN as u32);
-    }
-
-    #[test]
-    fn jit_context_abi_field_manifest_is_sorted_and_unique() {
-        let fields = jit_context_abi_fields();
-        assert!(!fields.is_empty());
-        for pair in fields.windows(2) {
-            assert_ne!(pair[0].name, pair[1].name);
-            assert!(
-                pair[0].offset < pair[1].offset || pair[0].name < pair[1].name,
-                "ABI fields should remain inspectable without duplicate adjacent entries"
-            );
-        }
-    }
-}
+mod tests;

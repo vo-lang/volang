@@ -28,6 +28,8 @@ use vo_runtime::builtins::error_helper::write_error_to;
 #[cfg(feature = "std")]
 use vo_runtime::ffi::ExternCallContext;
 use vo_runtime::ffi::ExternRegistry;
+#[cfg(feature = "std")]
+use vo_runtime::ffi::StdlibEntry;
 
 #[cfg(feature = "std")]
 lazy_static::lazy_static! {
@@ -107,79 +109,212 @@ fn write_io_error(call: &mut ExternCallContext, ret_slot: u16, err: std::io::Err
 }
 
 #[cfg(feature = "std")]
+#[doc(hidden)]
+pub const REGISTERED_EXTERNS: &[StdlibEntry] = &[
+    StdlibEntry {
+        name: "net_dial",
+        func: tcp::net_dial,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_listen",
+        func: tcp::net_listen,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_blocking_tcpConnRead",
+        func: tcp::net_tcp_conn_read,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    StdlibEntry {
+        name: "net_blocking_tcpConnWrite",
+        func: tcp::net_tcp_conn_write,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    StdlibEntry {
+        name: "net_tcpConnClose",
+        func: tcp::net_tcp_conn_close,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_tcpConnLocalAddr",
+        func: tcp::net_tcp_conn_local_addr,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_tcpConnRemoteAddr",
+        func: tcp::net_tcp_conn_remote_addr,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_tcpConnSetDeadline",
+        func: tcp::net_tcp_conn_set_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_tcpConnSetReadDeadline",
+        func: tcp::net_tcp_conn_set_read_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_tcpConnSetWriteDeadline",
+        func: tcp::net_tcp_conn_set_write_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_blocking_tcpListenerAccept",
+        func: tcp::net_tcp_listener_accept,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    StdlibEntry {
+        name: "net_tcpListenerClose",
+        func: tcp::net_tcp_listener_close,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_tcpListenerAddr",
+        func: tcp::net_tcp_listener_addr,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_listenPacket",
+        func: udp::net_listen_packet,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_blocking_udpConnReadFrom",
+        func: udp::net_udp_conn_read_from,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    StdlibEntry {
+        name: "net_blocking_udpConnWriteTo",
+        func: udp::net_udp_conn_write_to,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    StdlibEntry {
+        name: "net_udpConnClose",
+        func: udp::net_udp_conn_close,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_udpConnLocalAddr",
+        func: udp::net_udp_conn_local_addr,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_udpConnSetDeadline",
+        func: udp::net_udp_conn_set_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_udpConnSetReadDeadline",
+        func: udp::net_udp_conn_set_read_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_udpConnSetWriteDeadline",
+        func: udp::net_udp_conn_set_write_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_unixDial",
+        func: unix::net_unix_dial,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_unixListen",
+        func: unix::net_unix_listen,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_blocking_unixConnRead",
+        func: unix::net_unix_conn_read,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_blocking_unixConnWrite",
+        func: unix::net_unix_conn_write,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_unixConnSetDeadline",
+        func: unix::net_unix_conn_set_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_unixConnSetReadDeadline",
+        func: unix::net_unix_conn_set_read_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_unixConnSetWriteDeadline",
+        func: unix::net_unix_conn_set_write_deadline,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_unixConnClose",
+        func: unix::net_unix_conn_close,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_blocking_unixListenerAccept",
+        func: unix::net_unix_listener_accept,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    #[cfg(unix)]
+    StdlibEntry {
+        name: "net_unixListenerClose",
+        func: unix::net_unix_listener_close,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_lookupHost",
+        func: dns::net_lookup_host,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_lookupIP",
+        func: dns::net_lookup_ip,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_lookupAddr",
+        func: dns::net_lookup_addr,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_resolveTCPAddr",
+        func: dns::net_resolve_tcp_addr,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    StdlibEntry {
+        name: "net_resolveUDPAddr",
+        func: dns::net_resolve_udp_addr,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+];
+
+#[cfg(feature = "std")]
 pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
 ) {
     for (id, def) in externs.iter().enumerate() {
         let id = id as u32;
-        match def.name.as_str() {
-            // TCP
-            "net_dial" => registry.register(id, tcp::net_dial),
-            "net_listen" => registry.register(id, tcp::net_listen),
-            "net_blocking_tcpConnRead" => registry.register(id, tcp::net_tcp_conn_read),
-            "net_blocking_tcpConnWrite" => registry.register(id, tcp::net_tcp_conn_write),
-            "net_tcpConnClose" => registry.register(id, tcp::net_tcp_conn_close),
-            "net_tcpConnLocalAddr" => registry.register(id, tcp::net_tcp_conn_local_addr),
-            "net_tcpConnRemoteAddr" => registry.register(id, tcp::net_tcp_conn_remote_addr),
-            "net_tcpConnSetDeadline" => registry.register(id, tcp::net_tcp_conn_set_deadline),
-            "net_tcpConnSetReadDeadline" => {
-                registry.register(id, tcp::net_tcp_conn_set_read_deadline)
+        for entry in REGISTERED_EXTERNS {
+            if def.name == entry.name() {
+                entry.register(registry, id);
+                break;
             }
-            "net_tcpConnSetWriteDeadline" => {
-                registry.register(id, tcp::net_tcp_conn_set_write_deadline)
-            }
-            "net_blocking_tcpListenerAccept" => registry.register(id, tcp::net_tcp_listener_accept),
-            "net_tcpListenerClose" => registry.register(id, tcp::net_tcp_listener_close),
-            "net_tcpListenerAddr" => registry.register(id, tcp::net_tcp_listener_addr),
-            // UDP (async)
-            "net_listenPacket" => registry.register(id, udp::net_listen_packet),
-            "net_blocking_udpConnReadFrom" => registry.register(id, udp::net_udp_conn_read_from),
-            "net_blocking_udpConnWriteTo" => registry.register(id, udp::net_udp_conn_write_to),
-            "net_udpConnClose" => registry.register(id, udp::net_udp_conn_close),
-            "net_udpConnLocalAddr" => registry.register(id, udp::net_udp_conn_local_addr),
-            "net_udpConnSetDeadline" => registry.register(id, udp::net_udp_conn_set_deadline),
-            "net_udpConnSetReadDeadline" => {
-                registry.register(id, udp::net_udp_conn_set_read_deadline)
-            }
-            "net_udpConnSetWriteDeadline" => {
-                registry.register(id, udp::net_udp_conn_set_write_deadline)
-            }
-            // Unix (cfg(unix) only, async)
-            #[cfg(unix)]
-            "net_unixDial" => registry.register(id, unix::net_unix_dial),
-            #[cfg(unix)]
-            "net_unixListen" => registry.register(id, unix::net_unix_listen),
-            #[cfg(unix)]
-            "net_blocking_unixConnRead" => registry.register(id, unix::net_unix_conn_read),
-            #[cfg(unix)]
-            "net_blocking_unixConnWrite" => registry.register(id, unix::net_unix_conn_write),
-            #[cfg(unix)]
-            "net_unixConnSetDeadline" => registry.register(id, unix::net_unix_conn_set_deadline),
-            #[cfg(unix)]
-            "net_unixConnSetReadDeadline" => {
-                registry.register(id, unix::net_unix_conn_set_read_deadline)
-            }
-            #[cfg(unix)]
-            "net_unixConnSetWriteDeadline" => {
-                registry.register(id, unix::net_unix_conn_set_write_deadline)
-            }
-            #[cfg(unix)]
-            "net_unixConnClose" => registry.register(id, unix::net_unix_conn_close),
-            #[cfg(unix)]
-            "net_blocking_unixListenerAccept" => {
-                registry.register(id, unix::net_unix_listener_accept)
-            }
-            #[cfg(unix)]
-            "net_unixListenerClose" => registry.register(id, unix::net_unix_listener_close),
-            // DNS
-            "net_lookupHost" => registry.register(id, dns::net_lookup_host),
-            "net_lookupIP" => registry.register(id, dns::net_lookup_ip),
-            "net_lookupAddr" => registry.register(id, dns::net_lookup_addr),
-            // Resolve
-            "net_resolveTCPAddr" => registry.register(id, dns::net_resolve_tcp_addr),
-            "net_resolveUDPAddr" => registry.register(id, dns::net_resolve_udp_addr),
-            _ => {}
         }
     }
 }

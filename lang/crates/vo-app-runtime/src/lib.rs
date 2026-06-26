@@ -46,8 +46,9 @@ pub use render_island_session::RenderIslandSession;
 pub use scheduler::HostEventScheduler;
 pub use session::{
     advance_session, drain_outbound_island_frames, push_targeted_inbound_island_frame,
-    replay_event_wait_token, resume_waiting_event, run_inbound_island_command,
-    run_inbound_island_frame, validate_scheduling_outcome, SessionError,
+    replay_event_wait_key, replay_event_wait_token, resume_waiting_event,
+    run_inbound_island_command, run_inbound_island_frame, validate_scheduling_outcome,
+    SessionError,
 };
 #[cfg(feature = "std")]
 pub use tick::{NativeTickProvider, TickLoopControl};

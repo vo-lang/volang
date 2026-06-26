@@ -970,7 +970,6 @@ fn native_sscanf(call: &mut ExternCallContext) -> ExternResult {
 }
 
 /// nativeReadLine - read a line from stdin
-#[cfg(feature = "std")]
 #[vostd_fn("fmt", "nativeReadLine", std)]
 fn native_read_line(call: &mut ExternCallContext) -> ExternResult {
     use std::io::BufRead;
@@ -1007,28 +1006,27 @@ fn native_read_line(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+#[doc(hidden)]
+pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[
+    __STDLIB_fmt_nativeWrite,
+    __STDLIB_fmt_nativeSprint,
+    __STDLIB_fmt_nativeSprintln,
+    __STDLIB_fmt_nativeSprintf,
+    __STDLIB_fmt_nativeSscan,
+    __STDLIB_fmt_nativeSscanf,
+    __STDLIB_fmt_nativeReadLine,
+];
+
 pub fn register_externs(
     registry: &mut vo_runtime::ffi::ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
 ) {
-    const BASE_TABLE: &[vo_runtime::ffi::StdlibEntry] = &[
-        __STDLIB_fmt_nativeWrite,
-        __STDLIB_fmt_nativeSprint,
-        __STDLIB_fmt_nativeSprintln,
-        __STDLIB_fmt_nativeSprintf,
-        __STDLIB_fmt_nativeSscan,
-        __STDLIB_fmt_nativeSscanf,
-    ];
     for (id, def) in externs.iter().enumerate() {
-        for entry in BASE_TABLE {
+        for entry in REGISTERED_EXTERNS {
             if def.name == entry.name() {
                 entry.register(registry, id as u32);
                 break;
             }
-        }
-        #[cfg(feature = "std")]
-        if def.name == __STDLIB_fmt_nativeReadLine.name() {
-            __STDLIB_fmt_nativeReadLine.register(registry, id as u32);
         }
     }
 }

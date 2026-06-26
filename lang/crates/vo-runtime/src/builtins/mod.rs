@@ -9,3 +9,8 @@ pub mod format;
 
 pub use error_helper::{create_error, write_error_to, write_nil_error};
 pub use format::{format_interface, format_interface_with_ctx, format_value};
+
+pub fn known_extern_allowed_effects(name: &str) -> Option<crate::bytecode::ExternEffects> {
+    builtin::known_extern_allowed_effects(name)
+        .or_else(|| dynamic::known_extern_allowed_effects(name))
+}

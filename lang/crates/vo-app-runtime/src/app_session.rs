@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use vo_runtime::island::IslandCommand;
+use vo_vm::scheduler::HostWaitKey;
 use vo_vm::vm::{SchedulingOutcome, Vm};
 
 use crate::effects::SessionEffects;
@@ -86,12 +87,12 @@ impl AppSession {
         payload: &str,
         panic_message: &'static str,
     ) -> Result<StepResult, SessionError> {
-        let wait_token = self
+        let wait_key = self
             .mailbox
-            .replay_event_wait_token()
+            .replay_event_wait_key()
             .ok_or(SessionError::NotWaitingForEvents)?;
         self.clear_outputs();
-        let outcome = resume_waiting_event(&mut self.vm, wait_token, handler_id, payload)?;
+        let outcome = resume_waiting_event(&mut self.vm, wait_key, handler_id, payload)?;
         advance_session(&mut self.mailbox, &mut self.vm, outcome, panic_message)?;
         Ok(self.record_step(outcome))
     }
@@ -162,9 +163,12 @@ impl AppSession {
         self.pending_host_events.drain(..).collect()
     }
 
-    pub fn wake_host_event(&mut self, token: u64) {
-        self.mailbox.remove_pending_host_event_token(token);
-        self.vm.wake_host_event(token);
+    pub fn wake_host_event(&mut self, key: HostWaitKey) -> Result<(), SessionError> {
+        if !self.vm.wake_host_event(key) {
+            return Err(SessionError::HostWakeRejected);
+        }
+        self.mailbox.remove_pending_host_event_key(key);
+        Ok(())
     }
 
     // ── Lifecycle ───────────────────────────────────────────────────────
@@ -183,7 +187,7 @@ impl AppSession {
 
     fn record_step(&mut self, outcome: SchedulingOutcome) -> StepResult {
         let effects = SessionEffects::collect(
-            self.mailbox.replay_event_wait_token(),
+            self.mailbox.replay_event_wait_key(),
             self.mailbox.take_pending_host_events(),
             self.mailbox.take_outbound_frames(),
             self.vm.take_host_output(),
@@ -203,10 +207,59 @@ impl AppSession {
 mod tests {
     use alloc::boxed::Box;
     use alloc::string::String;
+    use alloc::vec;
 
     use super::AppSession;
     use crate::SessionError;
+    use vo_vm::scheduler::{
+        FiberWakeKey, HostWaitKey, HostWaitSource, PendingHostEvent as VmPendingHostEvent,
+        WaitRegistrationKey,
+    };
     use vo_vm::vm::Vm;
+
+    fn host_key(source: HostWaitSource, token: u64, registration: u64) -> HostWaitKey {
+        HostWaitKey {
+            source,
+            token,
+            wake_key: FiberWakeKey::new(0, 1),
+            registration: WaitRegistrationKey {
+                token: registration,
+            },
+        }
+    }
+
+    fn pending_timer_event(key: HostWaitKey) -> VmPendingHostEvent {
+        VmPendingHostEvent {
+            key,
+            source: HostWaitSource::Timer,
+            token: key.token,
+            delay_ms: 16,
+            replay: false,
+        }
+    }
+
+    #[test]
+    fn app_session_host_wake_rejection_does_not_consume_mailbox_key_043() {
+        let key = host_key(HostWaitSource::Timer, 42, 1);
+        let mut session = AppSession::new(Vm::new(), Box::new(String::new));
+        session
+            .mailbox
+            .record_pending_host_events(vec![pending_timer_event(key)]);
+
+        assert_eq!(
+            session.wake_host_event(key),
+            Err(SessionError::HostWakeRejected)
+        );
+        session
+            .mailbox
+            .record_pending_host_events(vec![pending_timer_event(key)]);
+
+        assert_eq!(
+            session.mailbox.take_pending_host_events().len(),
+            1,
+            "a VM-rejected host wake must not consume the mailbox dedup key"
+        );
+    }
 
     #[test]
     fn resume_waiting_event_requires_replay_wait_token() {

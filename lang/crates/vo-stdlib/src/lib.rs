@@ -13,6 +13,7 @@ mod source;
 // Cross-platform stdlib modules
 pub mod bits;
 pub mod bytes;
+pub mod extern_manifest;
 pub mod fmt;
 pub mod io;
 pub mod json;
@@ -70,14 +71,63 @@ pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     // cross-platform (no std required)
     regexp::register_externs(registry, externs);
 
+    // time has explicit no_std stubs for host builds without platform support.
+    time::register_externs(registry, externs);
+
     // std-only
     #[cfg(feature = "std")]
     {
-        time::register_externs(registry, externs);
         os::register_externs(registry, externs);
         net::register_externs(registry, externs);
         net::http::register_externs(registry, externs);
         filepath::register_externs(registry, externs);
         exec::register_externs(registry, externs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vo_runtime::bytecode::{
+        ExternEffects, ExternJitRoute, ParamShape, RegisteredExternSource, ResolvedExtern,
+        ReturnShape,
+    };
+    use vo_runtime::SlotType;
+
+    fn extern_def(name: &str) -> ExternDef {
+        let param_slots = if name == "math_FMA" { 3 } else { 1 };
+        ExternDef {
+            name: name.to_string(),
+            params: ParamShape::Exact { slots: param_slots },
+            returns: ReturnShape::with_slot_types(vec![SlotType::Float]),
+            allowed_effects: ExternEffects::NONE,
+            param_kinds: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn register_externs_routes_canonical_math_intrinsics_to_jit_intrinsic() {
+        let names = [
+            "math_Sqrt",
+            "math_Floor",
+            "math_Ceil",
+            "math_Trunc",
+            "math_FMA",
+        ];
+        let externs = names
+            .iter()
+            .map(|name| extern_def(name))
+            .collect::<Vec<_>>();
+        let mut registry = ExternRegistry::new();
+
+        register_externs(&mut registry, &externs);
+        let resolved = registry.resolve_module_externs(&externs).expect("resolve");
+
+        for (id, name) in names.iter().enumerate() {
+            let entry: &ResolvedExtern = resolved.get(id as u32).expect("resolved math extern");
+            assert_eq!(entry.name, *name);
+            assert_eq!(entry.jit_route, ExternJitRoute::Intrinsic);
+            assert_eq!(entry.source, RegisteredExternSource::Builtin);
+        }
     }
 }

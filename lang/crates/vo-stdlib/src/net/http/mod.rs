@@ -18,7 +18,7 @@ use vo_ffi_macro::{vostd_errors, vostd_fn};
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::ffi::ExternRegistry;
 #[cfg(feature = "std")]
-use vo_runtime::ffi::{ExternCallContext, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternResult, StdlibEntry};
 #[cfg(feature = "std")]
 use vo_runtime::gc::GcRef;
 #[cfg(feature = "std")]
@@ -299,7 +299,7 @@ fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
     let len = slice::len(slice_ref);
     let mut result = Vec::with_capacity(len);
     for i in 0..len {
-        let str_ref_raw = slice::get(slice_ref, i, std::mem::size_of::<GcRef>());
+        let str_ref_raw = unsafe { slice::get(slice_ref, i, std::mem::size_of::<GcRef>()) };
         let str_ref: GcRef = slot_to_ptr(str_ref_raw);
         if !str_ref.is_null() {
             result.push(vo_runtime::objects::string::as_str(str_ref).to_string());
@@ -327,13 +327,24 @@ fn split_header_line(line: &str) -> Option<(&str, &str)> {
 // ── Registration ─────────────────────────────────────────────────────
 
 #[cfg(feature = "std")]
+#[doc(hidden)]
+pub const REGISTERED_EXTERNS: &[StdlibEntry] = &[StdlibEntry {
+    name: "net_http_nativeHttpsRequest",
+    func: http_native_https_request,
+    effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+}];
+
+#[cfg(feature = "std")]
 pub fn register_externs(
     registry: &mut ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
 ) {
     for (id, def) in externs.iter().enumerate() {
-        if def.name.as_str() == "net_http_nativeHttpsRequest" {
-            registry.register(id as u32, http_native_https_request);
+        for entry in REGISTERED_EXTERNS {
+            if def.name == entry.name() {
+                entry.register(registry, id as u32);
+                break;
+            }
         }
     }
 }

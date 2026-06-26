@@ -298,7 +298,7 @@ fn handle_write_completion(
     }
 }
 
-#[vostd_fn("os", "blocking_fileRead", std)]
+#[vostd_fn("os", "blocking_fileRead", std, effects(MAY_WAIT_IO_REPLAY))]
 fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -402,7 +402,7 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[vostd_fn("os", "blocking_fileWrite", std)]
+#[vostd_fn("os", "blocking_fileWrite", std, effects(MAY_WAIT_IO_REPLAY))]
 fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -501,7 +501,7 @@ fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[vostd_fn("os", "blocking_fileReadAt", std)]
+#[vostd_fn("os", "blocking_fileReadAt", std, effects(MAY_WAIT_IO_REPLAY))]
 fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -589,7 +589,7 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
     }
 }
 
-#[vostd_fn("os", "blocking_fileWriteAt", std)]
+#[vostd_fn("os", "blocking_fileWriteAt", std, effects(MAY_WAIT_IO_REPLAY))]
 fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
@@ -965,9 +965,11 @@ fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
             for (i, (entry_name, is_dir, mode)) in dir_entries.iter().enumerate() {
                 let name_ref = call.alloc_str(entry_name);
                 let base = i * elem_slots;
-                slice::set(result, base, name_ref as u64, SLOT_BYTES);
-                slice::set(result, base + 1, if *is_dir { 1 } else { 0 }, SLOT_BYTES);
-                slice::set(result, base + 2, *mode as u64, SLOT_BYTES);
+                unsafe {
+                    slice::set(result, base, name_ref as u64, SLOT_BYTES);
+                    slice::set(result, base + 1, if *is_dir { 1 } else { 0 }, SLOT_BYTES);
+                    slice::set(result, base + 2, *mode as u64, SLOT_BYTES);
+                }
             }
             call.gc()
                 .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(result));

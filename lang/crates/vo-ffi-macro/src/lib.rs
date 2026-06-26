@@ -23,7 +23,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, punctuated::Punctuated, Expr, FnArg, ItemFn, Lit, ReturnType, Token, Type,
+    parse_macro_input, punctuated::Punctuated, Expr, ExprCall, FnArg, ItemFn, Lit, ReturnType,
+    Token, Type,
 };
 
 pub(crate) mod codegen;
@@ -31,6 +32,17 @@ mod registration;
 mod resolve;
 mod slot_mod;
 mod vo_parser;
+
+#[derive(Clone, Copy)]
+struct UnifiedExternContext<'a> {
+    raw_pkg: &'a str,
+    abi_pkg_path: &'a str,
+    source_pkg_path: &'a str,
+    func_name: &'a str,
+    is_std_only: bool,
+    flavor: &'a RegistrationFlavor,
+    effects: &'a TokenStream2,
+}
 
 // ==================== Unified Macros ====================
 
@@ -138,46 +150,86 @@ fn extract_str_lit(expr: &Expr) -> syn::Result<String> {
     }
 }
 
-/// Parse unified macro args: ("pkg", "FuncName") or ("pkg", "FuncName", std).
-/// Returns (pkg_path, func_name, is_std_only).
-fn parse_unified_args(args: &Punctuated<Expr, Token![,]>) -> syn::Result<(String, String, bool)> {
+fn parse_effects_arg(call: &ExprCall) -> syn::Result<TokenStream2> {
+    let Expr::Path(func_path) = &*call.func else {
+        return Err(syn::Error::new_spanned(&call.func, "expected effects(...)"));
+    };
+    if !func_path.path.is_ident("effects") {
+        return Err(syn::Error::new_spanned(&call.func, "expected effects(...)"));
+    }
+
+    let mut expr = quote! { vo_runtime::bytecode::ExternEffects::NONE };
+    let mut names = Vec::new();
+    for arg in &call.args {
+        let Expr::Path(path) = arg else {
+            return Err(syn::Error::new_spanned(
+                arg,
+                "effect entries must be ExternEffects constant names",
+            ));
+        };
+        let Some(ident) = path.path.get_ident() else {
+            return Err(syn::Error::new_spanned(
+                arg,
+                "effect entries must be ExternEffects constant names",
+            ));
+        };
+        let name = ident.to_string();
+        names.push(name);
+        expr = quote! { #expr.union(vo_runtime::bytecode::ExternEffects::#ident) };
+    }
+    if names.iter().any(|name| name == "UNKNOWN_CONTROL") && names.len() > 1 {
+        return Err(syn::Error::new_spanned(
+            call,
+            "UNKNOWN_CONTROL must be the only entry in effects(...)",
+        ));
+    }
+    Ok(expr)
+}
+
+/// Parse unified macro args: ("pkg", "FuncName"), optional std and effects(...).
+/// Returns (pkg_path, func_name, is_std_only, effects_expr).
+fn parse_unified_args(
+    args: &Punctuated<Expr, Token![,]>,
+) -> syn::Result<(String, String, bool, TokenStream2)> {
     let args_vec: Vec<_> = args.iter().collect();
 
-    if args_vec.len() < 2 || args_vec.len() > 3 {
+    if args_vec.len() < 2 || args_vec.len() > 4 {
         return Err(syn::Error::new_spanned(
             args,
-            "expected 2 or 3 arguments: (\"pkg\", \"FuncName\") or (\"pkg\", \"FuncName\", std)",
+            "expected (\"pkg\", \"FuncName\"), with optional std and effects(...)",
         ));
     }
 
     let pkg_path = extract_str_lit(args_vec[0])?;
     let func_name = extract_str_lit(args_vec[1])?;
 
-    let is_std_only = if args_vec.len() == 3 {
-        // Third arg must be the identifier `std`
-        match &args_vec[2] {
+    let mut is_std_only = false;
+    let mut effects = quote! { vo_runtime::bytecode::ExternEffects::NONE };
+    for arg in args_vec.iter().skip(2) {
+        match arg {
             Expr::Path(p) => {
                 if p.path.is_ident("std") {
-                    true
+                    is_std_only = true;
                 } else {
                     return Err(syn::Error::new_spanned(
-                        args_vec[2],
-                        "third argument must be `std`",
+                        arg,
+                        "optional path argument must be `std`",
                     ));
                 }
             }
+            Expr::Call(call) => {
+                effects = parse_effects_arg(call)?;
+            }
             _ => {
                 return Err(syn::Error::new_spanned(
-                    args_vec[2],
-                    "third argument must be `std`",
-                ));
+                    arg,
+                    "expected `std` or effects(...)",
+                ))
             }
         }
-    } else {
-        false
-    };
+    }
 
-    Ok((pkg_path, func_name, is_std_only))
+    Ok((pkg_path, func_name, is_std_only, effects))
 }
 
 /// Check if the first parameter is `&mut ExternCallContext`.
@@ -362,7 +414,7 @@ fn unified_fn_impl(
     func: ItemFn,
     flavor: RegistrationFlavor,
 ) -> syn::Result<TokenStream2> {
-    let (pkg_path, func_name, is_std_only) = parse_unified_args(&args)?;
+    let (pkg_path, func_name, is_std_only, effects) = parse_unified_args(&args)?;
 
     // Preserve the raw package name for deriving stable Rust symbol names.
     let raw_pkg = pkg_path.clone();
@@ -380,46 +432,34 @@ fn unified_fn_impl(
 
     // Detect mode from signature
     let mode = detect_fn_mode(&func)?;
+    let extern_ctx = UnifiedExternContext {
+        raw_pkg: &raw_pkg,
+        abi_pkg_path: &pkg_path,
+        source_pkg_path: &source_pkg_path,
+        func_name: &func_name,
+        is_std_only,
+        flavor: &flavor,
+        effects: &effects,
+    };
 
     match mode {
-        FnMode::Manual => unified_manual_impl(
-            &func,
-            &raw_pkg,
-            &pkg_path,
-            &source_pkg_path,
-            &func_name,
-            is_std_only,
-            &flavor,
-        ),
-        FnMode::Result(_) | FnMode::Simple => unified_auto_impl(
-            &func,
-            &raw_pkg,
-            &pkg_path,
-            &source_pkg_path,
-            &func_name,
-            is_std_only,
-            &flavor,
-            &mode,
-        ),
+        FnMode::Manual => unified_manual_impl(&func, extern_ctx),
+        FnMode::Result(_) | FnMode::Simple => unified_auto_impl(&func, extern_ctx, &mode),
     }
 }
 
 /// Manual mode: function gets ExternCallContext directly. Inject slots mod + register.
 fn unified_manual_impl(
     func: &ItemFn,
-    raw_pkg: &str,
-    abi_pkg_path: &str,
-    source_pkg_path: &str,
-    func_name: &str,
-    is_std_only: bool,
-    flavor: &RegistrationFlavor,
+    extern_ctx: UnifiedExternContext<'_>,
 ) -> syn::Result<TokenStream2> {
     let fn_name = &func.sig.ident;
     let fn_vis = &func.vis;
     let fn_sig = &func.sig;
     let fn_attrs = &func.attrs;
     let fn_body = &func.block;
-    let slot_mod = slot_mod::generate_inline_slot_mod(source_pkg_path, func_name);
+    let slot_mod =
+        slot_mod::generate_inline_slot_mod(extern_ctx.source_pkg_path, extern_ctx.func_name);
 
     let fn_tokens = quote! {
         #(#fn_attrs)*
@@ -431,35 +471,34 @@ fn unified_manual_impl(
 
     Ok(registration::emit_fn_registration(
         fn_tokens,
-        fn_name,
-        raw_pkg,
-        abi_pkg_path,
-        func_name,
-        is_std_only,
-        flavor,
+        registration::FnRegistration {
+            entry_fn: fn_name,
+            raw_pkg: extern_ctx.raw_pkg,
+            pkg_path: extern_ctx.abi_pkg_path,
+            func_name: extern_ctx.func_name,
+            is_std_only: extern_ctx.is_std_only,
+            flavor: extern_ctx.flavor,
+            effects: extern_ctx.effects,
+        },
     ))
 }
 
 /// Result/Simple mode: generate wrapper and register.
-#[allow(clippy::too_many_arguments)]
 fn unified_auto_impl(
     func: &ItemFn,
-    raw_pkg: &str,
-    abi_pkg_path: &str,
-    source_pkg_path: &str,
-    func_name: &str,
-    is_std_only: bool,
-    flavor: &RegistrationFlavor,
+    extern_ctx: UnifiedExternContext<'_>,
     mode: &FnMode,
 ) -> syn::Result<TokenStream2> {
     // Simple mode validates against Vo signature; Result mode skips validation
     if matches!(*mode, FnMode::Simple) {
-        let (vo_sig, _is_std) = resolve::find_vo_signature(source_pkg_path, func_name, func)?;
+        let (vo_sig, _is_std) =
+            resolve::find_vo_signature(extern_ctx.source_pkg_path, extern_ctx.func_name, func)?;
         resolve::validate_signature(func, &vo_sig)?;
     }
 
-    let wrapper = generate_wrapper(func, abi_pkg_path, func_name, mode)?;
-    let wrapper_name = registration::make_wrapper_ident(abi_pkg_path, func_name);
+    let wrapper = generate_wrapper(func, extern_ctx.abi_pkg_path, extern_ctx.func_name, mode)?;
+    let wrapper_name =
+        registration::make_wrapper_ident(extern_ctx.abi_pkg_path, extern_ctx.func_name);
 
     let fn_tokens = quote! {
         #func
@@ -468,12 +507,15 @@ fn unified_auto_impl(
 
     Ok(registration::emit_fn_registration(
         fn_tokens,
-        &wrapper_name,
-        raw_pkg,
-        abi_pkg_path,
-        func_name,
-        is_std_only,
-        flavor,
+        registration::FnRegistration {
+            entry_fn: &wrapper_name,
+            raw_pkg: extern_ctx.raw_pkg,
+            pkg_path: extern_ctx.abi_pkg_path,
+            func_name: extern_ctx.func_name,
+            is_std_only: extern_ctx.is_std_only,
+            flavor: extern_ctx.flavor,
+            effects: extern_ctx.effects,
+        },
     ))
 }
 
@@ -810,5 +852,37 @@ impl syn::parse::Parse for VoConstsInput {
             pkg_name,
             consts,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effects_arg_generates_const_friendly_union_chain() {
+        let call: ExprCall = syn::parse_quote! {
+            effects(MAY_WAIT_IO_REPLAY, MAY_HOST_REPLAY)
+        };
+
+        let tokens = parse_effects_arg(&call).expect("effects parse").to_string();
+
+        assert!(tokens.contains("ExternEffects :: NONE"));
+        assert!(tokens.contains("union"));
+        assert!(tokens.contains("MAY_WAIT_IO_REPLAY"));
+        assert!(tokens.contains("MAY_HOST_REPLAY"));
+        assert!(!tokens.contains("|"));
+    }
+
+    #[test]
+    fn effects_arg_rejects_unknown_control_mixed_with_precise_bits() {
+        let call: ExprCall = syn::parse_quote! {
+            effects(UNKNOWN_CONTROL, MAY_HOST_REPLAY)
+        };
+
+        let err = parse_effects_arg(&call).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("UNKNOWN_CONTROL must be the only entry"));
     }
 }

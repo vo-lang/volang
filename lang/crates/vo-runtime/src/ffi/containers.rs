@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use super::ExternCallContext;
 use crate::gc::GcRef;
 use crate::objects::{array, map, slice, string};
+use crate::ValueKind;
 use core::marker::PhantomData;
 
 // ==================== VoElem Trait ====================
@@ -49,16 +50,16 @@ impl VoElem for i64 {
     const NEEDS_GC: bool = false;
 
     fn read_from_slice(s: GcRef, idx: usize) -> i64 {
-        slice::get(s, idx, 8) as i64
+        unsafe { slice::get(s, idx, 8) as i64 }
     }
     fn write_to_slice(s: GcRef, idx: usize, val: i64) {
-        slice::set(s, idx, val as u64, 8);
+        unsafe { slice::set(s, idx, val as u64, 8) };
     }
     fn read_from_array(arr: GcRef, idx: usize) -> i64 {
-        array::get(arr, idx, 8) as i64
+        unsafe { array::get(arr, idx, 8) as i64 }
     }
     fn write_to_array(arr: GcRef, idx: usize, val: i64) {
-        array::set(arr, idx, val as u64, 8);
+        unsafe { array::set(arr, idx, val as u64, 8) };
     }
 }
 
@@ -69,16 +70,16 @@ impl VoElem for u64 {
     const NEEDS_GC: bool = false;
 
     fn read_from_slice(s: GcRef, idx: usize) -> u64 {
-        slice::get(s, idx, 8)
+        unsafe { slice::get(s, idx, 8) }
     }
     fn write_to_slice(s: GcRef, idx: usize, val: u64) {
-        slice::set(s, idx, val, 8);
+        unsafe { slice::set(s, idx, val, 8) };
     }
     fn read_from_array(arr: GcRef, idx: usize) -> u64 {
-        array::get(arr, idx, 8)
+        unsafe { array::get(arr, idx, 8) }
     }
     fn write_to_array(arr: GcRef, idx: usize, val: u64) {
-        array::set(arr, idx, val, 8);
+        unsafe { array::set(arr, idx, val, 8) };
     }
 }
 
@@ -89,16 +90,16 @@ impl VoElem for f64 {
     const NEEDS_GC: bool = false;
 
     fn read_from_slice(s: GcRef, idx: usize) -> f64 {
-        f64::from_bits(slice::get(s, idx, 8))
+        unsafe { f64::from_bits(slice::get(s, idx, 8)) }
     }
     fn write_to_slice(s: GcRef, idx: usize, val: f64) {
-        slice::set(s, idx, val.to_bits(), 8);
+        unsafe { slice::set(s, idx, val.to_bits(), 8) };
     }
     fn read_from_array(arr: GcRef, idx: usize) -> f64 {
-        f64::from_bits(array::get(arr, idx, 8))
+        unsafe { f64::from_bits(array::get(arr, idx, 8)) }
     }
     fn write_to_array(arr: GcRef, idx: usize, val: f64) {
-        array::set(arr, idx, val.to_bits(), 8);
+        unsafe { array::set(arr, idx, val.to_bits(), 8) };
     }
 }
 
@@ -109,16 +110,16 @@ impl VoElem for bool {
     const NEEDS_GC: bool = false;
 
     fn read_from_slice(s: GcRef, idx: usize) -> bool {
-        slice::get(s, idx, 8) != 0
+        unsafe { slice::get(s, idx, 8) != 0 }
     }
     fn write_to_slice(s: GcRef, idx: usize, val: bool) {
-        slice::set(s, idx, val as u64, 8);
+        unsafe { slice::set(s, idx, val as u64, 8) };
     }
     fn read_from_array(arr: GcRef, idx: usize) -> bool {
-        array::get(arr, idx, 8) != 0
+        unsafe { array::get(arr, idx, 8) != 0 }
     }
     fn write_to_array(arr: GcRef, idx: usize, val: bool) {
-        array::set(arr, idx, val as u64, 8);
+        unsafe { array::set(arr, idx, val as u64, 8) };
     }
 }
 
@@ -129,16 +130,16 @@ impl VoElem for GcRef {
     const NEEDS_GC: bool = true;
 
     fn read_from_slice(s: GcRef, idx: usize) -> GcRef {
-        slice::get(s, idx, 8) as GcRef
+        unsafe { slice::get(s, idx, 8) as GcRef }
     }
     fn write_to_slice(s: GcRef, idx: usize, val: GcRef) {
-        slice::set(s, idx, val as u64, 8);
+        unsafe { slice::set(s, idx, val as u64, 8) };
     }
     fn read_from_array(arr: GcRef, idx: usize) -> GcRef {
-        array::get(arr, idx, 8) as GcRef
+        unsafe { array::get(arr, idx, 8) as GcRef }
     }
     fn write_to_array(arr: GcRef, idx: usize, val: GcRef) {
-        array::set(arr, idx, val as u64, 8);
+        unsafe { array::set(arr, idx, val as u64, 8) };
     }
     fn gc_ref_for_barrier(val: &GcRef) -> Option<GcRef> {
         Some(*val)
@@ -155,14 +156,14 @@ impl VoElem for VoStringElem {
     const NEEDS_GC: bool = true;
 
     fn read_from_slice(s: GcRef, idx: usize) -> String {
-        let str_ref = slice::get(s, idx, 8) as GcRef;
+        let str_ref = unsafe { slice::get(s, idx, 8) as GcRef };
         string::as_str(str_ref).to_string()
     }
     fn write_to_slice(_s: GcRef, _idx: usize, _val: String) {
         panic!("Cannot write String directly to slice - use ctx.alloc_str() first");
     }
     fn read_from_array(arr: GcRef, idx: usize) -> String {
-        let str_ref = array::get(arr, idx, 8) as GcRef;
+        let str_ref = unsafe { array::get(arr, idx, 8) as GcRef };
         string::as_str(str_ref).to_string()
     }
     fn write_to_array(_arr: GcRef, _idx: usize, _val: String) {
@@ -230,15 +231,18 @@ impl<T: VoElem> VoSlice<T> {
     /// Get element at index.
     #[inline]
     pub fn get(&self, idx: usize) -> T::Owned {
+        assert!(idx < self.len(), "slice index out of bounds");
         T::read_from_slice(self.ptr, idx)
     }
 
     /// Set element at index and apply a GC barrier when `T` is a reference type.
     #[inline]
     pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
+        assert!(idx < self.len(), "slice index out of bounds");
         let child = T::gc_ref_for_barrier(&val);
+        let parent = slice::array_ref(self.ptr);
+        apply_element_write_barrier::<T>(ctx, parent, child);
         T::write_to_slice(self.ptr, idx, val);
-        apply_element_write_barrier::<T>(ctx, slice::array_ref(self.ptr), child);
     }
 
     /// Create a cursor for iteration.
@@ -339,21 +343,63 @@ impl<K, V> VoMap<K, V> {
     }
 }
 
+#[inline]
+fn assert_string_key_map(ptr: GcRef, context: &str) {
+    assert_eq!(
+        map::key_kind(ptr),
+        ValueKind::String,
+        "{context} requires a string-keyed map"
+    );
+    assert_eq!(
+        map::key_slots(ptr),
+        1,
+        "{context} requires a one-slot string-key map"
+    );
+}
+
+#[inline]
+fn assert_map_value_kind(ptr: GcRef, context: &str, expected: impl FnOnce(ValueKind) -> bool) {
+    let value_kind = map::val_kind(ptr);
+    assert!(
+        expected(value_kind),
+        "{context} value accessor does not match map value kind {value_kind:?}"
+    );
+}
+
+#[inline]
+fn is_single_slot_gc_ref_map_value_kind(value_kind: ValueKind) -> bool {
+    matches!(
+        value_kind,
+        ValueKind::String
+            | ValueKind::Slice
+            | ValueKind::Map
+            | ValueKind::Channel
+            | ValueKind::Closure
+            | ValueKind::Pointer
+            | ValueKind::Port
+            | ValueKind::Island
+    )
+}
+
 /// Specialized implementation for map[string]V where V is single-slot.
 impl<V> VoMap<String, V> {
     /// Get value by string key (returns raw u64).
     #[inline]
     pub fn get_raw(&self, key_ref: GcRef) -> Option<u64> {
         let key = [key_ref as u64];
-        map::get(self.ptr, &key, None).map(|v| v[0])
+        map::get_checked(self.ptr, &key, None)
+            .expect("VoMap::get_raw string key must be hashable")
+            .map(|v| v[0])
     }
 
     /// Set value by string key (raw u64) and apply GC barriers.
     #[inline]
     pub fn set_raw(&self, ctx: &mut ExternCallContext, key_ref: GcRef, val: u64) {
+        assert_string_key_map(self.ptr, "VoMap::set_raw");
         let key = [key_ref as u64];
         let val = [val];
-        map::set(self.ptr, &key, &val, None);
+        map::validate_entry_slot_counts(self.ptr, key.len(), val.len())
+            .expect("VoMap::set_raw key/value slots must match map layout");
         let key_meta = map::key_meta(self.ptr);
         if key_meta.value_kind().may_contain_gc_refs() {
             ctx.typed_write_barrier_by_meta(self.ptr, &key, key_meta);
@@ -362,13 +408,19 @@ impl<V> VoMap<String, V> {
         if val_meta.value_kind().may_contain_gc_refs() {
             ctx.typed_write_barrier_by_meta(self.ptr, &val, val_meta);
         }
+        unsafe {
+            // SAFETY: VoMap::set_raw barriers key/value roots through the extern context above.
+            map::set_checked(self.ptr, &key, &val, None)
+        }
+        .expect("VoMap::set_raw string key must be hashable");
     }
 
     /// Delete by string key.
     #[inline]
     pub fn delete_raw(&self, key_ref: GcRef) {
         let key = [key_ref as u64];
-        map::delete(self.ptr, &key, None);
+        map::delete_checked(self.ptr, &key, None)
+            .expect("VoMap::delete_raw string key must be hashable");
     }
 }
 
@@ -383,6 +435,10 @@ impl VoMap<String, String> {
 
     /// Set value by key.
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: &str) {
+        assert_string_key_map(self.ptr, "VoMap<String, String>::set");
+        assert_map_value_kind(self.ptr, "VoMap<String, String>::set", |kind| {
+            kind == ValueKind::String
+        });
         let key_ref = ctx.alloc_str(key);
         let val_ref = ctx.alloc_str(val);
         self.set_raw(ctx, key_ref, val_ref as u64);
@@ -405,6 +461,10 @@ impl VoMap<String, i64> {
 
     /// Set value by key.
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: i64) {
+        assert_string_key_map(self.ptr, "VoMap<String, i64>::set");
+        assert_map_value_kind(self.ptr, "VoMap<String, i64>::set", |kind| {
+            matches!(kind, ValueKind::Int | ValueKind::Int64)
+        });
         let key_ref = ctx.alloc_str(key);
         self.set_raw(ctx, key_ref, val as u64);
     }
@@ -426,6 +486,10 @@ impl VoMap<String, GcRef> {
 
     /// Set value by key.
     pub fn set(&self, ctx: &mut ExternCallContext, key: &str, val: GcRef) {
+        assert_string_key_map(self.ptr, "VoMap<String, GcRef>::set");
+        assert_map_value_kind(self.ptr, "VoMap<String, GcRef>::set", |kind| {
+            is_single_slot_gc_ref_map_value_kind(kind)
+        });
         let key_ref = ctx.alloc_str(key);
         self.set_raw(ctx, key_ref, val as u64);
     }
@@ -638,8 +702,8 @@ impl<T: VoElem, const N: usize> VoArray<T, N> {
     pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
         assert!(idx < N, "array index out of bounds");
         let child = T::gc_ref_for_barrier(&val);
-        T::write_to_array(self.ptr, idx, val);
         apply_element_write_barrier::<T>(ctx, self.ptr, child);
+        T::write_to_array(self.ptr, idx, val);
     }
 
     /// Create a cursor for iteration.
@@ -748,12 +812,68 @@ impl VoClosure {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[cfg(feature = "std")]
+    use crate::ffi::{
+        ExternCallContext, ExternFiberInputs, ExternInvoke, ExternWorld, SentinelErrorCache,
+    };
+    #[cfg(feature = "std")]
+    use crate::gc::Gc;
+    #[cfg(feature = "std")]
+    use crate::itab::ItabCache;
+    #[cfg(feature = "std")]
+    use crate::objects::{array, map, slice};
+    #[cfg(feature = "std")]
+    use crate::output::CaptureSink;
+    #[cfg(feature = "std")]
+    use crate::{io::IoRuntime, Module, ValueKind, ValueMeta};
+
+    #[cfg(feature = "std")]
+    fn with_extern_context<R>(gc: &mut Gc, f: impl FnOnce(&mut ExternCallContext<'_>) -> R) -> R {
+        let module = Module::new("ffi-container-test".to_string());
+        let mut itab_cache = ItabCache::new();
+        let output = CaptureSink::new();
+        let mut sentinel_errors = SentinelErrorCache::new();
+        let mut host_output = None;
+        let mut io = IoRuntime::new().expect("test I/O runtime");
+        let mut stack = [];
+        let world = ExternWorld {
+            gc,
+            module: &module,
+            itab_cache: &mut itab_cache,
+            vm_opaque: core::ptr::null_mut(),
+            program_args: &[],
+            output: &*output,
+            sentinel_errors: &mut sentinel_errors,
+            host_output: &mut host_output,
+            io: &mut io,
+        };
+        let invoke = ExternInvoke {
+            extern_id: 0,
+            bp: 0,
+            arg_start: 0,
+            arg_slots: 0,
+            ret_start: 0,
+            ret_slots: 0,
+        };
+        let fiber_inputs = ExternFiberInputs {
+            fiber_opaque: core::ptr::null_mut(),
+            resume_io_token: None,
+            resume_host_event_token: None,
+            resume_host_event_data: None,
+            replay_results: Vec::new(),
+            replay_panic_message: None,
+        };
+        let mut ctx = ExternCallContext::new(&mut stack, invoke, world, fiber_inputs);
+        f(&mut ctx)
+    }
+
     #[test]
     fn vo_array_bounds_are_release_checked() {
-        let src = include_str!("containers.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("containers production source");
+        let src = vo_source_contract::production_source_without_test_modules(include_str!(
+            "containers.rs"
+        ));
         let start = src
             .find("impl<T: VoElem, const N: usize> VoArray<T, N>")
             .expect("VoArray impl");
@@ -774,6 +894,190 @@ mod tests {
         assert!(
             !src.contains("debug_assert_eq!(T::ELEM_BYTES, 8)"),
             "GC element write-barrier width must be checked in release builds"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn vo_slice_set_rejects_indices_outside_visible_len_before_mutation_054() {
+        let mut gc = Gc::new();
+        let slice_ref = slice::create(&mut gc, ValueMeta::new(0, ValueKind::Int), 8, 1, 2);
+        let backing_array = slice::array_ref(slice_ref);
+        unsafe { array::set(backing_array, 1, 99, 8) };
+
+        let result = {
+            let module = Module::new("ffi-slice-bounds-test".to_string());
+            let mut itab_cache = ItabCache::new();
+            let output = CaptureSink::new();
+            let mut sentinel_errors = SentinelErrorCache::new();
+            let mut host_output = None;
+            let mut io = IoRuntime::new().expect("test I/O runtime");
+            let mut stack = [];
+            let world = ExternWorld {
+                gc: &mut gc,
+                module: &module,
+                itab_cache: &mut itab_cache,
+                vm_opaque: core::ptr::null_mut(),
+                program_args: &[],
+                output: &*output,
+                sentinel_errors: &mut sentinel_errors,
+                host_output: &mut host_output,
+                io: &mut io,
+            };
+            let invoke = ExternInvoke {
+                extern_id: 0,
+                bp: 0,
+                arg_start: 0,
+                arg_slots: 0,
+                ret_start: 0,
+                ret_slots: 0,
+            };
+            let fiber_inputs = ExternFiberInputs {
+                fiber_opaque: core::ptr::null_mut(),
+                resume_io_token: None,
+                resume_host_event_token: None,
+                resume_host_event_data: None,
+                replay_results: Vec::new(),
+                replay_panic_message: None,
+            };
+            let mut ctx = ExternCallContext::new(&mut stack, invoke, world, fiber_inputs);
+            let slice = VoSlice::<i64>::from_ref(slice_ref);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                slice.set(&mut ctx, 1, 123);
+            }))
+        };
+
+        assert!(
+            result.is_err(),
+            "VoSlice::set must fail fast when idx is outside the visible slice length"
+        );
+        assert_eq!(
+            unsafe { array::get(backing_array, 1, 8) },
+            99,
+            "VoSlice::set must not mutate backing capacity outside the visible slice"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn vo_slice_get_rejects_indices_outside_visible_len_055() {
+        let mut gc = Gc::new();
+        let slice_ref = slice::create(&mut gc, ValueMeta::new(0, ValueKind::Int), 8, 1, 2);
+        let backing_array = slice::array_ref(slice_ref);
+        unsafe { array::set(backing_array, 1, 99, 8) };
+
+        let slice = VoSlice::<i64>::from_ref(slice_ref);
+        let result = std::panic::catch_unwind(|| slice.get(1));
+
+        assert!(
+            result.is_err(),
+            "VoSlice::get must fail fast when idx is outside the visible slice length"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn ffi_vo_map_string_gcref_rejects_scalar_value_map_before_mutation_060() {
+        let mut gc = Gc::new();
+        let map_ref = map::create(
+            &mut gc,
+            ValueMeta::new(0, ValueKind::String),
+            ValueMeta::new(0, ValueKind::Int),
+            1,
+            1,
+            0,
+        );
+
+        let result = with_extern_context(&mut gc, |ctx| {
+            let accessor = VoMap::<String, GcRef>::from_ref(map_ref);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                accessor.set(ctx, "k", 0xdead_beef as GcRef);
+            }))
+        });
+
+        assert!(
+            result.is_err(),
+            "VoMap<String, GcRef> must reject scalar-valued maps before publishing"
+        );
+        assert_eq!(
+            map::len(map_ref),
+            0,
+            "rejected typed map write must not mutate"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn ffi_map_set_string_key_rejects_non_string_key_map_before_mutation_060() {
+        let mut gc = Gc::new();
+        let map_ref = map::create(
+            &mut gc,
+            ValueMeta::new(0, ValueKind::Int),
+            ValueMeta::new(0, ValueKind::String),
+            1,
+            1,
+            0,
+        );
+
+        let result = with_extern_context(&mut gc, |ctx| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ctx.map_set_string_key(map_ref, "k", &[0]);
+            }))
+        });
+
+        assert!(
+            result.is_err(),
+            "ExternCallContext::map_set_string_key must reject non-string-keyed maps"
+        );
+        assert_eq!(
+            map::len(map_ref),
+            0,
+            "rejected raw string-key map write must not mutate"
+        );
+    }
+
+    #[test]
+    fn ffi_slice_and_array_set_barriers_precede_mutation_053() {
+        let src = vo_source_contract::production_source_without_test_modules(include_str!(
+            "containers.rs"
+        ));
+
+        let slice_start = src
+            .find("impl<T: VoElem> VoSlice<T>")
+            .expect("VoSlice impl");
+        let slice_end = src[slice_start..]
+            .find("/// Cursor for iterating over VoSlice.")
+            .map(|offset| slice_start + offset)
+            .expect("VoSlice cursor marker");
+        let vo_slice = &src[slice_start..slice_end];
+        let slice_barrier = vo_slice
+            .find("apply_element_write_barrier::<T>")
+            .expect("VoSlice set barrier");
+        let slice_mutation = vo_slice
+            .find("T::write_to_slice")
+            .expect("VoSlice set mutation");
+        assert!(
+            slice_barrier < slice_mutation,
+            "VoSlice::set must run the element write barrier before publishing the slot write"
+        );
+
+        let array_start = src
+            .find("impl<T: VoElem, const N: usize> VoArray<T, N>")
+            .expect("VoArray impl");
+        let array_end = src[array_start..]
+            .find("/// Cursor for iterating over VoArray.")
+            .map(|offset| array_start + offset)
+            .expect("VoArray cursor marker");
+        let vo_array = &src[array_start..array_end];
+        let array_barrier = vo_array
+            .find("apply_element_write_barrier::<T>")
+            .expect("VoArray set barrier");
+        let array_mutation = vo_array
+            .find("T::write_to_array")
+            .expect("VoArray set mutation");
+        assert!(
+            array_barrier < array_mutation,
+            "VoArray::set must run the element write barrier before publishing the slot write"
         );
     }
 }

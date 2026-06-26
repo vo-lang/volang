@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::impl_gc_object;
+use crate::objects::queue_state::QueueWaiter;
 use crate::pack::PackedValue;
 use crate::slot::SLOT_BYTES;
 use vo_common_core::types::{ValueKind, ValueMeta};
@@ -38,8 +39,8 @@ impl_gc_object!(IslandData);
 pub enum IslandCommand {
     /// Spawn a new fiber with packed closure data
     SpawnFiber { closure_data: PackedValue },
-    /// Wake a blocked fiber (no PC modification - blocker sets resume PC)
-    WakeFiber { fiber_id: u32 },
+    /// Wake a blocked queue waiter (no PC modification - blocker sets resume PC).
+    WakeFiber { waiter: QueueWaiter },
     /// Request island shutdown
     Shutdown,
     /// Request from a remote island to the home island (where ChannelState lives).
@@ -47,14 +48,37 @@ pub enum IslandCommand {
         endpoint_id: u64,
         kind: EndpointRequestKind,
         from_island: u32,
-        fiber_id: u64,
+        fiber_key: u64,
+        wait_id: u64,
     },
     /// Response from the home island back to the requesting remote island.
     EndpointResponse {
         endpoint_id: u64,
         kind: EndpointResponseKind,
-        fiber_id: u64,
+        from_island: u32,
+        fiber_key: u64,
+        wait_id: u64,
     },
+}
+
+/// Authenticated transport envelope for a command delivered to an island.
+///
+/// `IslandCommand` payloads still carry semantic source fields for endpoint
+/// protocol compatibility. The envelope source is the transport-owned fact that
+/// receivers use to reject forged endpoint sources before mutating state.
+#[derive(Debug)]
+pub struct IslandCommandEnvelope {
+    pub source_island_id: u32,
+    pub command: IslandCommand,
+}
+
+impl IslandCommandEnvelope {
+    pub fn new(source_island_id: u32, command: IslandCommand) -> Self {
+        Self {
+            source_island_id,
+            command,
+        }
+    }
 }
 
 /// Kind of channel request (remote → home).
@@ -77,6 +101,8 @@ pub enum EndpointResponseKind {
     SendAck { closed: bool },
     /// Data delivered to a receiver (or closed indication).
     RecvData { data: Vec<u8>, closed: bool },
+    /// Receive failed before the home queue state was consumed.
+    RecvError,
     /// Broadcast: channel was closed by someone else.
     Closed,
 }
@@ -85,7 +111,8 @@ pub enum EndpointResponseKind {
 /// Note: Command channels are managed by VM, not stored here.
 pub fn create(gc: &mut Gc, island_id: u32) -> GcRef {
     let handle = gc.alloc(ValueMeta::new(0, ValueKind::Island), DATA_SLOTS);
-    let data = IslandData::as_mut(handle);
+    // Safety: `handle` is freshly allocated and not visible to the collector yet.
+    let data = unsafe { IslandData::as_mut(handle) };
     data.id = island_id;
     data._pad = 0;
     handle

@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use vo_vm::scheduler::HostWaitKey;
 use vo_vm::vm::Vm;
 
 use crate::{GuestSession, PendingHostEvent, RenderIslandSession, SessionError, StepResult};
@@ -49,8 +50,8 @@ impl RenderIslandRuntime {
         self.session.take_pending_host_events()
     }
 
-    pub fn wake_host_event(&mut self, token: u64) {
-        self.session.wake_host_event(token);
+    pub fn wake_host_event(&mut self, key: HostWaitKey) -> Result<(), SessionError> {
+        self.session.wake_host_event(key)
     }
 
     pub fn shutdown(&mut self) {
@@ -123,8 +124,8 @@ impl GuestRuntime {
         self.session.pop_pending_host_event()
     }
 
-    pub fn wake_host_event(&mut self, token: u64) {
-        self.session.wake_host_event(token);
+    pub fn wake_host_event(&mut self, key: HostWaitKey) -> Result<(), SessionError> {
+        self.session.wake_host_event(key)
     }
 
     pub fn shutdown(&mut self) {

@@ -24,7 +24,7 @@ use alloc::borrow::Cow;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
-use vo_common_core::types::ValueKind;
+use vo_common_core::types::{ValueKind, ValueRttid};
 use vo_ffi_macro::vo_errors;
 
 use super::error_helper::create_error_with_cause;
@@ -369,7 +369,7 @@ fn get_reflection(
         (DynKey::Field(name), ValueKind::Struct) => {
             match get_struct_field(call, base_ref, rttid, name) {
                 Ok(v) => Ok(v),
-                Err(_) => get_method(call, rttid, base_slot1, name),
+                Err(_) => get_method(call, rttid, vk, base_slot1, name),
             }
         }
         // Field access on pointer - try field first, then method
@@ -377,7 +377,7 @@ fn get_reflection(
             let elem_rttid = call.get_elem_value_rttid_from_base(rttid).rttid();
             match get_struct_field(call, base_ref, elem_rttid, name) {
                 Ok(v) => Ok(v),
-                Err(_) => get_method(call, rttid, base_slot1, name),
+                Err(_) => get_method(call, rttid, vk, base_slot1, name),
             }
         }
         // Field access on map (string key)
@@ -397,7 +397,7 @@ fn get_reflection(
         // Field access on other types - try method lookup
         (DynKey::Field(name), _) => {
             if call.get_named_type_id_from_rttid(rttid, false).is_some() {
-                get_method(call, rttid, base_slot1, name)
+                get_method(call, rttid, vk, base_slot1, name)
             } else {
                 Err((DynErr::TypeMismatch, "cannot access field on this type"))
             }
@@ -626,7 +626,6 @@ fn set_struct_field(
     // Unbox and write
     let field_vk = field.value_kind;
     let field_slots = field.slot_count;
-    let val_vk = interface::unpack_value_kind(val_slot0);
     let field_slot_types: Vec<_> = {
         let parent_meta_id = Gc::header(current_ref).meta_id() as usize;
         let struct_meta = call
@@ -642,59 +641,15 @@ fn set_struct_field(
             .ok_or((DynErr::BadField, "field layout exceeds struct metadata"))?
             .to_vec()
     };
-    let written_vals: Vec<u64>;
-
-    if field_vk == ValueKind::Interface {
-        // Interface field: validate implementation and compute itab
-        let iface_meta_id =
-            call.require_interface_meta_id_from_rttid(field.rttid, "dynamic interface field set");
-        let (stored_slot0, stored_slot1) =
-            prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id)?;
-        written_vals = vec![stored_slot0, stored_slot1];
-        unsafe {
-            Gc::write_slot(current_ref, field.offset, stored_slot0);
-            Gc::write_slot(current_ref, field.offset + 1, stored_slot1);
-        }
-    } else if interface::is_nil(val_slot0) {
-        // Cannot write nil to non-interface field (except reference types)
-        let is_nillable = matches!(
-            field_vk,
-            ValueKind::Pointer
-                | ValueKind::Slice
-                | ValueKind::Map
-                | ValueKind::Closure
-                | ValueKind::String
-        );
-        if !is_nillable {
-            return Err((
-                DynErr::TypeMismatch,
-                "cannot write nil to non-nillable field",
-            ));
-        }
-        // Write zero value for nillable types
-        written_vals = vec![0];
-        unsafe {
-            Gc::write_slot(current_ref, field.offset, 0);
-        }
-    } else if field_vk != val_vk {
-        // Type check for non-interface fields
-        return Err((DynErr::TypeMismatch, "field type mismatch"));
-    } else if field_vk == ValueKind::Struct || field_vk == ValueKind::Array {
-        // Struct/Array: val_slot1 is a GcRef to boxed data
-        let vals = read_ref_slots(val_slot1 as GcRef, field_slots);
-        written_vals = vals.clone();
-        for (i, &val) in vals.iter().enumerate() {
-            unsafe {
-                Gc::write_slot(current_ref, field.offset + i, val);
-            }
-        }
-    } else {
-        // Primitive types: val_slot1 is the direct value
-        written_vals = vec![val_slot1];
-        unsafe {
-            Gc::write_slot(current_ref, field.offset, val_slot1);
-        }
-    }
+    let written_vals = prepare_dynamic_value_for_target(
+        call,
+        ValueRttid::new(field.rttid, field_vk),
+        field_vk,
+        field_slots,
+        val_slot0,
+        val_slot1,
+        "dynamic struct field",
+    )?;
 
     if !field_slot_types.is_empty() {
         crate::gc_types::typed_write_barrier(
@@ -703,6 +658,11 @@ fn set_struct_field(
             &written_vals,
             &field_slot_types,
         );
+    }
+    for (i, &val) in written_vals.iter().enumerate() {
+        unsafe {
+            Gc::write_slot(current_ref, field.offset + i, val);
+        }
     }
 
     Ok(())
@@ -728,16 +688,26 @@ fn get_map_string_key(
     }
 
     let key_ref = call.alloc_str(name);
+    let map_key_slots = map::key_slots(base_ref) as usize;
+    let key_rttid = call.get_map_key_value_rttid_from_base(rttid);
+    let string_rttid = call.find_basic_type_rttid(ValueKind::String);
+    let key_slot0 = interface::pack_slot0(0, string_rttid, ValueKind::String);
+    let key_data = prepare_dynamic_value_for_target(
+        call,
+        key_rttid,
+        map_key_vk,
+        map_key_slots,
+        key_slot0,
+        key_ref as u64,
+        "dynamic map key",
+    )
+    .map_err(|_| (DynErr::BadField, "map key type mismatch"))?;
     let val_meta = map::val_meta(base_ref);
     let val_vk = val_meta.value_kind();
     let val_rttid = call.get_elem_value_rttid_from_base(rttid);
 
-    let found = if map_key_vk == ValueKind::Interface {
-        let key_slot0 = interface::pack_slot0(0, ValueKind::String as u32, ValueKind::String);
-        map::get(base_ref, &[key_slot0, key_ref as u64], Some(call.module()))
-    } else {
-        map::get(base_ref, &[key_ref as u64], Some(call.module()))
-    };
+    let found = map::get_checked(base_ref, &key_data, Some(call.module()))
+        .map_err(|_| (DynErr::BadField, "map key is not hashable"))?;
 
     // Dynamic access: missing key returns error (unlike Go's zero value)
     let val_slice = match found {
@@ -773,34 +743,51 @@ fn set_map_string_key(
     }
 
     let key_ref = call.alloc_str(name);
+    let map_key_slots = map::key_slots(base_ref) as usize;
+    let key_rttid = call.get_map_key_value_rttid_from_base(rttid);
+    let string_rttid = call.find_basic_type_rttid(ValueKind::String);
+    let key_slot0 = interface::pack_slot0(0, string_rttid, ValueKind::String);
+    let key_data = prepare_dynamic_value_for_target(
+        call,
+        key_rttid,
+        map_key_vk,
+        map_key_slots,
+        key_slot0,
+        key_ref as u64,
+        "dynamic map key",
+    )?;
     let val_meta = map::val_meta(base_ref);
     let val_vk = val_meta.value_kind();
     let val_rttid = call.get_elem_value_rttid_from_base(rttid);
-    let val_slots = call.get_type_slot_count(val_rttid.rttid()) as usize;
+    let val_slots = checked_container_raw_slot_count(
+        call,
+        val_rttid,
+        val_vk,
+        map::val_slots(base_ref) as usize,
+        "dynamic map value",
+    )?;
+    let val_data = prepare_dynamic_value_for_target(
+        call,
+        val_rttid,
+        val_vk,
+        val_slots,
+        val_slot0,
+        val_slot1,
+        "dynamic map value",
+    )?;
 
-    // Unbox value
-    let val_data: Vec<u64> = if val_vk == ValueKind::Interface {
-        vec![val_slot0, val_slot1]
-    } else if val_slots == 1 {
-        vec![val_slot1]
-    } else {
-        read_ref_slots(val_slot1 as GcRef, val_slots)
-    };
-
-    // For map[any]T, wrap key as interface
-    if map_key_vk == ValueKind::Interface {
-        let key_slot0 = interface::pack_slot0(0, ValueKind::String as u32, ValueKind::String);
-        let key_data = [key_slot0, key_ref as u64];
-        map::set(base_ref, &key_data, &val_data, Some(call.module()));
-        call.typed_write_barrier_by_meta(base_ref, &key_data, map::key_meta(base_ref));
-    } else {
-        let key_data = [key_ref as u64];
-        map::set(base_ref, &key_data, &val_data, Some(call.module()));
-        call.typed_write_barrier_by_meta(base_ref, &key_data, map::key_meta(base_ref));
-    }
+    call.typed_write_barrier_by_meta(base_ref, &key_data, map::key_meta(base_ref));
     if val_meta.value_kind().may_contain_gc_refs() {
         call.typed_write_barrier_by_meta(base_ref, &val_data, val_meta);
     }
+    unsafe {
+        // SAFETY: dynamic map writes applied key/value barriers above using map metadata.
+        map::set_checked(base_ref, &key_data, &val_data, Some(call.module()))
+    }
+    .map_err(|err| match err {
+        map::MapKeyError::UnhashableInterfaceKey => (DynErr::BadField, "map key is not hashable"),
+        map::MapKeyError::SlotCountMismatch => (DynErr::TypeMismatch, "map entry layout mismatch"),
+    })?;
     Ok(())
 }
 
@@ -815,35 +802,26 @@ fn get_map_index(
         return Err((DynErr::NilBase, "cannot index nil map"));
     }
 
-    let key_vk = interface::unpack_value_kind(key_slot0);
     let map_key_vk = map::key_kind(base_ref);
     let map_key_slots = map::key_slots(base_ref) as usize;
-
-    // Key type validation
-    let key_compatible = match (map_key_vk, key_vk) {
-        (a, b) if a == b => true,
-        (ValueKind::Interface, _) => true,
-        (ValueKind::Int, k) | (k, ValueKind::Int) => is_integer_value_kind(k),
-        _ => false,
-    };
-    if !key_compatible {
-        return Err((DynErr::BadIndex, "map key type mismatch"));
-    }
-
-    // Prepare key data
-    let key_data: Vec<u64> = if map_key_vk == ValueKind::Interface {
-        vec![key_slot0, key_slot1]
-    } else if map_key_slots == 1 {
-        vec![key_slot1]
-    } else {
-        read_ref_slots(key_slot1 as GcRef, map_key_slots)
-    };
+    let key_rttid = call.get_map_key_value_rttid_from_base(rttid);
+    let key_data = prepare_dynamic_value_for_target(
+        call,
+        key_rttid,
+        map_key_vk,
+        map_key_slots,
+        key_slot0,
+        key_slot1,
+        "dynamic map key",
+    )
+    .map_err(|_| (DynErr::BadIndex, "map key type mismatch"))?;
 
     let val_meta = map::val_meta(base_ref);
     let val_vk = val_meta.value_kind();
     let val_rttid = call.get_elem_value_rttid_from_base(rttid);
 
-    let found = map::get(base_ref, &key_data, Some(call.module()));
+    let found = map::get_checked(base_ref, &key_data, Some(call.module()))
+        .map_err(|_| (DynErr::BadIndex, "map key is not hashable"))?;
 
     // Dynamic access: missing key returns error (unlike Go's zero value)
     let val_slice = match found {
@@ -874,51 +852,41 @@ fn set_map_index(
         return Err((DynErr::NilBase, "cannot set index on nil map"));
     }
 
-    let key_vk = interface::unpack_value_kind(key_slot0);
     let map_key_vk = map::key_kind(base_ref);
     let map_key_slots = map::key_slots(base_ref) as usize;
-
-    // Key type validation
-    let key_compatible = match (map_key_vk, key_vk) {
-        (a, b) if a == b => true,
-        (ValueKind::Interface, _) => true,
-        (ValueKind::Int, k) | (k, ValueKind::Int) => is_integer_value_kind(k),
-        _ => false,
-    };
-    if !key_compatible {
-        return Err((DynErr::BadIndex, "map key type mismatch"));
-    }
-
-    // Prepare key data
-    let key_data: Vec<u64> = if map_key_vk == ValueKind::Interface {
-        vec![key_slot0, key_slot1]
-    } else if map_key_slots == 1 {
-        vec![key_slot1]
-    } else {
-        read_ref_slots(key_slot1 as GcRef, map_key_slots)
-    };
+    let key_rttid = call.get_map_key_value_rttid_from_base(rttid);
+    let key_data = prepare_dynamic_value_for_target(
+        call,
+        key_rttid,
+        map_key_vk,
+        map_key_slots,
+        key_slot0,
+        key_slot1,
+        "dynamic map key",
+    )
+    .map_err(|_| (DynErr::BadIndex, "map key type mismatch"))?;
 
     let val_meta = map::val_meta(base_ref);
     let val_vk = val_meta.value_kind();
     let val_rttid = call.get_elem_value_rttid_from_base(rttid);
-    let val_slots = call.get_type_slot_count(val_rttid.rttid()) as usize;
+    let val_slots = checked_container_raw_slot_count(
+        call,
+        val_rttid,
+        val_vk,
+        map::val_slots(base_ref) as usize,
+        "dynamic map value",
+    )?;
 
-    // Value type validation (for non-interface map values)
-    let src_val_vk = interface::unpack_value_kind(val_slot0);
-    if val_vk != ValueKind::Interface && !interface::is_nil(val_slot0) && val_vk != src_val_vk {
-        return Err((DynErr::TypeMismatch, "map value type mismatch"));
-    }
+    let val_data = prepare_dynamic_value_for_target(
+        call,
+        val_rttid,
+        val_vk,
+        val_slots,
+        val_slot0,
+        val_slot1,
+        "dynamic map value",
+    )?;
 
-    // Unbox value
-    let val_data: Vec<u64> = if val_vk == ValueKind::Interface {
-        vec![val_slot0, val_slot1]
-    } else if val_vk == ValueKind::Struct || val_vk == ValueKind::Array {
-        read_ref_slots(val_slot1 as GcRef, val_slots)
-    } else {
-        vec![val_slot1]
-    };
-
-    map::set(base_ref, &key_data, &val_data, Some(call.module()));
     let key_meta = map::key_meta(base_ref);
     if key_meta.value_kind().may_contain_gc_refs() {
         call.typed_write_barrier_by_meta(base_ref, &key_data, key_meta);
@@ -926,28 +894,20 @@ fn set_map_index(
     if val_meta.value_kind().may_contain_gc_refs() {
         call.typed_write_barrier_by_meta(base_ref, &val_data, val_meta);
     }
+    unsafe {
+        // SAFETY: dynamic map index writes applied key/value barriers above using map metadata.
+        map::set_checked(base_ref, &key_data, &val_data, Some(call.module()))
+    }
+    .map_err(|err| match err {
+        map::MapKeyError::UnhashableInterfaceKey => (DynErr::BadIndex, "map key is not hashable"),
+        map::MapKeyError::SlotCountMismatch => (DynErr::TypeMismatch, "map entry layout mismatch"),
+    })?;
     Ok(())
 }
 
 // ============================================================================
 // Layer 3c: Slice/Array/String Index Handlers
 // ============================================================================
-
-fn is_integer_value_kind(vk: ValueKind) -> bool {
-    matches!(
-        vk,
-        ValueKind::Int
-            | ValueKind::Int8
-            | ValueKind::Int16
-            | ValueKind::Int32
-            | ValueKind::Int64
-            | ValueKind::Uint
-            | ValueKind::Uint8
-            | ValueKind::Uint16
-            | ValueKind::Uint32
-            | ValueKind::Uint64
-    )
-}
 
 /// Validates that the value implements the interface and computes the itab.
 fn prepare_interface_value(
@@ -956,6 +916,10 @@ fn prepare_interface_value(
     val_slot1: u64,
     target_iface_meta_id: u32,
 ) -> DynResult<(u64, u64)> {
+    if interface::is_nil(val_slot0) {
+        return Ok((0, 0));
+    }
+
     let val_vk = interface::unpack_value_kind(val_slot0);
     let val_rttid = interface::unpack_rttid(val_slot0);
 
@@ -1011,39 +975,341 @@ fn boxed_value_raw_slot_count(call: &ExternCallContext, rttid: u32, vk: ValueKin
     }
 }
 
-fn sequence_elem_raw_slots<F>(
+fn checked_container_raw_slot_count(
     call: &ExternCallContext,
-    elem_rttid: u32,
+    value_rttid: ValueRttid,
+    value_kind: ValueKind,
+    physical_slots: usize,
+    context: &'static str,
+) -> DynResult<usize> {
+    if value_rttid.value_kind() != value_kind {
+        return Err((
+            DynErr::TypeMismatch,
+            match context {
+                "dynamic map value" => "dynamic map value metadata kind mismatch",
+                "dynamic slice element" => "dynamic slice element metadata kind mismatch",
+                _ => "dynamic container metadata kind mismatch",
+            },
+        ));
+    }
+    let expected_slots = boxed_value_raw_slot_count(call, value_rttid.rttid(), value_kind);
+    if expected_slots != physical_slots {
+        return Err((
+            DynErr::TypeMismatch,
+            match context {
+                "dynamic map value" => "dynamic map value layout mismatch",
+                "dynamic slice element" => "dynamic slice element layout mismatch",
+                _ => "dynamic container layout mismatch",
+            },
+        ));
+    }
+    Ok(physical_slots)
+}
+
+fn nil_assignable_to_value_kind(value_kind: ValueKind) -> bool {
+    matches!(
+        value_kind,
+        ValueKind::Interface
+            | ValueKind::Pointer
+            | ValueKind::Slice
+            | ValueKind::Map
+            | ValueKind::Closure
+            | ValueKind::Channel
+            | ValueKind::Port
+            | ValueKind::Island
+    )
+}
+
+#[cfg(test)]
+fn validate_dynamic_container_value_type(value_kind: ValueKind, val_slot0: u64) -> DynResult<()> {
+    if value_kind == ValueKind::Interface {
+        return Ok(());
+    }
+    if interface::is_nil(val_slot0) {
+        if nil_assignable_to_value_kind(value_kind) {
+            return Ok(());
+        }
+        return Err((
+            DynErr::TypeMismatch,
+            "cannot write nil to non-nillable container value",
+        ));
+    }
+    let src_val_vk = interface::unpack_value_kind(val_slot0);
+    if value_kind != src_val_vk {
+        return Err((DynErr::TypeMismatch, "container value type mismatch"));
+    }
+    Ok(())
+}
+
+fn dynamic_value_requires_exact_rttid(value_kind: ValueKind) -> bool {
+    matches!(
+        value_kind,
+        ValueKind::Struct
+            | ValueKind::Array
+            | ValueKind::Slice
+            | ValueKind::Map
+            | ValueKind::Channel
+            | ValueKind::Closure
+            | ValueKind::Pointer
+            | ValueKind::Port
+            | ValueKind::Island
+    )
+}
+
+fn dynamic_integer_value_kind(value_kind: ValueKind) -> bool {
+    matches!(
+        value_kind,
+        ValueKind::Int
+            | ValueKind::Int8
+            | ValueKind::Int16
+            | ValueKind::Int32
+            | ValueKind::Int64
+            | ValueKind::Uint
+            | ValueKind::Uint8
+            | ValueKind::Uint16
+            | ValueKind::Uint32
+            | ValueKind::Uint64
+    )
+}
+
+fn coerce_dynamic_integer_slot(target_kind: ValueKind, raw: u64) -> Option<u64> {
+    match target_kind {
+        ValueKind::Int8 => Some((raw as i8) as i64 as u64),
+        ValueKind::Int16 => Some((raw as i16) as i64 as u64),
+        ValueKind::Int32 => Some((raw as i32) as i64 as u64),
+        ValueKind::Int64 => Some(raw as i64 as u64),
+        #[cfg(target_pointer_width = "32")]
+        ValueKind::Int => Some((raw as i32) as i64 as u64),
+        #[cfg(target_pointer_width = "64")]
+        ValueKind::Int => Some(raw as i64 as u64),
+        ValueKind::Uint8 => Some((raw as u8) as u64),
+        ValueKind::Uint16 => Some((raw as u16) as u64),
+        ValueKind::Uint32 => Some((raw as u32) as u64),
+        ValueKind::Uint64 => Some(raw),
+        #[cfg(target_pointer_width = "32")]
+        ValueKind::Uint => Some((raw as u32) as u64),
+        #[cfg(target_pointer_width = "64")]
+        ValueKind::Uint => Some(raw),
+        _ => None,
+    }
+}
+
+fn read_boxed_array_value_slots(
+    call: &ExternCallContext,
+    array_ref: GcRef,
+    target_rttid: ValueRttid,
+    target_slots: usize,
+) -> DynResult<Vec<u64>> {
+    if array_ref.is_null() {
+        return Err((DynErr::TypeMismatch, "dynamic array value is nil"));
+    }
+    let array_len = call.get_array_len_from_rttid(target_rttid.rttid());
+    let elem_rttid = call.get_elem_value_rttid_from_base(target_rttid.rttid());
+    let elem_vk = elem_rttid.value_kind();
+    let elem_bytes = array::elem_bytes(array_ref);
+    let elem_slots = checked_sequence_elem_raw_slot_count(call, elem_rttid, elem_vk, elem_bytes)?;
+    let expected_slots = elem_slots
+        .checked_mul(array_len)
+        .ok_or((DynErr::TypeMismatch, "dynamic array value layout overflow"))?;
+    if expected_slots != target_slots {
+        return Err((DynErr::TypeMismatch, "dynamic array value layout mismatch"));
+    }
+
+    let mut raw_slots = vec![0u64; target_slots];
+    for idx in 0..array_len {
+        let start = idx * elem_slots;
+        let end = start + elem_slots;
+        read_array_elem_logical_slots(
+            array_ref,
+            idx,
+            elem_vk,
+            elem_bytes,
+            &mut raw_slots[start..end],
+        );
+    }
+    Ok(raw_slots)
+}
+
+fn read_boxed_aggregate_value_slots(
+    call: &ExternCallContext,
+    target_rttid: ValueRttid,
+    target_kind: ValueKind,
+    target_slots: usize,
+    value_ref: GcRef,
+) -> DynResult<Vec<u64>> {
+    if value_ref.is_null() {
+        return Err((DynErr::TypeMismatch, "dynamic aggregate value is nil"));
+    }
+    match target_kind {
+        ValueKind::Struct => Ok(read_ref_slots(value_ref, target_slots)),
+        ValueKind::Array => {
+            read_boxed_array_value_slots(call, value_ref, target_rttid, target_slots)
+        }
+        _ => Err((DynErr::TypeMismatch, "dynamic target is not aggregate")),
+    }
+}
+
+fn prepare_dynamic_value_for_target(
+    call: &mut ExternCallContext,
+    target_rttid: ValueRttid,
+    target_kind: ValueKind,
+    target_slots: usize,
+    val_slot0: u64,
+    val_slot1: u64,
+    context: &'static str,
+) -> DynResult<Vec<u64>> {
+    if target_rttid.value_kind() != target_kind {
+        return Err((DynErr::TypeMismatch, "dynamic target metadata mismatch"));
+    }
+
+    if interface::is_nil(val_slot0) {
+        if target_kind == ValueKind::Interface {
+            return Ok(vec![0; target_slots]);
+        }
+        if nil_assignable_to_value_kind(target_kind) {
+            return Ok(vec![0; target_slots]);
+        }
+        return Err((DynErr::TypeMismatch, "cannot write nil to dynamic target"));
+    }
+
+    if target_kind == ValueKind::Interface {
+        let iface_meta_id = call
+            .get_interface_meta_id_from_rttid(target_rttid.rttid())
+            .ok_or((
+                DynErr::TypeMismatch,
+                "dynamic interface target metadata missing",
+            ))?;
+        let (slot0, slot1) = prepare_interface_value(call, val_slot0, val_slot1, iface_meta_id)?;
+        return Ok(vec![slot0, slot1]);
+    }
+
+    let src_kind = interface::unpack_value_kind(val_slot0);
+    if dynamic_integer_value_kind(target_kind) {
+        if !dynamic_integer_value_kind(src_kind) || target_slots != 1 {
+            return Err((DynErr::TypeMismatch, "dynamic target value kind mismatch"));
+        }
+        let Some(coerced) = coerce_dynamic_integer_slot(target_kind, val_slot1) else {
+            return Err((DynErr::TypeMismatch, "dynamic integer target mismatch"));
+        };
+        return Ok(vec![coerced]);
+    }
+    if src_kind != target_kind {
+        return Err((DynErr::TypeMismatch, "dynamic target value kind mismatch"));
+    }
+    let src_rttid = interface::unpack_rttid(val_slot0);
+    if dynamic_value_requires_exact_rttid(target_kind) && src_rttid != target_rttid.rttid() {
+        return Err((DynErr::TypeMismatch, "dynamic target runtime type mismatch"));
+    }
+
+    if matches!(target_kind, ValueKind::Struct | ValueKind::Array) {
+        read_boxed_aggregate_value_slots(
+            call,
+            target_rttid,
+            target_kind,
+            target_slots,
+            val_slot1 as GcRef,
+        )
+    } else if target_slots == 0 {
+        Ok(Vec::new())
+    } else if target_slots == 1 {
+        Ok(vec![val_slot1])
+    } else {
+        let raw_slots = read_ref_slots(val_slot1 as GcRef, target_slots);
+        if raw_slots.len() != target_slots {
+            return Err((DynErr::TypeMismatch, context));
+        }
+        Ok(raw_slots)
+    }
+}
+
+fn checked_sequence_elem_raw_slot_count(
+    call: &ExternCallContext,
+    elem_rttid: ValueRttid,
     elem_vk: ValueKind,
     elem_bytes: usize,
-    read_elem: F,
-) -> Vec<u64>
-where
-    F: FnOnce(&mut [u64]),
-{
-    let expected_slots = boxed_value_raw_slot_count(call, elem_rttid, elem_vk);
+) -> DynResult<usize> {
+    if elem_rttid.value_kind() != elem_vk {
+        return Err((
+            DynErr::TypeMismatch,
+            "dynamic sequence element metadata kind mismatch",
+        ));
+    }
+    let expected_slots = boxed_value_raw_slot_count(call, elem_rttid.rttid(), elem_vk);
     let physical_slots = elem_bytes.div_ceil(8);
 
     if elem_bytes == 0 {
-        assert!(
-            elem_vk == ValueKind::Struct && expected_slots == 1,
-            "dynamic sequence element RTTID {elem_rttid} {:?} has zero-byte storage but expects {} raw slot(s)",
-            elem_vk,
-            expected_slots
-        );
-    } else {
-        assert_eq!(
-            physical_slots, expected_slots,
-            "dynamic sequence element RTTID {elem_rttid} {:?} stores {} byte(s) but expects {} raw slot(s)",
-            elem_vk, elem_bytes, expected_slots
-        );
+        if elem_vk == ValueKind::Struct && expected_slots == 1 {
+            return Ok(expected_slots);
+        }
+    } else if physical_slots == expected_slots {
+        return Ok(expected_slots);
     }
 
+    Err((
+        DynErr::TypeMismatch,
+        "dynamic sequence element layout mismatch",
+    ))
+}
+
+fn sequence_elem_raw_slots<F>(
+    call: &ExternCallContext,
+    elem_rttid: ValueRttid,
+    elem_vk: ValueKind,
+    elem_bytes: usize,
+    read_elem: F,
+) -> DynResult<Vec<u64>>
+where
+    F: FnOnce(&mut [u64]),
+{
+    let expected_slots =
+        checked_sequence_elem_raw_slot_count(call, elem_rttid, elem_vk, elem_bytes)?;
     let mut raw_slots = vec![0u64; expected_slots];
     if elem_bytes != 0 {
         read_elem(&mut raw_slots);
     }
-    raw_slots
+    Ok(raw_slots)
+}
+
+fn read_array_elem_logical_slots(
+    array_ref: GcRef,
+    idx: usize,
+    elem_vk: ValueKind,
+    elem_bytes: usize,
+    dst: &mut [u64],
+) {
+    if elem_bytes == 0 {
+        return;
+    }
+    if dst.len() == 1 && elem_bytes <= 8 {
+        dst[0] = unsafe { array::get_auto(array_ref, idx, elem_bytes) };
+    } else {
+        unsafe { array::get_n(array_ref, idx, dst, elem_bytes) };
+    }
+    let _ = elem_vk;
+}
+
+fn read_slice_elem_logical_slots(
+    slice_ref: GcRef,
+    idx: usize,
+    elem_vk: ValueKind,
+    elem_bytes: usize,
+    dst: &mut [u64],
+) {
+    if elem_bytes == 0 {
+        return;
+    }
+    if dst.len() == 1 && elem_bytes <= 8 {
+        dst[0] = unsafe { slice::get_auto(slice::data_ptr(slice_ref), idx, elem_bytes, elem_vk) };
+    } else {
+        unsafe { slice::get_n(slice_ref, idx, dst, elem_bytes) };
+    }
+}
+
+fn write_slice_elem_raw_slots(base_ref: GcRef, idx: usize, elem_bytes: usize, raw_slots: &[u64]) {
+    if elem_bytes == 0 {
+        return;
+    }
+    unsafe { slice::set_n(base_ref, idx, raw_slots, elem_bytes) };
 }
 
 fn get_slice_index(
@@ -1066,17 +1332,10 @@ fn get_slice_index(
     let elem_meta = slice::elem_meta(base_ref);
     let elem_vk = elem_meta.value_kind();
     let elem_rttid = call.get_elem_value_rttid_from_base(rttid);
-    assert_eq!(
-        elem_rttid.value_kind(),
-        elem_vk,
-        "dynamic slice element metadata kind drift: RTTID {:?}, container {:?}",
-        elem_rttid.value_kind(),
-        elem_vk
-    );
     let elem_bytes = array::elem_bytes(slice::array_ref(base_ref));
-    let raw_slots = sequence_elem_raw_slots(call, elem_rttid.rttid(), elem_vk, elem_bytes, |dst| {
-        slice::get_n(base_ref, idx, dst, elem_bytes);
-    });
+    let raw_slots = sequence_elem_raw_slots(call, elem_rttid, elem_vk, elem_bytes, |dst| {
+        read_slice_elem_logical_slots(base_ref, idx, elem_vk, elem_bytes, dst);
+    })?;
 
     let boxed = call.box_to_interface(elem_rttid.rttid(), elem_vk, &raw_slots);
     Ok((boxed.slot0, boxed.slot1))
@@ -1104,34 +1363,24 @@ fn set_slice_index(
     let elem_meta = slice::elem_meta(base_ref);
     let elem_vk = elem_meta.value_kind();
     let elem_rttid = call.get_elem_value_rttid_from_base(rttid);
-    let elem_slots = call.get_type_slot_count(elem_rttid.rttid()) as usize;
-    let val_vk = interface::unpack_value_kind(val_slot0);
+    let elem_bytes = array::elem_bytes(slice::array_ref(base_ref));
+    let elem_slots = checked_sequence_elem_raw_slot_count(call, elem_rttid, elem_vk, elem_bytes)?;
 
-    // Type check for non-interface elements
-    if elem_vk != ValueKind::Interface && elem_vk != val_vk && !interface::is_nil(val_slot0) {
-        return Err((DynErr::TypeMismatch, "slice element type mismatch"));
-    }
-
-    // Unbox and write
-    let written_vals: Vec<u64> = if elem_vk == ValueKind::Interface {
-        slice::set(base_ref, idx * elem_slots, val_slot0, 8);
-        slice::set(base_ref, idx * elem_slots + 1, val_slot1, 8);
-        vec![val_slot0, val_slot1]
-    } else if elem_vk == ValueKind::Struct || elem_vk == ValueKind::Array {
-        let vals = read_ref_slots(val_slot1 as GcRef, elem_slots);
-        for (i, &slot) in vals.iter().enumerate() {
-            slice::set(base_ref, idx * elem_slots + i, slot, 8);
-        }
-        vals
-    } else {
-        slice::set(base_ref, idx * elem_slots, val_slot1, 8);
-        vec![val_slot1]
-    };
+    let written_vals = prepare_dynamic_value_for_target(
+        call,
+        elem_rttid,
+        elem_vk,
+        elem_slots,
+        val_slot0,
+        val_slot1,
+        "dynamic slice element",
+    )?;
 
     if elem_meta.value_kind().may_contain_gc_refs() {
         let arr_ref = slice::array_ref(base_ref);
         call.typed_write_barrier_by_meta(arr_ref, &written_vals, elem_meta);
     }
+    write_slice_elem_raw_slots(base_ref, idx, elem_bytes, &written_vals);
 
     Ok(())
 }
@@ -1157,16 +1406,9 @@ fn get_array_index(
     let elem_vk = elem_meta.value_kind();
     let elem_bytes = array::elem_bytes(base_ref);
     let elem_rttid = call.get_elem_value_rttid_from_base(rttid);
-    assert_eq!(
-        elem_rttid.value_kind(),
-        elem_vk,
-        "dynamic array element metadata kind drift: RTTID {:?}, container {:?}",
-        elem_rttid.value_kind(),
-        elem_vk
-    );
-    let raw_slots = sequence_elem_raw_slots(call, elem_rttid.rttid(), elem_vk, elem_bytes, |dst| {
-        array::get_n(base_ref, idx, dst, elem_bytes);
-    });
+    let raw_slots = sequence_elem_raw_slots(call, elem_rttid, elem_vk, elem_bytes, |dst| {
+        read_array_elem_logical_slots(base_ref, idx, elem_vk, elem_bytes, dst);
+    })?;
 
     let boxed = call.box_to_interface(elem_rttid.rttid(), elem_vk, &raw_slots);
     Ok((boxed.slot0, boxed.slot1))
@@ -1201,19 +1443,66 @@ fn get_string_index(
 fn get_method(
     call: &mut ExternCallContext,
     rttid: u32,
+    vk: ValueKind,
     receiver_slot1: u64,
     method_name: &str,
 ) -> DynResult<(u64, u64)> {
-    let (func_id, _is_pointer_receiver, signature_rttid) =
-        call.lookup_method(rttid, method_name)
-            .ok_or((DynErr::BadField, "method not found"))?;
+    let method_info = call
+        .lookup_method(rttid, method_name)
+        .ok_or((DynErr::BadField, "method not found"))?;
+    let func_id = method_info.func_id;
+    let recv_slots = call
+        .get_func_def(func_id)
+        .ok_or((DynErr::BadCall, "method function metadata missing"))?
+        .recv_slots as usize;
+    let captures = method_receiver_captures(vk, receiver_slot1, &method_info, recv_slots)?;
 
-    let closure_ref = closure::create(call.gc(), func_id, 1);
-    closure::set_capture(closure_ref, 0, receiver_slot1);
+    let closure_ref = closure::create(call.gc(), func_id, captures.len());
+    for (idx, slot) in captures.into_iter().enumerate() {
+        // Safety: `closure_ref` is freshly allocated; it is marked for
+        // scanning after all captures are initialized.
+        unsafe { closure::set_capture(closure_ref, idx, slot) };
+    }
     call.gc().mark_allocated_for_scan(closure_ref);
 
-    let slot0 = interface::pack_slot0(0, signature_rttid, ValueKind::Closure);
+    let slot0 = interface::pack_slot0(0, method_info.signature_rttid, ValueKind::Closure);
     Ok((slot0, closure_ref as u64))
+}
+
+fn method_receiver_captures(
+    vk: ValueKind,
+    receiver_slot1: u64,
+    method_info: &vo_common_core::bytecode::MethodInfo,
+    recv_slots: usize,
+) -> DynResult<Vec<u64>> {
+    method_info
+        .iface_receiver_slot_type_for_source_kind(vk)
+        .map_err(|_| {
+            (
+                DynErr::BadCall,
+                "method receiver layout does not match dynamic source",
+            )
+        })?;
+    if recv_slots == 0 {
+        return Ok(Vec::new());
+    }
+    if recv_slots == 1 {
+        // NamedTypeMeta.methods exposes interface ABI targets: pointer receivers use the
+        // original one-slot pointer receiver, and value receivers use a $iface wrapper that
+        // expects the interface data slot. In both cases the whole receiver is slot1.
+        return Ok(vec![receiver_slot1]);
+    }
+    if method_info.is_pointer_receiver {
+        return Err((DynErr::BadCall, "pointer receiver method must use one slot"));
+    }
+    if vk == ValueKind::Struct || vk == ValueKind::Array || vk == ValueKind::Pointer {
+        let receiver_ref = receiver_slot1 as GcRef;
+        if receiver_ref.is_null() {
+            return Err((DynErr::NilBase, "method receiver is nil"));
+        }
+        return Ok(read_ref_slots(receiver_ref, recv_slots));
+    }
+    Err((DynErr::BadCall, "method receiver layout is unsupported"))
 }
 
 // ============================================================================
@@ -1316,7 +1605,7 @@ fn do_call(
                 error_offset,
                 DynErr::BadCall,
                 "invalid closure signature",
-            )
+            );
         }
     };
 
@@ -1366,7 +1655,7 @@ fn do_call(
                 error_offset,
                 DynErr::SigMismatch,
                 "argument type mismatch",
-            )
+            );
         }
     };
 
@@ -1424,7 +1713,7 @@ fn do_method(
         match get_method_via_protocol(call, base_slot1, rttid, vk, iface_id, method_name) {
             Ok(c) => Some(c),
             Err(DynOrSuspend::Dyn(e, m)) => {
-                return call_return_error(call, error_offset, e, m.borrow())
+                return call_return_error(call, error_offset, e, m.borrow());
             }
             Err(DynOrSuspend::Suspend(r)) => return r,
         }
@@ -1436,7 +1725,7 @@ fn do_method(
     let (closure_slot0, closure_slot1) = if let Some(c) = closure {
         c
     } else {
-        match get_method(call, rttid, base_slot1, method_name) {
+        match get_method(call, rttid, vk, base_slot1, method_name) {
             Ok(c) => c,
             Err((e, m)) => return call_return_error(call, error_offset, e, m),
         }
@@ -1518,57 +1807,20 @@ fn unpack_args(
         .take(non_variadic_count.min(arg_count))
     {
         let param_vk = param.value_kind();
-        let param_rttid = param.rttid();
-        let param_slots = call.get_type_slot_count(param_rttid) as usize;
+        let param_slots = call.get_type_slot_count(param.rttid()) as usize;
 
         let (arg_slot0, arg_slot1) = read_slice_elem(args_slice_ref, i, elem_bytes);
-
-        // Type check (unless param is any)
-        if param_vk != ValueKind::Interface {
-            let arg_vk = interface::unpack_value_kind(arg_slot0);
-            let arg_rttid = interface::unpack_rttid(arg_slot0);
-
-            if interface::is_nil(arg_slot0) {
-                // nil is only valid for reference types
-                if !matches!(
-                    param_vk,
-                    ValueKind::Pointer
-                        | ValueKind::Slice
-                        | ValueKind::Map
-                        | ValueKind::String
-                        | ValueKind::Closure
-                ) {
-                    return Err(());
-                }
-            } else {
-                // Check ValueKind compatibility
-                if arg_vk != param_vk {
-                    return Err(());
-                }
-                // For composite types, also check rttid to catch e.g. []int vs []string
-                if matches!(
-                    param_vk,
-                    ValueKind::Struct
-                        | ValueKind::Array
-                        | ValueKind::Slice
-                        | ValueKind::Map
-                        | ValueKind::Pointer
-                ) && arg_rttid != param_rttid
-                {
-                    return Err(());
-                }
-            }
-        }
-
-        // Unbox
-        if param_vk == ValueKind::Interface {
-            args.push(arg_slot0);
-            args.push(arg_slot1);
-        } else if param_slots == 1 {
-            args.push(arg_slot1);
-        } else {
-            args.extend(read_ref_slots(arg_slot1 as GcRef, param_slots));
-        }
+        let raw_arg = prepare_dynamic_value_for_target(
+            call,
+            *param,
+            param_vk,
+            param_slots,
+            arg_slot0,
+            arg_slot1,
+            "dynamic call argument",
+        )
+        .map_err(|_| ())?;
+        args.extend(raw_arg);
     }
 
     // Handle variadic
@@ -1598,7 +1850,17 @@ fn unpack_args(
             for i in 0..variadic_count {
                 let (arg_slot0, arg_slot1) =
                     read_slice_elem(args_slice_ref, non_variadic_count + i, elem_bytes);
-                set_slice_elem_from_any(new_slice, i, arg_slot0, arg_slot1, elem_vk, elem_slots);
+                let raw_arg = prepare_dynamic_value_for_target(
+                    call,
+                    elem_vr,
+                    elem_vk,
+                    elem_slots,
+                    arg_slot0,
+                    arg_slot1,
+                    "dynamic variadic argument",
+                )
+                .map_err(|_| ())?;
+                write_slice_elem_raw_slots(new_slice, i, elem_slots * 8, &raw_arg);
             }
             if elem_meta.value_kind().may_contain_gc_refs() {
                 call.gc()
@@ -1621,24 +1883,6 @@ fn read_slice_elem(slice_ref: GcRef, idx: usize, elem_bytes: usize) -> (u64, u64
         0
     };
     (slot0, slot1)
-}
-
-fn set_slice_elem_from_any(
-    slice_ref: GcRef,
-    idx: usize,
-    arg_slot0: u64,
-    arg_slot1: u64,
-    elem_vk: ValueKind,
-    elem_slots: usize,
-) {
-    if elem_vk == ValueKind::Interface || elem_slots == 2 {
-        slice::set_n(slice_ref, idx, &[arg_slot0, arg_slot1], elem_slots * 8);
-    } else if elem_slots == 1 {
-        slice::set(slice_ref, idx, arg_slot1, 8);
-    } else {
-        let vals = read_ref_slots(arg_slot1 as GcRef, elem_slots);
-        slice::set_n(slice_ref, idx, &vals, elem_slots * 8);
-    }
 }
 
 fn replay_value_slot_width(
@@ -2232,7 +2476,6 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
     let mut spread_slice_ref: GcRef = core::ptr::null_mut();
     let mut spread_elem_rttid = 0u32;
     let mut spread_elem_vk = ValueKind::Void;
-    let mut spread_elem_slots = 0usize;
     let mut spread_is_any = false;
 
     if spread_flag && arg_count > 0 {
@@ -2266,7 +2509,6 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
 
         spread_elem_rttid = elem.rttid();
         spread_elem_vk = elem.value_kind();
-        spread_elem_slots = call.get_type_slot_count(spread_elem_rttid) as usize;
         spread_is_any = spread_elem_vk == ValueKind::Interface;
 
         spread_slice_ref = last_slot1 as GcRef;
@@ -2310,9 +2552,32 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
                 let (elem_slot0, elem_slot1) = if spread_is_any {
                     read_slice_elem(spread_slice_ref, i, spread_elem_bytes)
                 } else {
-                    let raw: Vec<u64> = (0..spread_elem_slots)
-                        .map(|j| slice::get(spread_slice_ref, i * spread_elem_slots + j, 8))
-                        .collect();
+                    let spread_elem_vr = ValueRttid::new(spread_elem_rttid, spread_elem_vk);
+                    let raw = match sequence_elem_raw_slots(
+                        call,
+                        spread_elem_vr,
+                        spread_elem_vk,
+                        spread_elem_bytes,
+                        |dst| {
+                            read_slice_elem_logical_slots(
+                                spread_slice_ref,
+                                i,
+                                spread_elem_vk,
+                                spread_elem_bytes,
+                                dst,
+                            )
+                        },
+                    ) {
+                        Ok(raw) => raw,
+                        Err((err, msg)) => {
+                            call.ret_ref(0, core::ptr::null_mut());
+                            let (cause0, cause1) = dyn_sentinel_error(call, err.into());
+                            let (slot0, slot1) = create_error_with_cause(call, msg, cause0, cause1);
+                            call.ret_u64(1, slot0);
+                            call.ret_u64(2, slot1);
+                            return ExternResult::Ok;
+                        }
+                    };
                     let boxed = call.box_to_interface(spread_elem_rttid, spread_elem_vk, &raw);
                     (boxed.slot0, boxed.slot1)
                 };
@@ -2352,32 +2617,101 @@ fn dyn_type_assert_error(call: &mut ExternCallContext) -> ExternResult {
 // Registration
 // ============================================================================
 
+#[derive(Clone, Copy)]
+struct DynamicExternEntry {
+    name: &'static str,
+    func: crate::ffi::ExternFn,
+    effects: crate::bytecode::ExternEffects,
+}
+
+const REGISTERED_EXTERNS: &[DynamicExternEntry] = &[
+    DynamicExternEntry {
+        name: "dyn_getDynErrors",
+        func: get_dyn_errors,
+        effects: crate::bytecode::ExternEffects::NONE,
+    },
+    DynamicExternEntry {
+        name: "dyn_field",
+        func: dyn_field,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_index",
+        func: dyn_index,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_set_field",
+        func: dyn_set_field,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_set_index_unified",
+        func: dyn_set_index_unified,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_call",
+        func: dyn_call,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_method",
+        func: dyn_method,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_pack_any_slice",
+        func: dyn_pack_any_slice,
+        effects: crate::bytecode::ExternEffects::NONE,
+    },
+    DynamicExternEntry {
+        name: "dyn_type_assert_error",
+        func: dyn_type_assert_error,
+        effects: crate::bytecode::ExternEffects::NONE,
+    },
+    DynamicExternEntry {
+        name: "dyn_GetAttr",
+        func: dyn_get_attr,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_GetIndex",
+        func: dyn_get_index,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_SetAttr",
+        func: dyn_set_attr,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+    DynamicExternEntry {
+        name: "dyn_SetIndex",
+        func: dyn_set_index,
+        effects: crate::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+    },
+];
+
+pub fn known_extern_allowed_effects(name: &str) -> Option<crate::bytecode::ExternEffects> {
+    REGISTERED_EXTERNS
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.effects)
+}
+
 pub fn register_externs(
     registry: &mut crate::ffi::ExternRegistry,
     externs: &[crate::bytecode::ExternDef],
 ) {
-    use crate::ffi::ExternFn;
-
-    const TABLE: &[(&str, ExternFn)] = &[
-        ("dyn_getDynErrors", get_dyn_errors),
-        ("dyn_field", dyn_field),
-        ("dyn_index", dyn_index),
-        ("dyn_set_field", dyn_set_field),
-        ("dyn_set_index_unified", dyn_set_index_unified),
-        ("dyn_call", dyn_call),
-        ("dyn_method", dyn_method),
-        ("dyn_pack_any_slice", dyn_pack_any_slice),
-        ("dyn_type_assert_error", dyn_type_assert_error),
-        ("dyn_GetAttr", dyn_get_attr),
-        ("dyn_GetIndex", dyn_get_index),
-        ("dyn_SetAttr", dyn_set_attr),
-        ("dyn_SetIndex", dyn_set_index),
-    ];
-
     for (id, def) in externs.iter().enumerate() {
-        for (name, func) in TABLE {
-            if def.name == *name {
-                registry.register(id as u32, *func);
+        for entry in REGISTERED_EXTERNS {
+            if def.name == entry.name {
+                registry.register_builtin_with_effects(
+                    id as u32,
+                    entry.name,
+                    entry.func,
+                    entry.effects,
+                );
                 break;
             }
         }
@@ -2385,96 +2719,4 @@ pub fn register_externs(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exact_replay_slots_accepts_only_exact_width() {
-        let ret = match exact_replay_slots::<4>(vec![11, 22, 0, 0], DynErr::BadCall, "test replay")
-        {
-            Ok(ret) => ret,
-            _ => panic!("exact replay width should be accepted"),
-        };
-        assert_eq!(ret, [11, 22, 0, 0]);
-
-        match exact_replay_slots::<4>(vec![11, 22, 0], DynErr::BadCall, "test replay") {
-            Err(DynOrSuspend::Dyn(DynErr::BadCall, msg)) => {
-                assert!(msg.contains("returned 3 slot(s), expected 4"));
-            }
-            _ => panic!("short replay result must be rejected"),
-        }
-
-        match exact_replay_slots::<4>(vec![11, 22, 0, 0, 99], DynErr::BadCall, "test replay") {
-            Err(DynOrSuspend::Dyn(DynErr::BadCall, msg)) => {
-                assert!(msg.contains("returned 5 slot(s), expected 4"));
-            }
-            _ => panic!("long replay result must be rejected"),
-        }
-    }
-
-    #[test]
-    fn dynamic_replay_contract_has_no_min_copy_or_zero_fill() {
-        let source = include_str!("dynamic.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("dynamic source should contain tests section");
-
-        assert!(
-            !source.contains(".min(N)"),
-            "protocol replay results must be exact-width, not min-copied"
-        );
-        assert!(
-            !source.contains(".min(4)"),
-            "CallObject replay results must be exact-width, not min-copied"
-        );
-        assert!(
-            !source.contains("ret.get(err_start + 1).copied().unwrap_or(0)"),
-            "protocol error slots must not be optional zero-filled slots"
-        );
-        assert!(
-            !source.contains("raw_slots.first().copied().unwrap_or(0)"),
-            "dynamic return packing must not zero-fill a missing first slot"
-        );
-        assert!(
-            !source.contains("raw_slots.get(1).copied().unwrap_or(0)"),
-            "dynamic return packing must not zero-fill a missing second slot"
-        );
-        assert!(
-            source.contains("exact_replay_slots(ret_vec, err, \"dynamic protocol\")"),
-            "protocol calls must use the exact replay-slot helper"
-        );
-        assert!(
-            source.contains("ret_buffer.len() != expected_ret_slots"),
-            "dynamic closure call replay must reject slot-count drift before packing"
-        );
-    }
-
-    #[test]
-    fn dynamic_sequence_indexing_uses_exact_container_element_layout() {
-        let source = include_str!("dynamic.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("dynamic source should contain tests section");
-
-        assert!(
-            source.contains("fn sequence_elem_raw_slots"),
-            "slice/array dynamic indexing must centralize exact element layout checks"
-        );
-        assert!(
-            source.contains("let elem_bytes = array::elem_bytes(slice::array_ref(base_ref));"),
-            "slice dynamic indexing must read using the container element byte width"
-        );
-        assert!(
-            source.contains("let elem_bytes = array::elem_bytes(base_ref);"),
-            "array dynamic indexing must read using the array element byte width"
-        );
-        assert!(
-            !source.contains("let elem_slots = call.get_type_slot_count(elem_rttid.rttid()) as usize;\n\n    let raw_slots"),
-            "sequence indexing must not use RTTID slot count as the copy width"
-        );
-        assert!(
-            source.contains("physical_slots, expected_slots"),
-            "sequence indexing must fail fast when physical and logical element layouts drift"
-        );
-    }
-}
+mod tests;

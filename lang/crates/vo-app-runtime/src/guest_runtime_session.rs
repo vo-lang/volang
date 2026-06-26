@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use vo_vm::scheduler::HostWaitKey;
 use vo_vm::vm::Vm;
 
 use crate::{GuiAppSession, PendingHostEvent, RenderIslandSession, SessionError, StepResult};
@@ -51,10 +52,10 @@ impl GuestSession {
         }
     }
 
-    pub fn wake_host_event(&mut self, token: u64) {
+    pub fn wake_host_event(&mut self, key: HostWaitKey) -> Result<(), SessionError> {
         match self {
-            Self::GuiApp(session) => session.wake_host_event(token),
-            Self::RenderIsland(session) => session.wake_host_event(token),
+            Self::GuiApp(session) => session.wake_host_event(key),
+            Self::RenderIsland(session) => session.wake_host_event(key),
         }
     }
 

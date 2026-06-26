@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use vo_vm::scheduler::HostWaitKey;
 use vo_vm::vm::SchedulingOutcome;
 
 use crate::PendingHostEvent;
@@ -16,7 +17,7 @@ pub struct StepResult {
 /// Internal aggregate of all side effects produced by one VM execution step.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct SessionEffects {
-    pub(crate) replay_event_wait_token: Option<u64>,
+    pub(crate) replay_event_wait_key: Option<HostWaitKey>,
     pub(crate) pending_host_events: Vec<PendingHostEvent>,
     pub(crate) outbound_island_frames: Vec<Vec<u8>>,
     pub(crate) render_output: Option<Vec<u8>>,
@@ -25,14 +26,14 @@ pub(crate) struct SessionEffects {
 
 impl SessionEffects {
     pub(crate) fn collect(
-        replay_event_wait_token: Option<u64>,
+        replay_event_wait_key: Option<HostWaitKey>,
         pending_host_events: Vec<PendingHostEvent>,
         outbound_island_frames: Vec<Vec<u8>>,
         render_output: Option<Vec<u8>>,
         stdout: String,
     ) -> Self {
         Self {
-            replay_event_wait_token,
+            replay_event_wait_key,
             pending_host_events,
             outbound_island_frames,
             render_output,

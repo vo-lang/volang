@@ -1,7 +1,7 @@
 //! Bytecode text format parser and formatter.
 
 use vo_common_core::SlotType;
-use vo_vm::bytecode::{Constant, FunctionDef, Module};
+use vo_vm::bytecode::{Constant, FunctionDef, Module, ParamShape};
 use vo_vm::instruction::{Instruction, Opcode};
 
 /// Format a Module as text.
@@ -95,9 +95,18 @@ pub fn format_text(module: &Module) -> String {
     if !module.externs.is_empty() {
         out.push_str("## Externs\n");
         for (i, e) in module.externs.iter().enumerate() {
+            let effects = if e.allowed_effects.is_empty() {
+                String::from("none")
+            } else {
+                e.allowed_effects.names().collect::<Vec<_>>().join("|")
+            };
             out.push_str(&format!(
-                "# [{}] {}({}) -> {}\n",
-                i, e.name, e.param_slots, e.ret_slots
+                "# [{}] {}({}) -> {} effects={}\n",
+                i,
+                e.name,
+                format_param_shape(&e.params),
+                e.ret_slots(),
+                effects
             ));
         }
         out.push('\n');
@@ -120,6 +129,13 @@ fn format_constant(c: &Constant) -> String {
         Constant::Int(i) => format!("int {}", i),
         Constant::Float(f) => format!("float {}", f),
         Constant::String(s) => format!("string {:?}", s),
+    }
+}
+
+fn format_param_shape(shape: &ParamShape) -> String {
+    match shape {
+        ParamShape::Exact { slots } => slots.to_string(),
+        ParamShape::CallSiteVariadic => String::from("call-site"),
     }
 }
 
