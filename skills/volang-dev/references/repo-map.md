@@ -52,8 +52,8 @@ system.
 | `vo-analysis` | Project analysis, import loading, type checking, object/type arenas, scopes, selections, escape/sendability post-passes. |
 | `vo-codegen` | Type-checked project to bytecode module, runtime metadata, wrappers, slot metadata, debug info. |
 | `vo-engine` | Native compile/check/run API, module context, compile cache, native extension prep. |
-| `vo-runtime` | GC, object layouts, builtins, FFI registry/loader, stdlib runtime support, islands. |
-| `vo-vm` | Interpreter, scheduler, fibers, root scanning, VM-side JIT integration. |
+| `vo-runtime` | GC, object layouts, builtins, extern effect contracts, FFI registry/loader, stdlib runtime support, islands. |
+| `vo-vm` | Interpreter, runtime-boundary transitions, scheduler, fibers, root scanning, VM-side JIT integration. |
 | `vo-jit` | Cranelift full-function and loop OSR compilation, opcode semantic rows, contract graph, verifier, lowering, call helpers, and runtime path policy. |
 | `vo-module` | Module identity, manifests, lock files, workspaces, solver, registry, cache, lifecycle ops. |
 | `vo-release` | Module release verification and staging. |
@@ -88,6 +88,18 @@ JIT execution:
 5. Runtime transitions return through `vo-vm/src/vm/jit/*`, including bridge
    results, materialization, callbacks, side exits, panic setup, and transition
    handling.
+
+VM/runtime boundary:
+
+1. Runtime side effects should flow through `RuntimeTransition`,
+   `RuntimeCommand`, `FiberWakeKey`, and scheduler generation checks instead of
+   raw fiber IDs or ad hoc scheduler mutation.
+2. JIT callbacks may publish pending runtime transitions while generated code
+   continues; pending effects commit with the next side-effect-carrying VM
+   boundary and are discarded as a unit on terminal discard.
+3. Boundary architecture notes live in
+   `lang/docs/dev/vm-runtime-boundary-architecture.md`; repair/status notes
+   live in `lang/docs/dev/vm-runtime-boundary-repair-plan.md`.
 
 Web/Studio compile/run:
 

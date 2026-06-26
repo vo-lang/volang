@@ -9,6 +9,7 @@ entry points before editing.
 - [Change Type Rules Or Diagnostics](#change-type-rules-or-diagnostics)
 - [Change Codegen Lowering Without Adding Opcodes](#change-codegen-lowering-without-adding-opcodes)
 - [Add Or Change A Bytecode Instruction](#add-or-change-a-bytecode-instruction)
+- [Change VM Runtime Boundary Or Scheduler Wakes](#change-vm-runtime-boundary-or-scheduler-wakes)
 - [Change JIT Semantics, Contracts, Or Lowering](#change-jit-semantics-contracts-or-lowering)
 - [Change GC Or Root Scanning](#change-gc-or-root-scanning)
 - [Change Module Resolution Or Lock Semantics](#change-module-resolution-or-lock-semantics)
@@ -146,6 +147,43 @@ Audit serialization, text dump, debug info, GC slot metadata, call/return frame
 shape, `FunctionDef` derived metadata, `slot_types`, `capture_slot_types`,
 runtime/JIT ABI helper needs, JIT side exits, and VM call materialization.
 
+## Change VM Runtime Boundary Or Scheduler Wakes
+
+Touch likely areas:
+
+- `lang/crates/vo-vm/src/runtime_boundary.rs`
+- `lang/crates/vo-vm/src/scheduler.rs`
+- `lang/crates/vo-vm/src/fiber.rs`
+- `lang/crates/vo-vm/src/exec/*`
+- `lang/crates/vo-vm/src/vm/mod.rs`
+- `lang/crates/vo-vm/src/vm/jit/*`
+- `lang/crates/vo-runtime/src/jit_api.rs`
+- `lang/docs/dev/vm-runtime-boundary-architecture.md`
+- `lang/docs/dev/vm-runtime-boundary-repair-plan.md`
+
+Checks:
+
+```sh
+cargo test -p vo-vm
+cargo test -p vo-vm --features jit
+./d.py test both tests/lang/cases/<case>.vo
+./d.py test osr tests/lang/cases/<case>.vo
+./d.py test wasm tests/lang/cases/<case>.vo
+cargo run -q -p vo-dev -- task run gc-contract
+```
+
+Use `RuntimeTransition`/`RuntimeCommand` for runtime side effects. JIT
+callbacks that cannot commit immediately should publish pending transitions and
+let the next VM boundary commit them; terminal discard must drop the pending
+transition as a unit. Do not mutate scheduler state directly from JIT callback
+helpers unless the helper is explicitly the boundary applier.
+
+Use `FiberWakeKey`/generation checks for host event, island, queue, and I/O
+wakes. Raw `FiberId`/slot identity is insufficient across reuse. Treat
+`GcRootEffect` as part of the boundary contract: new block/yield/suspend paths
+must either mark the current fiber, all roots, or intentionally preserve the
+existing dirty-root protocol.
+
 ## Change JIT Semantics, Contracts, Or Lowering
 
 Touch likely areas:
@@ -160,6 +198,7 @@ Touch likely areas:
 - `lang/crates/vo-jit/src/translate/*`
 - `lang/crates/vo-jit/src/call_helpers/*`
 - `lang/crates/vo-vm/src/vm/jit/*`
+- `lang/crates/vo-vm/src/runtime_boundary.rs`
 - `lang/crates/vo-vm/src/vm/jit_mgr.rs`
 - `tests/lang/cases` and `tests/lang/manifest.toml`
 
@@ -200,6 +239,11 @@ calls in `prepared.rs`, result handling in `result_flow.rs`, VM materialization
 in `vm_materialization.rs`, and callback ABI wrappers in `callback_abi.rs`.
 VM-side bridge code belongs under `vo-vm/src/vm/jit/*`, with grouped transition
 state preferred over long argument lists.
+
+When a JIT helper performs local runtime side effects such as spawning,
+waking, host-event resume, queue/select interaction, or island response
+handling, audit whether it returns a `RuntimeTransition`, a pending transition,
+or a terminal discard. Tests should cover commit-at-boundary and discard paths.
 
 ## Change GC Or Root Scanning
 
@@ -330,6 +374,7 @@ Touch likely areas:
 - `lang/crates/vo-ffi-macro/src/*`
 - `lang/crates/vo-runtime/src/ffi/*`
 - `lang/crates/vo-runtime/src/ext_loader.rs`
+- `lang/crates/vo-stdlib/src/extern_manifest.rs`
 - `lang/crates/vo-engine/src/compile/native.rs`
 - `lang/crates/vo-module/src/ext_manifest.rs`
 - `lang/docs/spec/native-ffi.md`
@@ -339,6 +384,7 @@ Checks:
 ```sh
 cargo test -p vo-ffi-macro
 cargo test -p vo-ext
+cargo test -p vo-runtime --release resolved_call_rejects_provider_identity_drift_after_load
 ./d.py test both tests/lang/cases/<extension-case>.vo
 ```
 
@@ -349,6 +395,12 @@ path, and runtime lookup names.
 `#[vo_fn]` supports simple, result, and manual wrapper modes. Result wrappers
 expect `String` errors. Native exports must provide `vo_ext_get_entries` and
 the ABI fingerprint expected by the runtime loader.
+
+Resolved extern calls compare provider identity allocated by the registry, not
+function pointer addresses. Release builds may merge identical functions, so
+never use `ExternFn` pointer equality as a provider drift check. Keep declared
+extern effects, provider manifest effects, resolved extern tables, and JIT
+routing policy in sync.
 
 Do not copy `#[vo_extern]` examples from older docs without fixing them.
 Also verify stale ABI snippets before copying fields or result variants.

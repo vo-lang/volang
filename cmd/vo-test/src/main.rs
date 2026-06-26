@@ -12,6 +12,12 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_WORKERS: usize = 8;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
+const RUNNER_OWNED_JIT_ENV_KEYS: &[&str] = &[
+    "VO_JIT_CALL_THRESHOLD",
+    "VO_JIT_LOOP_THRESHOLD",
+    "VO_JIT_DEBUG",
+];
+const RUNNER_OWNED_GC_ENV_KEYS: &[&str] = &["VO_GC_STRESS", "VO_GC_VERIFY", "VO_GC_DEBUG"];
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -159,6 +165,7 @@ struct Expect {
     pattern: Option<String>,
     #[serde(alias = "jit_regular_call_fallbacks_min")]
     jit_regular_call_side_exits_min: Option<u64>,
+    jit_loop_entries_min: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -609,22 +616,55 @@ fn run_plan_job(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_job(job: &TestJob) -> Result<(), String> {
-    let saved_env: Vec<_> = job
-        .env
-        .keys()
+    let saved_env = apply_job_env(job);
+    let result = run_job_inner(job);
+    restore_job_env(saved_env);
+    result
+}
+
+fn apply_job_env(job: &TestJob) -> Vec<(String, Option<String>)> {
+    let keys = job_env_restore_keys(job);
+    let saved_env: Vec<_> = keys
+        .into_iter()
         .map(|key| (key.clone(), env::var(key).ok()))
         .collect();
+    for (key, _) in &saved_env {
+        env::remove_var(key);
+    }
     for (key, value) in &job.env {
         env::set_var(key, value);
     }
-    let result = run_job_inner(job);
+    saved_env
+}
+
+fn restore_job_env(saved_env: Vec<(String, Option<String>)>) {
     for (key, value) in saved_env {
         match value {
             Some(value) => env::set_var(key, value),
             None => env::remove_var(key),
         }
     }
-    result
+}
+
+fn job_env_restore_keys(job: &TestJob) -> Vec<String> {
+    let mut keys: Vec<String> = job.env.keys().cloned().collect();
+    if job.backend == "jit" {
+        keys.extend(
+            RUNNER_OWNED_JIT_ENV_KEYS
+                .iter()
+                .map(|key| (*key).to_string()),
+        );
+    }
+    if matches!(job.backend.as_str(), "vm" | "jit") {
+        keys.extend(
+            RUNNER_OWNED_GC_ENV_KEYS
+                .iter()
+                .map(|key| (*key).to_string()),
+        );
+    }
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 fn run_job_inner(job: &TestJob) -> Result<(), String> {
@@ -663,6 +703,14 @@ fn run_job_inner(job: &TestJob) -> Result<(), String> {
         );
     }
     if mode == vo_engine::RunMode::Jit {
+        if let Some(min) = job.expect.jit_loop_entries_min {
+            if observation.jit_loop_entries < min {
+                return Err(format!(
+                    "expected at least {min} JIT loop entries, got {}",
+                    observation.jit_loop_entries
+                ));
+            }
+        }
         if let Some(min) = job.expect.jit_regular_call_side_exits_min {
             if observation.jit_regular_call_side_exits < min {
                 return Err(format!(
@@ -741,6 +789,32 @@ fn patterns_match(message: &str, expect: &Expect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvSnapshot(Vec<(String, Option<String>)>);
+
+    impl EnvSnapshot {
+        fn capture(keys: &[&str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| ((*key).to_string(), env::var(key).ok()))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
 
     fn result(case_id: &str, target: &str, passed: bool, stdout: &str, error: &str) -> PlanResult {
         PlanResult {
@@ -767,9 +841,129 @@ mod tests {
                 patterns: Vec::new(),
                 pattern: None,
                 jit_regular_call_side_exits_min: None,
+                jit_loop_entries_min: None,
             },
             baseline: None,
         }
+    }
+
+    fn test_job(target: &str, backend: &str, env: &[(&str, &str)]) -> TestJob {
+        TestJob {
+            id: format!("case::{target}"),
+            case_id: "case".to_string(),
+            kind: "file".to_string(),
+            path: "tests/lang/cases/runtime/case.vo".to_string(),
+            target: target.to_string(),
+            backend: backend.to_string(),
+            matrix: None,
+            tags: Vec::new(),
+            owner: None,
+            env: env
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+            timeout_sec: 1,
+            expect: Expect {
+                kind: "pass".to_string(),
+                patterns: Vec::new(),
+                pattern: None,
+                jit_regular_call_side_exits_min: None,
+                jit_loop_entries_min: None,
+            },
+        }
+    }
+
+    #[test]
+    fn vm_test_runner_expect_parses_loop_entry_contract_061() {
+        let expect: Expect = serde_json::from_value(serde_json::json!({
+            "kind": "pass",
+            "jit_loop_entries_min": 1
+        }))
+        .expect("expect schema should accept JIT loop-entry contract");
+
+        assert_eq!(expect.jit_loop_entries_min, Some(1));
+    }
+
+    #[test]
+    fn vm_test_runner_jit_jobs_restore_all_runner_owned_jit_env_059() {
+        let job = test_job("jit", "jit", &[("VO_JIT_CALL_THRESHOLD", "1")]);
+        let keys = job_env_restore_keys(&job);
+
+        assert!(keys.contains(&"VO_JIT_CALL_THRESHOLD".to_string()));
+        assert!(
+            keys.contains(&"VO_JIT_LOOP_THRESHOLD".to_string()),
+            "jit jobs must clear inherited loop threshold when the target does not set it"
+        );
+        assert!(
+            keys.contains(&"VO_JIT_DEBUG".to_string()),
+            "jit jobs must clear inherited debug flag when the target does not set it"
+        );
+    }
+
+    #[test]
+    fn vm_test_runner_apply_job_env_clears_unset_jit_env_059() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned");
+        let _snapshot = EnvSnapshot::capture(RUNNER_OWNED_JIT_ENV_KEYS);
+        env::set_var("VO_JIT_CALL_THRESHOLD", "999");
+        env::set_var("VO_JIT_LOOP_THRESHOLD", "1");
+        env::set_var("VO_JIT_DEBUG", "1");
+        let job = test_job("jit", "jit", &[("VO_JIT_CALL_THRESHOLD", "1")]);
+
+        let saved_env = apply_job_env(&job);
+
+        assert_eq!(env::var("VO_JIT_CALL_THRESHOLD").as_deref(), Ok("1"));
+        assert!(env::var("VO_JIT_LOOP_THRESHOLD").is_err());
+        assert!(env::var("VO_JIT_DEBUG").is_err());
+
+        restore_job_env(saved_env);
+        assert_eq!(env::var("VO_JIT_CALL_THRESHOLD").as_deref(), Ok("999"));
+        assert_eq!(env::var("VO_JIT_LOOP_THRESHOLD").as_deref(), Ok("1"));
+        assert_eq!(env::var("VO_JIT_DEBUG").as_deref(), Ok("1"));
+    }
+
+    #[test]
+    fn vm_test_runner_apply_job_env_clears_unset_gc_env_060() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned");
+        let _snapshot = EnvSnapshot::capture(RUNNER_OWNED_GC_ENV_KEYS);
+        env::set_var("VO_GC_STRESS", "1");
+        env::set_var("VO_GC_VERIFY", "1");
+        env::set_var("VO_GC_DEBUG", "1");
+        let job = test_job("vm", "vm", &[]);
+
+        let saved_env = apply_job_env(&job);
+
+        assert!(env::var("VO_GC_STRESS").is_err());
+        assert!(env::var("VO_GC_VERIFY").is_err());
+        assert!(env::var("VO_GC_DEBUG").is_err());
+
+        restore_job_env(saved_env);
+        assert_eq!(env::var("VO_GC_STRESS").as_deref(), Ok("1"));
+        assert_eq!(env::var("VO_GC_VERIFY").as_deref(), Ok("1"));
+        assert_eq!(env::var("VO_GC_DEBUG").as_deref(), Ok("1"));
+    }
+
+    #[test]
+    fn vm_test_runner_apply_job_env_preserves_explicit_gc_target_env_060() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned");
+        let _snapshot = EnvSnapshot::capture(RUNNER_OWNED_GC_ENV_KEYS);
+        env::set_var("VO_GC_STRESS", "ambient");
+        let job = test_job("gc-vm", "vm", &[("VO_GC_STRESS", "1")]);
+
+        let saved_env = apply_job_env(&job);
+
+        assert_eq!(env::var("VO_GC_STRESS").as_deref(), Ok("1"));
+
+        restore_job_env(saved_env);
+        assert_eq!(env::var("VO_GC_STRESS").as_deref(), Ok("ambient"));
     }
 
     #[test]

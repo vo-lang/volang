@@ -353,6 +353,7 @@ pub(crate) fn build_plan(root: &Path, opts: &TestArgs) -> Result<TestPlan> {
                 expect: json!({
                     "kind": "pass",
                     "jit_regular_call_side_exits_min": expect.jit_regular_call_side_exits_min,
+                    "jit_loop_entries_min": expect.jit_loop_entries_min,
                 }),
                 selection_reasons: selection_reasons_for_case(
                     case,

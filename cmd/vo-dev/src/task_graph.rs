@@ -78,12 +78,30 @@ pub(crate) fn add_task_with_deps(
 pub(crate) fn task_tools_recursive(root: &Path, task_name: &str) -> Result<BTreeSet<String>> {
     let config = load_tasks(root)?;
     let task_map = task_map(&config)?;
+    task_tools_recursive_from_map(&task_map, task_name)
+}
+
+pub(crate) fn selector_tools_recursive(root: &Path, selector: &str) -> Result<BTreeSet<String>> {
+    let config = load_tasks(root)?;
+    let task_map = task_map(&config)?;
+    let task_names = resolve_selector(&config, selector)?;
+    let mut tools = BTreeSet::new();
+    for task_name in task_names {
+        tools.extend(task_tools_recursive_from_map(&task_map, &task_name)?);
+    }
+    Ok(tools)
+}
+
+fn task_tools_recursive_from_map(
+    task_map: &BTreeMap<String, Task>,
+    task_name: &str,
+) -> Result<BTreeSet<String>> {
     let mut tools = BTreeSet::new();
     let mut stack = Vec::new();
     let mut seen = HashSet::new();
     collect_task_tools(
         task_name.strip_prefix("task:").unwrap_or(task_name),
-        &task_map,
+        task_map,
         &mut tools,
         &mut stack,
         &mut seen,

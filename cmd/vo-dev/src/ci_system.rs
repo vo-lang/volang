@@ -1,8 +1,11 @@
 use crate::config::{load_tasks, load_toolchains, NodeWorkspace, Task, ToolchainFile};
 use crate::first_party::{ci_checkout_for, CiCheckout};
 use crate::github_output::write_github_output;
-use crate::task_graph::{collect_task_node_workspaces, task_map, task_tools_recursive};
+use crate::task_graph::{
+    collect_task_node_workspaces, resolve_selector, task_map, task_tools_recursive,
+};
 use crate::task_planner::{plan_tasks, PlanArgs};
+use crate::task_runner::VM_PRODUCTION_FINAL_GATE_SELECTORS;
 use crate::tool_lint::validate_rust_cache_workspace;
 use crate::tool_system::desired_tool_version;
 use anyhow::{anyhow, bail, Result};
@@ -12,7 +15,7 @@ use std::path::Path;
 
 pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
     let Some(subcommand) = args.first().cloned() else {
-        bail!("usage: vo-dev ci matrix|metadata <selector> [--github-output]");
+        bail!("usage: vo-dev ci matrix|metadata <selector> [--github-output]\n       vo-dev ci final-matrix [--github-output]");
     };
     args.remove(0);
     let mut github_output = false;
@@ -25,6 +28,31 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
         } else {
             filtered.push(arg);
         }
+    }
+    if subcommand == "final-matrix" {
+        if !filtered.is_empty() {
+            bail!("usage: vo-dev ci final-matrix [--github-output]");
+        }
+        let task_names = final_gate_task_names(root)?;
+        let matrix = matrix_for(root, &task_names)?;
+        if github_output {
+            write_github_output(&[
+                ("tasks", serde_json::to_string(&task_names)?),
+                ("matrix", serde_json::to_string(&matrix)?),
+                (
+                    "has_tasks",
+                    if task_names.is_empty() {
+                        "false"
+                    } else {
+                        "true"
+                    }
+                    .to_string(),
+                ),
+            ])?;
+        } else {
+            println!("{}", serde_json::to_string_pretty(&matrix)?);
+        }
+        return Ok(());
     }
     let mut opts = PlanArgs::parse(filtered)?;
     if !opts.selector_explicit {
@@ -64,7 +92,7 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
             }
         }
         _ => bail!(
-            "usage: vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]\n       vo-dev ci metadata <selector> [--github-output]"
+            "usage: vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]\n       vo-dev ci metadata <selector> [--github-output]\n       vo-dev ci final-matrix [--github-output]"
         ),
     }
     Ok(())
@@ -87,8 +115,10 @@ struct MatrixRow {
     repos: Vec<String>,
     tools: Vec<String>,
     rust: bool,
+    python: bool,
     node: bool,
     wasm_pack: bool,
+    python_version: String,
     node_version: String,
     node_lockfiles: String,
     rust_cache_workspaces: String,
@@ -100,8 +130,10 @@ pub(crate) struct CiMetadata {
     tasks: Vec<String>,
     tools: Vec<String>,
     rust: bool,
+    python: bool,
     node: bool,
     wasm_pack: bool,
+    python_version: String,
     node_version: String,
     node_lockfiles: String,
     rust_cache_workspaces: String,
@@ -117,8 +149,10 @@ impl CiMetadata {
             ("tasks", serde_json::to_string(&self.tasks)?),
             ("tools", serde_json::to_string(&self.tools)?),
             ("rust", self.rust.to_string()),
+            ("python", self.python.to_string()),
             ("node", self.node.to_string()),
             ("wasm_pack", self.wasm_pack.to_string()),
+            ("python_version", self.python_version.clone()),
             ("node_version", self.node_version.clone()),
             ("node_lockfiles", self.node_lockfiles.clone()),
             ("rust_cache_workspaces", self.rust_cache_workspaces.clone()),
@@ -130,10 +164,25 @@ impl CiMetadata {
     }
 }
 
+fn final_gate_task_names(root: &Path) -> Result<Vec<String>> {
+    let config = load_tasks(root)?;
+    let mut tasks = Vec::new();
+    let mut seen = BTreeSet::new();
+    for selector in VM_PRODUCTION_FINAL_GATE_SELECTORS {
+        for task in resolve_selector(&config, selector)? {
+            if seen.insert(task.clone()) {
+                tasks.push(task);
+            }
+        }
+    }
+    Ok(tasks)
+}
+
 pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOutput> {
     let config = load_tasks(root)?;
     let task_map = task_map(&config)?;
     let toolchains = load_toolchains(root)?;
+    let python_version = desired_tool_version(&toolchains, "python")?;
     let node_version = desired_tool_version(&toolchains, "node")?;
     let wasm_pack_version = desired_tool_version(&toolchains, "wasm-pack")?;
     let mut include = Vec::new();
@@ -154,8 +203,14 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
             checkout_repository: checkout.repository,
             checkout_path: checkout.path,
             rust: true,
+            python: tools.contains("python"),
             node: tools.contains("node"),
             wasm_pack: tools.contains("wasm-pack"),
+            python_version: if tools.contains("python") {
+                python_version.clone()
+            } else {
+                String::new()
+            },
             node_version: if tools.contains("node") {
                 node_version.clone()
             } else {
@@ -196,14 +251,21 @@ pub(crate) fn ci_metadata_for(root: &Path, task_names: &[String]) -> Result<CiMe
         repos.extend(task_repos_recursive(name, &task_map)?);
     }
     let checkout = metadata_checkout(root, &repos)?;
+    let python = tools.contains("python");
     let node = tools.contains("node");
     let wasm_pack = tools.contains("wasm-pack");
     Ok(CiMetadata {
         tasks: task_names.to_vec(),
         tools: tools.iter().cloned().collect(),
         rust: true,
+        python,
         node,
         wasm_pack,
+        python_version: if python {
+            desired_tool_version(&toolchains, "python")?
+        } else {
+            String::new()
+        },
         node_version: if node {
             desired_tool_version(&toolchains, "node")?
         } else {

@@ -6,6 +6,9 @@ gc_regression_alias = "gc"
 [matrices.default]
 targets = ["vm", "jit", "osr", "nostd", "wasm"]
 
+[matrices.osr-only]
+targets = ["osr"]
+
 [matrices.native]
 targets = ["vm", "jit", "osr"]
 
@@ -88,7 +91,6 @@ backend = "vo-web"
 env = { VOWORK = "off" }
 default_timeout_sec = 60
 build_command = ["wasm-pack", "build", "lang/crates/vo-web", "--target", "web", "--features", "compiler"]
-release_build_args = ["--release"]
 runner_command = ["node", "lang/crates/vo-web/test_runner.mjs"]
 
 [[target]]

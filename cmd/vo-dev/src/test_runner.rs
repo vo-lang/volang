@@ -4,8 +4,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct JsonRunOutput {
@@ -107,12 +108,8 @@ fn run_native_tests_text(root: &Path, opts: &TestArgs, run_plan_targets: &[Strin
     let plan_path =
         std::env::temp_dir().join(format!("volang-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
-    let mut command = Command::new("cargo");
-    command.args(["run", "-q"]);
-    if opts.release {
-        command.arg("--release");
-    }
-    command.args(["-p", "vo-test", "--", "run-plan"]);
+    let mut command = vo_test_command(root, opts.release);
+    command.arg("run-plan");
     command.arg(&plan_path);
     if let Some(jobs) = opts.jobs {
         command.args(["--jobs", &jobs.to_string()]);
@@ -171,12 +168,8 @@ fn run_native_tests_json(
     let plan_path =
         std::env::temp_dir().join(format!("volang-test-plan-{}.json", std::process::id()));
     fs::write(&plan_path, serde_json::to_string_pretty(&plan)?)?;
-    let mut command = Command::new("cargo");
-    command.args(["run", "-q"]);
-    if opts.release {
-        command.arg("--release");
-    }
-    command.args(["-p", "vo-test", "--", "run-plan"]);
+    let mut command = vo_test_command(root, opts.release);
+    command.arg("run-plan");
     command.arg(&plan_path);
     if let Some(jobs) = opts.jobs {
         command.args(["--jobs", &jobs.to_string()]);
@@ -419,13 +412,93 @@ fn check_localhost_loopback() -> Result<()> {
     let addr = listener
         .local_addr()
         .context("could not inspect loopback listener address")?;
-    let client = TcpStream::connect(addr)
+    let accept = std::thread::spawn(move || listener.accept());
+    let client = TcpStream::connect_timeout(&addr, Duration::from_secs(1))
         .with_context(|| format!("could not connect to loopback listener at {addr}"))?;
-    let (_server, _) = listener
-        .accept()
+    let (_server, _) = accept
+        .join()
+        .map_err(|_| anyhow!("loopback accept thread panicked"))?
         .with_context(|| format!("could not accept loopback connection at {addr}"))?;
     drop(client);
     Ok(())
+}
+
+fn vo_test_command(root: &Path, release: bool) -> Command {
+    if let Some(path) = sibling_tool(root, "vo-test", release) {
+        return Command::new(path);
+    }
+
+    let mut command = Command::new("cargo");
+    command.args(["run", "-q"]);
+    if release {
+        command.arg("--release");
+    }
+    command.args(["-p", "vo-test", "--"]);
+    command
+}
+
+fn sibling_tool(root: &Path, name: &str, release: bool) -> Option<PathBuf> {
+    let exe_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let current = std::env::current_exe().ok()?;
+    sibling_tool_candidate(&current, root, &exe_name, release)
+}
+
+fn sibling_tool_candidate(
+    current: &Path,
+    root: &Path,
+    exe_name: &str,
+    release: bool,
+) -> Option<PathBuf> {
+    let dir = current.parent()?;
+    let expected_profile = if release { "release" } else { "debug" };
+    if dir.file_name()?.to_str()? != expected_profile {
+        return None;
+    }
+    let candidate = dir.join(exe_name);
+    if !candidate.is_file() {
+        return None;
+    }
+    let current_modified = current.metadata().ok()?.modified().ok()?;
+    let candidate_modified = candidate.metadata().ok()?.modified().ok()?;
+    if candidate_modified < current_modified {
+        return None;
+    }
+    if candidate_modified < latest_native_runner_input_mtime(root)? {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn latest_native_runner_input_mtime(root: &Path) -> Option<SystemTime> {
+    let mut latest = UNIX_EPOCH;
+    for input in [
+        "Cargo.lock",
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        "cmd/vo-test",
+        "lang/crates",
+        "lang/stdlib",
+    ] {
+        latest_mtime(&root.join(input), &mut latest)?;
+    }
+    Some(latest)
+}
+
+fn latest_mtime(path: &Path, latest: &mut SystemTime) -> Option<()> {
+    let metadata = fs::metadata(path).ok()?;
+    if let Ok(modified) = metadata.modified() {
+        *latest = (*latest).max(modified);
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).ok()? {
+            latest_mtime(&entry.ok()?.path(), latest)?;
+        }
+    }
+    Some(())
 }
 
 fn command_from_args(args: &[String], description: &str) -> Result<Command> {
@@ -485,5 +558,130 @@ mod tests {
         assert_eq!(output.schema, "volang.test-result.v1");
         assert_eq!(output.passed, 1);
         assert_eq!(output.failed, 0);
+    }
+
+    #[test]
+    fn sibling_vo_test_requires_matching_profile_and_fresh_binary() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-sibling-vo-test-{}-{unique}",
+            std::process::id()
+        ));
+        let debug_dir = root.join("debug");
+        fs::create_dir_all(&debug_dir).unwrap();
+        fs::create_dir_all(root.join("cmd/vo-test/src")).unwrap();
+        fs::create_dir_all(root.join("lang/crates/vo-vm/src")).unwrap();
+        fs::create_dir_all(root.join("lang/stdlib")).unwrap();
+        fs::write(root.join("Cargo.lock"), b"# lock").unwrap();
+        fs::write(root.join("Cargo.toml"), b"[workspace]\n").unwrap();
+        fs::write(root.join("rust-toolchain.toml"), b"[toolchain]\n").unwrap();
+        fs::write(root.join("cmd/vo-test/src/main.rs"), b"fn main() {}").unwrap();
+        fs::write(root.join("lang/crates/vo-vm/src/lib.rs"), b"").unwrap();
+        fs::write(root.join("lang/stdlib/core.vo"), b"package core\n").unwrap();
+
+        let current = debug_dir.join("vo-dev");
+        let sibling = debug_dir.join(if cfg!(windows) {
+            "vo-test.exe"
+        } else {
+            "vo-test"
+        });
+        fs::write(&current, b"vo-dev").unwrap();
+        fs::write(&sibling, b"vo-test").unwrap();
+
+        assert_eq!(
+            sibling_tool_candidate(
+                &current,
+                &root,
+                sibling.file_name().unwrap().to_str().unwrap(),
+                false
+            ),
+            Some(sibling.clone())
+        );
+        assert_eq!(
+            sibling_tool_candidate(
+                &current,
+                &root,
+                sibling.file_name().unwrap().to_str().unwrap(),
+                true
+            ),
+            None,
+            "debug sibling must not satisfy a --release run"
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+        fs::write(
+            root.join("lang/stdlib/core.vo"),
+            b"package core\nconst X = 1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            sibling_tool_candidate(
+                &current,
+                &root,
+                sibling.file_name().unwrap().to_str().unwrap(),
+                false
+            ),
+            None,
+            "stale sibling must fall back to cargo run when embedded stdlib source is newer"
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+        fs::write(&sibling, b"newer vo-test after stdlib").unwrap();
+        assert_eq!(
+            sibling_tool_candidate(
+                &current,
+                &root,
+                sibling.file_name().unwrap().to_str().unwrap(),
+                false
+            ),
+            Some(sibling.clone())
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+        fs::write(
+            root.join("cmd/vo-test/src/main.rs"),
+            b"fn main() { println!(\"new\"); }",
+        )
+        .unwrap();
+        assert_eq!(
+            sibling_tool_candidate(
+                &current,
+                &root,
+                sibling.file_name().unwrap().to_str().unwrap(),
+                false
+            ),
+            None,
+            "stale sibling must fall back to cargo run when vo-test source is newer"
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+        fs::write(&sibling, b"newer vo-test").unwrap();
+        assert_eq!(
+            sibling_tool_candidate(
+                &current,
+                &root,
+                sibling.file_name().unwrap().to_str().unwrap(),
+                false
+            ),
+            Some(sibling.clone())
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+        fs::write(&current, b"newer vo-dev").unwrap();
+        assert_eq!(
+            sibling_tool_candidate(
+                &current,
+                &root,
+                sibling.file_name().unwrap().to_str().unwrap(),
+                false
+            ),
+            None,
+            "stale sibling must fall back to cargo run so current source is rebuilt"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

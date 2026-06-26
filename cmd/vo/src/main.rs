@@ -385,6 +385,10 @@ fn cmd_dump(args: &[String]) -> i32 {
             return 1;
         }
     };
+    if let Err(e) = vo_common_core::verifier::verify_module(&module) {
+        eprintln!("[VO:BYTECODE] invalid bytecode: {}", e);
+        return 1;
+    }
 
     print!("{}", format_text(&module));
     0

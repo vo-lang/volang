@@ -22,6 +22,11 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 - Some specs are intentionally canonical for contracts but stale for
   implementation status. Exact current behavior still needs source and test
   verification.
+- Development plans can be mixed records: a single file may contain current
+  implementation status, completed migration phases, original risk checkpoints,
+  and future maintenance checklists. Read the status/document-role section
+  first; do not treat historical problem summaries or required changes as
+  current defects without checking source and tests against completion status.
 - `lang/docs/dev-notes/*` is historical context. It often explains intent but
   may describe plans, not shipped behavior.
 - `lang/docs/outdated/*` is explicitly stale.
@@ -63,6 +68,15 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 - Bytecode/JIT specs and comments can lag current opcodes and callback support.
   Verify `vo-common-core`, `vo-engine::run`, `vo-vm/src/vm/jit/*`, and
   `vo-jit` before editing or explaining backend behavior.
+- VM/runtime-boundary docs are active design contracts with historical context.
+  Treat `vm-runtime-boundary-architecture.md` as the current invariant map and
+  `vm-runtime-boundary-repair-plan.md` as a completed repair record when its
+  status says phases landed. For boundary work, inspect
+  `vo-vm/src/runtime_boundary.rs`, scheduler wake-key APIs, `vm/jit/*`
+  transition/callback code, and the current source-audit sections before
+  reporting a defect. Endpoint stale-response non-decrement and terminal
+  discard of uncommitted pending JIT transitions are intentional contracts
+  unless current source or tests violate the acceptance matrix.
 - `lang/docs/dev/jit-fact-source.md` documents the current maintainer
   contract. In code, `vo-jit/src/semantics` is the opcode fact source for
   capability, metadata requirement, register effects, runtime dependencies,
@@ -77,6 +91,11 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
   helper or callback ABI drift, and call-shape mismatches. Legal runtime paths
   are explicit side exits, VM call materialization, runtime helpers, or runtime
   panic recording.
+- JIT callbacks may publish pending runtime transitions while generated code
+  continues to the next VM boundary. Pending side effects commit with the next
+  side-effect-carrying boundary and are discarded as a unit on terminal discard;
+  do not assume every interpreter opcode boundary is observable by generated
+  code.
 - Avoid using "fallback" for intentional JIT runtime paths. Prefer
   `RuntimePathPolicy`, `JitSideExitReason`, "side exit", and "VM call
   materialization"; manifest side-exit wording is parsed only at the
@@ -116,6 +135,9 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
 - Native extension artifacts differ for local/workspace modules and published
   dependencies. Check readiness and artifact resolution source before changing
   errors.
+- FFI provider identity is assigned by the registry. Function pointer addresses
+  are not stable identities in optimized release builds because LLVM may merge
+  identical functions.
 
 ## Runtime And GC Risks
 
@@ -134,6 +156,20 @@ artifacts, module behavior, FFI, JIT, GC, Studio, or CI policy.
   blocked, suspended, or suspended-for-host-events.
 - Changes to calls, returns, defer, panic/recover, borrowed frames, JIT spills,
   wait registrations, queue/select state, or host events can be root-sensitive.
+- Host-event, island, queue, and I/O wakes must use validated wake keys and
+  source checks. Raw fiber slot IDs are vulnerable to reuse and generation
+  drift.
+- Endpoint response accounting follows accepted state changes:
+  `pending_island_responses` tracks live obligations, so stale generation,
+  wrong source, wrong endpoint, or wrong response-kind commands must not
+  decrement it while the real obligation remains pending.
+- Boundary effects are also GC effects. When adding a new suspend/block/yield
+  path, audit `GcRootEffect`, dirty fiber epochs, pending JIT extern payloads,
+  and whether terminal discard drops every pending side effect.
+- Pending transition effects are scheduler-visible boundary work. Queue/select
+  helpers may already have committed queue-local object state; report a
+  pending-discard issue only with a reachable path where that committed state
+  leaves a waiter dependent on a discarded pending wake.
 
 ## Generated Artifact Risks
 

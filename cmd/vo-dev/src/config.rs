@@ -88,6 +88,7 @@ pub(crate) struct Tool {
     pub(crate) required: Option<bool>,
     pub(crate) usage: Option<String>,
     pub(crate) check: Option<Vec<String>>,
+    pub(crate) bootstrap: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

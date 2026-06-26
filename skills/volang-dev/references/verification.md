@@ -27,6 +27,10 @@ repo-root commands routed through `./d.py` or `vo-dev`.
   and workspace overrides are not part of the task.
 - Avoid relying on network behavior during frozen build tests. Use explicit
   `vo mod` lifecycle commands for dependency download/resolution behavior.
+- Some language-test backends preflight local loopback sockets. In sandboxed
+  Codex runs, `could not bind 127.0.0.1:0: Operation not permitted` is usually
+  an environment permission failure; rerun the same task with approved
+  escalation before treating it as a product failure.
 
 ## Common Commands
 
@@ -100,6 +104,19 @@ runtime path policy, or lowering-owner changes, start with `cargo test -p vo-jit
 Add `vo-vm --features jit` when VM bridge, materialization, callbacks, side
 exits, or `jit_mgr` behavior is touched.
 
+For VM runtime-boundary, scheduler wake, host event, island, queue/select,
+extern suspend, or JIT callback side-effect changes, include focused VM/JIT
+tests plus cross-target language coverage:
+
+```sh
+cargo test -p vo-vm <boundary-or-regression-name>
+cargo test -p vo-vm --features jit <boundary-or-regression-name>
+./d.py test both tests/lang/cases/<case>.vo
+./d.py test osr tests/lang/cases/<case>.vo
+./d.py test wasm tests/lang/cases/<case>.vo
+cargo run -q -p vo-dev -- task run gc-contract
+```
+
 Use GC-focused checks for slot metadata, root scanning, write barriers,
 allocation, scheduler boundaries, defer/panic, or JIT materialization:
 
@@ -120,6 +137,9 @@ Use when behavior should work in browser/no_std or when touching `vo-web`,
 ./d.py test nostd
 ./d.py test wasm
 cargo check -p vo-web --target wasm32-unknown-unknown
+cargo run -q -p vo-dev -- task run task:wasm-check
+cargo run -q -p vo-dev -- task run task:wasm-check-release
+cargo run -q -p vo-dev -- task run app-contract
 ```
 
 ## Module System And Release Logic
@@ -158,6 +178,15 @@ cargo check --workspace --all-targets --exclude vo-playground
 
 For ABI or macro changes, add Rust tests near the macro/runtime code and a Vo
 integration case that exercises the public surface.
+
+For extern resolution, provider effects, replay protocol, or JIT extern routing
+changes, include release-mode runtime coverage because optimizer function
+merging can hide pointer-identity bugs:
+
+```sh
+cargo test -p vo-runtime --release resolved_call_rejects_provider_identity_drift_after_load
+cargo run -q -p vo-dev -- task run task:cargo-test-release
+```
 
 ## Studio, WASM Bridge, Quickplay
 
@@ -213,6 +242,13 @@ cargo run -q -p vo-dev -- task run contract
 cargo run -q -p vo-dev -- task run site
 cargo run -q -p vo-dev -- task run release-verify
 ```
+
+When the user asks for broad validation after VM/runtime changes, prefer
+`verify run pr` or the equivalent composed set: `cargo-fmt`, `cargo-clippy`,
+`cargo-check`, native/JIT/OSR/no_std/WASM language tests, `gc-contract`,
+`stdlib-contract`, `examples`, `docs`, `benchmarks`, `app-contract`,
+`quickplay-validate`, `blockkart-smoke-static`, `cargo-test-release`,
+`wasm-check-release`, and `release-verify`.
 
 ## Docs
 

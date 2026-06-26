@@ -39,6 +39,11 @@ validation, and treat stale docs as an expected maintenance hazard.
 - Treat `lang/docs/spec/*.md` as canonical intended behavior for user-facing
   contracts, but verify source and tests before explaining current shipped
   implementation status.
+- Read development plans by their status and document role before mining them
+  for findings. Many `lang/docs/dev/*plan*.md` files keep completed phase
+  records, original risk checkpoints, and current completion definitions in one
+  place; historical problem or required-change sections are not current defects
+  unless source/tests violate the stated completion status.
 - Treat `lang/docs/dev-notes/` and `lang/docs/outdated/` as historical context.
 - Treat generated Playground docs as mirrors. Source docs live in
   `lang/docs/spec/` and `lang/docs/vo-for-gophers.md`.
@@ -73,6 +78,11 @@ background in this skill; use references for decisions, caveats, and commands.
 - Opcode or bytecode changes usually cross `vo-common-core`, codegen, VM exec,
   bytecode text/serialization, function metadata, slot metadata, JIT or
   fallback behavior, runtime/JIT ABI helpers, and tests.
+- VM/runtime-boundary changes usually cross `vo-vm/src/runtime_boundary.rs`,
+  scheduler/fiber wake keys, `vm/jit/*` callbacks/transitions, GC dirty-root
+  policy, host event/island wake paths, and
+  `lang/docs/dev/vm-runtime-boundary-architecture.md` plus the completed
+  repair record when boundary migration history matters.
 - JIT opcode behavior changes must route through the semantic row, metadata
   requirement, verifier domain, capability/runtime path policy, lowering owner,
   and contract graph together. Do not add parallel opcode-family match tables.
@@ -139,6 +149,18 @@ cargo run -q -p vo-dev -- task run release-verify
   external `require` entries are involved.
 - Native FFI docs may lag source macro names. Check `vo-ext` and
   `vo-ffi-macro` before writing examples.
+- Extern resolution is contract-checked. Do not use function pointer identity
+  as provider identity; release builds may merge identical functions. Check
+  `vo-runtime::ffi` registry identity and resolved extern tables together.
+- VM runtime-boundary docs are stratified: the architecture document is the
+  current invariant contract, while the repair-plan file may be a completed
+  repair record that preserves historical phase text. For endpoint responses,
+  `pending_island_responses` counts live obligations; stale or wrong responses
+  must not decrement it unless source/tests intentionally change that contract.
+  For reviews, read the repair record's implementation status and completion
+  definition before using historical phase text. Distinguish scheduler-visible
+  pending transition work from already-committed queue/select object mutations,
+  and require a reachable failing path before reporting a pending-discard bug.
 - JIT status is nuanced. Verify current `vo-engine::run`, `vo-vm` dispatch,
   `vm/jit/*`, `jit_mgr`, `vo-jit`, `lang/docs/dev/jit-fact-source.md`, and
   language tests before claiming support or diagnosing failures.

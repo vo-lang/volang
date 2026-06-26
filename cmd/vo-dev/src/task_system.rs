@@ -1,7 +1,7 @@
 use crate::config::load_tasks;
 use crate::task_graph::{task_map, task_to_json};
 use crate::task_planner::{plan_task_details, plan_tasks, PlanArgs};
-use crate::task_runner::run_tasks;
+use crate::task_runner::{run_tasks, write_task_run_evidence, VM_PRODUCTION_FINAL_GATE_SELECTORS};
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +11,12 @@ use std::path::Path;
 struct PlanOutput {
     tasks: Vec<String>,
     changed_files: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FinalSelectorsOutput {
+    schema: &'static str,
+    selectors: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,6 +37,24 @@ pub(crate) fn cmd_task(root: &Path, mut args: Vec<String>) -> Result<()> {
         bail!("usage: vo-dev task list|show|stats|coverage|plan|run ...");
     }
     match args.remove(0).as_str() {
+        "final-selectors" => {
+            let format = parse_format_args("task final-selectors", args)?;
+            let selectors = VM_PRODUCTION_FINAL_GATE_SELECTORS.to_vec();
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&FinalSelectorsOutput {
+                        schema: "volang.final-task-selectors.v1",
+                        selectors,
+                    })?
+                );
+            } else {
+                for selector in selectors {
+                    println!("{selector}");
+                }
+            }
+            Ok(())
+        }
         "list" => {
             if !args.is_empty() {
                 bail!("usage: vo-dev task list");
@@ -129,7 +153,8 @@ pub(crate) fn cmd_task(root: &Path, mut args: Vec<String>) -> Result<()> {
                 bail!("vo-dev task run does not support --format json");
             }
             let (tasks, _) = plan_tasks(root, &opts)?;
-            run_tasks(root, &tasks)
+            run_tasks(root, &tasks)?;
+            write_task_run_evidence(root, &opts.selector, opts.changed, &tasks)
         }
         other => bail!("unknown task command: {other}"),
     }
@@ -484,5 +509,19 @@ mod tests {
         assert_eq!(value["schema"], "volang.task-stats.v1");
         assert!(value.get("group_metadata").is_some());
         assert!(value.get("tasks_by_owner").is_some());
+    }
+
+    #[test]
+    fn final_selectors_json_schema_is_stable_060() {
+        let output = FinalSelectorsOutput {
+            schema: "volang.final-task-selectors.v1",
+            selectors: VM_PRODUCTION_FINAL_GATE_SELECTORS.to_vec(),
+        };
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["schema"], "volang.final-task-selectors.v1");
+        assert_eq!(
+            value["selectors"],
+            serde_json::json!(["contract", "vm-production", "site", "release-verify"])
+        );
     }
 }

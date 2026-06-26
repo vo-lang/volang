@@ -81,12 +81,14 @@ fn print_usage() {
         r#"usage:
   vo-dev task list
   vo-dev task show <task>
+  vo-dev task final-selectors [--format text|json]
   vo-dev task stats [--format text|json]
   vo-dev task coverage [--format text|json]
   vo-dev task plan <selector> [--changed] [--base <sha>] [--head <sha>] [--format text|json] [--explain]
   vo-dev task run <selector> [--changed] [--base <sha>] [--head <sha>]
   vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]
   vo-dev ci metadata <selector> [--github-output]
+  vo-dev ci final-matrix [--github-output]
   vo-dev lint tasks|artifacts|repo-boundaries|layout|docs|examples|benchmarks|release|all [--strict]
   vo-dev tool check [--task <task>] [--json]
   vo-dev tool bootstrap [--task <task>] [--apply] [--json]
