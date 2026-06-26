@@ -187,9 +187,9 @@ fn emit_box_value(
     let meta_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
     let boxed = func.alloc_slots(&[SlotType::GcRef]);
-    func.emit_ptr_new(boxed, meta_reg, slots);
     let slot_types = info.type_slot_types(value_type);
     assert_eq!(slots as usize, slot_types.len());
+    func.emit_ptr_new(boxed, meta_reg, &slot_types);
     func.emit_ptr_set_with_slot_types(boxed, 0, reg, &slot_types);
     boxed
 }
@@ -292,9 +292,15 @@ fn emit_iface_method_value_closure(
         .collect();
     let capture_box = emit_box_value(iface_reg, 2, iface_type, ctx, func, info);
     let capture_transfer_type = transfer_type_for_type(iface_type, ctx, info);
+    let iface_meta_id = ctx.get_or_create_interface_meta_id(
+        iface_type,
+        &info.project.tc_objs,
+        &info.project.interner,
+    );
 
     let wrapper_id = ctx.get_or_create_method_value_wrapper_iface(
         iface_type,
+        iface_meta_id,
         method_idx,
         param_slot_types,
         ret_slot_types,

@@ -21,9 +21,9 @@ use hashbrown::HashMap;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::bytecode::{
-    Constant, ExtSlotKind, ExternDef, FieldMeta, FunctionDef, GlobalDef, InterfaceMeta,
-    InterfaceMethodMeta, Itab, JitInstructionMetadata, MethodInfo, Module, NamedTypeMeta,
-    StructMeta, TransferType, WellKnownTypes,
+    Constant, ExtSlotKind, ExternDef, ExternEffects, FieldMeta, FunctionDef, GlobalDef,
+    InterfaceMeta, InterfaceMethodMeta, Itab, JitInstructionMetadata, MethodInfo, Module,
+    NamedTypeMeta, ParamShape, ReturnShape, StructMeta, TransferType, WellKnownTypes,
 };
 use crate::instruction::Instruction;
 use crate::types::{SlotType, ValueMeta, ValueRttid};
@@ -31,7 +31,7 @@ use crate::RuntimeType;
 use num_enum::TryFromPrimitive;
 
 const MAGIC: &[u8; 3] = b"VOB";
-const VERSION: u32 = 7;
+const VERSION: u32 = 10;
 const MIN_SUPPORTED_VERSION: u32 = VERSION;
 
 #[derive(Debug)]
@@ -47,6 +47,9 @@ pub enum SerializeError {
     InvalidRuntimeType(u8),
     InvalidChanDir(u8),
     InvalidExtSlotKind(u8),
+    InvalidParamShape(u8),
+    InvalidReturnShape(String),
+    InvalidExternEffects(u64),
 }
 
 pub struct ByteWriter {
@@ -181,6 +184,64 @@ fn read_ext_slot_kind(r: &mut ByteReader) -> Result<ExtSlotKind, SerializeError>
     }
 }
 
+fn write_param_shape(w: &mut ByteWriter, shape: &ParamShape) {
+    match shape {
+        ParamShape::Exact { slots } => {
+            w.write_u8(0);
+            w.write_u16(*slots);
+        }
+        ParamShape::CallSiteVariadic => {
+            w.write_u8(1);
+        }
+    }
+}
+
+fn read_param_shape(r: &mut ByteReader) -> Result<ParamShape, SerializeError> {
+    match r.read_u8()? {
+        0 => Ok(ParamShape::Exact {
+            slots: r.read_u16()?,
+        }),
+        1 => Ok(ParamShape::CallSiteVariadic),
+        raw => Err(SerializeError::InvalidParamShape(raw)),
+    }
+}
+
+fn write_return_shape(w: &mut ByteWriter, shape: &ReturnShape) {
+    w.write_u16(shape.slots);
+    w.write_vec(&shape.kinds, |w, k| w.write_u8(*k as u8));
+    w.write_vec(&shape.slot_types, |w, st| w.write_u8(*st as u8));
+    w.write_vec(&shape.interface_metas, |w, meta| match meta {
+        Some(id) => {
+            w.write_u8(1);
+            w.write_u32(*id);
+        }
+        None => w.write_u8(0),
+    });
+}
+
+fn read_return_shape(r: &mut ByteReader) -> Result<ReturnShape, SerializeError> {
+    let slots = r.read_u16()?;
+    let kinds = r.read_vec(read_ext_slot_kind)?;
+    let slot_types = r.read_vec(read_slot_type)?;
+    let interface_metas = r.read_vec(|r| match r.read_u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(r.read_u32()?)),
+        raw => Err(SerializeError::InvalidReturnShape(format!(
+            "invalid ReturnShape interface metadata tag {raw}"
+        ))),
+    })?;
+    let shape = ReturnShape {
+        slots,
+        kinds,
+        slot_types,
+        interface_metas,
+    };
+    shape
+        .validate_with_label("ReturnShape")
+        .map_err(SerializeError::InvalidReturnShape)?;
+    Ok(shape)
+}
+
 fn write_jit_instruction_metadata(w: &mut ByteWriter, meta: &JitInstructionMetadata) {
     match meta {
         JitInstructionMetadata::None => w.write_u8(0),
@@ -203,6 +264,14 @@ fn write_jit_instruction_metadata(w: &mut ByteWriter, meta: &JitInstructionMetad
             write_slot_layout(w, key_layout);
             write_slot_layout(w, val_layout);
             w.write_u8(*has_ok as u8);
+        }
+        JitInstructionMetadata::MapNew {
+            key_layout,
+            val_layout,
+        } => {
+            w.write_u8(16);
+            write_slot_layout(w, key_layout);
+            write_slot_layout(w, val_layout);
         }
         JitInstructionMetadata::MapSet {
             key_layout,
@@ -229,6 +298,16 @@ fn write_jit_instruction_metadata(w: &mut ByteWriter, meta: &JitInstructionMetad
             ret_layout,
         } => {
             w.write_u8(11);
+            write_slot_layout(w, arg_layout);
+            write_slot_layout(w, ret_layout);
+        }
+        JitInstructionMetadata::CallIfaceLayout {
+            iface_meta_id,
+            arg_layout,
+            ret_layout,
+        } => {
+            w.write_u8(17);
+            w.write_u32(*iface_meta_id);
             write_slot_layout(w, arg_layout);
             write_slot_layout(w, ret_layout);
         }
@@ -279,6 +358,10 @@ fn read_jit_instruction_metadata_for_version(
             val_layout: read_slot_layout(r)?,
             has_ok: r.read_u8()? != 0,
         }),
+        16 => Ok(JitInstructionMetadata::MapNew {
+            key_layout: read_slot_layout(r)?,
+            val_layout: read_slot_layout(r)?,
+        }),
         3 => Ok(JitInstructionMetadata::MapSet {
             key_layout: read_slot_layout(r)?,
             val_layout: read_slot_layout(r)?,
@@ -296,6 +379,11 @@ fn read_jit_instruction_metadata_for_version(
             elem_layout: read_slot_layout(r)?,
         }),
         11 => Ok(JitInstructionMetadata::CallLayout {
+            arg_layout: read_slot_layout(r)?,
+            ret_layout: read_slot_layout(r)?,
+        }),
+        17 => Ok(JitInstructionMetadata::CallIfaceLayout {
+            iface_meta_id: r.read_u32()?,
             arg_layout: read_slot_layout(r)?,
             ret_layout: read_slot_layout(r)?,
         }),
@@ -681,11 +769,13 @@ impl Module {
                 w.write_string(name);
                 w.write_u32(info.func_id);
                 w.write_u8(info.is_pointer_receiver as u8);
+                w.write_u8(info.receiver_is_iface_boxed as u8);
                 w.write_u32(info.signature_rttid);
             }
         });
 
         w.write_vec(&self.itabs, |w, itab| {
+            w.write_u32(itab.iface_meta_id);
             w.write_vec(&itab.methods, |w, func_id| w.write_u32(*func_id));
         });
 
@@ -787,9 +877,9 @@ impl Module {
 
         w.write_vec(&self.externs, |w, e| {
             w.write_string(&e.name);
-            w.write_u16(e.param_slots);
-            w.write_u16(e.ret_slots);
-            w.write_u8(e.is_blocking as u8);
+            write_param_shape(w, &e.params);
+            write_return_shape(w, &e.returns);
+            w.write_u64(e.allowed_effects.bits());
             w.write_vec(&e.param_kinds, |w, k| w.write_u8(*k as u8));
         });
 
@@ -892,12 +982,14 @@ impl Module {
                 let n = r.read_string()?;
                 let func_id = r.read_u32()?;
                 let is_pointer_receiver = r.read_u8()? != 0;
+                let receiver_is_iface_boxed = r.read_u8()? != 0;
                 let signature_rttid = r.read_u32()?;
                 methods.insert(
                     n,
                     MethodInfo {
                         func_id,
                         is_pointer_receiver,
+                        receiver_is_iface_boxed,
                         signature_rttid,
                     },
                 );
@@ -911,8 +1003,12 @@ impl Module {
         })?;
 
         let itabs = r.read_vec(|r| {
+            let iface_meta_id = r.read_u32()?;
             let methods = r.read_vec(|r| r.read_u32())?;
-            Ok(Itab { methods })
+            Ok(Itab {
+                iface_meta_id,
+                methods,
+            })
         })?;
 
         let runtime_types = r.read_vec(|r| read_runtime_type(r))?;
@@ -1060,15 +1156,17 @@ impl Module {
 
         let externs = r.read_vec(|r| {
             let name = r.read_string()?;
-            let param_slots = r.read_u16()?;
-            let ret_slots = r.read_u16()?;
-            let is_blocking = r.read_u8()? != 0;
+            let params = read_param_shape(r)?;
+            let returns = read_return_shape(r)?;
+            let effects_bits = r.read_u64()?;
+            let allowed_effects = ExternEffects::from_bits(effects_bits)
+                .ok_or(SerializeError::InvalidExternEffects(effects_bits))?;
             let param_kinds = r.read_vec(read_ext_slot_kind)?;
             Ok(ExternDef {
                 name,
-                param_slots,
-                ret_slots,
-                is_blocking,
+                params,
+                returns,
+                allowed_effects,
                 param_kinds,
             })
         })?;
@@ -1154,6 +1252,90 @@ mod tests {
 
         assert_eq!(module.constants.len(), module2.constants.len());
         assert_eq!(module.constants, module2.constants);
+    }
+
+    #[test]
+    fn test_serialize_deserialize_extern_allowed_effects() {
+        let mut module = Module::new("test".into());
+        module.externs.push(ExternDef {
+            name: "host_fetch".into(),
+            params: ParamShape::Exact { slots: 2 },
+            returns: ReturnShape::with_slot_types(vec![SlotType::GcRef]),
+            allowed_effects: ExternEffects::MAY_WAIT_IO_REPLAY
+                .union(ExternEffects::MAY_HOST_REPLAY),
+            param_kinds: vec![ExtSlotKind::Value, ExtSlotKind::Bytes],
+        });
+
+        let bytes = module.serialize();
+        let module2 = Module::deserialize(&bytes).unwrap();
+
+        assert_eq!(
+            module2.externs[0].allowed_effects,
+            module.externs[0].allowed_effects
+        );
+        assert_eq!(
+            module2.externs[0].param_kinds,
+            module.externs[0].param_kinds
+        );
+        assert_eq!(module2.externs[0].params, module.externs[0].params);
+        assert_eq!(module2.externs[0].returns, module.externs[0].returns);
+    }
+
+    #[test]
+    fn deserialize_rejects_extern_return_shape_slot_type_drift_048() {
+        let mut module = Module::new("extern-return-shape-drift".into());
+        module.externs.push(ExternDef {
+            name: "host_bad_return".into(),
+            params: ParamShape::CallSiteVariadic,
+            returns: ReturnShape::new(2, Vec::new(), vec![SlotType::GcRef]),
+            allowed_effects: ExternEffects::NONE,
+            param_kinds: Vec::new(),
+        });
+
+        assert!(
+            Module::deserialize(&module.serialize()).is_err(),
+            "deserialization must reject ReturnShape slot_types that do not match slots"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_extern_return_shape_interface_metadata_drift_060() {
+        let mut module = Module::new("extern-return-interface-shape-drift".into());
+        module.externs.push(ExternDef {
+            name: "host_bad_interface_return".into(),
+            params: ParamShape::CallSiteVariadic,
+            returns: ReturnShape::new(
+                2,
+                Vec::new(),
+                vec![SlotType::Interface0, SlotType::Interface1],
+            ),
+            allowed_effects: ExternEffects::NONE,
+            param_kinds: Vec::new(),
+        });
+        module.externs[0].returns.interface_metas = vec![None, Some(0)];
+
+        assert!(
+            Module::deserialize(&module.serialize()).is_err(),
+            "deserialization must reject ReturnShape interface metadata that is not anchored on Interface0"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_extern_return_shape_slots_only_interface_metadata_060() {
+        let mut module = Module::new("extern-return-interface-metadata-without-layout".into());
+        module.externs.push(ExternDef {
+            name: "host_bad_interface_return".into(),
+            params: ParamShape::CallSiteVariadic,
+            returns: ReturnShape::slots(2),
+            allowed_effects: ExternEffects::NONE,
+            param_kinds: Vec::new(),
+        });
+        module.externs[0].returns.interface_metas = vec![Some(0), None];
+
+        assert!(
+            Module::deserialize(&module.serialize()).is_err(),
+            "deserialization must reject interface metadata when ReturnShape has no slot_types"
+        );
     }
 
     #[test]
@@ -1281,12 +1463,21 @@ mod tests {
                 arg_layout: vec![SlotType::Value, SlotType::Float],
                 ret_layout: vec![SlotType::GcRef],
             },
+            JitInstructionMetadata::CallIfaceLayout {
+                iface_meta_id: 7,
+                arg_layout: vec![SlotType::Value],
+                ret_layout: vec![SlotType::Interface0, SlotType::Interface1],
+            },
             JitInstructionMetadata::CallExternLayout {
                 arg_layout: vec![SlotType::Interface0, SlotType::Interface1],
                 ret_layout: vec![SlotType::Value],
             },
             JitInstructionMetadata::QueueLayout {
                 elem_layout: vec![SlotType::GcRef],
+            },
+            JitInstructionMetadata::MapNew {
+                key_layout: vec![SlotType::Value],
+                val_layout: vec![SlotType::GcRef],
             },
             JitInstructionMetadata::MapIterNext {
                 key_layout: vec![SlotType::Value],

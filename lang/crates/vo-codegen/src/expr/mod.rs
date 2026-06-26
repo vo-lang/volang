@@ -108,7 +108,7 @@ pub fn get_expr_source(
                         info.type_slot_count(type_key)
                     };
                     return ExprSource::Location(StorageKind::Global {
-                        index: global_idx as u16,
+                        index: global_idx,
                         slots,
                     });
                 }

@@ -223,14 +223,13 @@ fn compile_go_method_expr_call(
                 } => {
                     let (param_types, is_variadic) =
                         info.get_interface_method_signature(*iface_type, method_name);
-                    let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+                    let wrapper_id = defer_iface_wrapper_for_method(
                         ctx,
+                        info,
+                        *iface_type,
                         method_name,
                         *method_idx as usize,
-                        param_types
-                            .iter()
-                            .map(|&type_key| info.type_slot_types(type_key))
-                            .collect(),
+                        &param_types,
                     );
                     return compile_scheduled_iface_method_expr_call(
                         target.recv_expr,
@@ -300,14 +299,13 @@ fn compile_go_method_expr_call(
         MethodDispatch::Interface { method_idx } => {
             let (param_types, is_variadic) =
                 info.get_interface_method_signature(recv_type, method_name);
-            let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+            let wrapper_id = defer_iface_wrapper_for_method(
                 ctx,
+                info,
+                recv_type,
                 method_name,
                 *method_idx as usize,
-                param_types
-                    .iter()
-                    .map(|&type_key| info.type_slot_types(type_key))
-                    .collect(),
+                &param_types,
             );
             compile_scheduled_iface_method_expr_call(
                 recv_arg,
@@ -331,14 +329,13 @@ fn compile_go_method_expr_call(
         } => {
             let (param_types, is_variadic) =
                 info.get_interface_method_signature(*iface_type, method_name);
-            let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+            let wrapper_id = defer_iface_wrapper_for_method(
                 ctx,
+                info,
+                *iface_type,
                 method_name,
                 *method_idx as usize,
-                param_types
-                    .iter()
-                    .map(|&type_key| info.type_slot_types(type_key))
-                    .collect(),
+                &param_types,
             );
             compile_scheduled_iface_method_expr_call(
                 recv_arg,
@@ -368,10 +365,42 @@ fn compile_call_args(
     info: &TypeInfoWrapper,
 ) -> Result<(u16, u16), CodegenError> {
     let arg_slot_types = sig.calc_arg_slot_types(call_expr, info);
-    let total_arg_slots = arg_slot_types.len() as u16;
+    let total_arg_slots = ctx.slot_count_u16_or_record(arg_slot_types.len());
     let args_start = func.alloc_args_typed(&arg_slot_types);
     sig.compile_args(call_expr, args_start, ctx, func, info)?;
     Ok((args_start, total_arg_slots))
+}
+
+fn defer_iface_wrapper_for_method(
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+    iface_type: TypeKey,
+    method_name: &str,
+    method_idx: usize,
+    param_types: &[TypeKey],
+) -> u32 {
+    let param_slot_types = param_types
+        .iter()
+        .map(|&type_key| info.type_slot_types(type_key))
+        .collect();
+    let ret_slot_types = info
+        .get_interface_method_result_types(iface_type, method_name)
+        .iter()
+        .flat_map(|&type_key| info.type_slot_types(type_key))
+        .collect();
+    let iface_meta_id = ctx.get_or_create_interface_meta_id(
+        iface_type,
+        &info.project.tc_objs,
+        &info.project.interner,
+    );
+    crate::wrapper::generate_defer_iface_wrapper(
+        ctx,
+        iface_meta_id,
+        method_name,
+        method_idx,
+        param_slot_types,
+        ret_slot_types,
+    )
 }
 
 #[inline]
@@ -443,7 +472,7 @@ where
         info.type_slot_types(actual_recv_type)
     };
     arg_slot_types.extend(sig.calc_arg_slot_types(call_expr, info));
-    let total_arg_slots = arg_slot_types.len() as u16;
+    let total_arg_slots = ctx.slot_count_u16_or_record(arg_slot_types.len());
     let args_start = func.alloc_args_typed(&arg_slot_types);
 
     crate::expr::call::emit_receiver(
@@ -482,7 +511,7 @@ where
 
     let mut total_arg_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     total_arg_slot_types.extend(arg_slot_types);
-    let total_arg_slots = total_arg_slot_types.len() as u16;
+    let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slot_types.len());
     let args_start = func.alloc_args_typed(&total_arg_slot_types);
 
     let iface_reg = crate::expr::compile_expr(recv_expr, ctx, func, info)?;
@@ -546,7 +575,7 @@ where
         is_variadic,
         info,
     ));
-    let total_arg_slots = arg_slot_types.len() as u16;
+    let total_arg_slots = ctx.slot_count_u16_or_record(arg_slot_types.len());
     let args_start = func.alloc_args_typed(&arg_slot_types);
 
     crate::expr::call::emit_receiver(
@@ -601,7 +630,7 @@ where
     );
     let mut total_arg_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
     total_arg_slot_types.extend(arg_slot_types);
-    let total_arg_slots = total_arg_slot_types.len() as u16;
+    let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slot_types.len());
     let args_start = func.alloc_args_typed(&total_arg_slot_types);
 
     let iface_reg = crate::expr::compile_expr(recv_expr, ctx, func, info)?;
@@ -657,37 +686,22 @@ fn compile_defer_pkg_func_call(
 
     // Get return slot count from function signature
     let func_type = info.expr_type(call_expr.func.id);
-    let sig = info.as_signature(func_type);
-    let ret_slot_types = info.type_slot_types(sig.results());
+    let result_types = info.func_result_types(func_type);
+    let returns = crate::expr::call::return_shape_for_type_keys(&result_types, ctx, info)?;
+    let sig_info = CallSigInfo::from_call(call_expr, info);
+    let arg_slot_types = sig_info.calc_arg_slot_types(call_expr, info);
 
     let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(
         ctx,
         &extern_name,
-        call_expr.args.len(),
-        ret_slot_types,
+        arg_slot_types.clone(),
+        returns,
     );
 
-    // Compile args as interface values for print/println/assert style functions
-    let any_type = info.any_type();
-    let total_arg_slots = call_expr.args.len() as u16 * 2; // each arg is interface (2 slots)
-    let mut arg_slot_types = Vec::with_capacity(total_arg_slots as usize);
-    for _ in &call_expr.args {
-        arg_slot_types.push(SlotType::Interface0);
-        arg_slot_types.push(SlotType::Interface1);
-    }
+    let total_arg_slots_usize = arg_slot_types.len();
+    let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slots_usize);
     let args_start = func.alloc_args_typed(&arg_slot_types);
-
-    for (i, arg) in call_expr.args.iter().enumerate() {
-        let dst = args_start + (i as u16 * 2);
-        crate::assign::emit_assign(
-            dst,
-            crate::assign::AssignSource::Expr(arg),
-            any_type,
-            ctx,
-            func,
-            info,
-        )?;
-    }
+    sig_info.compile_args(call_expr, args_start, ctx, func, info)?;
 
     emit_defer_func(opcode, wrapper_id, args_start, total_arg_slots, func);
     Ok(())
@@ -758,14 +772,13 @@ fn compile_defer_method_expr_call(
                 } => {
                     let (param_types, is_variadic) =
                         info.get_interface_method_signature(*iface_type, method_name);
-                    let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+                    let wrapper_id = defer_iface_wrapper_for_method(
                         ctx,
+                        info,
+                        *iface_type,
                         method_name,
                         *method_idx as usize,
-                        param_types
-                            .iter()
-                            .map(|&type_key| info.type_slot_types(type_key))
-                            .collect(),
+                        &param_types,
                     );
                     return compile_scheduled_iface_method_expr_call(
                         target.recv_expr,
@@ -839,14 +852,13 @@ fn compile_defer_method_expr_call(
         MethodDispatch::Interface { method_idx } => {
             let (param_types, is_variadic) =
                 info.get_interface_method_signature(recv_type, method_name);
-            let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+            let wrapper_id = defer_iface_wrapper_for_method(
                 ctx,
+                info,
+                recv_type,
                 method_name,
                 *method_idx as usize,
-                param_types
-                    .iter()
-                    .map(|&type_key| info.type_slot_types(type_key))
-                    .collect(),
+                &param_types,
             );
             compile_scheduled_iface_method_expr_call(
                 recv_arg,
@@ -872,14 +884,13 @@ fn compile_defer_method_expr_call(
         } => {
             let (param_types, is_variadic) =
                 info.get_interface_method_signature(*iface_type, method_name);
-            let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+            let wrapper_id = defer_iface_wrapper_for_method(
                 ctx,
+                info,
+                *iface_type,
                 method_name,
                 *method_idx as usize,
-                param_types
-                    .iter()
-                    .map(|&type_key| info.type_slot_types(type_key))
-                    .collect(),
+                &param_types,
             );
             compile_scheduled_iface_method_expr_call(
                 recv_arg,
@@ -981,15 +992,14 @@ fn compile_defer_method_call(
             )?;
         }
         MethodDispatch::Interface { method_idx } => {
-            let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+            let sig = CallSigInfo::from_call(call_expr, info);
+            let wrapper_id = defer_iface_wrapper_for_method(
                 ctx,
+                info,
+                recv_type,
                 method_name,
                 *method_idx as usize,
-                CallSigInfo::from_call(call_expr, info)
-                    .param_types
-                    .iter()
-                    .map(|&type_key| info.type_slot_types(type_key))
-                    .collect(),
+                &sig.param_types,
             );
             compile_scheduled_iface_call(
                 call_expr,
@@ -1006,16 +1016,18 @@ fn compile_defer_method_call(
                 info,
             )?;
         }
-        MethodDispatch::EmbeddedInterface { method_idx, .. } => {
-            let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+        MethodDispatch::EmbeddedInterface {
+            iface_type,
+            method_idx,
+        } => {
+            let sig = CallSigInfo::from_call(call_expr, info);
+            let wrapper_id = defer_iface_wrapper_for_method(
                 ctx,
+                info,
+                *iface_type,
                 method_name,
                 *method_idx as usize,
-                CallSigInfo::from_call(call_expr, info)
-                    .param_types
-                    .iter()
-                    .map(|&type_key| info.type_slot_types(type_key))
-                    .collect(),
+                &sig.param_types,
             );
             compile_scheduled_iface_call(
                 call_expr,
@@ -1040,14 +1052,7 @@ fn compile_defer_method_call(
 
 #[inline]
 fn emit_go_func(func_idx: u32, args_start: u16, arg_slots: u16, func: &mut FuncBuilder) {
-    let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_idx);
-    func.emit_with_flags(
-        Opcode::GoStart,
-        func_id_high << 1,
-        func_id_low,
-        args_start,
-        arg_slots,
-    );
+    func.emit_go_start_static(func_idx, args_start, arg_slots);
 }
 
 #[inline]
@@ -1175,35 +1180,21 @@ fn compile_go_pkg_func_call(
 
     let extern_name = crate::expr::call::get_extern_name(sel, info)?;
     let func_type = info.expr_type(call_expr.func.id);
-    let sig = info.as_signature(func_type);
-    let ret_slot_types = info.type_slot_types(sig.results());
+    let result_types = info.func_result_types(func_type);
+    let returns = crate::expr::call::return_shape_for_type_keys(&result_types, ctx, info)?;
+    let sig_info = CallSigInfo::from_call(call_expr, info);
+    let arg_slot_types = sig_info.calc_arg_slot_types(call_expr, info);
     let wrapper_id = crate::wrapper::generate_defer_extern_wrapper(
         ctx,
         &extern_name,
-        call_expr.args.len(),
-        ret_slot_types,
+        arg_slot_types.clone(),
+        returns,
     );
 
-    let any_type = info.any_type();
-    let total_arg_slots = call_expr.args.len() as u16 * 2;
-    let mut arg_slot_types = Vec::with_capacity(total_arg_slots as usize);
-    for _ in &call_expr.args {
-        arg_slot_types.push(SlotType::Interface0);
-        arg_slot_types.push(SlotType::Interface1);
-    }
+    let total_arg_slots_usize = arg_slot_types.len();
+    let total_arg_slots = ctx.slot_count_u16_or_record(total_arg_slots_usize);
     let args_start = func.alloc_args_typed(&arg_slot_types);
-
-    for (i, arg) in call_expr.args.iter().enumerate() {
-        let dst = args_start + (i as u16 * 2);
-        crate::assign::emit_assign(
-            dst,
-            crate::assign::AssignSource::Expr(arg),
-            any_type,
-            ctx,
-            func,
-            info,
-        )?;
-    }
+    sig_info.compile_args(call_expr, args_start, ctx, func, info)?;
 
     emit_go_func(wrapper_id, args_start, total_arg_slots, func);
     Ok(())
@@ -1287,15 +1278,14 @@ fn compile_go_method_call(
             )?;
         }
         MethodDispatch::Interface { method_idx } => {
-            let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+            let sig = CallSigInfo::from_call(call_expr, info);
+            let wrapper_id = defer_iface_wrapper_for_method(
                 ctx,
+                info,
+                recv_type,
                 method_name,
                 *method_idx as usize,
-                CallSigInfo::from_call(call_expr, info)
-                    .param_types
-                    .iter()
-                    .map(|&type_key| info.type_slot_types(type_key))
-                    .collect(),
+                &sig.param_types,
             );
             compile_scheduled_iface_call(
                 call_expr,
@@ -1312,16 +1302,18 @@ fn compile_go_method_call(
                 info,
             )?;
         }
-        MethodDispatch::EmbeddedInterface { method_idx, .. } => {
-            let wrapper_id = crate::wrapper::generate_defer_iface_wrapper(
+        MethodDispatch::EmbeddedInterface {
+            iface_type,
+            method_idx,
+        } => {
+            let sig = CallSigInfo::from_call(call_expr, info);
+            let wrapper_id = defer_iface_wrapper_for_method(
                 ctx,
+                info,
+                *iface_type,
                 method_name,
                 *method_idx as usize,
-                CallSigInfo::from_call(call_expr, info)
-                    .param_types
-                    .iter()
-                    .map(|&type_key| info.type_slot_types(type_key))
-                    .collect(),
+                &sig.param_types,
             );
             compile_scheduled_iface_call(
                 call_expr,
@@ -1341,4 +1333,49 @@ fn compile_go_method_call(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
+        source
+            .split(name)
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("expected function body")
+    }
+
+    #[test]
+    fn extern_defer_go_wrappers_use_callsite_arg_layout_050() {
+        let source = include_str!("defer_go.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("defer/go source should contain tests section");
+        for function in [
+            "fn compile_defer_pkg_func_call",
+            "fn compile_go_pkg_func_call",
+        ] {
+            let body = function_body(source, function);
+            assert!(
+                body.contains("sig_info.calc_arg_slot_types(call_expr, info)"),
+                "{function} must derive extern wrapper args from the call-site signature layout"
+            );
+            assert!(
+                body.contains("generate_defer_extern_wrapper(\n        ctx,\n        &extern_name,\n        arg_slot_types.clone(),"),
+                "{function} must pass the precise arg layout into the extern wrapper"
+            );
+            assert!(
+                body.contains("return_shape_for_type_keys(&result_types, ctx, info)?"),
+                "{function} must preserve the extern return ABI shape, including interface metadata"
+            );
+            assert!(
+                body.contains("sig_info.compile_args(call_expr, args_start, ctx, func, info)?"),
+                "{function} must compile deferred extern args with the same signature layout"
+            );
+            assert!(
+                !body.contains("info.any_type()") && !body.contains("SlotType::Interface0"),
+                "{function} must not synthesize a second interface-boxed extern ABI"
+            );
+        }
+    }
 }

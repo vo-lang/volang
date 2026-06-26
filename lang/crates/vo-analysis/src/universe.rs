@@ -389,6 +389,11 @@ impl Universe {
             "error".to_string(),
             Some(error_type),
         ));
+        if let Type::Named(named) = &mut objs.types[error_type] {
+            named.set_obj(type_name);
+        } else {
+            panic!("create_error_type: expected named type for error");
+        }
 
         // Insert into universe scope
         Scope::insert(universe_scope, type_name, objs);

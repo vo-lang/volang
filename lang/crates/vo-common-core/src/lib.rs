@@ -26,8 +26,10 @@ pub mod types;
 pub mod verifier;
 
 pub use bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Itab, JitInstructionMetadata,
-    Module, StructMeta, TransferType,
+    Constant, ExternDef, ExternEffects, ExternJitRoute, FunctionDef, GlobalDef, InterfaceMeta,
+    Itab, JitInstructionMetadata, Module, ParamShape, ProviderTrust, RegisteredExternSource,
+    ResolvedExtern, ResolvedExternAbi, ResolvedExternTable, ResolvedExternTableError, ReturnShape,
+    StructMeta, TransferType,
 };
 pub use debug_info::{DebugInfo, DebugLoc, FuncDebugInfo, SourceLoc};
 pub use instruction::{Instruction, Opcode};

@@ -6,8 +6,12 @@ use vo_analysis::importer::NullImporter;
 use vo_analysis::{AnalysisError, Checker, Project};
 use vo_codegen::compile_project;
 use vo_common::SourceMap;
-use vo_common_core::bytecode::{RETURN_FLAG_ERROR_RETURN, RETURN_FLAG_HEAP_RETURNS};
-use vo_runtime::{SlotType, ValueKind, ValueMeta};
+use vo_common_core::bytecode::{
+    ExtSlotKind, ParamShape, IFACE_ASSIGN_NO_ITAB, RETURN_FLAG_ERROR_RETURN,
+    RETURN_FLAG_HEAP_RETURNS,
+};
+use vo_common_core::verifier::verify_module;
+use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
 use vo_syntax::parser;
 use vo_vm::bytecode::{FunctionDef, JitInstructionMetadata};
 use vo_vm::instruction::Opcode;
@@ -58,6 +62,116 @@ fn compile_source(source: &str) -> vo_vm::bytecode::Module {
     compile_project(&project).expect("codegen failed")
 }
 
+fn assert_transfer_metadata_canonical(module: &vo_vm::bytecode::Module) {
+    for func in &module.functions {
+        for (label, transfers) in [
+            ("capture_types", func.capture_types.as_slice()),
+            ("param_types", func.param_types.as_slice()),
+        ] {
+            for (idx, transfer) in transfers.iter().enumerate() {
+                let value_rttid = ValueRttid::from_raw(transfer.rttid_raw);
+                let canonical_meta = module
+                    .canonical_value_meta_for_value_rttid(value_rttid)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} {label}[{idx}] ValueRttid {} must resolve",
+                            func.name,
+                            value_rttid.rttid()
+                        )
+                    });
+                assert_eq!(
+                    transfer.meta_raw,
+                    canonical_meta.to_raw(),
+                    "{} {label}[{idx}] must use canonical ValueMeta",
+                    func.name
+                );
+                assert_eq!(
+                    transfer.slots as usize,
+                    module
+                        .slot_count_for_value_rttid(value_rttid)
+                        .expect("ValueRttid must resolve to slot layout"),
+                    "{} {label}[{idx}] slot count must match ValueRttid layout",
+                    func.name
+                );
+            }
+        }
+    }
+}
+
+fn function_elem_layout_dump(func: &FunctionDef, opcode: Opcode) -> String {
+    func.code
+        .iter()
+        .zip(&func.jit_metadata)
+        .enumerate()
+        .filter(|(_, (inst, _))| inst.opcode() == opcode)
+        .map(|(pc, (inst, meta))| {
+            let meta_summary = match meta {
+                JitInstructionMetadata::ElemLayout {
+                    elem_bytes,
+                    needs_sign_extend,
+                    slot_layout,
+                } => format!(
+                    "ElemLayout {{ elem_bytes: {elem_bytes}, needs_sign_extend: {needs_sign_extend}, slot_layout_len: {} }}",
+                    slot_layout.len()
+                ),
+                other => format!("{other:?}"),
+            };
+            format!("{pc}: {:?} flags={} {meta_summary}", inst.opcode(), inst.flags)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_elem_layout_metadata(
+    func: &FunctionDef,
+    opcode: Opcode,
+    elem_bytes: u32,
+    slot_count: usize,
+) {
+    assert!(
+        func.code.iter().zip(&func.jit_metadata).any(|(inst, meta)| {
+            inst.opcode() == opcode
+                && matches!(
+                    meta,
+                    JitInstructionMetadata::ElemLayout {
+                        elem_bytes: actual_bytes,
+                        slot_layout,
+                        ..
+                    } if *actual_bytes == elem_bytes && slot_layout.len() == slot_count
+                )
+        }),
+        "{opcode:?} must preserve elem_bytes={elem_bytes} and slot_layout len={slot_count}; got:\n{}",
+        function_elem_layout_dump(func, opcode)
+    );
+}
+
+fn ptr_new_layouts(module: &vo_vm::bytecode::Module) -> Vec<(String, usize, Vec<SlotType>)> {
+    module
+        .functions
+        .iter()
+        .flat_map(|func| {
+            func.code
+                .iter()
+                .zip(&func.jit_metadata)
+                .enumerate()
+                .filter_map(move |(pc, (inst, meta))| {
+                    if inst.opcode() != Opcode::PtrNew {
+                        return None;
+                    }
+                    match meta {
+                        JitInstructionMetadata::PtrLayout { value_layout } => {
+                            Some((func.name.clone(), pc, value_layout.clone()))
+                        }
+                        other => panic!(
+                            "{}:{pc} PtrNew must carry PtrLayout metadata, got {other:?}",
+                            func.name
+                        ),
+                    }
+                })
+        })
+        .collect()
+}
+
 /// Helper: compile and run, verify execution completes
 fn compile_and_run(source: &str) {
     let module = compile_source(source);
@@ -72,6 +186,130 @@ fn compile_and_run(source: &str) {
     vm.run().expect("VM execution failed");
 
     println!("✓ VM execution completed");
+}
+
+#[test]
+fn ptr_new_codegen_emits_verifier_layout_metadata_060() {
+    let source = r#"
+package main
+
+type Node struct {
+    next *Node
+    value int
+}
+
+func main() int {
+    n := new(Node)
+    m := &Node{next: n, value: 7}
+    return m.value
+}
+"#;
+
+    let module = compile_source(source);
+    let ptr_new_layouts = ptr_new_layouts(&module);
+    assert!(
+        ptr_new_layouts
+            .iter()
+            .any(|(_, _, layout)| { layout == &[SlotType::GcRef, SlotType::Value] }),
+        "PtrNew should carry physical boxed Node layout, got {ptr_new_layouts:?}"
+    );
+    verify_module(&module).expect("generated PtrNew metadata must satisfy module verifier");
+}
+
+#[test]
+fn dynamic_method_value_receiver_ptr_new_metadata_fact_is_tracked_061() {
+    let source = r#"
+package main
+
+type Pair struct {
+    a int
+    b int
+}
+
+func (p Pair) Sum() int {
+    return p.a + p.b
+}
+
+func main() int {
+    p := Pair{a: 3, b: 4}
+    var box interface{} = p
+    sumMethod, err := box~>Sum
+    assert(err == nil, "Sum method lookup on Pair")
+    sum := sumMethod.(func() int)
+    return sum()
+}
+"#;
+
+    let module = compile_source(source);
+    let main_ptr_new_layouts: Vec<_> = ptr_new_layouts(&module)
+        .into_iter()
+        .filter(|(func, _, _)| func == "main")
+        .collect();
+
+    assert!(
+        main_ptr_new_layouts
+            .iter()
+            .any(|(_, _, layout)| layout == &[SlotType::Value, SlotType::Value]),
+        "dynamic method value receiver boxing must carry Pair's two-slot physical layout, got {main_ptr_new_layouts:?}"
+    );
+    verify_module(&module)
+        .expect("generated PtrNew metadata must be backed by tracked constant facts");
+}
+
+#[test]
+fn interface_arg_conversion_rebuilds_non_empty_itab_before_call_061() {
+    let source = r#"
+package main
+
+type Reader interface {
+    Read() int
+}
+
+type Closer interface {
+    Close()
+}
+
+type ReadCloser interface {
+    Reader
+    Closer
+}
+
+type File struct{}
+
+func (File) Read() int { return 1 }
+func (File) Close() {}
+
+func ReadAll(r Reader) int {
+    return r.Read()
+}
+
+func main() {
+    var rc ReadCloser = File{}
+    _ = ReadAll(rc)
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("interface arg conversion module should verify");
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+
+    let iface_to_iface_assigns = main
+        .code
+        .iter()
+        .filter(|inst| {
+            inst.opcode() == Opcode::IfaceAssign
+                && inst.flags == vo_runtime::ValueKind::Interface as u8
+        })
+        .count();
+
+    assert!(
+        iface_to_iface_assigns >= 1,
+        "passing ReadCloser to a Reader parameter must rebuild the itab before the call"
+    );
 }
 
 #[test]
@@ -110,6 +348,34 @@ func main() int {
 }
 
 #[test]
+fn global_array_root_metadata_references_array_runtime_type() {
+    let source = r#"
+package main
+
+var first = [2]int{10, 20}
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    let global = module
+        .globals
+        .iter()
+        .find(|global| global.name == "first")
+        .expect("global array should be registered");
+
+    assert_eq!(ValueKind::try_from(global.value_kind), Ok(ValueKind::Array));
+    assert!(
+        matches!(
+            module.runtime_types.get(global.meta_id as usize),
+            Some(vo_runtime::RuntimeType::Array { .. })
+        ),
+        "global array metadata must reference an array runtime type"
+    );
+    verify_module(&module).expect("global array module metadata should verify");
+}
+
+#[test]
 fn escaped_local_array_slice_does_not_copy_gcref_into_value_temp() {
     let source = r#"
 package main
@@ -129,6 +395,7 @@ func main() int {
 "#;
 
     let module = compile_source(source);
+    verify_module(&module).expect("dynamic slice/map module metadata should verify");
     let main = module
         .functions
         .iter()
@@ -531,6 +798,9 @@ func main() int {
 "#;
 
     let module = compile_source(source);
+    verify_module(&module).expect(
+        "string conversion extern shape must publish the same precise return layout used by CallExtern",
+    );
     let main = module
         .functions
         .iter()
@@ -666,6 +936,98 @@ func main() int {
 }
 
 #[test]
+fn copy_builtin_extern_uses_fixed_return_layout_062() {
+    let source = r#"
+package main
+
+func main() int {
+    dst := []byte{0, 0}
+    src := []byte{1, 2}
+    n := copy(dst, src)
+    return n
+}
+"#;
+
+    let module = compile_source(source);
+    let copy_extern = module
+        .externs
+        .iter()
+        .find(|extern_def| extern_def.name == "vo_copy")
+        .expect("copy builtin must register vo_copy extern");
+    assert_eq!(
+        copy_extern.returns.slot_types,
+        vec![SlotType::Value],
+        "vo_copy must publish its fixed scalar return layout"
+    );
+    verify_module(&module).expect("generated copy builtin ABI must satisfy verifier");
+}
+
+#[test]
+fn slice_index_preserves_large_element_byte_width_028() {
+    let source = r#"
+package main
+
+type Big [8192]int
+
+func sliceGet(xs []Big) int {
+    v := xs[0]
+    return v[0]
+}
+
+func sliceSet(xs []Big, v Big) {
+    xs[0] = v
+}
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    let getter = module
+        .functions
+        .iter()
+        .find(|func| func.name == "sliceGet")
+        .expect("sliceGet function");
+    let setter = module
+        .functions
+        .iter()
+        .find(|func| func.name == "sliceSet")
+        .expect("sliceSet function");
+
+    assert_elem_layout_metadata(getter, Opcode::SliceGet, 65_536, 8192);
+    assert_elem_layout_metadata(setter, Opcode::SliceSet, 65_536, 8192);
+}
+
+#[test]
+fn escaped_array_index_preserves_large_element_byte_width_028() {
+    let source = r#"
+package main
+
+type Big [8192]int
+
+func heapArrayIndex() int {
+    var arr [2]Big
+    s := arr[:]
+    var v Big
+    arr[0] = v
+    got := arr[0]
+    return got[0] + len(s)
+}
+
+func main() {}
+"#;
+
+    let module = compile_source(source);
+    let func = module
+        .functions
+        .iter()
+        .find(|func| func.name == "heapArrayIndex")
+        .expect("heapArrayIndex function");
+
+    assert_elem_layout_metadata(func, Opcode::ArraySet, 65_536, 8192);
+    assert_elem_layout_metadata(func, Opcode::ArrayGet, 65_536, 8192);
+}
+
+#[test]
 fn type_assert_and_shared_closure_calls_emit_precise_jit_layout_metadata() {
     let source = r#"
 package main
@@ -673,6 +1035,8 @@ package main
 type Box struct {
     v int
 }
+
+func worker(v string, p *Box) {}
 
 func main() int {
     var x any = "hello"
@@ -683,6 +1047,7 @@ func main() int {
     var n Box
 
     go f(s, &n)
+    go worker(s, &n)
     defer d(s)
     return len(s)
 }
@@ -732,6 +1097,24 @@ func main() int {
             .iter()
             .zip(&main.jit_metadata)
             .any(|(inst, meta)| {
+                inst.opcode() == Opcode::GoStart
+                    && !inst.call_shape_is_closure()
+                    && matches!(
+                        meta,
+                        JitInstructionMetadata::CallLayout {
+                            arg_layout,
+                            ret_layout
+                        } if arg_layout.as_slice() == [SlotType::GcRef, SlotType::GcRef]
+                            && ret_layout.is_empty()
+                    )
+            }),
+        "static go call must carry exact CallLayout argument slots"
+    );
+    assert!(
+        main.code
+            .iter()
+            .zip(&main.jit_metadata)
+            .any(|(inst, meta)| {
                 inst.opcode() == Opcode::DeferPush
                     && inst.call_shape_is_closure()
                     && matches!(
@@ -743,6 +1126,61 @@ func main() int {
                     )
             }),
         "closure defer call must carry exact CallLayout argument slots"
+    );
+}
+
+#[test]
+fn concrete_to_empty_interface_uses_no_itab_sentinel_even_with_itab_zero() {
+    let source = r#"
+package main
+
+type Closer interface {
+    Close()
+}
+
+type Resource struct {}
+
+func (Resource) Close() {}
+
+func main() {
+    var c Closer = Resource{}
+    var x any = 1
+    _ = c
+    _ = x
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("IfaceAssign sentinel module should verify");
+    assert!(
+        !module.itabs.is_empty(),
+        "test must create at least one concrete non-empty interface itab"
+    );
+
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let numeric_empty_iface_assign = main.code.iter().find(|inst| {
+        if inst.opcode() != Opcode::IfaceAssign {
+            return false;
+        }
+        let Ok(kind) = ValueKind::try_from(inst.flags) else {
+            return false;
+        };
+        if !matches!(kind, ValueKind::Int | ValueKind::Int64) {
+            return false;
+        }
+        matches!(
+            module.constants.get(inst.c as usize),
+            Some(vo_vm::bytecode::Constant::Int(raw)) if *raw as u32 == IFACE_ASSIGN_NO_ITAB
+        )
+    });
+
+    assert!(
+        numeric_empty_iface_assign.is_some(),
+        "concrete numeric -> empty interface must encode no-itab sentinel instead of borrowing itab 0"
     );
 }
 
@@ -817,7 +1255,7 @@ func main() {
         "string-to-slice conversion destination must be a GC root"
     );
     assert_eq!(
-        main.slot_types[call.b as usize],
+        main.slot_types[call.c as usize],
         SlotType::GcRef,
         "string-to-slice conversion source argument must be a GC root"
     );
@@ -1035,6 +1473,478 @@ func main() int {
             }
         }
     }
+}
+
+#[test]
+fn late_interned_named_runtime_types_are_canonicalized_before_verify() {
+    let source = r#"
+package main
+
+type Store struct {}
+
+type Tx struct {}
+
+func (s *Store) View(fn func(tx *Tx) error) error {
+    return fn(&Tx{})
+}
+
+func (tx *Tx) Get(key string) (string, bool, error) {
+    return key + "!", true, nil
+}
+
+func (s *Store) Get(key string) (string, bool, error) {
+    var value string
+    var found bool
+    err := s.View(func(tx *Tx) error {
+        var getErr error
+        value, found, getErr = tx.Get(key)
+        return getErr
+    })
+    return value, found, err
+}
+
+func main() {
+    s := &Store{}
+    value, found, err := s.Get("hello")
+    assert(err == nil, "Get should succeed")
+    assert(found, "found should be true")
+    assert(value == "hello!", "value should be captured and assigned")
+}
+"#;
+
+    let module = compile_source(source);
+    assert_transfer_metadata_canonical(&module);
+    verify_module(&module).expect("late-interned named runtime types must satisfy verifier");
+}
+
+#[test]
+fn queue_new_empty_struct_uses_canonical_element_transfer_metadata() {
+    let source = r#"
+package main
+
+func main() {
+    ch := make(chan struct{}, 1)
+    ch <- struct{}{}
+    <-ch
+
+    p := make(port struct{}, 1)
+    p <- struct{}{}
+    <-p
+}
+"#;
+
+    compile_and_run(source);
+}
+
+#[test]
+fn anonymous_empty_struct_slice_reuses_single_struct_meta_identity() {
+    let source = r#"
+package main
+
+func accept(data []struct{}) {}
+
+func main() {
+    data := make([]struct{}, 5)
+    accept(data)
+}
+"#;
+
+    let module = compile_source(source);
+    assert_transfer_metadata_canonical(&module);
+    verify_module(&module).expect("anonymous empty struct slice metadata should verify");
+
+    let empty_struct_meta_count = module
+        .struct_metas
+        .iter()
+        .filter(|meta| meta.fields.is_empty() && meta.slot_types == vec![SlotType::Value])
+        .count();
+    assert_eq!(
+        empty_struct_meta_count, 1,
+        "structurally identical anonymous empty structs must share one StructMeta id"
+    );
+}
+
+#[test]
+fn discarded_dynamic_calls_encode_callee_return_layout() {
+    let source = r#"
+package main
+
+type Closer interface {
+    Close() error
+}
+
+type Sink struct {}
+
+func (s *Sink) Close() error {
+    return nil
+}
+
+func main() {
+    var c Closer = &Sink{}
+    c.Close()
+
+    f := func() error {
+        return nil
+    }
+    f()
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("discarded dynamic calls must verify");
+
+    let main = module
+        .functions
+        .iter()
+        .find(|func| func.name == "main")
+        .expect("main function");
+    let mut saw_iface = false;
+    let mut saw_closure = false;
+    for (pc, inst) in main.code.iter().enumerate() {
+        match inst.opcode() {
+            Opcode::CallIface | Opcode::CallClosure => {
+                let ret_layout = match (inst.opcode(), &main.jit_metadata[pc]) {
+                    (
+                        Opcode::CallClosure,
+                        JitInstructionMetadata::CallLayout { ret_layout, .. },
+                    ) => ret_layout,
+                    (
+                        Opcode::CallIface,
+                        JitInstructionMetadata::CallIfaceLayout { ret_layout, .. },
+                    ) => ret_layout,
+                    _ => {
+                        panic!("dynamic call must carry precise call layout metadata");
+                    }
+                };
+                assert_eq!(
+                    inst.packed_ret_slots(),
+                    2,
+                    "discarded dynamic call must encode error return slots"
+                );
+                assert_eq!(
+                    ret_layout.as_slice(),
+                    &[SlotType::Interface0, SlotType::Interface1],
+                    "discarded dynamic call must allocate the callee return layout"
+                );
+                saw_iface |= inst.opcode() == Opcode::CallIface;
+                saw_closure |= inst.opcode() == Opcode::CallClosure;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_iface, "test must exercise discarded CallIface");
+    assert!(saw_closure, "test must exercise discarded CallClosure");
+}
+
+#[test]
+fn dynamic_field_and_index_externs_are_keyed_by_precise_return_layout_058() {
+    let source = r#"
+package main
+
+type Data struct {
+    Count int
+}
+
+func main() {
+    var data any = Data{Count: 7}
+    fieldAny, err := data~>Count
+    var fieldInt int
+    fieldInt, err = data~>Count
+
+    var values any = map[string]int{"a": 1, "b": 2}
+    indexAny, err := values~>["a"]
+    var indexInt int
+    indexInt, err = values~>["b"]
+
+    _ = fieldAny
+    _ = fieldInt
+    _ = indexAny
+    _ = indexInt
+    _ = err
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("precise dynamic extern return layouts must verify");
+
+    let any_result_layout = vec![
+        SlotType::Interface0,
+        SlotType::Interface1,
+        SlotType::Interface0,
+        SlotType::Interface1,
+    ];
+    let int_result_layout = vec![
+        SlotType::Value,
+        SlotType::Value,
+        SlotType::Interface0,
+        SlotType::Interface1,
+    ];
+
+    for extern_name in ["dyn_field", "dyn_index"] {
+        let extern_defs = module
+            .externs
+            .iter()
+            .filter(|extern_def| extern_def.name == extern_name)
+            .collect::<Vec<_>>();
+        let return_layouts = extern_defs
+            .iter()
+            .map(|extern_def| extern_def.returns.slot_types.clone())
+            .collect::<Vec<_>>();
+
+        assert!(
+            return_layouts
+                .iter()
+                .any(|layout| layout == &any_result_layout),
+            "{extern_name} must keep its any-result layout"
+        );
+        assert!(
+            return_layouts
+                .iter()
+                .any(|layout| layout == &int_result_layout),
+            "{extern_name} must keep its int-result layout"
+        );
+
+        for extern_def in extern_defs {
+            match extern_name {
+                "dyn_field" => {
+                    assert_eq!(
+                        extern_def.params,
+                        ParamShape::Exact { slots: 5 },
+                        "dyn_field must keep its exact parameter ABI"
+                    );
+                    assert_eq!(
+                        extern_def.param_kinds,
+                        vec![
+                            ExtSlotKind::Value,
+                            ExtSlotKind::Value,
+                            ExtSlotKind::Bytes,
+                            ExtSlotKind::Value,
+                            ExtSlotKind::Value,
+                        ],
+                        "dyn_field must keep field-name bytes in the parameter ABI"
+                    );
+                }
+                "dyn_index" => {
+                    assert_eq!(
+                        extern_def.params,
+                        ParamShape::Exact { slots: 6 },
+                        "dyn_index must keep its exact parameter ABI"
+                    );
+                    assert_eq!(
+                        extern_def.param_kinds,
+                        vec![ExtSlotKind::Value; 6],
+                        "dyn_index must keep its six value parameter ABI slots"
+                    );
+                }
+                _ => unreachable!("unexpected dynamic extern"),
+            }
+        }
+    }
+}
+
+#[test]
+fn dynamic_call_and_method_externs_keep_callsite_param_abi_058() {
+    let source = r#"
+package main
+
+type Calc struct {
+    Value int
+}
+
+func (c *Calc) GetInt() int {
+    return c.Value
+}
+
+func (c *Calc) GetPair() (int, string) {
+    return c.Value, "ok"
+}
+
+func main() {
+    calc := &Calc{Value: 7}
+    var obj any = calc
+    one, err := obj~>GetInt()
+    left, right, err := obj~>GetPair()
+    var fn any = func(x int) int {
+        return x + 1
+    }
+    direct, err := fn~>(one.(int))
+    _ = one
+    _ = left
+    _ = right
+    _ = direct
+    _ = err
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("dynamic call extern ABI must verify");
+
+    let dyn_call_defs = module
+        .externs
+        .iter()
+        .filter(|extern_def| extern_def.name == "dyn_call")
+        .collect::<Vec<_>>();
+    assert!(
+        !dyn_call_defs.is_empty(),
+        "source must lower through dyn_call"
+    );
+    assert!(
+        dyn_call_defs
+            .iter()
+            .any(|extern_def| extern_def.params == ParamShape::Exact { slots: 6 }),
+        "dyn_call must keep its one-result callsite parameter ABI"
+    );
+    for extern_def in dyn_call_defs {
+        assert_ne!(
+            extern_def.params,
+            ParamShape::CallSiteVariadic,
+            "dyn_call must not accept arbitrary argument slots"
+        );
+        assert_eq!(
+            extern_def.param_kinds.len(),
+            extern_def.params.exact_slots().unwrap() as usize,
+            "dyn_call param_kinds must describe every encoded argument slot"
+        );
+    }
+
+    let dyn_method_defs = module
+        .externs
+        .iter()
+        .filter(|extern_def| extern_def.name == "dyn_method")
+        .collect::<Vec<_>>();
+    assert!(
+        dyn_method_defs.len() >= 2,
+        "source must lower one-result and two-result dyn_method calls"
+    );
+    assert!(
+        dyn_method_defs
+            .iter()
+            .any(|extern_def| extern_def.params == ParamShape::Exact { slots: 7 }),
+        "dyn_method must keep its one-result callsite parameter ABI"
+    );
+    assert!(
+        dyn_method_defs
+            .iter()
+            .any(|extern_def| extern_def.params == ParamShape::Exact { slots: 9 }),
+        "dyn_method must keep its two-result callsite parameter ABI"
+    );
+    for extern_def in dyn_method_defs {
+        assert_ne!(
+            extern_def.params,
+            ParamShape::CallSiteVariadic,
+            "dyn_method must not accept arbitrary argument slots"
+        );
+        assert_eq!(
+            extern_def.param_kinds.len(),
+            extern_def.params.exact_slots().unwrap() as usize,
+            "dyn_method param_kinds must describe every encoded argument slot"
+        );
+    }
+}
+
+#[test]
+fn deferred_loop_closure_slice_append_metadata_survives_verifier_058() {
+    let source = include_str!(
+        "../../../../tests/lang/cases/skill_debug_vo/2026_01_23_defer_order_complex.vo"
+    )
+    .lines()
+    .filter(|line| {
+        let trimmed = line.trim_start();
+        trimmed != "import \"fmt\"" && !trimmed.starts_with("fmt.Println(")
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let module = compile_source(&source);
+    verify_module(&module).expect("deferred loop closure SliceAppend metadata must verify");
+}
+
+#[test]
+fn scheduled_interface_wrappers_encode_callee_return_layout_but_discard_results() {
+    let source = r#"
+package main
+
+type Closer interface {
+    Close() error
+}
+
+type Sink struct {}
+
+func (s *Sink) Close() error {
+    return nil
+}
+
+func main() {
+    var c Closer = &Sink{}
+    defer c.Close()
+    go c.Close()
+}
+"#;
+
+    let module = compile_source(source);
+    verify_module(&module).expect("scheduled interface wrappers must verify");
+
+    let mut saw_wrapper = false;
+    for wrapper in module
+        .functions
+        .iter()
+        .filter(|func| func.name.contains("$defer_iface"))
+    {
+        saw_wrapper = true;
+        assert_eq!(
+            wrapper.ret_slots, 0,
+            "scheduled interface wrapper {} must discard results",
+            wrapper.name
+        );
+        assert!(
+            wrapper.ret_slot_types.is_empty(),
+            "scheduled interface wrapper {} must not expose callee results",
+            wrapper.name
+        );
+
+        let mut saw_call_iface = false;
+        let mut saw_empty_return = false;
+        for (pc, inst) in wrapper.code.iter().enumerate() {
+            match inst.opcode() {
+                Opcode::CallIface => {
+                    saw_call_iface = true;
+                    let JitInstructionMetadata::CallIfaceLayout { ret_layout, .. } =
+                        &wrapper.jit_metadata[pc]
+                    else {
+                        panic!("scheduled interface wrapper CallIface must carry CallIfaceLayout");
+                    };
+                    assert_eq!(
+                        inst.packed_ret_slots(),
+                        2,
+                        "scheduled interface wrapper CallIface must encode callee error returns"
+                    );
+                    assert_eq!(
+                        ret_layout.as_slice(),
+                        &[SlotType::Interface0, SlotType::Interface1],
+                        "scheduled interface wrapper CallIface must allocate callee return layout"
+                    );
+                }
+                Opcode::Return => {
+                    saw_empty_return = inst.b == 0;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_call_iface,
+            "scheduled interface wrapper {} must call through CallIface",
+            wrapper.name
+        );
+        assert!(
+            saw_empty_return,
+            "scheduled interface wrapper {} must return no slots",
+            wrapper.name
+        );
+    }
+    assert!(
+        saw_wrapper,
+        "test must generate a scheduled interface wrapper"
+    );
 }
 
 #[test]
@@ -1581,6 +2491,43 @@ func main() {
 }
 
 #[test]
+fn test_iface_wrapper_records_forwarded_param_transfer_types() {
+    let source = r#"
+package main
+
+type Reader interface {
+    Read(p []byte, n int) []byte
+}
+
+type Box struct{}
+
+func (b Box) Read(p []byte, n int) []byte {
+    return p
+}
+
+func main() {
+    var r Reader = Box{}
+    _ = r
+}
+"#;
+
+    let module = compile_source(source);
+    let wrapper = module
+        .functions
+        .iter()
+        .find(|f| f.name == "Read$iface")
+        .expect("interface dispatch wrapper");
+
+    assert_eq!(
+        wrapper.param_types.len(),
+        2,
+        "$iface wrapper transfer params should include forwarded params and exclude receiver"
+    );
+    assert_eq!(wrapper.param_types[0].slots, 1);
+    assert_eq!(wrapper.param_types[1].slots, 1);
+}
+
+#[test]
 fn test_value_method_value_wrapper_uses_precise_slot_layout_and_box_capture() {
     let source = r#"
 package main
@@ -1728,7 +2675,7 @@ func main() {
     let wrappers: Vec<_> = module
         .functions
         .iter()
-        .filter(|f| f.name == "Read$defer_iface_0")
+        .filter(|f| f.name.starts_with("Read$defer_iface_0_"))
         .collect();
 
     assert_eq!(
@@ -1747,6 +2694,88 @@ func main() {
             vo_runtime::SlotType::GcRef,
         ],
         "defer iface wrapper must keep interface receiver and forwarded args precisely typed",
+    );
+}
+
+#[test]
+fn defer_iface_wrapper_cache_key_includes_receiver_interface_meta_061() {
+    let source = r#"
+package main
+
+type FileLike interface {
+    Close() error
+    Stat() int
+}
+
+type ConnLike interface {
+    Close() error
+    ZAddr() int
+}
+
+type closer struct {}
+
+func (closer) Close() error {
+    return nil
+}
+
+func (closer) Stat() int {
+    return 0
+}
+
+func (closer) ZAddr() int {
+    return 0
+}
+
+func main() {
+    var file FileLike = closer{}
+    var conn ConnLike = closer{}
+    defer file.Close()
+    defer conn.Close()
+}
+"#;
+
+    let module = compile_source(source);
+    let file_iface_meta_id = module
+        .interface_metas
+        .iter()
+        .position(|meta| meta.name.ends_with("FileLike"))
+        .expect("FileLike interface meta should be registered") as u32;
+    let conn_iface_meta_id = module
+        .interface_metas
+        .iter()
+        .position(|meta| meta.name.ends_with("ConnLike"))
+        .expect("ConnLike interface meta should be registered") as u32;
+
+    let wrapper_iface_metas: Vec<_> = module
+        .functions
+        .iter()
+        .filter(|f| f.name.starts_with("Close$defer_iface_0_"))
+        .map(|wrapper| {
+            wrapper
+                .jit_metadata
+                .iter()
+                .find_map(|metadata| match metadata {
+                    JitInstructionMetadata::CallIfaceLayout { iface_meta_id, .. } => {
+                        Some(*iface_meta_id)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{} must carry CallIfaceLayout metadata", wrapper.name))
+        })
+        .collect();
+
+    assert_eq!(
+        wrapper_iface_metas.len(),
+        2,
+        "deferred interface Close wrappers with distinct receiver interfaces must not share a cache entry"
+    );
+    assert!(
+        wrapper_iface_metas.contains(&file_iface_meta_id),
+        "FileLike defer wrapper metadata missing: {wrapper_iface_metas:?}"
+    );
+    assert!(
+        wrapper_iface_metas.contains(&conn_iface_meta_id),
+        "ConnLike defer wrapper metadata missing: {wrapper_iface_metas:?}"
     );
 }
 
@@ -2172,6 +3201,81 @@ func main() int {
     }
 
     // Should see SlotSet for arr[2] = 100
+}
+
+#[test]
+fn stack_array_copy_slot_accesses_are_index_checked_047() {
+    let source = r#"
+package main
+
+func main() int {
+    left := [3]int{1, 2, 3}
+    right := left
+    return right[1]
+}
+"#;
+
+    let module = compile_source(source);
+
+    verify_module(&module).expect(
+        "stack array copy lowering must emit verifier-visible IndexCheck facts before SlotGet/SlotSet",
+    );
+}
+
+#[test]
+fn map_new_struct_key_uses_canonical_key_metadata_047() {
+    let source = r#"
+package main
+
+func main() {
+    seed()
+    _ = map[string]int{"a": 1}
+    _ = map[int]string{42: "answer"}
+    _ = map[bool]string{true: "yes", false: "no"}
+    type Point struct {
+        x int
+        y int
+    }
+    m := make(map[Point]string)
+    m[Point{1, 2}] = "p1"
+}
+
+func seed() {
+    type Point struct {
+        x int
+        y int
+    }
+    m := make(map[string]Point)
+    m["a"] = Point{1, 2}
+}
+"#;
+
+    let module = compile_source(source);
+
+    verify_module(&module)
+        .expect("MapNew must pack canonical key ValueMeta for its key ValueRttid");
+}
+
+#[test]
+fn dynamic_assignment_error_branches_verify_scalar_conditions_061() {
+    let source = r#"
+package main
+
+func main() {
+    m := map[int]string{}
+    var box any = m
+    box~>[1] = "one"
+
+    s := struct{ name string }{}
+    var obj any = &s
+    obj~>name = "ok"
+}
+"#;
+
+    let module = compile_source(source);
+
+    verify_module(&module)
+        .expect("dynamic write error branches must canonicalize interface nil checks to scalar branch conditions");
 }
 
 /// Test 9: Empty interface with int (no escape needed)

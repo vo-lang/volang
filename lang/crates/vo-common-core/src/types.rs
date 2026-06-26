@@ -9,7 +9,7 @@ use num_enum::TryFromPrimitive;
 
 /// Meta ID - 24-bit index.
 /// Meaning varies by value_kind:
-/// - Array, Slice, Channel: elem_meta_id (element's meta_id)
+/// - Array: runtime type id, used to recover flattened element layout
 /// - Struct, Pointer: meta_id of the pointed object
 /// - Interface: meta_id of the interface type
 /// - Map: 0 (key/val type info stored in Container data)
@@ -24,6 +24,7 @@ pub const META_ID_MASK: MetaId = 0xFF_FFFF; // 24-bit mask
 ///
 /// The meaning of `meta_id` depends on `value_kind`:
 /// - Struct/Pointer: `struct_meta_id` - index into `struct_metas[]` (for GC scan)
+/// - Array: `rttid` - index into `runtime_types[]` (for recursive GC scan)
 /// - Interface: `iface_meta_id` - index into `interface_metas[]` (for itab lookup)
 /// - Other types: 0 (unused, never store rttid here to avoid confusion)
 ///

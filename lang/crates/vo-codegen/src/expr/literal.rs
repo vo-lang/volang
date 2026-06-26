@@ -239,7 +239,9 @@ fn compile_struct_lit(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let total_slots = info.type_slot_count(type_key);
+    let total_slots = info
+        .try_type_slot_count(type_key)
+        .map_err(CodegenError::Internal)?;
 
     // Zero-initialize all slots first
     for i in 0..total_slots {
@@ -296,20 +298,47 @@ fn resolve_elem_index(
     elem: &vo_syntax::ast::CompositeLitElem,
     current_index: &mut u64,
     info: &TypeInfoWrapper,
-) -> u64 {
+) -> Result<u64, CodegenError> {
     let index = if let Some(ref key) = elem.key {
         match key {
-            vo_syntax::ast::CompositeLitKey::Expr(key_expr) => info
-                .try_const_int(key_expr)
-                .map(|i| i as u64)
-                .unwrap_or(*current_index),
+            vo_syntax::ast::CompositeLitKey::Expr(key_expr) => {
+                let index = info.try_const_int(key_expr).ok_or_else(|| {
+                    CodegenError::Internal("array/slice literal index is not constant".to_string())
+                })?;
+                u64::try_from(index).map_err(|_| {
+                    CodegenError::Internal(format!(
+                        "array/slice literal index {index} must be non-negative"
+                    ))
+                })?
+            }
             vo_syntax::ast::CompositeLitKey::Ident(_) => *current_index,
         }
     } else {
         *current_index
     };
-    *current_index = index + 1;
-    index
+    *current_index = index.checked_add(1).ok_or_else(|| {
+        CodegenError::Internal("array/slice literal index exceeds u64::MAX".to_string())
+    })?;
+    Ok(index)
+}
+
+fn emit_int_value(
+    func: &mut FuncBuilder,
+    ctx: &mut CodegenContext,
+    dst: u16,
+    value: u64,
+    access: &'static str,
+) -> Result<(), CodegenError> {
+    let signed = i64::try_from(value)
+        .map_err(|_| CodegenError::Internal(format!("{access} exceeds i64::MAX")))?;
+    if let Ok(value32) = i32::try_from(signed) {
+        let (b, c) = encode_i32(value32);
+        func.emit_op(Opcode::LoadInt, dst, b, c);
+    } else {
+        let idx = ctx.const_int(signed);
+        func.emit_op(Opcode::LoadConst, dst, idx, 0);
+    }
+    Ok(())
 }
 
 fn compile_array_lit(
@@ -333,7 +362,7 @@ fn compile_array_lit(
     // Initialize specified elements with keyed index support
     let mut current_index: u64 = 0;
     for elem in lit.elems.iter() {
-        let index = resolve_elem_index(elem, &mut current_index, info);
+        let index = resolve_elem_index(elem, &mut current_index, info)?;
         let offset = (index as u16) * elem_slots;
         super::compile_elem_to(&elem.value, dst + offset, elem_type, ctx, func, info)?;
     }
@@ -349,7 +378,16 @@ fn compile_slice_lit(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     let elem_bytes = info.slice_elem_bytes(type_key);
-    let len = lit.elems.len();
+    let mut current_index: u64 = 0;
+    let mut resolved_indices = Vec::with_capacity(lit.elems.len());
+    let mut len = 0u64;
+    for elem in lit.elems.iter() {
+        let index = resolve_elem_index(elem, &mut current_index, info)?;
+        len = len.max(index.checked_add(1).ok_or_else(|| {
+            CodegenError::Internal("slice literal length exceeds u64::MAX".to_string())
+        })?);
+        resolved_indices.push(index);
+    }
 
     // Get element meta with correct ValueKind
     let elem_type = info.slice_elem_type(type_key);
@@ -366,9 +404,8 @@ fn compile_slice_lit(
     // When flags=0 (dynamic), put len, cap, elem_bytes in consecutive registers
     let num_regs = if flags == 0 { 3 } else { 2 };
     let len_cap_reg = func.alloc_slots(&vec![SlotType::Value; num_regs]);
-    let (b, c) = encode_i32(len as i32);
-    func.emit_op(Opcode::LoadInt, len_cap_reg, b, c); // len
-    func.emit_op(Opcode::LoadInt, len_cap_reg + 1, b, c); // cap = len
+    emit_int_value(func, ctx, len_cap_reg, len, "slice literal length")?;
+    emit_int_value(func, ctx, len_cap_reg + 1, len, "slice literal capacity")?;
     if flags == 0 {
         let eb_idx = ctx.const_int(elem_bytes as i64);
         func.emit_op(Opcode::LoadConst, len_cap_reg + 2, eb_idx, 0);
@@ -382,13 +419,11 @@ fn compile_slice_lit(
     );
 
     // Set each element with keyed index support
-    let mut current_index: u64 = 0;
-    for elem in lit.elems.iter() {
-        let index = resolve_elem_index(elem, &mut current_index, info);
+    for (elem, index) in lit.elems.iter().zip(resolved_indices.into_iter()) {
         let val_reg = func.alloc_slots(&elem_slot_types);
         super::compile_elem_to(&elem.value, val_reg, elem_type, ctx, func, info)?;
         let idx_reg = func.alloc_slots(&[SlotType::Value]);
-        func.emit_op(Opcode::LoadInt, idx_reg, index as u16, 0);
+        emit_int_value(func, ctx, idx_reg, index, "slice literal index")?;
         func.emit_slice_set(
             dst,
             idx_reg,
@@ -408,8 +443,9 @@ fn compile_map_lit(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) =
-        ctx.get_or_create_map_metas(type_key, info);
+    let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) = ctx
+        .get_or_create_map_metas(type_key, info)
+        .map_err(CodegenError::Internal)?;
     let key_slot_types = info.map_key_slot_types(type_key);
     let val_slot_types = info.map_val_slot_types(type_key);
 
@@ -428,8 +464,9 @@ fn compile_map_lit(
     let key_rttid_idx = ctx.const_int(key_rttid as i64);
     func.emit_op(Opcode::LoadConst, packed_reg + 1, key_rttid_idx, 0);
 
-    let slots_arg = crate::type_info::encode_map_new_slots(key_slots, val_slots);
-    func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
+    let slots_arg = crate::type_info::try_encode_map_new_slots(key_slots, val_slots)
+        .map_err(CodegenError::Internal)?;
+    func.emit_map_new(dst, packed_reg, slots_arg, &key_slot_types, &val_slot_types);
 
     // Get key type for interface boxing
     let (key_type, _) = info.map_key_val_types(type_key);
@@ -442,7 +479,8 @@ fn compile_map_lit(
             let mut map_set_slot_types = vec![SlotType::Value]; // meta
             map_set_slot_types.extend(key_slot_types.iter().cloned()); // key
             let meta_and_key_reg = func.alloc_slots(&map_set_slot_types);
-            let meta = crate::type_info::encode_map_set_meta(key_slots, val_slots);
+            let meta = crate::type_info::try_encode_map_set_meta(key_slots, val_slots)
+                .map_err(CodegenError::Internal)?;
             let meta_idx = ctx.const_int(meta as i64);
             func.emit_op(Opcode::LoadConst, meta_and_key_reg, meta_idx, 0);
 
@@ -561,9 +599,13 @@ pub(crate) fn lower_func_lit(
             let param_type_key = param_type_iter
                 .next()
                 .expect("closure signature param types missing anonymous parameter entry");
-            let slots = info.type_slot_count(param_type_key);
+            let slots = info
+                .try_type_slot_count(param_type_key)
+                .map_err(CodegenError::Internal)?;
             let slot_types = info.type_slot_types(param_type_key);
-            closure_builder.define_param(None, slots, &slot_types);
+            closure_builder
+                .try_define_param(None, slots, &slot_types)
+                .map_err(CodegenError::Internal)?;
             closure_builder.add_param_type_key(param_type_key, ctx, info);
             continue;
         }
@@ -571,11 +613,15 @@ pub(crate) fn lower_func_lit(
             let param_type_key = param_type_iter
                 .next()
                 .expect("closure signature param types missing named parameter entry");
-            let slots = info.type_slot_count(param_type_key);
+            let slots = info
+                .try_type_slot_count(param_type_key)
+                .map_err(CodegenError::Internal)?;
             let slot_types = info.type_slot_types(param_type_key);
             let obj_key = info.get_def(name);
             let type_key = info.obj_type(obj_key, "param must have type");
-            closure_builder.define_param(Some(name.symbol), slots, &slot_types);
+            closure_builder
+                .try_define_param(Some(name.symbol), slots, &slot_types)
+                .map_err(CodegenError::Internal)?;
             closure_builder.add_param_type_key(param_type_key, ctx, info);
             if info.needs_boxing(obj_key, type_key) {
                 escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
@@ -601,18 +647,19 @@ pub(crate) fn lower_func_lit(
 
     // Set return slots and types
     let mut ret_slot_types = Vec::new();
-    let ret_slots: u16 = func_lit
-        .sig
-        .results
-        .iter()
-        .map(|r| {
-            let (slots, slot_types) = info.type_expr_layout(r.ty.id);
-            ret_slot_types.extend(slot_types);
-            slots
-        })
-        .sum();
+    for result in &func_lit.sig.results {
+        let type_key = info.type_expr_type(result.ty.id);
+        info.try_type_slot_count(type_key)
+            .map_err(CodegenError::Internal)?;
+        ret_slot_types.extend(info.type_slot_types(type_key));
+    }
+    let ret_slots = info
+        .checked_slot_count(ret_slot_types.len())
+        .map_err(CodegenError::Internal)?;
     debug_assert_eq!(ret_slot_types.len(), ret_slots as usize);
-    closure_builder.set_ret_slot_types(ret_slot_types);
+    closure_builder
+        .try_set_ret_slot_types(ret_slot_types)
+        .map_err(CodegenError::Internal)?;
     let return_types: Vec<_> = func_lit
         .sig
         .results
@@ -643,6 +690,7 @@ pub(crate) fn lower_func_lit(
         gcref_slot: u16,
         slots: u16,
         result_type: vo_analysis::objects::TypeKey,
+        slot_types: Vec<SlotType>,
     }
     let mut escaped_returns: Vec<EscapedReturn> = Vec::new();
 
@@ -657,7 +705,7 @@ pub(crate) fn lower_func_lit(
     for result in &func_lit.sig.results {
         if let Some(name) = &result.name {
             let result_type = info.type_expr_type(result.ty.id);
-            let (slots, _slot_types) = info.type_expr_layout(result.ty.id);
+            let (slots, slot_types) = info.type_expr_layout(result.ty.id);
             let obj_key = info.get_def(name);
             // Force escape if ANY named return escapes (for correct panic/recover)
             let escapes = any_escapes || info.is_escaped(obj_key);
@@ -673,10 +721,10 @@ pub(crate) fn lower_func_lit(
                     gcref_slot,
                     slots,
                     result_type,
+                    slot_types,
                 });
                 gcref_slot
             } else {
-                let (_, slot_types) = info.type_expr_layout(result.ty.id);
                 let slot = closure_builder.define_local_stack(name.symbol, slots, &slot_types);
                 // Zero-initialize non-escaped named return (Go zero-value semantics)
                 for i in 0..slots {
@@ -693,13 +741,17 @@ pub(crate) fn lower_func_lit(
         let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = closure_builder.alloc_slots(&[SlotType::Value]);
         closure_builder.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        closure_builder.emit_ptr_new(er.gcref_slot, meta_reg, er.slots);
+        assert_eq!(er.slots as usize, er.slot_types.len());
+        closure_builder.emit_ptr_new(er.gcref_slot, meta_reg, &er.slot_types);
     }
 
     // Compile closure body
     crate::stmt::compile_block(&func_lit.body, ctx, &mut closure_builder, info)?;
 
     closure_builder.emit_fallthrough_return();
+    closure_builder
+        .check_layout_error()
+        .map_err(CodegenError::Internal)?;
 
     // Build and add closure function to module
     let closure_func = closure_builder.build();

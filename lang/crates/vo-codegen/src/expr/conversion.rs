@@ -94,11 +94,12 @@ fn emit_string_conversion(
         _ => return false,
     };
 
-    let extern_id = ctx.get_or_register_extern(extern_name);
     let arg_slot_types = info.type_slot_types(src_type);
     let args_start = func.alloc_slots(&arg_slot_types);
     func.emit_copy(args_start, src_reg, arg_slot_types.len() as u16);
     let ret_slot_types = info.type_slot_types(dst_type);
+    let extern_id =
+        ctx.get_or_register_extern_with_return_layout(extern_name, ret_slot_types.clone());
     func.emit_call_extern(
         dst,
         extern_id,

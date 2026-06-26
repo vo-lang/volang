@@ -222,8 +222,11 @@ fn compile_builtin_call_impl(
                 );
             } else if info.is_map(type_key) {
                 // make(map[K]V)
-                let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) =
-                    ctx.get_or_create_map_metas(type_key, info);
+                let (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid) = ctx
+                    .get_or_create_map_metas(type_key, info)
+                    .map_err(CodegenError::Internal)?;
+                let key_slot_types = info.map_key_slot_types(type_key);
+                let val_slot_types = info.map_val_slot_types(type_key);
 
                 // Pack key_meta and val_meta: (key_meta << 32) | val_meta
                 // packed_reg[0] = packed_meta, packed_reg[1] = key_rttid
@@ -239,17 +242,17 @@ fn compile_builtin_call_impl(
                 let key_rttid_idx = ctx.const_int(key_rttid as i64);
                 func.emit_op(Opcode::LoadConst, packed_reg + 1, key_rttid_idx, 0);
 
-                let slots_arg = crate::type_info::encode_map_new_slots(key_slots, val_slots);
-                func.emit_op(Opcode::MapNew, dst, packed_reg, slots_arg);
+                let slots_arg = crate::type_info::try_encode_map_new_slots(key_slots, val_slots)
+                    .map_err(CodegenError::Internal)?;
+                func.emit_map_new(dst, packed_reg, slots_arg, &key_slot_types, &val_slot_types);
             } else if info.is_queue(type_key) {
                 let elem_type_key = info.queue_elem_type(type_key);
-                let elem_meta_raw = ctx.compute_value_meta_raw(elem_type_key, info);
-                let elem_rttid_raw = vo_runtime::ValueRttid::new(
-                    ctx.intern_type_key(elem_type_key, info),
-                    info.type_value_kind(elem_type_key),
-                )
-                .to_raw();
-                let packed_type = ((elem_rttid_raw as u64) << 32) | (elem_meta_raw as u64);
+                let elem_slot_types = info.type_slot_types(elem_type_key);
+                let elem_transfer = ctx
+                    .canonical_transfer_type_for_type_key(elem_type_key, info)
+                    .map_err(CodegenError::Internal)?;
+                let packed_type =
+                    ((elem_transfer.rttid_raw as u64) << 32) | (elem_transfer.meta_raw as u64);
                 let packed_type_idx = ctx.const_int(packed_type as i64);
                 let packed_type_reg = func.alloc_slots(&[SlotType::Value]);
                 func.emit_op(Opcode::LoadConst, packed_type_reg, packed_type_idx, 0);
@@ -261,12 +264,13 @@ fn compile_builtin_call_impl(
                     func.emit_op(Opcode::LoadInt, tmp, 0, 0);
                     tmp
                 };
-                func.emit_with_flags(
-                    Opcode::QueueNew,
-                    info.queue_new_flags(type_key),
+                func.emit_queue_new(
                     dst,
                     packed_type_reg,
                     cap_reg,
+                    info.queue_new_flags(type_key)
+                        .map_err(CodegenError::Internal)?,
+                    &elem_slot_types,
                 );
             } else if info.is_island(type_key) {
                 // make(island)
@@ -284,10 +288,12 @@ fn compile_builtin_call_impl(
             let ptr_type_key = info.expr_type(expr.id);
             let type_key = info.pointer_elem(ptr_type_key);
             let slots = info.type_slot_count(type_key);
-            let meta_idx = ctx.get_or_create_value_meta(type_key, info);
+            let slot_types = info.type_slot_types(type_key);
+            let meta_idx = ctx.get_boxing_meta(type_key, info);
             let meta_reg = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-            func.emit_ptr_new(dst, meta_reg, slots);
+            assert_eq!(slots as usize, slot_types.len());
+            func.emit_ptr_new(dst, meta_reg, &slot_types);
         }
         "append" => {
             // append(slice, elem...) - variadic, supports multiple elements
@@ -313,13 +319,17 @@ fn compile_builtin_call_impl(
                 // Spread append: append all elements from second slice/string
                 // String and slice have identical memory layout, so vo_slice_append_slice works for both
                 let other_reg = compile_expr(&call.args[1], ctx, func, info)?;
-                let extern_id = ctx.get_or_register_extern("vo_slice_append_slice");
+                let ret_slot_types = vec![SlotType::GcRef];
+                let extern_id = ctx.get_or_register_extern_with_return_layout(
+                    "vo_slice_append_slice",
+                    ret_slot_types.clone(),
+                );
                 let args_reg =
                     func.alloc_slots(&[SlotType::GcRef, SlotType::GcRef, SlotType::Value]);
                 func.emit_op(Opcode::Copy, args_reg, slice_reg, 0);
                 func.emit_op(Opcode::Copy, args_reg + 1, other_reg, 0);
                 func.emit_op(Opcode::LoadConst, args_reg + 2, elem_meta_idx, 0);
-                func.emit_call_extern(dst, extern_id, args_reg, 3, &[SlotType::GcRef]);
+                func.emit_call_extern(dst, extern_id, args_reg, 3, &ret_slot_types);
             } else {
                 let flags = vo_common_core::elem_flags(elem_bytes, elem_vk);
                 // SliceAppend: a=dst, b=slice, c=meta_and_elem, flags=elem_flags
@@ -396,7 +406,9 @@ fn compile_builtin_call_impl(
             let map_type = info.expr_type(call.args[0].id);
             let (key_type, _) = info.map_key_val_types(map_type);
             let key_slot_types = info.type_slot_types(key_type);
-            let key_slots = key_slot_types.len() as u16;
+            let key_slots = info
+                .checked_slot_count(key_slot_types.len())
+                .map_err(CodegenError::Internal)?;
 
             let mut delete_slot_types = vec![SlotType::Value]; // meta
             delete_slot_types.extend(key_slot_types.iter().copied()); // key

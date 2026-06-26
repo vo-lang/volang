@@ -5,6 +5,7 @@
 
 use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
+use vo_vm::bytecode::ReturnShape;
 use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
@@ -12,6 +13,20 @@ use crate::error::CodegenError;
 use crate::expr::compile_expr_to;
 use crate::func::FuncBuilder;
 use crate::type_info::TypeInfoWrapper;
+
+fn dyn_error_return_shape(
+    ctx: &mut CodegenContext,
+    info: &TypeInfoWrapper,
+) -> Result<ReturnShape, CodegenError> {
+    ReturnShape::try_with_slot_types_and_interface_metas(
+        vec![SlotType::Interface0, SlotType::Interface1],
+        vec![
+            Some(crate::expr::dyn_access::error_interface_meta_id(ctx, info)),
+            None,
+        ],
+    )
+    .map_err(CodegenError::Internal)
+}
 
 /// Emit panic with error: call panic_with_error extern.
 /// Dynamic write always panics on error (does not propagate).
@@ -94,8 +109,6 @@ pub(crate) fn compile_dyn_field_assign(
         .ok_or_else(|| CodegenError::Internal("cannot resolve field name".to_string()))?;
     let name_idx = ctx.const_string(field_name);
 
-    let extern_id = ctx.get_or_register_extern("dyn_set_field");
-
     // Prepare args: base[2] + name[1] + value[2]
     let args = func.alloc_slots(&[
         SlotType::Interface0,
@@ -116,14 +129,15 @@ pub(crate) fn compile_dyn_field_assign(
     )?;
 
     // Call dyn_set_field: 5 arg slots, 2 ret slots (error)
-    let err_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-    func.emit_call_extern(
-        err_reg,
-        extern_id,
-        args,
-        5,
-        &[SlotType::Interface0, SlotType::Interface1],
+    let returns = dyn_error_return_shape(ctx, info)?;
+    let ret_slot_types = returns.slot_types.clone();
+    let extern_id = ctx.get_or_register_extern_with_return_shape_and_effects(
+        "dyn_set_field",
+        returns,
+        vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
     );
+    let err_reg = func.alloc_slots(&ret_slot_types);
+    func.emit_call_extern(err_reg, extern_id, args, 5, &ret_slot_types);
 
     // Panic on error
     let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);
@@ -147,8 +161,6 @@ pub(crate) fn compile_dyn_index_assign(
     // Returns: error[2]
     let any_type = info.any_type();
     let any_base_reg = compile_base_to_any(base, ctx, func, info)?;
-
-    let extern_id = ctx.get_or_register_extern("dyn_set_index_unified");
 
     // Prepare args: base[2] + key[2] + value[2]
     let args = func.alloc_slots(&[
@@ -178,14 +190,15 @@ pub(crate) fn compile_dyn_index_assign(
     )?;
 
     // Call dyn_set_index_unified: 6 arg slots, 2 ret slots (error)
-    let err_reg = func.alloc_slots(&[SlotType::Interface0, SlotType::Interface1]);
-    func.emit_call_extern(
-        err_reg,
-        extern_id,
-        args,
-        6,
-        &[SlotType::Interface0, SlotType::Interface1],
+    let returns = dyn_error_return_shape(ctx, info)?;
+    let ret_slot_types = returns.slot_types.clone();
+    let extern_id = ctx.get_or_register_extern_with_return_shape_and_effects(
+        "dyn_set_index_unified",
+        returns,
+        vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
     );
+    let err_reg = func.alloc_slots(&ret_slot_types);
+    func.emit_call_extern(err_reg, extern_id, args, 6, &ret_slot_types);
 
     // Panic on error
     let done_jump = func.emit_jump(Opcode::JumpIfNot, err_reg);

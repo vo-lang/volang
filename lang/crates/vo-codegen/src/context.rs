@@ -36,12 +36,6 @@ enum MethodValueWrapperKey {
         param_slots: u16,
         ret_slots: u16,
     },
-    /// Embedded interface: captures boxed outer struct, reads iface from offset, uses CallIface
-    EmbeddedInterface {
-        iface_type: TypeKey,
-        embed_offset: u16,
-        method_idx: u32,
-    },
 }
 
 /// Get ret_slots for builtin extern functions.
@@ -89,15 +83,201 @@ fn builtin_extern_ret_slots(name: &str) -> u16 {
         ),
     }
 }
+
+fn builtin_extern_return_shape(name: &str) -> ReturnShape {
+    if let Some(slot_types) = vo_vm::bytecode::known_builtin_extern_fixed_return_slot_types(name) {
+        return ReturnShape::try_with_slot_types(slot_types.to_vec()).unwrap_or_else(|error| {
+            panic!("builtin_extern_return_shape: invalid layout for '{name}': {error}")
+        });
+    }
+    ReturnShape::slots(builtin_extern_ret_slots(name))
+}
+
+fn builtin_extern_param_shape(name: &str) -> ParamShape {
+    known_builtin_extern_param_shape(name).unwrap_or(ParamShape::CallSiteVariadic)
+}
+
+fn known_builtin_extern_param_shape(name: &str) -> Option<ParamShape> {
+    if let Some(slot_types) = vo_vm::bytecode::known_builtin_extern_param_slot_types(name) {
+        return Some(ParamShape::Exact {
+            slots: slot_types.len() as u16,
+        });
+    }
+    match name {
+        "vo_print" | "vo_println" | "vo_assert" | "dyn_pack_any_slice" => {
+            Some(ParamShape::CallSiteVariadic)
+        }
+        "dyn_call" | "dyn_method" => Some(ParamShape::CallSiteVariadic),
+        "dyn_GetAttr" | "dyn_GetIndex" => Some(ParamShape::CallSiteVariadic),
+        "dyn_SetAttr" | "dyn_SetIndex" => Some(ParamShape::CallSiteVariadic),
+        "dyn_type_assert_error" => Some(ParamShape::CallSiteVariadic),
+        _ => None,
+    }
+}
+
+fn param_shape_from_kinds(param_kinds: &[vo_vm::bytecode::ExtSlotKind]) -> ParamShape {
+    if param_kinds.is_empty() {
+        ParamShape::CallSiteVariadic
+    } else {
+        ParamShape::Exact {
+            slots: param_kinds.len() as u16,
+        }
+    }
+}
+
+fn exact_param_shape_from_kinds(param_kinds: &[vo_vm::bytecode::ExtSlotKind]) -> ParamShape {
+    ParamShape::Exact {
+        slots: param_kinds.len() as u16,
+    }
+}
+
+fn extern_param_shape_for_callsite(
+    name: &str,
+    param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+) -> (ParamShape, Vec<vo_vm::bytecode::ExtSlotKind>) {
+    match known_builtin_extern_param_shape(name) {
+        Some(ParamShape::CallSiteVariadic) => (ParamShape::CallSiteVariadic, Vec::new()),
+        Some(shape @ ParamShape::Exact { .. }) => (shape, param_kinds),
+        None => (exact_param_shape_from_kinds(&param_kinds), param_kinds),
+    }
+}
+
+fn builtin_extern_param_contract(name: &str) -> (ParamShape, Vec<vo_vm::bytecode::ExtSlotKind>) {
+    if let Some(slot_types) = vo_vm::bytecode::known_builtin_extern_param_slot_types(name) {
+        return (
+            ParamShape::Exact {
+                slots: slot_types.len() as u16,
+            },
+            ext_slot_kinds_for_slot_types(slot_types),
+        );
+    }
+    match known_builtin_extern_param_shape(name) {
+        Some(ParamShape::CallSiteVariadic) => (ParamShape::CallSiteVariadic, Vec::new()),
+        Some(shape @ ParamShape::Exact { .. }) => (shape, Vec::new()),
+        None => (ParamShape::CallSiteVariadic, Vec::new()),
+    }
+}
+
+fn variable_ret_extern_param_contract(
+    name: &str,
+    param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+) -> (ParamShape, Vec<vo_vm::bytecode::ExtSlotKind>) {
+    match name {
+        "dyn_call" | "dyn_method" if !param_kinds.is_empty() => {
+            (exact_param_shape_from_kinds(&param_kinds), param_kinds)
+        }
+        _ if param_kinds.is_empty() => builtin_extern_param_contract(name),
+        _ => extern_param_shape_for_callsite(name, param_kinds),
+    }
+}
+
+pub(crate) fn ext_slot_kinds_for_slot_types(
+    slot_types: &[vo_runtime::SlotType],
+) -> Vec<vo_vm::bytecode::ExtSlotKind> {
+    vo_vm::bytecode::ext_slot_kinds_for_slot_types(slot_types)
+}
+
 use crate::type_interner::TypeInterner;
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_common::span::Span;
 use vo_common::symbol::Symbol;
 use vo_common::SourceMap;
 use vo_vm::bytecode::{
-    Constant, FunctionDef, GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta,
-    StructMeta,
+    validate_ext_param_kinds_with_label, Constant, ExtSlotKind, ExternEffects, FunctionDef,
+    GlobalDef, InterfaceMeta, Itab, MethodInfo, Module, NamedTypeMeta, ParamShape, ReturnShape,
+    StructMeta, TransferType, IFACE_ASSIGN_NO_ITAB,
 };
+
+fn merge_allowed_effects(existing: ExternEffects, new: ExternEffects) -> ExternEffects {
+    if existing.contains(ExternEffects::UNKNOWN_CONTROL)
+        || new.contains(ExternEffects::UNKNOWN_CONTROL)
+    {
+        ExternEffects::UNKNOWN_CONTROL
+    } else {
+        existing | new
+    }
+}
+
+fn merge_extern_return_shape(name: &str, existing: &mut ReturnShape, new: ReturnShape) {
+    existing
+        .validate_with_label(&format!("extern '{name}'"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    new.validate_with_label(&format!("extern '{name}'"))
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    if existing.slots != new.slots {
+        panic!("extern '{name}' registered with incompatible return slot layout");
+    }
+
+    if !new.kinds.is_empty() {
+        if existing.kinds.is_empty() {
+            existing.kinds = new.kinds;
+        } else if existing.kinds != new.kinds {
+            panic!("extern '{name}' registered with incompatible return slot layout");
+        }
+    }
+
+    if !new.slot_types.is_empty() {
+        if existing.slot_types.is_empty() {
+            existing.slot_types = new.slot_types;
+        } else if existing.slot_types != new.slot_types {
+            panic!("extern '{name}' registered with incompatible return slot layout");
+        }
+    }
+
+    if !new.interface_metas.is_empty() {
+        if existing.interface_metas.is_empty() {
+            existing.interface_metas = new.interface_metas;
+        } else if existing.interface_metas != new.interface_metas {
+            panic!("extern '{name}' registered with incompatible return interface metadata");
+        }
+    }
+}
+
+fn merge_extern_param_shape(
+    name: &str,
+    existing_params: &mut ParamShape,
+    existing_kinds: &mut Vec<ExtSlotKind>,
+    new_params: ParamShape,
+    new_kinds: Vec<ExtSlotKind>,
+) {
+    validate_ext_param_kinds_with_label(
+        existing_params,
+        existing_kinds,
+        &format!("extern '{name}'"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    validate_ext_param_kinds_with_label(&new_params, &new_kinds, &format!("extern '{name}'"))
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    match (existing_params.clone(), new_params.clone()) {
+        (ParamShape::CallSiteVariadic, ParamShape::Exact { .. }) => {
+            *existing_params = new_params;
+        }
+        (ParamShape::Exact { slots: existing }, ParamShape::Exact { slots: new })
+            if existing != new =>
+        {
+            panic!("extern '{name}' registered with incompatible parameter ABI");
+        }
+        (ParamShape::Exact { .. }, ParamShape::CallSiteVariadic)
+        | (ParamShape::Exact { .. }, ParamShape::Exact { .. })
+        | (ParamShape::CallSiteVariadic, ParamShape::CallSiteVariadic) => {}
+    }
+
+    if !new_kinds.is_empty() {
+        if existing_kinds.is_empty() {
+            *existing_kinds = new_kinds;
+        } else if *existing_kinds != new_kinds {
+            panic!("extern '{name}' registered with incompatible parameter ABI");
+        }
+    }
+}
+
+fn declared_extern_allowed_effects(name: &str) -> ExternEffects {
+    vo_runtime::builtins::known_extern_allowed_effects(name)
+        .or_else(|| vo_stdlib::extern_manifest::known_extern_allowed_effects(name))
+        .unwrap_or(ExternEffects::UNKNOWN_CONTROL)
+}
 
 /// Package-level codegen context.
 pub struct CodegenContext {
@@ -110,8 +290,8 @@ pub struct CodegenContext {
     /// Extern function index: name -> extern_id
     extern_names: HashMap<String, u32>,
 
-    /// Global variable slot offset: ObjKey -> slot_offset
-    global_indices: HashMap<vo_analysis::objects::ObjKey, u32>,
+    /// Global variable slot offset: ObjKey -> VM-encodable slot offset.
+    global_indices: HashMap<vo_analysis::objects::ObjKey, u16>,
 
     /// Next global slot offset (accumulated from all globals)
     global_slot_offset: u32,
@@ -173,6 +353,10 @@ pub struct CodegenContext {
     /// Unified wrapper cache (name -> func_id)
     /// Used for: defer_extern, defer_iface, method_expr_iface, etc.
     wrapper_cache: HashMap<String, u32>,
+
+    /// Deferred VM layout contract errors discovered by helper subsystems that
+    /// cannot return `CodegenError` directly, such as runtime type interning.
+    layout_errors: Vec<String>,
 }
 
 impl CodegenContext {
@@ -231,7 +415,57 @@ impl CodegenContext {
             builtin_protocols: BuiltinProtocols::default(),
             method_value_wrappers: HashMap::new(),
             wrapper_cache: HashMap::new(),
+            layout_errors: Vec::new(),
         }
+    }
+
+    pub(crate) fn check_layout_errors(&self) -> Result<(), String> {
+        if let Some(error) = self.layout_errors.first() {
+            Err(error.clone())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn record_layout_error(&mut self, error: impl Into<String>) {
+        self.layout_errors.push(error.into());
+    }
+
+    pub(crate) fn record_builder_layout_error(&mut self, builder: &crate::func::FuncBuilder) {
+        if let Err(error) = builder.check_layout_error() {
+            self.record_layout_error(error);
+        }
+    }
+
+    pub(crate) fn slot_count_u16_or_record(&mut self, slots: usize) -> u16 {
+        u16::try_from(slots).unwrap_or_else(|_| {
+            self.record_layout_error(format!("type slot count exceeds u16::MAX: {slots} slots"));
+            0
+        })
+    }
+
+    pub(crate) fn dynamic_call_shape_or_record(
+        &mut self,
+        arg_slots: usize,
+        ret_slots: usize,
+    ) -> u16 {
+        let arg_slots = self.slot_count_u16_or_record(arg_slots);
+        let ret_slots = self.slot_count_u16_or_record(ret_slots);
+        crate::type_info::try_encode_dynamic_call_args(arg_slots, ret_slots).unwrap_or_else(
+            |error| {
+                self.record_layout_error(error);
+                0
+            },
+        )
+    }
+
+    pub(crate) fn call_iface_method_index_or_record(&mut self, method_idx: usize) -> u8 {
+        u8::try_from(method_idx).unwrap_or_else(|_| {
+            self.record_layout_error(format!(
+                "CallIface method index exceeds u8 operand width: {method_idx}"
+            ));
+            0
+        })
     }
 
     /// Register a builtin protocol interface.
@@ -331,6 +565,7 @@ impl CodegenContext {
             struct_metas: &mut self.module.struct_metas,
             interface_meta_ids: &mut self.interface_meta_ids,
             interface_metas: &mut self.module.interface_metas,
+            layout_errors: &mut self.layout_errors,
         };
         let value_rttid = crate::type_interner::intern_type_key(
             &mut self.type_interner,
@@ -389,6 +624,116 @@ impl CodegenContext {
                 *smi = struct_meta_id;
             }
         }
+    }
+
+    pub fn finalize_named_type_underlying_meta(&mut self) {
+        self.module.runtime_types = self.type_interner.types().to_vec();
+        for idx in 0..self.module.named_type_metas.len() {
+            let underlying_rttid = self.module.named_type_metas[idx].underlying_rttid;
+            if let Some(canonical) = self
+                .module
+                .canonical_value_meta_for_value_rttid(underlying_rttid)
+            {
+                self.module.named_type_metas[idx].underlying_meta = canonical;
+            }
+        }
+        for runtime_type in self.type_interner.types_mut() {
+            let vo_runtime::RuntimeType::Named { id, struct_meta_id } = runtime_type else {
+                continue;
+            };
+            *struct_meta_id = self
+                .module
+                .named_type_metas
+                .get(*id as usize)
+                .filter(|meta| meta.underlying_meta.value_kind() == vo_runtime::ValueKind::Struct)
+                .map(|meta| meta.underlying_meta.meta_id());
+        }
+        self.module.runtime_types = self.type_interner.types().to_vec();
+    }
+
+    pub fn canonical_transfer_type_for_type_key(
+        &mut self,
+        type_key: TypeKey,
+        info: &crate::type_info::TypeInfoWrapper,
+    ) -> Result<TransferType, String> {
+        let rttid_raw = self.compute_value_rttid_raw(type_key, info);
+        self.module.runtime_types = self.type_interner.types().to_vec();
+        let value_rttid = vo_runtime::ValueRttid::from_raw(rttid_raw);
+        self.canonical_transfer_type_for_rttid(value_rttid, "type")
+    }
+
+    pub fn finalize_transfer_metadata(&mut self) -> Result<(), String> {
+        self.module.runtime_types = self.type_interner.types().to_vec();
+        let mut updates = Vec::with_capacity(self.module.functions.len());
+        for (func_idx, func) in self.module.functions.iter().enumerate() {
+            let capture_types = self.canonicalize_transfer_types(
+                &func.capture_types,
+                &format!("functions[{func_idx}] {} capture_types", func.name),
+            )?;
+            let param_types = self.canonicalize_transfer_types(
+                &func.param_types,
+                &format!("functions[{func_idx}] {} param_types", func.name),
+            )?;
+            updates.push((capture_types, param_types));
+        }
+        for (func, (capture_types, param_types)) in
+            self.module.functions.iter_mut().zip(updates.into_iter())
+        {
+            func.capture_types = capture_types;
+            func.param_types = param_types;
+        }
+        Ok(())
+    }
+
+    fn canonicalize_transfer_types(
+        &self,
+        transfer_types: &[TransferType],
+        label: &str,
+    ) -> Result<Vec<TransferType>, String> {
+        transfer_types
+            .iter()
+            .enumerate()
+            .map(|(idx, transfer_type)| {
+                let value_rttid = vo_runtime::ValueRttid::from_raw(transfer_type.rttid_raw);
+                self.canonical_transfer_type_for_rttid(value_rttid, &format!("{label}[{idx}]"))
+            })
+            .collect()
+    }
+
+    fn canonical_transfer_type_for_rttid(
+        &self,
+        value_rttid: vo_runtime::ValueRttid,
+        label: &str,
+    ) -> Result<TransferType, String> {
+        let value_meta = self
+            .module
+            .canonical_value_meta_for_value_rttid(value_rttid)
+            .ok_or_else(|| {
+                format!(
+                    "{label} ValueRttid {} cannot be resolved to canonical metadata",
+                    value_rttid.rttid()
+                )
+            })?;
+        let slots = self
+            .module
+            .slot_count_for_value_rttid(value_rttid)
+            .ok_or_else(|| {
+                format!(
+                    "{label} ValueRttid {} cannot be resolved to slot layout",
+                    value_rttid.rttid()
+                )
+            })?;
+        let slots = u16::try_from(slots).map_err(|_| {
+            format!(
+                "{label} ValueRttid {} type slot count exceeds u16::MAX: {slots} slots",
+                value_rttid.rttid()
+            )
+        })?;
+        Ok(TransferType {
+            meta_raw: value_meta.to_raw(),
+            rttid_raw: value_rttid.to_raw(),
+            slots,
+        })
     }
 
     /// Fill WellKnownTypes with pre-computed IDs for errors.Error.
@@ -487,6 +832,7 @@ impl CodegenContext {
         method_name: String,
         func_id: u32,
         is_pointer_receiver: bool,
+        receiver_is_iface_boxed: bool,
         signature_rttid: u32,
     ) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
@@ -495,6 +841,7 @@ impl CodegenContext {
                 MethodInfo {
                     func_id,
                     is_pointer_receiver,
+                    receiver_is_iface_boxed,
                     signature_rttid,
                 },
             );
@@ -508,12 +855,14 @@ impl CodegenContext {
         method_name: String,
         func_id: u32,
         is_pointer_receiver: bool,
+        receiver_is_iface_boxed: bool,
         signature_rttid: u32,
     ) {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
             meta.methods.entry(method_name).or_insert(MethodInfo {
                 func_id,
                 is_pointer_receiver,
+                receiver_is_iface_boxed,
                 signature_rttid,
             });
         }
@@ -527,6 +876,7 @@ impl CodegenContext {
         method_name: String,
         func_id: u32,
         is_pointer_receiver: bool,
+        receiver_is_iface_boxed: bool,
         signature_rttid: u32,
     ) -> bool {
         if let Some(meta) = self.module.named_type_metas.get_mut(named_type_id as usize) {
@@ -536,6 +886,7 @@ impl CodegenContext {
                     e.insert(MethodInfo {
                         func_id,
                         is_pointer_receiver,
+                        receiver_is_iface_boxed,
                         signature_rttid,
                     });
                     true
@@ -629,6 +980,7 @@ impl CodegenContext {
                             struct_metas: &mut self.module.struct_metas,
                             interface_meta_ids: &mut self.interface_meta_ids,
                             interface_metas: &mut self.module.interface_metas,
+                            layout_errors: &mut self.layout_errors,
                         };
                         let signature_rttid = crate::type_interner::intern_type_key(
                             &mut self.type_interner,
@@ -698,7 +1050,7 @@ impl CodegenContext {
     ) -> u16 {
         if iface_meta_id == 0 {
             // Empty interface: no itab needed
-            let packed = (rttid as i64) << 32;
+            let packed = ((rttid as i64) << 32) | i64::from(IFACE_ASSIGN_NO_ITAB);
             self.const_int(packed)
         } else {
             // Non-empty interface: defer itab building
@@ -781,8 +1133,14 @@ impl CodegenContext {
             })
             .collect();
 
+        if self.module.itabs.is_empty() {
+            self.module.itabs.push(Itab::default());
+        }
         let itab_id = self.module.itabs.len() as u32;
-        self.module.itabs.push(Itab { methods });
+        self.module.itabs.push(Itab {
+            iface_meta_id,
+            methods,
+        });
         self.itab_cache.insert(cache_key, itab_id);
         itab_id
     }
@@ -864,6 +1222,11 @@ impl CodegenContext {
         id
     }
 
+    pub(crate) fn add_function_from_builder(&mut self, builder: crate::func::FuncBuilder) -> u32 {
+        self.record_builder_layout_error(&builder);
+        self.add_function(builder.build())
+    }
+
     /// Replace function at given ID (used by compile_func_decl_at).
     pub fn replace_function(&mut self, func_id: u32, func: FunctionDef) {
         self.module.functions[func_id as usize] = func;
@@ -872,69 +1235,309 @@ impl CodegenContext {
     // === Extern registration ===
 
     /// Get or register an extern function by string name.
-    /// Uses builtin_extern_ret_slots for known externs, 0 for unknown.
+    /// Builtin helper externs are pure unless the caller uses an explicit
+    /// effect-bearing registration method.
     pub fn get_or_register_extern(&mut self, name: &str) -> u32 {
-        self.get_or_register_extern_with_slots(name, builtin_extern_ret_slots(name), Vec::new())
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            builtin_extern_return_shape(name),
+            builtin_extern_param_shape(name),
+            Vec::new(),
+            ExternEffects::NONE,
+        )
+    }
+
+    pub fn get_or_register_extern_with_effects(
+        &mut self,
+        name: &str,
+        effects: ExternEffects,
+    ) -> u32 {
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            builtin_extern_return_shape(name),
+            builtin_extern_param_shape(name),
+            Vec::new(),
+            effects,
+        )
+    }
+
+    pub fn get_or_register_extern_with_return_layout(
+        &mut self,
+        name: &str,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
+    ) -> u32 {
+        self.get_or_register_extern_with_return_layout_and_effects(
+            name,
+            ret_slot_types,
+            ExternEffects::NONE,
+        )
+    }
+
+    pub fn get_or_register_extern_with_return_layout_and_effects(
+        &mut self,
+        name: &str,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
+        effects: ExternEffects,
+    ) -> u32 {
+        let returns = ReturnShape::try_with_slot_types(ret_slot_types).unwrap_or_else(|error| {
+            self.record_layout_error(error);
+            ReturnShape::slots(0)
+        });
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            returns,
+            builtin_extern_param_shape(name),
+            Vec::new(),
+            effects,
+        )
+    }
+
+    pub fn get_or_register_extern_with_return_shape_and_effects(
+        &mut self,
+        name: &str,
+        returns: ReturnShape,
+        effects: ExternEffects,
+    ) -> u32 {
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            returns,
+            builtin_extern_param_shape(name),
+            Vec::new(),
+            effects,
+        )
     }
 
     /// Get or register an extern function with explicit ret_slots (no param_kinds).
     pub fn get_or_register_extern_with_ret_slots(&mut self, name: &str, ret_slots: u16) -> u32 {
-        if matches!(name, "dyn_call" | "dyn_method") {
-            return self.get_or_register_variable_ret_extern(name, ret_slots);
-        }
-        self.get_or_register_extern_with_slots(name, ret_slots, Vec::new())
+        self.get_or_register_extern_with_ret_slots_and_effects(name, ret_slots, ExternEffects::NONE)
     }
 
-    fn get_or_register_variable_ret_extern(&mut self, name: &str, ret_slots: u16) -> u32 {
+    pub fn get_or_register_extern_with_ret_slots_and_effects(
+        &mut self,
+        name: &str,
+        ret_slots: u16,
+        effects: ExternEffects,
+    ) -> u32 {
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            ReturnShape::slots(ret_slots),
+            ParamShape::CallSiteVariadic,
+            Vec::new(),
+            effects,
+        )
+    }
+
+    pub fn get_or_register_declared_extern_with_ret_slots(
+        &mut self,
+        name: &str,
+        ret_slots: u16,
+    ) -> u32 {
+        self.get_or_register_extern_with_ret_slots_and_effects(
+            name,
+            ret_slots,
+            declared_extern_allowed_effects(name),
+        )
+    }
+
+    pub fn get_or_register_variable_ret_extern_with_effects(
+        &mut self,
+        name: &str,
+        ret_slots: u16,
+        effects: ExternEffects,
+    ) -> u32 {
         if let Some((id, _)) = self
             .module
             .externs
             .iter()
             .enumerate()
-            .find(|(_, def)| def.name == name && def.ret_slots == ret_slots)
+            .find(|(_, def)| def.name == name && def.returns.slots == ret_slots)
         {
+            let existing = &mut self.module.externs[id];
+            existing.allowed_effects = merge_allowed_effects(existing.allowed_effects, effects);
             return id as u32;
         }
 
         let id = self.module.externs.len() as u32;
         self.module.externs.push(vo_vm::bytecode::ExternDef {
             name: name.to_string(),
-            param_slots: 0,
-            ret_slots,
-            is_blocking: name.contains("_blocking_"),
+            params: ParamShape::CallSiteVariadic,
+            returns: ReturnShape::slots(ret_slots),
+            allowed_effects: effects,
             param_kinds: Vec::new(),
         });
         id
     }
 
+    pub fn get_or_register_variable_ret_extern_with_return_layout_and_effects(
+        &mut self,
+        name: &str,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
+        effects: ExternEffects,
+    ) -> u32 {
+        self.get_or_register_variable_ret_extern_with_return_layout_params_and_effects(
+            name,
+            ret_slot_types,
+            Vec::new(),
+            effects,
+        )
+    }
+
+    pub fn get_or_register_variable_ret_extern_with_return_layout_params_and_effects(
+        &mut self,
+        name: &str,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
+        param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+        effects: ExternEffects,
+    ) -> u32 {
+        let returns = ReturnShape::try_with_slot_types(ret_slot_types).unwrap_or_else(|error| {
+            self.record_layout_error(error);
+            ReturnShape::slots(0)
+        });
+        self.get_or_register_variable_ret_extern_with_return_shape_params_and_effects(
+            name,
+            returns,
+            param_kinds,
+            effects,
+        )
+    }
+
+    pub fn get_or_register_variable_ret_extern_with_return_shape_params_and_effects(
+        &mut self,
+        name: &str,
+        returns: ReturnShape,
+        param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+        effects: ExternEffects,
+    ) -> u32 {
+        let (params, param_kinds) = variable_ret_extern_param_contract(name, param_kinds);
+
+        if let Some((id, _)) = self.module.externs.iter().enumerate().find(|(_, def)| {
+            def.name == name
+                && def.returns == returns
+                && def.params == params
+                && def.param_kinds == param_kinds
+        }) {
+            let existing = &mut self.module.externs[id];
+            merge_extern_param_shape(
+                name,
+                &mut existing.params,
+                &mut existing.param_kinds,
+                params,
+                param_kinds,
+            );
+            existing.allowed_effects = merge_allowed_effects(existing.allowed_effects, effects);
+            return id as u32;
+        }
+
+        let id = self.module.externs.len() as u32;
+        self.module.externs.push(vo_vm::bytecode::ExternDef {
+            name: name.to_string(),
+            params,
+            returns,
+            allowed_effects: effects,
+            param_kinds,
+        });
+        id
+    }
+
     /// Get or register an extern function with ret_slots and param_kinds.
-    /// If already registered: updates ret_slots to max; sets param_kinds if not yet set.
+    /// If already registered: updates return shape conservatively; sets param_kinds if not yet set.
     pub fn get_or_register_extern_with_slots(
         &mut self,
         name: &str,
         ret_slots: u16,
         param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
     ) -> u32 {
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            ReturnShape::slots(ret_slots),
+            param_shape_from_kinds(&param_kinds),
+            param_kinds,
+            ExternEffects::NONE,
+        )
+    }
+
+    pub fn get_or_register_extern_with_slots_and_effects(
+        &mut self,
+        name: &str,
+        returns: ReturnShape,
+        param_shape: ParamShape,
+        param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+        effects: ExternEffects,
+    ) -> u32 {
         if let Some(&id) = self.extern_names.get(name) {
             let existing = &mut self.module.externs[id as usize];
-            if ret_slots > existing.ret_slots {
-                existing.ret_slots = ret_slots;
-            }
-            if existing.param_kinds.is_empty() && !param_kinds.is_empty() {
-                existing.param_kinds = param_kinds;
-            }
+            merge_extern_return_shape(name, &mut existing.returns, returns);
+            merge_extern_param_shape(
+                name,
+                &mut existing.params,
+                &mut existing.param_kinds,
+                param_shape,
+                param_kinds,
+            );
+            existing.allowed_effects = merge_allowed_effects(existing.allowed_effects, effects);
             return id;
         }
         let id = self.module.externs.len() as u32;
         self.module.externs.push(vo_vm::bytecode::ExternDef {
             name: name.to_string(),
-            param_slots: 0,
-            ret_slots,
-            is_blocking: name.contains("_blocking_"),
+            params: param_shape,
+            returns,
+            allowed_effects: effects,
             param_kinds,
         });
         self.extern_names.insert(name.to_string(), id);
         id
+    }
+
+    pub fn get_or_register_declared_extern_with_slots(
+        &mut self,
+        name: &str,
+        ret_slots: u16,
+        param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+    ) -> u32 {
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            ReturnShape::slots(ret_slots),
+            exact_param_shape_from_kinds(&param_kinds),
+            param_kinds,
+            declared_extern_allowed_effects(name),
+        )
+    }
+
+    pub fn get_or_register_declared_extern_with_return_layout(
+        &mut self,
+        name: &str,
+        ret_slot_types: Vec<vo_runtime::SlotType>,
+        param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+    ) -> u32 {
+        let returns = ReturnShape::try_with_slot_types(ret_slot_types).unwrap_or_else(|error| {
+            self.record_layout_error(error);
+            ReturnShape::slots(0)
+        });
+        let (param_shape, param_kinds) = extern_param_shape_for_callsite(name, param_kinds);
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            returns,
+            param_shape,
+            param_kinds,
+            declared_extern_allowed_effects(name),
+        )
+    }
+
+    pub fn get_or_register_declared_extern_with_return_shape(
+        &mut self,
+        name: &str,
+        returns: ReturnShape,
+        param_kinds: Vec<vo_vm::bytecode::ExtSlotKind>,
+    ) -> u32 {
+        let (param_shape, param_kinds) = extern_param_shape_for_callsite(name, param_kinds);
+        self.get_or_register_extern_with_slots_and_effects(
+            name,
+            returns,
+            param_shape,
+            param_kinds,
+            declared_extern_allowed_effects(name),
+        )
     }
 
     // === Global registration ===
@@ -943,15 +1546,29 @@ impl CodegenContext {
         &mut self,
         obj_key: vo_analysis::objects::ObjKey,
         def: GlobalDef,
-    ) -> u32 {
+    ) -> u16 {
         let slot_offset = self.global_slot_offset;
-        self.global_slot_offset += def.slots as u32;
+        let total_slots = slot_offset
+            .checked_add(u32::from(def.slots))
+            .unwrap_or(u32::MAX);
+        if total_slots > u32::from(u16::MAX) + 1 {
+            self.record_layout_error(format!(
+                "global slot count exceeds u16 operand width: {total_slots} slots"
+            ));
+        }
+        self.global_slot_offset = total_slots;
         self.module.globals.push(def);
+        let slot_offset = u16::try_from(slot_offset).unwrap_or_else(|_| {
+            self.record_layout_error(format!(
+                "global slot offset exceeds u16 operand width: {slot_offset}"
+            ));
+            0
+        });
         self.global_indices.insert(obj_key, slot_offset);
         slot_offset
     }
 
-    pub fn get_global_index(&self, obj_key: vo_analysis::objects::ObjKey) -> Option<u32> {
+    pub fn get_global_index(&self, obj_key: vo_analysis::objects::ObjKey) -> Option<u16> {
         self.global_indices.get(&obj_key).copied()
     }
 
@@ -1011,10 +1628,9 @@ impl CodegenContext {
         info: &crate::type_info::TypeInfoWrapper,
     ) -> u32 {
         let canonical = vo_analysis::typ::underlying_type(struct_type, &info.project.tc_objs);
-        if let Some(id) = self.get_struct_meta_id(canonical) {
-            return id;
-        }
-        // Materialize anonymous/nested struct metadata on demand.
+        // Materialize anonymous/nested struct metadata on demand and let the
+        // runtime type interner collapse structurally identical types to the
+        // meta id owned by the canonical rttid.
         self.intern_type_key(canonical, info);
         self.get_struct_meta_id(canonical).unwrap_or_else(|| {
             panic!(
@@ -1062,6 +1678,7 @@ impl CodegenContext {
                 self.ensure_struct_meta_id(base, info)
             }
             ValueKind::Interface => info.get_or_create_interface_meta_id(type_key, self),
+            ValueKind::Array => self.intern_type_key(type_key, info),
             _ => 0,
         };
         (meta_id << 8) | (vk as u32)
@@ -1124,24 +1741,38 @@ impl CodegenContext {
         self.get_or_create_value_meta(elem_type, info)
     }
 
-    /// Get or create key and value ValueMeta for MapNew.
+    /// Get canonical key and value metadata for MapNew.
     /// Returns (key_meta_const_idx, val_meta_const_idx, key_slots, val_slots, key_rttid).
     /// key_rttid is used for struct key deep hash/eq operations.
     pub fn get_or_create_map_metas(
         &mut self,
         map_type: TypeKey,
         info: &crate::type_info::TypeInfoWrapper,
-    ) -> (u16, u16, u16, u16, u32) {
-        let (key_slots, val_slots) = info.map_key_val_slots(map_type);
+    ) -> Result<(u16, u16, u16, u16, u32), String> {
         let (key_type, val_type) = info.map_key_val_types(map_type);
+        let key_slots = info.try_type_slot_count(key_type)?;
+        let val_slots = info.try_type_slot_count(val_type)?;
 
-        let key_meta_idx = self.get_or_create_value_meta(key_type, info);
-        let val_meta_idx = self.get_or_create_value_meta(val_type, info);
+        let key_transfer = self.canonical_transfer_type_for_type_key(key_type, info)?;
+        let val_transfer = self.canonical_transfer_type_for_type_key(val_type, info)?;
+        if key_transfer.slots != key_slots {
+            return Err(format!(
+                "MapNew key canonical slot count {} does not match type slot count {key_slots}",
+                key_transfer.slots
+            ));
+        }
+        if val_transfer.slots != val_slots {
+            return Err(format!(
+                "MapNew value canonical slot count {} does not match type slot count {val_slots}",
+                val_transfer.slots
+            ));
+        }
 
-        // Get key_rttid for struct key deep hash/eq
-        let key_rttid = self.intern_type_key(key_type, info);
+        let key_meta_idx = self.add_const(Constant::Int(key_transfer.meta_raw as i64));
+        let val_meta_idx = self.add_const(Constant::Int(val_transfer.meta_raw as i64));
+        let key_rttid = vo_runtime::ValueRttid::from_raw(key_transfer.rttid_raw).rttid();
 
-        (key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid)
+        Ok((key_meta_idx, val_meta_idx, key_slots, val_slots, key_rttid))
     }
 
     // === Closure ID ===
@@ -1172,12 +1803,19 @@ impl CodegenContext {
     // === Method value support ===
 
     fn define_wrapper_params(
+        ctx: &mut CodegenContext,
         builder: &mut crate::func::FuncBuilder,
         param_layouts: &[Vec<vo_runtime::SlotType>],
     ) -> Option<u16> {
         let mut first_param = None;
         for layout in param_layouts {
-            let slot = builder.define_param(None, layout.len() as u16, layout);
+            let slots = ctx.slot_count_u16_or_record(layout.len());
+            let slot = builder
+                .try_define_param(None, slots, layout)
+                .unwrap_or_else(|error| {
+                    ctx.record_layout_error(error);
+                    0
+                });
             if first_param.is_none() {
                 first_param = Some(slot);
             }
@@ -1200,8 +1838,7 @@ impl CodegenContext {
         cache_key: MethodValueWrapperKey,
         builder: crate::func::FuncBuilder,
     ) -> u32 {
-        let wrapper_id = self.module.functions.len() as u32;
-        self.module.functions.push(builder.build());
+        let wrapper_id = self.add_function_from_builder(builder);
         self.method_value_wrappers.insert(cache_key, wrapper_id);
         wrapper_id
     }
@@ -1238,15 +1875,18 @@ impl CodegenContext {
         }
 
         let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
-        let recv_slots = recv_slot_types.len() as u16;
-        let forwarded_param_slots = forwarded_slot_types.len() as u16;
-        let total_arg_slots = recv_slots + forwarded_param_slots;
-        let ret_slots = ret_slot_types.len() as u16;
+        let recv_slots_usize = recv_slot_types.len();
+        let forwarded_param_slots_usize = forwarded_slot_types.len();
+        let recv_slots = self.slot_count_u16_or_record(recv_slots_usize);
+        let forwarded_param_slots = self.slot_count_u16_or_record(forwarded_param_slots_usize);
+        let total_arg_slots =
+            self.slot_count_u16_or_record(recv_slots_usize + forwarded_param_slots_usize);
+        let ret_slots = self.slot_count_u16_or_record(ret_slot_types.len());
 
         let suffix = if is_pointer_recv { "_ptr" } else { "" };
         let wrapper_name = format!("__method_value{}_{}", suffix, method_func_id);
         let mut builder = crate::func::FuncBuilder::new_closure(&wrapper_name);
-        let first_param_slot = Self::define_wrapper_params(&mut builder, &param_slot_types);
+        let first_param_slot = Self::define_wrapper_params(self, &mut builder, &param_slot_types);
         builder.add_param_transfer_types(&param_types);
         builder.add_capture_type(
             capture_type.meta_raw,
@@ -1286,6 +1926,7 @@ impl CodegenContext {
     pub fn get_or_create_method_value_wrapper_iface(
         &mut self,
         iface_type: TypeKey,
+        iface_meta_id: u32,
         method_idx: u32,
         param_slot_types: Vec<Vec<vo_runtime::SlotType>>,
         ret_slot_types: Vec<vo_runtime::SlotType>,
@@ -1293,11 +1934,9 @@ impl CodegenContext {
         param_types: Vec<vo_vm::bytecode::TransferType>,
         capture_type: vo_vm::bytecode::TransferType,
     ) -> Result<u32, crate::error::CodegenError> {
-        let param_slots = param_slot_types
-            .iter()
-            .map(|slot_types| slot_types.len() as u16)
-            .sum();
-        let ret_slots = ret_slot_types.len() as u16;
+        let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
+        let param_slots = self.slot_count_u16_or_record(forwarded_slot_types.len());
+        let ret_slots = self.slot_count_u16_or_record(ret_slot_types.len());
         let cache_key = MethodValueWrapperKey::Interface {
             iface_type,
             method_idx,
@@ -1315,7 +1954,7 @@ impl CodegenContext {
             iface_type.raw(),
         );
         let mut builder = crate::func::FuncBuilder::new_closure(&wrapper_name);
-        let first_param_slot = Self::define_wrapper_params(&mut builder, &param_slot_types);
+        let first_param_slot = Self::define_wrapper_params(self, &mut builder, &param_slot_types);
         builder.add_param_transfer_types(&param_types);
         builder.add_capture_type(
             capture_type.meta_raw,
@@ -1333,7 +1972,6 @@ impl CodegenContext {
         ]);
         builder.emit_ptr_get(iface_slot, capture_box, 0, 2);
 
-        let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
         let args_start = builder.alloc_dynamic_call_buffer(
             &[vo_runtime::SlotType::Value],
             &forwarded_slot_types,
@@ -1343,87 +1981,13 @@ impl CodegenContext {
             builder.emit_copy(args_start, first_param, param_slots);
         }
 
-        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
+        let call_c =
+            self.dynamic_call_shape_or_record(forwarded_slot_types.len(), ret_slot_types.len());
+        let method_idx = self.call_iface_method_index_or_record(method_idx as usize);
         builder.emit_call_iface(
+            iface_meta_id,
             method_idx,
             iface_slot,
-            args_start,
-            call_c,
-            &forwarded_slot_types,
-            &ret_slot_types,
-        );
-        builder.set_ret_slot_types(ret_slot_types);
-        builder.emit_op(
-            vo_vm::instruction::Opcode::Return,
-            args_start + param_slots,
-            ret_slots,
-            0,
-        );
-
-        Ok(self.register_method_value_wrapper_from_builder(cache_key, builder))
-    }
-
-    /// Get or create wrapper function for method value on embedded interface field.
-    /// The wrapper gets boxed outer struct from captures, reads the embedded interface,
-    /// and calls via CallIface.
-    pub fn get_or_create_method_value_wrapper_embedded_iface(
-        &mut self,
-        iface_type: TypeKey,
-        embed_offset: u16,
-        method_idx: u32,
-        param_slot_types: Vec<Vec<vo_runtime::SlotType>>,
-        ret_slot_types: Vec<vo_runtime::SlotType>,
-        method_name: &str,
-        param_types: Vec<vo_vm::bytecode::TransferType>,
-    ) -> Result<u32, crate::error::CodegenError> {
-        let cache_key = MethodValueWrapperKey::EmbeddedInterface {
-            iface_type,
-            embed_offset,
-            method_idx,
-        };
-        if let Some(&wrapper_id) = self.method_value_wrappers.get(&cache_key) {
-            return Ok(wrapper_id);
-        }
-
-        let forwarded_slot_types = Self::flatten_param_layouts(&param_slot_types);
-        let param_slots = forwarded_slot_types.len() as u16;
-        let ret_slots = ret_slot_types.len() as u16;
-        let iface_slots = 2u16;
-
-        let wrapper_name = format!(
-            "__method_value_embed_iface_{}_{}_t{}_o{}",
-            method_name,
-            method_idx,
-            iface_type.raw(),
-            embed_offset,
-        );
-        let mut builder = crate::func::FuncBuilder::new_closure(&wrapper_name);
-        let first_param_slot = Self::define_wrapper_params(&mut builder, &param_slot_types);
-        builder.add_param_transfer_types(&param_types);
-        builder.add_capture_slot_types(&[vo_runtime::SlotType::GcRef]);
-
-        let outer_ptr = builder.alloc_slots(&[vo_runtime::SlotType::GcRef]);
-        builder.emit_op(vo_vm::instruction::Opcode::ClosureGet, outer_ptr, 0, 0);
-
-        let iface_reg = builder.alloc_slots(&[
-            vo_runtime::SlotType::Interface0,
-            vo_runtime::SlotType::Interface1,
-        ]);
-        builder.emit_ptr_get(iface_reg, outer_ptr, embed_offset, iface_slots);
-
-        let args_start = builder.alloc_dynamic_call_buffer(
-            &[vo_runtime::SlotType::Value],
-            &forwarded_slot_types,
-            &ret_slot_types,
-        );
-        if let Some(first_param) = first_param_slot {
-            builder.emit_copy(args_start, first_param, param_slots);
-        }
-
-        let call_c = crate::type_info::encode_call_args(param_slots, ret_slots);
-        builder.emit_call_iface(
-            method_idx,
-            iface_reg,
             args_start,
             call_c,
             &forwarded_slot_types,
@@ -1453,7 +2017,7 @@ impl CodegenContext {
         name: &str,
         builder: crate::func::FuncBuilder,
     ) -> u32 {
-        let func_id = self.add_function(builder.build());
+        let func_id = self.add_function_from_builder(builder);
         self.wrapper_cache.insert(name.to_string(), func_id);
         func_id
     }
@@ -1556,6 +2120,14 @@ impl CodegenContext {
 
     /// Finalize debug info (sort entries by PC).
     pub fn finalize_debug_info(&mut self) {
+        for (func_id, func_debug) in self.module.debug_info.funcs.iter_mut().enumerate() {
+            let Some(func) = self.module.functions.get(func_id) else {
+                func_debug.entries.clear();
+                continue;
+            };
+            let code_len = func.code.len() as u32;
+            func_debug.entries.retain(|entry| entry.pc < code_len);
+        }
         self.module.debug_info.finalize();
     }
 
@@ -1565,22 +2137,4 @@ impl CodegenContext {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::CodegenContext;
-
-    #[test]
-    fn variable_ret_externs_are_keyed_by_ret_slots() {
-        let mut ctx = CodegenContext::new("extern-ret-slots");
-
-        let typed_call = ctx.get_or_register_extern_with_ret_slots("dyn_call", 4);
-        let any_call = ctx.get_or_register_extern_with_ret_slots("dyn_call", 6);
-        let typed_call_again = ctx.get_or_register_extern_with_ret_slots("dyn_call", 4);
-
-        assert_ne!(typed_call, any_call);
-        assert_eq!(typed_call, typed_call_again);
-        assert_eq!(ctx.module().externs[typed_call as usize].ret_slots, 4);
-        assert_eq!(ctx.module().externs[any_call as usize].ret_slots, 6);
-        assert_eq!(ctx.module().externs[typed_call as usize].name, "dyn_call");
-        assert_eq!(ctx.module().externs[any_call as usize].name, "dyn_call");
-    }
-}
+mod tests;
