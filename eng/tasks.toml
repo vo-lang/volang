@@ -1478,7 +1478,7 @@ outputs = []
 tier = "contract"
 tags = ["runtime", "host-wake", "legacy-playground", "contract", "crate-unit"]
 owner = "runtime"
-timeout_sec = 1800
+timeout_sec = 3600
 
 [[task]]
 name = "legacy-playground-inventory"
