@@ -109,8 +109,8 @@ pub fn create_loaded_vm_from_module(
     init_output();
 
     let mut vm = Vm::new();
-    let reg = &mut vm.state.extern_registry;
     let exts = &module.externs;
+    let reg = vm.extern_registry_mut();
     register_wasm_runtime_externs(reg, exts);
 
     // caller
@@ -126,23 +126,7 @@ pub fn create_loaded_vm_from_module(
 pub fn call_closure(vm: &mut Vm, closure: GcRef, args: &[u64]) -> Result<(), String> {
     vo_runtime::output::clear_output();
 
-    use vo_runtime::objects::closure;
-    let func_id = closure::func_id(closure);
-    let module = vm.module().ok_or_else(|| "module not set".to_string())?;
-    let func_def = module
-        .functions
-        .get(func_id as usize)
-        .ok_or_else(|| format!("closure target function id {} out of bounds", func_id))?;
-
-    let full_args = vo_vm::vm::helpers::build_closure_args(
-        closure as u64,
-        closure,
-        func_def,
-        args.as_ptr(),
-        args.len() as u32,
-    );
-
-    vm.spawn_call(func_id, &full_args)
+    vm.spawn_closure_call(closure, args)
         .map_err(|e| format!("{:?}", e))?;
     let outcome = vm.run_scheduled().map_err(|e| format!("{:?}", e))?;
     validate_sync_outcome(vm, outcome)?;
@@ -207,6 +191,27 @@ pub fn run_with_args(bytecode: &[u8], args: js_sys::Array) -> RunResult {
 #[cfg(test)]
 mod tests {
     use super::voplay_perf_report_payload;
+
+    #[test]
+    fn vm_web_closure_calls_use_vm_owned_frame_entry_047() {
+        let src = include_str!("vm.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+
+        assert!(
+            src.contains("vm.spawn_closure_call(closure, args)"),
+            "vo-web event closures must enter through the VM-owned closure-call API"
+        );
+        assert!(
+            !src.contains("vo_vm::vm::helpers"),
+            "vo-web must not depend on VM helper internals for closure argument shaping"
+        );
+        assert!(
+            !src.contains("build_closure_args"),
+            "closure argument layout must be owned by vo-vm"
+        );
+    }
 
     #[test]
     fn extracts_voplay_perf_report_payload() {

@@ -1,7 +1,7 @@
 <!--
 Generated from lang/docs/spec/memory-model-and-instructions.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:51b28102399dda3e09f0275283070c64e984d9fa5410bf944480103dd9c78650
+Source-Digest: sha256:d983c72a74ab43fef2a96f78b12e02b0b687b9a0bbe208cf5f8452d76db798ff
 Generated-At: 2026-01-20T20:35:05+08:00
 -->
 # Vo Memory Model and Instruction Set Specification
@@ -502,7 +502,7 @@ For stack-allocated arrays with dynamic indices.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `PtrNew` | a, b, flags | `slots[a] = alloc(slots[b])`, b=meta_reg containing ValueMeta, flags=slots |
+| `PtrNew` | a, b, c, flags | `slots[a] = alloc(slots[b])`, b=meta_reg containing ValueMeta, c=slots, flags=reserved |
 | `PtrClone` | a, b | `slots[a] = clone(slots[b])` - allocate + memcpy |
 | `PtrGet` | a, b, c | `slots[a] = heap[slots[b]].offset[c]` (single slot) |
 | `PtrSet` | a, b, c | `heap[slots[a]].offset[b] = slots[c]` (single slot) |
@@ -971,4 +971,3 @@ pub struct ClosureHeader {
 }
 // Followed by capture_count GcRef slots (direct pointers to escaped variables on heap)
 ```
-

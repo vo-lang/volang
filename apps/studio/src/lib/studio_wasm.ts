@@ -17,8 +17,8 @@ export interface VoVmInstance {
   setGcStressEveryStep(enabled: boolean): void;
   pushIslandCommand(frame: Uint8Array): void;
   takeOutboundCommands(): Uint8Array[];
-  takePendingHostEvents(): Array<{ token: string; delayMs: number; replay: boolean }>;
-  wakeHostEvent(token: string): void;
+  takePendingHostEvents(): Array<{ key: string; source: string; token: string; delayMs: number; replay: boolean }>;
+  wakeHostEvent(key: string): void;
   takeOutput(): string;
 }
 
@@ -55,8 +55,8 @@ export interface StudioWasm {
     files: Array<{ path: string; bytes: Uint8Array }>;
   };
   pollIslandData(): Uint8Array;
-  pollPendingHostEvent(): { token: string; delayMs: number } | null;
-  wakeHostEvent(token: string): void;
+  pollPendingHostEvent(): { key: string; source: string; token: string; delayMs: number; replay: boolean } | null;
+  wakeHostEvent(key: string): void;
   stopGui(): void;
   checkEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
   compileEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;

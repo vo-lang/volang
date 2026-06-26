@@ -40,9 +40,15 @@ fn exec_run_capture_output(call: &mut ExternCallContext) -> ExternResult {
 pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     for (id, def) in externs.iter().enumerate() {
         match def.name.as_str() {
-            "os_exec_startProcess" => registry.register(id as u32, exec_start_process),
-            "os_exec_waitProcess" => registry.register(id as u32, exec_wait_process),
-            "os_exec_runCaptureOutput" => registry.register(id as u32, exec_run_capture_output),
+            "os_exec_startProcess" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, exec_start_process)
+            }
+            "os_exec_waitProcess" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, exec_wait_process)
+            }
+            "os_exec_runCaptureOutput" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, exec_run_capture_output)
+            }
             _ => {}
         }
     }

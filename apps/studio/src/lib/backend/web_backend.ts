@@ -287,15 +287,15 @@ export class WebBackend implements Backend {
       if (!event) {
         return;
       }
-      this.scheduleGuiHostEvent(event.token, event.delayMs, sessionId);
+      this.scheduleGuiHostEvent(event.key, event.delayMs, sessionId);
     }
   }
 
-  private scheduleGuiHostEvent(token: string, delayMs: number, sessionId: number): void {
+  private scheduleGuiHostEvent(key: string, delayMs: number, sessionId: number): void {
     if (sessionId !== this.guiSessionId || this.guiFatalError) {
       return;
     }
-    const existing = this.guiHostTimers.get(token);
+    const existing = this.guiHostTimers.get(key);
     if (existing) {
       if (existing.kind === 'raf') {
         cancelAnimationFrame(existing.id);
@@ -304,10 +304,10 @@ export class WebBackend implements Backend {
       }
     }
     const fire = (): void => {
-      this.guiHostTimers.delete(token);
+      this.guiHostTimers.delete(key);
       void this.runGuiEventSerialized(
         (wasm) => {
-          wasm.wakeHostEvent(token);
+          wasm.wakeHostEvent(key);
           this.drainPendingGuiHostEvents(wasm, sessionId);
           const renderBytes = this.guiFirstRenderWaiter?.sessionId === sessionId
             ? wasm.pollGuiRender()
@@ -325,12 +325,26 @@ export class WebBackend implements Backend {
         sessionId,
       ).then((renderBytes) => {
         this.resolveGuiFirstRenderWaiter(sessionId, renderBytes);
-      }).catch(() => {});
+      }).catch((error) => {
+        const fatalError = this.recordGuiFatalError(error);
+        console.error('[Vo Studio] GUI host event failed', fatalError);
+      });
     };
     const handle = delayMs === DISPLAY_PULSE_DELAY_MS
       ? this.scheduleGuiDisplayPulse(fire)
       : { kind: 'timeout' as const, id: window.setTimeout(fire, Math.max(0, delayMs)) };
-    this.guiHostTimers.set(token, handle);
+    this.guiHostTimers.set(key, handle);
+  }
+
+  private recordGuiFatalError(error: unknown): Error {
+    const fatalError = error instanceof Error ? error : new Error(String(error));
+    if (!this.guiFatalError) {
+      this.guiFatalError = fatalError;
+    }
+    this.clearGuiHostTimers();
+    this.rejectGuiFirstRenderWaiter(this.guiFatalError);
+    setStandaloneGuiEventDispatcher(null);
+    return this.guiFatalError;
   }
 
   private scheduleGuiDisplayPulse(fire: () => void): { kind: 'raf'; id: number } {
@@ -428,11 +442,7 @@ export class WebBackend implements Backend {
         if (sessionId !== this.guiSessionId) {
           return staleValue;
         }
-        this.guiFatalError = error instanceof Error ? error : new Error(String(error));
-        this.clearGuiHostTimers();
-        this.rejectGuiFirstRenderWaiter(this.guiFatalError);
-        setStandaloneGuiEventDispatcher(null);
-        throw this.guiFatalError;
+        throw this.recordGuiFatalError(error);
       }
     };
 

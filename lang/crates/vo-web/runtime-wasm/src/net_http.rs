@@ -6,15 +6,16 @@
 //! - Re-invoked extern: reads result, writes return slots, returns Ok
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::bytecode::ExternDef;
-use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult, HostEventReplaySource};
 use vo_runtime::gc::GcRef;
-use vo_runtime::objects::slice;
+use vo_runtime::objects::{slice, string};
 use vo_runtime::slot::slot_to_ptr;
 use wasm_bindgen::prelude::*;
+
+const NET_UNSUPPORTED: &str = "operation not supported on wasm";
 
 #[wasm_bindgen(inline_js = r#"
 export function voHttpBuildFetchPromise(method, url, headers, body) {
@@ -58,12 +59,6 @@ extern "C" {
         headers: &js_sys::Array,
         body: &[u8],
     ) -> js_sys::Promise;
-}
-
-static FETCH_TOKEN: AtomicU64 = AtomicU64::new(1);
-
-fn next_fetch_token() -> u64 {
-    FETCH_TOKEN.fetch_add(1, Ordering::Relaxed)
 }
 
 // Pending fetch Promises: (token, Promise). Consumed by run_vm_async.
@@ -199,7 +194,7 @@ fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
     let elem_bytes = core::mem::size_of::<GcRef>();
     let mut result = Vec::with_capacity(len);
     for i in 0..len {
-        let raw = slice::get(slice_ref, i, elem_bytes);
+        let raw = unsafe { slice::get(slice_ref, i, elem_bytes) };
         let str_ref: GcRef = slot_to_ptr(raw);
         if !str_ref.is_null() {
             result.push(vo_runtime::objects::string::as_str(str_ref).to_string());
@@ -215,7 +210,7 @@ fn wasm_http_native_request(call: &mut ExternCallContext) -> ExternResult {
         let result = match take_fetch_result(token) {
             Some(r) => r,
             None => {
-                return ExternResult::Panic(format!("fetch result missing for token {}", token))
+                return ExternResult::Panic(format!("fetch result missing for token {}", token));
             }
         };
 
@@ -244,21 +239,114 @@ fn wasm_http_native_request(call: &mut ExternCallContext) -> ExternResult {
         let body = call.arg_bytes(3).to_vec();
         // arg 4 (timeoutNs) ignored on WASM
 
-        let token = next_fetch_token();
+        let token = call.next_host_event_token();
         match build_fetch_promise(&method, &url, &headers, &body) {
             Ok(promise) => {
                 register_fetch_promise(token, promise);
-                ExternResult::HostEventWaitAndReplay { token }
+                ExternResult::HostEventWaitAndReplay {
+                    token,
+                    source: HostEventReplaySource::Fetch,
+                }
             }
             Err(e) => ExternResult::Panic(e),
         }
     }
 }
 
+fn net_int_error(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_i64(0, -1);
+    write_error_to(call, 1, NET_UNSUPPORTED);
+    ExternResult::Ok
+}
+
+fn net_count_error(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_i64(0, 0);
+    write_error_to(call, 1, NET_UNSUPPORTED);
+    ExternResult::Ok
+}
+
+fn net_error_only(call: &mut ExternCallContext) -> ExternResult {
+    write_error_to(call, 0, NET_UNSUPPORTED);
+    ExternResult::Ok
+}
+
+fn net_empty_string(call: &mut ExternCallContext) -> ExternResult {
+    let s = string::from_rust_str(call.gc(), "");
+    call.ret_ref(0, s);
+    ExternResult::Ok
+}
+
+fn net_count_addr_error(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_i64(0, 0);
+    let s = string::from_rust_str(call.gc(), "");
+    call.ret_ref(1, s);
+    write_error_to(call, 2, NET_UNSUPPORTED);
+    ExternResult::Ok
+}
+
+fn net_ref_error(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_nil(0);
+    write_error_to(call, 1, NET_UNSUPPORTED);
+    ExternResult::Ok
+}
+
 pub fn register_externs(reg: &mut ExternRegistry, defs: &[ExternDef]) {
+    use vo_runtime::bytecode::ExternEffects;
+
     for (id, def) in defs.iter().enumerate() {
-        if def.name.as_str() == "net_http_nativeHttpsRequest" {
-            reg.register(id as u32, wasm_http_native_request);
+        match def.name.as_str() {
+            "net_http_nativeHttpsRequest" => reg.register_wasm_host_with_effects(
+                id as u32,
+                &def.name,
+                wasm_http_native_request,
+                ExternEffects::MAY_HOST_REPLAY,
+            ),
+            "net_dial"
+            | "net_listen"
+            | "net_listenPacket"
+            | "net_blocking_tcpListenerAccept"
+            | "net_unixDial"
+            | "net_unixListen"
+            | "net_blocking_unixListenerAccept" => {
+                crate::register_wasm_host(reg, id as u32, &def.name, net_int_error)
+            }
+            "net_blocking_tcpConnRead"
+            | "net_blocking_tcpConnWrite"
+            | "net_blocking_udpConnWriteTo"
+            | "net_blocking_unixConnRead"
+            | "net_blocking_unixConnWrite" => {
+                crate::register_wasm_host(reg, id as u32, &def.name, net_count_error)
+            }
+            "net_tcpConnClose"
+            | "net_tcpListenerClose"
+            | "net_tcpConnSetDeadline"
+            | "net_tcpConnSetReadDeadline"
+            | "net_tcpConnSetWriteDeadline"
+            | "net_udpConnClose"
+            | "net_udpConnSetDeadline"
+            | "net_udpConnSetReadDeadline"
+            | "net_udpConnSetWriteDeadline"
+            | "net_unixConnSetDeadline"
+            | "net_unixConnSetReadDeadline"
+            | "net_unixConnSetWriteDeadline"
+            | "net_unixConnClose"
+            | "net_unixListenerClose" => {
+                crate::register_wasm_host(reg, id as u32, &def.name, net_error_only)
+            }
+            "net_tcpConnLocalAddr"
+            | "net_tcpConnRemoteAddr"
+            | "net_tcpListenerAddr"
+            | "net_udpConnLocalAddr" => {
+                crate::register_wasm_host(reg, id as u32, &def.name, net_empty_string)
+            }
+            "net_blocking_udpConnReadFrom" => {
+                crate::register_wasm_host(reg, id as u32, &def.name, net_count_addr_error)
+            }
+            "net_resolveTCPAddr" | "net_resolveUDPAddr" | "net_lookupHost" | "net_lookupIP"
+            | "net_lookupAddr" => {
+                crate::register_wasm_host(reg, id as u32, &def.name, net_ref_error)
+            }
+            _ => {}
         }
     }
 }
