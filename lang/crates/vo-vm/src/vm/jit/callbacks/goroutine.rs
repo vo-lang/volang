@@ -1,51 +1,206 @@
 //! JIT callbacks for goroutine spawning.
 
-use vo_runtime::gc::GcRef;
 use vo_runtime::jit_api::{
-    set_jit_infra_error, JitContext, JitResult, JitRuntimeTrapKind,
-    JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+    set_jit_infra_error, set_jit_infra_error_with_message, JitContext, JitResult,
+    JitRuntimeTrapKind, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
 };
-use vo_runtime::objects::closure;
-use vo_runtime::ValueKind;
 
-use crate::fiber::Fiber;
-use crate::vm::{helpers, Vm};
+use crate::fiber::{Fiber, JitExternSuspend};
+use crate::frame_call::{
+    call_layout_for_callsite, validate_closure_arg_shape, validate_closure_callsite_arg_layout,
+    validate_closure_target, validate_function_arg_shape, validate_function_callsite_arg_layout,
+    validate_island_handle, ValidClosureTarget,
+};
+use crate::runtime_boundary::{
+    IslandCommandEffect, PendingTransitionTerminalPolicy, ResumePolicy, RuntimeBoundary,
+    RuntimeTransition,
+};
+use crate::vm::{helpers, GcRootEffect, Vm};
 
-use super::helpers::{record_runtime_trap, set_jit_trap};
-
-fn canonical_object_with_kind(
-    ctx: &JitContext,
-    raw_ref: u64,
-    expected: ValueKind,
-) -> Option<GcRef> {
-    let gc = unsafe { &*ctx.gc };
-    let obj = gc.canonicalize_ref(raw_ref as GcRef)?;
-    (vo_runtime::gc::Gc::header(obj).kind() == expected).then_some(obj)
-}
+use super::helpers::{record_runtime_trap, set_jit_trap, validate_callback_raw_slots};
 
 fn reject_invalid_object_kind(ctx: &mut JitContext, raw_ref: u64) -> JitResult {
     set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, raw_ref)
 }
 
+fn reject_invalid_callback_state(ctx: &mut JitContext, detail: u64) -> JitResult {
+    set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, detail)
+}
+
+fn validate_regular_go_start_abi(
+    ctx: &mut JitContext,
+    func_id: u32,
+    func: &vo_runtime::bytecode::FunctionDef,
+    args_ptr: *const u64,
+    arg_slots: u32,
+) -> Result<(), JitResult> {
+    let validated_arg_slots = match validate_callback_raw_slots(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        func_id as u64,
+        args_ptr,
+        arg_slots,
+    ) {
+        Ok(arg_slots) => arg_slots,
+        Err(result) => return Err(result),
+    };
+    if u32::try_from(validated_arg_slots).ok() != Some(arg_slots)
+        || validate_function_arg_shape("JIT GoStart", func_id, func, validated_arg_slots).is_err()
+    {
+        return Err(reject_invalid_callback_state(ctx, func_id as u64));
+    }
+    Ok(())
+}
+
+fn validate_closure_go_abi<'a>(
+    ctx: &mut JitContext,
+    target: &'a ValidClosureTarget<'a>,
+    args_ptr: *const u64,
+    arg_slots: u32,
+) -> Result<usize, JitResult> {
+    let supplied_arg_slots = validate_callback_raw_slots(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        target.func_id as u64,
+        args_ptr,
+        arg_slots,
+    )?;
+    if validate_closure_arg_shape("jit go closure", target, supplied_arg_slots).is_err() {
+        return Err(reject_invalid_callback_state(ctx, target.func_id as u64));
+    }
+    Ok(supplied_arg_slots)
+}
+
+fn jit_callsite_arg_layout<'a>(
+    ctx: &mut JitContext,
+    module: &'a vo_runtime::bytecode::Module,
+    context: &str,
+    detail: u64,
+) -> Result<&'a [vo_runtime::SlotType], JitResult> {
+    let callsite_pc = ctx.runtime_trap_pc;
+    if callsite_pc == u32::MAX {
+        return Err(reject_invalid_callback_state(ctx, detail));
+    }
+    let fiber = unsafe { (ctx.fiber as *const Fiber).as_ref() }
+        .ok_or_else(|| reject_invalid_callback_state(ctx, detail))?;
+    let caller_frame = fiber
+        .current_frame()
+        .ok_or_else(|| reject_invalid_callback_state(ctx, detail))?;
+    let caller_func = module
+        .functions
+        .get(caller_frame.func_id as usize)
+        .ok_or_else(|| reject_invalid_callback_state(ctx, caller_frame.func_id as u64))?;
+    let (arg_layout, ret_layout) =
+        call_layout_for_callsite(caller_func, callsite_pc as usize, context)
+            .map_err(|_| reject_invalid_callback_state(ctx, callsite_pc as u64))?;
+    if !ret_layout.is_empty() {
+        return Err(reject_invalid_callback_state(ctx, detail));
+    }
+    Ok(arg_layout)
+}
+
+fn validate_jit_closure_go_callsite_layout(
+    ctx: &mut JitContext,
+    context: &str,
+    target: &ValidClosureTarget<'_>,
+    arg_layout: &[vo_runtime::SlotType],
+) -> Result<(), JitResult> {
+    validate_closure_callsite_arg_layout(context, target, arg_layout)
+        .map_err(|_| reject_invalid_callback_state(ctx, target.func_id as u64))
+}
+
+fn validate_jit_static_go_callsite(
+    ctx: &mut JitContext,
+    module: &vo_runtime::bytecode::Module,
+    context: &str,
+    func_id: u32,
+    func: &vo_runtime::bytecode::FunctionDef,
+) -> Result<(), JitResult> {
+    let arg_layout = jit_callsite_arg_layout(ctx, module, context, func_id as u64)?;
+    validate_function_callsite_arg_layout(
+        context,
+        func_id,
+        func,
+        0,
+        func.param_slots as usize,
+        arg_layout,
+    )
+    .map_err(|_| reject_invalid_callback_state(ctx, func_id as u64))
+}
+
 /// Create a new fiber from a closure and spawn it on the scheduler.
 ///
 /// Handles: func_id resolution, Fiber creation, push_frame, call_layout arg copy, and spawn.
-unsafe fn spawn_closure_fiber(
+unsafe fn build_closure_fiber(
     vm: &mut Vm,
     module: &vo_runtime::bytecode::Module,
     closure_ref: u64,
     args_ptr: *const u64,
     arg_slots: u32,
-) -> Result<(), crate::vm::RuntimeTrapKind> {
+) -> Result<Fiber, helpers::ClosureFiberBuildError> {
     let new_fiber = helpers::try_build_closure_fiber_from_args_ptr(
-        &module.functions,
+        &vm.state.gc,
+        module,
         vm.scheduler.fibers.len() as u32,
         closure_ref,
         args_ptr,
         arg_slots,
     )?;
-    vm.scheduler.spawn(new_fiber);
-    Ok(())
+    Ok(new_fiber)
+}
+
+fn commit_go_transition(
+    ctx: &mut JitContext,
+    vm: &mut Vm,
+    mut transition: RuntimeTransition,
+    terminal_policy: PendingTransitionTerminalPolicy,
+) -> JitResult {
+    transition.set_pending_terminal_policy(terminal_policy);
+    vm.push_pending_runtime_transition(transition);
+    suspend_after_go_boundary(ctx)
+}
+
+fn suspend_after_go_boundary(ctx: &mut JitContext) -> JitResult {
+    let Some(resume_pc) = ctx.runtime_trap_pc.checked_add(1) else {
+        return reject_invalid_callback_state(ctx, ctx.runtime_trap_pc as u64);
+    };
+    let fiber = unsafe { &mut *(ctx.fiber as *mut Fiber) };
+    fiber.jit_extern_suspend = Some(JitExternSuspend::Yield { resume_pc });
+    JitResult::ExternSuspend
+}
+
+fn commit_go_spawn(ctx: &mut JitContext, vm: &mut Vm, fiber: Fiber) -> JitResult {
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Continue,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::AllRootsDirty,
+    );
+    transition.spawns.push(fiber);
+    commit_go_transition(
+        ctx,
+        vm,
+        transition,
+        PendingTransitionTerminalPolicy::CommitOnLanguagePanic,
+    )
+}
+
+fn commit_go_island_commands(
+    ctx: &mut JitContext,
+    vm: &mut Vm,
+    island_commands: Vec<IslandCommandEffect>,
+    terminal_policy: PendingTransitionTerminalPolicy,
+    rollback: Option<crate::runtime_boundary::RuntimeRollback>,
+) -> JitResult {
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Continue,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::AllRootsDirty,
+    );
+    transition.island_commands = island_commands;
+    if let Some(rollback) = rollback {
+        transition.set_rollback(rollback);
+    }
+    commit_go_transition(ctx, vm, transition, terminal_policy)
 }
 
 /// JIT callback to spawn a new goroutine.
@@ -61,32 +216,59 @@ pub extern "C" fn jit_go_start(
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module) };
+    let raw_arg_detail = if is_closure_call != 0 {
+        closure_ref
+    } else {
+        func_id as u64
+    };
+    if let Err(result) = validate_callback_raw_slots(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        raw_arg_detail,
+        args_ptr,
+        arg_slots,
+    ) {
+        return result;
+    }
 
     if is_closure_call != 0 {
+        let arg_layout = match jit_callsite_arg_layout(ctx, module, "JIT GoStart", raw_arg_detail) {
+            Ok(arg_layout) => arg_layout,
+            Err(result) => return result,
+        };
         if closure_ref != 0 {
-            let Some(closure_gcref) =
-                canonical_object_with_kind(ctx, closure_ref, ValueKind::Closure)
-            else {
-                return reject_invalid_object_kind(ctx, closure_ref);
-            };
-            let func_id = closure::func_id(closure_gcref);
-            if module.functions.get(func_id as usize).is_none() {
-                return vo_runtime::jit_api::set_jit_infra_error(
-                    ctx,
-                    vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-                    func_id as u64,
-                );
+            let gc = unsafe { &*ctx.gc };
+            let closure_target =
+                match validate_closure_target(gc, module, closure_ref, "jit_go_start") {
+                    Ok(target) => target,
+                    Err(_) => return reject_invalid_object_kind(ctx, closure_ref),
+                };
+            if let Err(result) = validate_closure_go_abi(ctx, &closure_target, args_ptr, arg_slots)
+            {
+                return result;
+            }
+            if let Err(result) = validate_jit_closure_go_callsite_layout(
+                ctx,
+                "JIT GoStart",
+                &closure_target,
+                arg_layout,
+            ) {
+                return result;
             }
         }
-        if let Err(kind) =
-            unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) }
-        {
-            let trap = match kind {
-                crate::vm::RuntimeTrapKind::StackOverflow => JitRuntimeTrapKind::StackOverflow,
-                _ => JitRuntimeTrapKind::NilFuncCall,
-            };
-            record_runtime_trap(ctx, trap, ctx.runtime_trap_pc);
-            return JitResult::Panic;
+        match unsafe { build_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) } {
+            Ok(new_fiber) => return commit_go_spawn(ctx, vm, new_fiber),
+            Err(helpers::ClosureFiberBuildError::Trap(kind)) => {
+                let trap = match kind {
+                    crate::vm::RuntimeTrapKind::StackOverflow => JitRuntimeTrapKind::StackOverflow,
+                    _ => JitRuntimeTrapKind::NilFuncCall,
+                };
+                record_runtime_trap(ctx, trap, ctx.runtime_trap_pc);
+                return JitResult::Panic;
+            }
+            Err(helpers::ClosureFiberBuildError::Malformed(_)) => {
+                return reject_invalid_callback_state(ctx, closure_ref);
+            }
         }
     } else {
         // Regular function: args start at reg[0]
@@ -97,6 +279,15 @@ pub extern "C" fn jit_go_start(
                 func_id as u64,
             );
         };
+        if let Err(result) = validate_regular_go_start_abi(ctx, func_id, func, args_ptr, arg_slots)
+        {
+            return result;
+        }
+        if let Err(result) =
+            validate_jit_static_go_callsite(ctx, module, "JIT GoStart", func_id, func)
+        {
+            return result;
+        }
         let next_id = vm.scheduler.fibers.len() as u32;
         let mut new_fiber = Fiber::new(next_id);
         if let Err(err) =
@@ -115,9 +306,8 @@ pub extern "C" fn jit_go_start(
         for i in 0..arg_slots as usize {
             unsafe { *new_stack.add(i) = *args_ptr.add(i) };
         }
-        vm.scheduler.spawn(new_fiber);
+        return commit_go_spawn(ctx, vm, new_fiber);
     }
-    JitResult::Ok
 }
 
 /// JIT callback to spawn a goroutine on a specific island.
@@ -132,6 +322,19 @@ pub extern "C" fn jit_go_island(
     let ctx = unsafe { &mut *ctx };
     let vm = unsafe { &mut *(ctx.vm as *mut Vm) };
     let module = unsafe { &*(ctx.module) };
+    if let Err(result) = validate_callback_raw_slots(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        closure_ref,
+        args_ptr,
+        arg_slots,
+    ) {
+        return result;
+    }
+    let arg_layout = match jit_callsite_arg_layout(ctx, module, "JIT GoIsland", closure_ref) {
+        Ok(arg_layout) => arg_layout,
+        Err(result) => return result,
+    };
 
     if island == 0 {
         record_runtime_trap(
@@ -146,389 +349,166 @@ pub extern "C" fn jit_go_island(
         return JitResult::Panic;
     }
 
-    let Some(island_handle) = canonical_object_with_kind(ctx, island, ValueKind::Island) else {
-        return reject_invalid_object_kind(ctx, island);
+    let gc = unsafe { &*ctx.gc };
+    let island_handle = match validate_island_handle(gc, island, "jit_go_island") {
+        Ok(island_handle) => island_handle,
+        Err(_) => return reject_invalid_object_kind(ctx, island),
     };
-    let Some(closure) = canonical_object_with_kind(ctx, closure_ref, ValueKind::Closure) else {
-        return reject_invalid_object_kind(ctx, closure_ref);
+    let closure_target = match validate_closure_target(gc, module, closure_ref, "jit_go_island") {
+        Ok(target) => target,
+        Err(_) => return reject_invalid_object_kind(ctx, closure_ref),
     };
     let island_id = vo_runtime::island::id(island_handle);
+    let supplied_arg_slots =
+        match validate_closure_go_abi(ctx, &closure_target, args_ptr, arg_slots) {
+            Ok(supplied_arg_slots) => supplied_arg_slots,
+            Err(result) => return result,
+        };
+    if let Err(result) =
+        validate_jit_closure_go_callsite_layout(ctx, "JIT GoIsland", &closure_target, arg_layout)
+    {
+        return result;
+    }
+    if island_id != vm.state.current_island_id {
+        if let Err(msg) =
+            crate::exec::preflight_island_route(&vm.state, island_id, "GoIsland spawn route")
+        {
+            return set_jit_infra_error_with_message(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                island_id as u64,
+                msg,
+            );
+        }
+    }
 
     if island_id == vm.state.current_island_id {
-        if closure_ref != 0 {
-            let func_id = closure::func_id(closure);
-            if module.functions.get(func_id as usize).is_none() {
+        match unsafe { build_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) } {
+            Ok(new_fiber) => return commit_go_spawn(ctx, vm, new_fiber),
+            Err(helpers::ClosureFiberBuildError::Trap(kind)) => {
+                let trap = match kind {
+                    crate::vm::RuntimeTrapKind::StackOverflow => JitRuntimeTrapKind::StackOverflow,
+                    _ => JitRuntimeTrapKind::NilFuncCall,
+                };
+                record_runtime_trap(ctx, trap, ctx.runtime_trap_pc);
+                return JitResult::Panic;
+            }
+            Err(helpers::ClosureFiberBuildError::Malformed(_)) => {
+                return reject_invalid_callback_state(ctx, closure_ref);
+            }
+        }
+    } else {
+        let func_id = closure_target.func_id;
+        let capture_count = closure_target.capture_count();
+        let func_def = closure_target.func;
+
+        let mut capture_data = Vec::with_capacity(capture_count);
+        for i in 0..capture_count {
+            capture_data.push(closure_target.capture(i));
+        }
+
+        let mut arg_data = Vec::with_capacity(supplied_arg_slots);
+        for i in 0..supplied_arg_slots {
+            arg_data.push(unsafe { *args_ptr.add(i) });
+        }
+
+        let result = crate::exec::GoIslandResult {
+            island: island_handle,
+            func_id,
+            receiver_capture_slots: closure_target.layout.receiver_capture_count as u16,
+            capture_data,
+            arg_data,
+        };
+
+        let (result, capture_types) = if result.receiver_capture_slots == 0 {
+            (result, func_def.capture_types.clone())
+        } else {
+            match crate::exec::direct_method_receiver_transfer_plan(
+                module,
+                result.func_id,
+                func_def,
+                result.receiver_capture_slots,
+            ) {
+                Ok(plan) => (
+                    crate::exec::apply_direct_method_receiver_transfer_plan(result, plan),
+                    vec![plan.transfer_type],
+                ),
+                Err(_) => {
+                    return vo_runtime::jit_api::set_jit_infra_error(
+                        ctx,
+                        vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                        func_id as u64,
+                    );
+                }
+            }
+        };
+
+        let param_types = match crate::exec::go_island_sender_param_transfer_types(
+            module,
+            result.func_id,
+            func_def,
+            result.arg_data.len(),
+        ) {
+            Ok(param_types) => param_types,
+            Err(_) => {
                 return vo_runtime::jit_api::set_jit_infra_error(
                     ctx,
                     vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
                     func_id as u64,
                 );
             }
-        }
-        if let Err(kind) =
-            unsafe { spawn_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) }
-        {
-            let trap = match kind {
-                crate::vm::RuntimeTrapKind::StackOverflow => JitRuntimeTrapKind::StackOverflow,
-                _ => JitRuntimeTrapKind::NilFuncCall,
-            };
-            record_runtime_trap(ctx, trap, ctx.runtime_trap_pc);
-            return JitResult::Panic;
-        }
-    } else {
-        let func_id = closure::func_id(closure);
-        let capture_count = closure::capture_count(closure);
-
-        let mut capture_data = Vec::with_capacity(capture_count);
-        for i in 0..capture_count {
-            capture_data.push(closure::get_capture(closure, i));
-        }
-
-        let mut arg_data = Vec::with_capacity(arg_slots as usize);
-        for i in 0..arg_slots as usize {
-            arg_data.push(unsafe { *args_ptr.add(i) });
-        }
-
-        let Some(func_def) = module.functions.get(func_id as usize) else {
-            return vo_runtime::jit_api::set_jit_infra_error(
-                ctx,
-                vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-                func_id as u64,
-            );
         };
-        let result = crate::exec::GoIslandResult {
-            island: island_handle,
-            func_id,
-            capture_data,
-            arg_data,
-        };
-
-        if crate::exec::prepare_queue_handles_for_transfer(
+        let mut island_effects = Vec::new();
+        let transfer_commit = match crate::exec::prepare_queue_handles_for_transfer(
             &result,
             island_id,
-            &func_def.capture_types,
-            &func_def.param_types,
+            &capture_types,
+            &param_types,
             &module.struct_metas,
+            &module.named_type_metas,
             &module.runtime_types,
             &mut vm.state,
-        )
-        .is_err()
-        {
-            return vo_runtime::jit_api::set_jit_infra_error(
-                ctx,
-                vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-                func_id as u64,
-            );
-        }
+            &mut island_effects,
+        ) {
+            Ok(commit) => commit,
+            Err(_) => {
+                return vo_runtime::jit_api::set_jit_infra_error(
+                    ctx,
+                    vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                    func_id as u64,
+                );
+            }
+        };
         let data = crate::exec::pack_closure_for_island(
             &vm.state.gc,
             &result,
-            &func_def.capture_types,
-            &func_def.param_types,
+            &capture_types,
+            &param_types,
             &module.struct_metas,
+            &module.named_type_metas,
             &module.runtime_types,
         );
+        let data = match data {
+            Ok(data) => data,
+            Err(_) => {
+                return vo_runtime::jit_api::set_jit_infra_error(
+                    ctx,
+                    vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                    func_id as u64,
+                );
+            }
+        };
         let closure_data = vo_runtime::pack::PackedValue::from_data(data);
-        vm.state.send_spawn_fiber_to_island(island_id, closure_data);
+        island_effects.push(IslandCommandEffect::spawn_fiber(island_id, closure_data));
+        let terminal_policy = if transfer_commit.requires_terminal_commit() {
+            PendingTransitionTerminalPolicy::CommitOnAnyTerminal
+        } else {
+            PendingTransitionTerminalPolicy::CommitOnLanguagePanic
+        };
+        let rollback = transfer_commit.into_runtime_rollback();
+        return commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
     }
-    JitResult::Ok
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use core::ffi::c_void;
-    use vo_runtime::bytecode::{FunctionDef, Module};
-    use vo_runtime::ffi::SentinelErrorCache;
-    use vo_runtime::itab::ItabCache;
-    use vo_runtime::jit_api::{
-        JitRuntimeTrapKind, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_SENTINEL,
-    };
-    use vo_runtime::objects::interface::InterfaceSlot;
-    use vo_runtime::output::CaptureSink;
-    use vo_runtime::SlotType;
-
-    fn minimal_func() -> FunctionDef {
-        FunctionDef {
-            name: "callee".to_string(),
-            param_count: 0,
-            param_slots: 0,
-            local_slots: 1,
-            gc_scan_slots: 0,
-            ret_slots: 0,
-            ret_slot_types: Vec::new(),
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: false,
-            error_ret_slot: -1,
-            has_defer: false,
-            has_calls: false,
-            has_call_extern: false,
-            code: Vec::new(),
-            jit_metadata: Vec::new(),
-            slot_types: vec![SlotType::Value],
-            borrowed_scan_slots_prefix: vec![0, 0],
-            capture_types: Vec::new(),
-            capture_slot_types: Vec::new(),
-            param_types: Vec::new(),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn test_context<'a>(
-        vm: &'a mut Vm,
-        module: &'a Module,
-        fiber: &'a mut Fiber,
-        itab_cache: &'a mut ItabCache,
-        safepoint_flag: &'a bool,
-        panic_flag: &'a mut bool,
-        is_user_panic: &'a mut bool,
-        panic_msg: &'a mut InterfaceSlot,
-        program_args: &'a Vec<String>,
-        sentinel_errors: &'a mut SentinelErrorCache,
-        output: &'a CaptureSink,
-        host_output: &'a mut Option<Vec<u8>>,
-    ) -> JitContext {
-        JitContext {
-            gc: &mut vm.state.gc,
-            globals: core::ptr::null_mut(),
-            safepoint_flag,
-            panic_flag,
-            is_user_panic,
-            panic_msg,
-            user_panic_pc: u32::MAX,
-            runtime_trap_kind: JitRuntimeTrapKind::None as u8,
-            runtime_trap_arg0: 0,
-            runtime_trap_arg1: 0,
-            runtime_trap_pc: u32::MAX,
-            vm: vm as *mut Vm as *mut c_void,
-            fiber: fiber as *mut Fiber as *mut c_void,
-            itab_cache,
-            extern_registry: core::ptr::null(),
-            call_extern_fn: None,
-            module,
-            jit_func_table: core::ptr::null(),
-            jit_func_count: 0,
-            direct_call_table: core::ptr::null(),
-            direct_call_count: 0,
-            program_args,
-            sentinel_errors,
-            output: output as *const dyn vo_runtime::output::OutputSink,
-            host_output,
-            #[cfg(feature = "std")]
-            io: core::ptr::null_mut(),
-            call_func_id: 0,
-            call_arg_start: 0,
-            call_resume_pc: 0,
-            call_ret_slots: 0,
-            call_ret_reg: 0,
-            call_kind: 0,
-            #[cfg(feature = "std")]
-            wait_io_token: 0,
-            loop_exit_pc: 0,
-            stack_ptr: core::ptr::null_mut(),
-            stack_cap: 0,
-            stack_limit: 0,
-            call_depth: 0,
-            call_depth_limit: 64,
-            jit_bp: 0,
-            fiber_sp: 0,
-            push_frame_fn: None,
-            pop_frame_fn: None,
-            stack_overflow_fn: None,
-            push_resume_point_fn: None,
-            create_island_fn: None,
-            queue_close_fn: None,
-            queue_send_fn: None,
-            queue_recv_fn: None,
-            go_start_fn: None,
-            go_island_fn: None,
-            defer_push_fn: None,
-            recover_fn: None,
-            select_begin_fn: None,
-            select_send_fn: None,
-            select_recv_fn: None,
-            select_exec_fn: None,
-            is_error_return: 0,
-            ret_gcref_start: 0,
-            ret_is_heap: 0,
-            ret_start: 0,
-            prepare_closure_call_fn: None,
-            prepare_iface_call_fn: None,
-            ic_table: core::ptr::null_mut(),
-        }
-    }
-
-    #[test]
-    fn jit_go_island_rejects_nil_island_before_object_header_read() {
-        let module = Module::new("test".to_string());
-        let mut vm = Vm::new();
-        let mut fiber = Fiber::new(0);
-        let mut itab_cache = ItabCache::new();
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let program_args = Vec::new();
-        let mut sentinel_errors = SentinelErrorCache::new();
-        let output = CaptureSink::new();
-        let mut host_output = None;
-        let mut ctx = test_context(
-            &mut vm,
-            &module,
-            &mut fiber,
-            &mut itab_cache,
-            &safepoint_flag,
-            &mut panic_flag,
-            &mut is_user_panic,
-            &mut panic_msg,
-            &program_args,
-            &mut sentinel_errors,
-            &output,
-            &mut host_output,
-        );
-
-        let result = jit_go_island(&mut ctx, 0, 0, core::ptr::null(), 0);
-
-        assert_eq!(result, JitResult::Panic);
-        assert_eq!(
-            ctx.runtime_trap_kind,
-            JitRuntimeTrapKind::NilPointerDereference as u8
-        );
-    }
-
-    #[test]
-    fn jit_go_island_rejects_nil_closure_before_object_header_read() {
-        let module = Module::new("test".to_string());
-        let mut vm = Vm::new();
-        let island = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
-        let mut fiber = Fiber::new(0);
-        let mut itab_cache = ItabCache::new();
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let program_args = Vec::new();
-        let mut sentinel_errors = SentinelErrorCache::new();
-        let output = CaptureSink::new();
-        let mut host_output = None;
-        let mut ctx = test_context(
-            &mut vm,
-            &module,
-            &mut fiber,
-            &mut itab_cache,
-            &safepoint_flag,
-            &mut panic_flag,
-            &mut is_user_panic,
-            &mut panic_msg,
-            &program_args,
-            &mut sentinel_errors,
-            &output,
-            &mut host_output,
-        );
-
-        let result = jit_go_island(&mut ctx, island as u64, 0, core::ptr::null(), 0);
-
-        assert_eq!(result, JitResult::Panic);
-        assert_eq!(ctx.runtime_trap_kind, JitRuntimeTrapKind::NilFuncCall as u8);
-    }
-
-    #[test]
-    fn jit_go_island_rejects_non_island_gcref_before_island_header_read() {
-        let mut module = Module::new("test".to_string());
-        module.functions.push(minimal_func());
-        let mut vm = Vm::new();
-        let wrong_island = closure::create(&mut vm.state.gc, 0, 0);
-        let closure_ref = closure::create(&mut vm.state.gc, 0, 0);
-        let mut fiber = Fiber::new(0);
-        let mut itab_cache = ItabCache::new();
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let program_args = Vec::new();
-        let mut sentinel_errors = SentinelErrorCache::new();
-        let output = CaptureSink::new();
-        let mut host_output = None;
-        let mut ctx = test_context(
-            &mut vm,
-            &module,
-            &mut fiber,
-            &mut itab_cache,
-            &safepoint_flag,
-            &mut panic_flag,
-            &mut is_user_panic,
-            &mut panic_msg,
-            &program_args,
-            &mut sentinel_errors,
-            &output,
-            &mut host_output,
-        );
-
-        let result = jit_go_island(
-            &mut ctx,
-            wrong_island as u64,
-            closure_ref as u64,
-            core::ptr::null(),
-            0,
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(
-            ctx.runtime_trap_arg1,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
-        );
-    }
-
-    #[test]
-    fn jit_go_island_rejects_non_closure_gcref_before_closure_header_read() {
-        let mut module = Module::new("test".to_string());
-        module.functions.push(minimal_func());
-        let mut vm = Vm::new();
-        let island = vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
-        let wrong_closure =
-            vo_runtime::island::create(&mut vm.state.gc, vm.state.current_island_id);
-        let mut fiber = Fiber::new(0);
-        let mut itab_cache = ItabCache::new();
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let program_args = Vec::new();
-        let mut sentinel_errors = SentinelErrorCache::new();
-        let output = CaptureSink::new();
-        let mut host_output = None;
-        let mut ctx = test_context(
-            &mut vm,
-            &module,
-            &mut fiber,
-            &mut itab_cache,
-            &safepoint_flag,
-            &mut panic_flag,
-            &mut is_user_panic,
-            &mut panic_msg,
-            &program_args,
-            &mut sentinel_errors,
-            &output,
-            &mut host_output,
-        );
-
-        let result = jit_go_island(
-            &mut ctx,
-            island as u64,
-            wrong_closure as u64,
-            core::ptr::null(),
-            0,
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(
-            ctx.runtime_trap_arg1,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
-        );
-    }
-}
+mod tests;

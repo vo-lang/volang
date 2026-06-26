@@ -11,9 +11,10 @@ use vo_runtime::InterfaceSlot;
 
 use super::types::ExecResult;
 use super::types::RuntimeTrapKind;
-use crate::bytecode::{FunctionDef, Module};
+use crate::bytecode::Module;
 use crate::exec;
 use crate::fiber::Fiber;
+use crate::frame_call::{validate_closure_arg_shape, validate_closure_target, ValidClosureTarget};
 
 // String and slice have identical layout - use slice constants for both
 const FIELD_DATA_PTR: usize = slice::FIELD_DATA_PTR;
@@ -222,42 +223,72 @@ pub fn user_panic(
 // Closure call helpers
 // =============================================================================
 
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+pub(crate) use vo_runtime::objects::closure::ClosureCallLayout;
 
-// Re-export from vo-runtime for convenience
-pub use vo_runtime::objects::closure::{call_layout as closure_call_layout, ClosureCallLayout};
+#[inline]
+pub(crate) fn closure_call_layout(
+    closure_ref: u64,
+    closure_gcref: GcRef,
+    recv_slots: usize,
+    is_closure: bool,
+) -> Result<ClosureCallLayout, closure::ClosureCallLayoutError> {
+    closure::call_layout(closure_ref, closure_gcref, recv_slots, is_closure)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClosureFiberBuildError {
+    Trap(RuntimeTrapKind),
+    Malformed(String),
+}
+
+impl From<RuntimeTrapKind> for ClosureFiberBuildError {
+    fn from(kind: RuntimeTrapKind) -> Self {
+        Self::Trap(kind)
+    }
+}
 
 /// # Safety
 /// `args` must point to at least `arg_count` valid u64 values.
 pub unsafe fn try_build_closure_fiber_from_args_ptr(
-    functions: &[FunctionDef],
+    gc: &Gc,
+    module: &Module,
     next_fiber_id: u32,
     closure_ref: u64,
     args: *const u64,
     arg_count: u32,
-) -> Result<Fiber, RuntimeTrapKind> {
+) -> Result<Fiber, ClosureFiberBuildError> {
     if closure_ref == 0 {
-        return Err(RuntimeTrapKind::NilFuncCall);
+        return Err(RuntimeTrapKind::NilFuncCall.into());
     }
-    let closure_gcref = closure_ref as GcRef;
-    let func_id = closure::func_id(closure_gcref);
-    let Some(func_def) = functions.get(func_id as usize) else {
-        return Err(RuntimeTrapKind::NilFuncCall);
-    };
+    let target = validate_closure_target(gc, module, closure_ref, "Go closure spawn")
+        .map_err(ClosureFiberBuildError::Malformed)?;
+    validate_closure_arg_shape("Go closure spawn", &target, arg_count as usize)
+        .map_err(ClosureFiberBuildError::Malformed)?;
+    try_build_validated_closure_fiber_from_args_ptr(next_fiber_id, &target, args, arg_count)
+}
+
+/// # Safety
+/// `args` must point to at least `arg_count` valid u64 values and the caller
+/// must have validated `target` against `arg_count`.
+pub(crate) unsafe fn try_build_validated_closure_fiber_from_args_ptr(
+    next_fiber_id: u32,
+    target: &ValidClosureTarget<'_>,
+    args: *const u64,
+    arg_count: u32,
+) -> Result<Fiber, ClosureFiberBuildError> {
+    let func_id = target.func_id;
+    let func_def = target.func;
 
     let mut fiber = Fiber::new(next_fiber_id);
     fiber
         .try_push_frame(func_id, func_def.local_slots, func_def.gc_scan_slots, 0, 0)
-        .map_err(|_| RuntimeTrapKind::StackOverflow)?;
+        .map_err(|_| ClosureFiberBuildError::Trap(RuntimeTrapKind::StackOverflow))?;
 
-    let layout = closure_call_layout(
-        closure_ref,
-        closure_gcref,
-        func_def.recv_slots as usize,
-        func_def.is_closure,
-    );
+    let layout = target.layout;
     let stack = fiber.stack_ptr();
+    for i in 0..layout.receiver_capture_count {
+        *stack.add(i) = target.capture(i);
+    }
     if let Some(slot0) = layout.slot0 {
         *stack = slot0;
     }
@@ -270,53 +301,42 @@ pub unsafe fn try_build_closure_fiber_from_args_ptr(
 
 /// # Safety
 /// `args` must point to at least `arg_count` valid u64 values.
+#[cfg(test)]
 pub unsafe fn build_closure_fiber_from_args_ptr(
-    functions: &[FunctionDef],
+    gc: &Gc,
+    module: &Module,
     next_fiber_id: u32,
     closure_ref: u64,
     args: *const u64,
     arg_count: u32,
 ) -> Fiber {
-    try_build_closure_fiber_from_args_ptr(functions, next_fiber_id, closure_ref, args, arg_count)
+    try_build_closure_fiber_from_args_ptr(gc, module, next_fiber_id, closure_ref, args, arg_count)
         .expect("build_closure_fiber_from_args_ptr: nil closure")
-}
-
-/// Build full args for closure call (prepends slot0 if needed).
-pub fn build_closure_args(
-    closure_ref: u64,
-    closure_gcref: GcRef,
-    func_def: &crate::bytecode::FunctionDef,
-    args: *const u64,
-    arg_count: u32,
-) -> Vec<u64> {
-    let layout = closure_call_layout(
-        closure_ref,
-        closure_gcref,
-        func_def.recv_slots as usize,
-        func_def.is_closure,
-    );
-
-    let mut full_args = Vec::with_capacity(layout.slot0.is_some() as usize + arg_count as usize);
-    full_args.extend(layout.slot0);
-    for i in 0..arg_count {
-        full_args.push(unsafe { *args.add(i as usize) });
-    }
-    full_args
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_closure_fiber_from_args_ptr;
+    use super::{
+        build_closure_fiber_from_args_ptr, try_build_closure_fiber_from_args_ptr,
+        ClosureFiberBuildError,
+    };
     use crate::bytecode::FunctionDef;
+    use crate::bytecode::Module;
     use vo_runtime::gc::Gc;
     use vo_runtime::objects::closure;
+    use vo_runtime::SlotType;
 
-    fn make_func(local_slots: u16, recv_slots: u16, is_closure: bool) -> FunctionDef {
+    fn make_func(
+        local_slots: u16,
+        param_slots: u16,
+        recv_slots: u16,
+        is_closure: bool,
+    ) -> FunctionDef {
         let gc_scan_slots = FunctionDef::compute_gc_scan_slots(&[]);
         FunctionDef {
             name: String::new(),
-            param_count: 0,
-            param_slots: 0,
+            param_count: param_slots,
+            param_slots,
             local_slots,
             gc_scan_slots,
             ret_slots: 0,
@@ -340,16 +360,23 @@ mod tests {
         }
     }
 
+    fn module_with_func(func: FunctionDef) -> Module {
+        let mut module = Module::new("closure-fiber-test".to_string());
+        module.functions.push(func);
+        module
+    }
+
     #[test]
     fn build_closure_fiber_named_wrapper_starts_args_at_zero() {
         let mut gc = Gc::new();
         let closure_ref = closure::create(&mut gc, 0, 0);
-        let functions = vec![make_func(4, 0, false)];
+        let module = module_with_func(make_func(4, 2, 0, false));
         let args = [11_u64, 22_u64];
 
         let fiber = unsafe {
             build_closure_fiber_from_args_ptr(
-                &functions,
+                &gc,
+                &module,
                 7,
                 closure_ref as u64,
                 args.as_ptr(),
@@ -365,16 +392,43 @@ mod tests {
     #[test]
     fn build_closure_fiber_closure_value_puts_closure_in_slot_zero() {
         let mut gc = Gc::new();
-        let closure_ref = closure::create(&mut gc, 0, 1);
-        closure::set_capture(closure_ref, 0, 999);
-        let functions = vec![make_func(4, 0, true)];
+        let closure_ref = closure::create(&mut gc, 0, 0);
+        let module = module_with_func(make_func(4, 2, 0, true));
         let args = [33_u64];
 
         let fiber = unsafe {
             build_closure_fiber_from_args_ptr(
-                &functions,
+                &gc,
+                &module,
                 3,
                 closure_ref as u64,
+                args.as_ptr(),
+                args.len() as u32,
+            )
+        };
+
+        assert_eq!(fiber.stack[0], closure_ref as u64);
+        assert_eq!(fiber.stack[1], 33);
+    }
+
+    #[test]
+    fn vm_call_closure_canon_001_go_closure_fiber_stores_canonical_slot0_from_interior_ref() {
+        let mut gc = Gc::new();
+        let closure_ref = closure::create(&mut gc, 0, 1);
+        // Safety: test fixture initializes a freshly allocated closure.
+        unsafe { closure::set_capture(closure_ref, 0, 999) };
+        let interior_ref = unsafe { closure_ref.add(closure::HEADER_SLOTS) };
+        let mut func = make_func(4, 2, 0, true);
+        func.capture_slot_types = vec![SlotType::Value];
+        let module = module_with_func(func);
+        let args = [33_u64];
+
+        let fiber = unsafe {
+            build_closure_fiber_from_args_ptr(
+                &gc,
+                &module,
+                3,
+                interior_ref as u64,
                 args.as_ptr(),
                 args.len() as u32,
             )
@@ -388,13 +442,15 @@ mod tests {
     fn build_closure_fiber_method_value_uses_captured_receiver() {
         let mut gc = Gc::new();
         let closure_ref = closure::create(&mut gc, 0, 1);
-        closure::set_capture(closure_ref, 0, 444);
-        let functions = vec![make_func(4, 1, false)];
+        // Safety: test fixture initializes a freshly allocated closure.
+        unsafe { closure::set_capture(closure_ref, 0, 444) };
+        let module = module_with_func(make_func(4, 2, 1, false));
         let args = [55_u64];
 
         let fiber = unsafe {
             build_closure_fiber_from_args_ptr(
-                &functions,
+                &gc,
+                &module,
                 1,
                 closure_ref as u64,
                 args.as_ptr(),
@@ -404,5 +460,34 @@ mod tests {
 
         assert_eq!(fiber.stack[0], 444);
         assert_eq!(fiber.stack[1], 55);
+    }
+
+    #[test]
+    fn vm_closure_spawn_shape_002_rejects_arg_slot_shape_drift_before_frame_push() {
+        let mut gc = Gc::new();
+        let closure_ref = closure::create(&mut gc, 0, 0);
+        let module = module_with_func(make_func(1, 1, 0, false));
+        let args: [u64; 0] = [];
+
+        let result = unsafe {
+            try_build_closure_fiber_from_args_ptr(
+                &gc,
+                &module,
+                1,
+                closure_ref as u64,
+                args.as_ptr(),
+                0,
+            )
+        };
+
+        match result {
+            Err(ClosureFiberBuildError::Malformed(msg)) => {
+                assert!(
+                    msg.contains("Go closure spawn arg slot count 0 does not match target 1"),
+                    "{msg}"
+                );
+            }
+            other => panic!("shape drift should be rejected before frame build, got {other:?}"),
+        }
     }
 }

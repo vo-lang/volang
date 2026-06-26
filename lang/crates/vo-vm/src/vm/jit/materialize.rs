@@ -1,6 +1,7 @@
 use vo_runtime::bytecode::Module;
 
 use crate::fiber::{CallFrame, Fiber, FiberCapacityError};
+use crate::frame_call::{validate_call_frame_shape, validate_call_return_window};
 
 #[derive(Debug)]
 pub(super) enum JitFrameMaterializeError {
@@ -30,9 +31,33 @@ pub(super) fn setup_prepared_call(
     let callee_func_def = module.functions.get(callee_func_id as usize).ok_or(
         JitFrameMaterializeError::Invariant("prepared call callee func_id is out of module range"),
     )?;
+    validate_jit_call_frame_shape(
+        callee_func_def,
+        "prepared call callee frame shape is invalid",
+    )?;
+    validate_prepared_call_return_window(
+        fiber,
+        module,
+        call_ret_reg,
+        callee_ret_slots,
+        "prepared call caller return window is invalid",
+    )?;
     let param_slots = callee_func_def.param_slots as usize;
     let local_slots = callee_func_def.local_slots as usize;
     let gc_scan_slots = callee_func_def.gc_scan_slots as usize;
+
+    preflight_prepared_call_final_frames(
+        fiber,
+        module,
+        callee_func_id,
+        callee_ret_slots,
+        call_ret_reg,
+        callee_bp,
+        local_slots,
+        callee_func_def.gc_scan_slots,
+        caller_resume_pc,
+    )?;
+    preflight_jit_call_materialization(fiber, 1, callee_bp, local_slots)?;
 
     // Materialize any intermediate JIT frames from non-OK propagation.
     if !fiber.resume_stack.is_empty() {
@@ -67,6 +92,27 @@ pub(super) fn setup_regular_call(
     call_arg_start: usize,
     resume_pc: u32,
 ) -> Result<usize, JitFrameMaterializeError> {
+    let callee_func_def = module.functions.get(callee_func_id as usize).ok_or(
+        JitFrameMaterializeError::Invariant("regular call callee func_id is out of module range"),
+    )?;
+    validate_jit_call_frame_shape(
+        callee_func_def,
+        "regular call callee frame shape is invalid",
+    )?;
+    let callee_local_slots = callee_func_def.local_slots as usize;
+    let callee_gc_scan_slots = callee_func_def.gc_scan_slots as usize;
+    let arg_slots = callee_func_def.param_slots as usize;
+
+    let callee_bp = regular_call_callee_bp_for_preflight(fiber, call_arg_start)?;
+    preflight_jit_call_materialization(fiber, 1, callee_bp, callee_local_slots)?;
+    validate_regular_call_return_window(
+        fiber,
+        module,
+        call_ret_reg,
+        callee_ret_slots,
+        "regular call caller return window is invalid",
+    )?;
+
     materialize_jit_frames(fiber, module, resume_pc)?;
 
     let caller_frame = fiber
@@ -82,12 +128,6 @@ pub(super) fn setup_regular_call(
 
     fiber.sp = actual_caller_bp + caller_func.local_slots as usize;
 
-    let callee_func_def = module.functions.get(callee_func_id as usize).ok_or(
-        JitFrameMaterializeError::Invariant("regular call callee func_id is out of module range"),
-    )?;
-    let callee_local_slots = callee_func_def.local_slots as usize;
-    let callee_gc_scan_slots = callee_func_def.gc_scan_slots as usize;
-    let arg_slots = callee_func_def.param_slots as usize;
     let caller_scan_slots = caller_func.scan_slots_before_borrowed_start(call_arg_start as u16);
 
     let callee_bp = fiber.try_push_borrowed_call_frame(
@@ -104,6 +144,116 @@ pub(super) fn setup_regular_call(
     Ok(callee_bp)
 }
 
+fn validate_jit_call_frame_shape(
+    func: &vo_runtime::bytecode::FunctionDef,
+    context: &'static str,
+) -> Result<(), JitFrameMaterializeError> {
+    validate_call_frame_shape(func).map_err(|_| JitFrameMaterializeError::Invariant(context))
+}
+
+fn validate_prepared_call_return_window(
+    fiber: &Fiber,
+    module: &Module,
+    ret_reg: u16,
+    ret_slots: u16,
+    context: &'static str,
+) -> Result<(), JitFrameMaterializeError> {
+    let caller_func = prepared_call_caller_func_for_return_window(fiber, module)?;
+    validate_jit_call_return_window(caller_func, ret_reg, ret_slots, context)
+}
+
+fn prepared_call_caller_func_for_return_window<'a>(
+    fiber: &Fiber,
+    module: &'a Module,
+) -> Result<&'a vo_runtime::bytecode::FunctionDef, JitFrameMaterializeError> {
+    let caller_func_id = if let Some(resume) = fiber.resume_stack.first() {
+        resume.func_id
+    } else {
+        fiber
+            .frames
+            .last()
+            .ok_or(JitFrameMaterializeError::Invariant(
+                "prepared call has no materialized caller frame",
+            ))?
+            .func_id
+    };
+    module
+        .functions
+        .get(caller_func_id as usize)
+        .ok_or(JitFrameMaterializeError::Invariant(
+            "prepared call caller func_id is out of module range",
+        ))
+}
+
+fn validate_regular_call_return_window(
+    fiber: &Fiber,
+    module: &Module,
+    ret_reg: u16,
+    ret_slots: u16,
+    context: &'static str,
+) -> Result<(), JitFrameMaterializeError> {
+    let caller_func = regular_call_caller_func_for_return_window(fiber, module)?;
+    validate_jit_call_return_window(caller_func, ret_reg, ret_slots, context)
+}
+
+fn regular_call_caller_func_for_return_window<'a>(
+    fiber: &Fiber,
+    module: &'a Module,
+) -> Result<&'a vo_runtime::bytecode::FunctionDef, JitFrameMaterializeError> {
+    let caller_func_id = if let Some(resume) = fiber.resume_stack.first() {
+        resume.func_id
+    } else {
+        fiber
+            .frames
+            .last()
+            .ok_or(JitFrameMaterializeError::Invariant(
+                "regular call has no materialized caller frame",
+            ))?
+            .func_id
+    };
+    module
+        .functions
+        .get(caller_func_id as usize)
+        .ok_or(JitFrameMaterializeError::Invariant(
+            "regular call caller func_id is out of module range",
+        ))
+}
+
+fn validate_jit_call_return_window(
+    caller_func: &vo_runtime::bytecode::FunctionDef,
+    ret_reg: u16,
+    ret_slots: u16,
+    context: &'static str,
+) -> Result<(), JitFrameMaterializeError> {
+    validate_call_return_window(caller_func, ret_reg, ret_slots)
+        .map_err(|_| JitFrameMaterializeError::Invariant(context))
+}
+
+fn regular_call_callee_bp_for_preflight(
+    fiber: &Fiber,
+    call_arg_start: usize,
+) -> Result<usize, JitFrameMaterializeError> {
+    let caller_bp = if let Some(resume) = fiber.resume_stack.first() {
+        resume.bp
+    } else {
+        fiber
+            .frames
+            .last()
+            .ok_or(JitFrameMaterializeError::Invariant(
+                "regular call has no caller frame for capacity preflight",
+            ))?
+            .bp
+    };
+    caller_bp
+        .checked_add(call_arg_start)
+        .ok_or(JitFrameMaterializeError::Capacity(
+            FiberCapacityError::StackSlots {
+                required: usize::MAX,
+                limit: crate::fiber::MAX_STACK_CAPACITY,
+            },
+        ))
+}
+
 /// Convert resume_stack to fiber.frames when VM takes over from JIT.
 ///
 /// Called when JIT returns Call/WaitIo/Panic. The resume_stack contains
@@ -117,29 +267,69 @@ pub(super) fn materialize_jit_frames(
     let len = fiber.resume_stack.len();
 
     if len == 0 {
-        if let Some(frame) = fiber.frames.last_mut() {
-            let func = module.functions.get(frame.func_id as usize).ok_or(
+        if let Some(frame_idx) = fiber.frames.len().checked_sub(1) {
+            let func_id = fiber.frames[frame_idx].func_id;
+            let bp = fiber.frames[frame_idx].bp;
+            let func = module.functions.get(func_id as usize).ok_or(
                 JitFrameMaterializeError::Invariant("entry frame func_id is out of module range"),
             )?;
-            frame.pc = resume_pc as usize;
-            let sp = frame.bp.checked_add(func.local_slots as usize).ok_or(
+            if validate_call_frame_shape(func).is_err() {
+                return Err(JitFrameMaterializeError::Invariant(
+                    "entry frame shape is invalid",
+                ));
+            }
+            let sp = bp.checked_add(func.local_slots as usize).ok_or(
                 FiberCapacityError::StackSlots {
                     required: usize::MAX,
                     limit: crate::fiber::MAX_STACK_CAPACITY,
                 },
             )?;
+            preflight_existing_materialized_frame_invariants(fiber, module, sp)?;
             fiber.try_ensure_capacity(sp)?;
+            fiber.frames[frame_idx].pc = resume_pc as usize;
             fiber.sp = sp;
         }
         return Ok(());
     }
 
+    let plan = build_materialized_resume_plan(fiber, module, resume_pc)?;
+    let mut candidate_frames = Vec::with_capacity(fiber.frames.len() + plan.frames.len());
+    candidate_frames.extend_from_slice(&fiber.frames);
+    candidate_frames.extend_from_slice(&plan.frames);
+    preflight_materialized_frame_invariants(&candidate_frames, module, plan.sp)?;
     fiber.try_reserve_call_frames(len)?;
+    fiber.try_ensure_capacity(plan.sp)?;
+
+    if let Some(entry_frame) = fiber.frames.last_mut() {
+        entry_frame.pc = plan.entry_pc;
+    }
+
+    fiber.frames.extend(plan.frames);
+    fiber.sp = plan.sp;
+    fiber.resume_stack.clear();
+    if let Err(err) = materialized_jit_frame_invariants(fiber, module) {
+        return Err(JitFrameMaterializeError::Invariant(err));
+    }
+    Ok(())
+}
+
+struct MaterializedResumePlan {
+    frames: Vec<CallFrame>,
+    sp: usize,
+    entry_pc: usize,
+}
+
+fn build_materialized_resume_plan(
+    fiber: &Fiber,
+    module: &Module,
+    resume_pc: u32,
+) -> Result<MaterializedResumePlan, JitFrameMaterializeError> {
+    let len = fiber.resume_stack.len();
     let innermost = fiber
         .resume_stack
         .first()
         .ok_or(JitFrameMaterializeError::Invariant(
-            "resume stack unexpectedly empty after non-empty check",
+            "resume stack unexpectedly empty while building materialization plan",
         ))?;
     let innermost_local_slots = module
         .functions
@@ -148,7 +338,7 @@ pub(super) fn materialize_jit_frames(
             "innermost resume func_id is out of module range",
         ))?
         .local_slots as usize;
-    let innermost_sp =
+    let sp =
         innermost
             .bp
             .checked_add(innermost_local_slots)
@@ -156,18 +346,15 @@ pub(super) fn materialize_jit_frames(
                 required: usize::MAX,
                 limit: crate::fiber::MAX_STACK_CAPACITY,
             })?;
-    fiber.try_ensure_capacity(innermost_sp)?;
+    let entry_pc = fiber
+        .resume_stack
+        .last()
+        .ok_or(JitFrameMaterializeError::Invariant(
+            "resume stack unexpectedly empty while materializing entry frame",
+        ))?
+        .resume_pc as usize;
 
-    if let Some(entry_frame) = fiber.frames.last_mut() {
-        entry_frame.pc = fiber
-            .resume_stack
-            .last()
-            .ok_or(JitFrameMaterializeError::Invariant(
-                "resume stack unexpectedly empty while materializing entry frame",
-            ))?
-            .resume_pc as usize;
-    }
-
+    let mut frames = Vec::with_capacity(len);
     for i in (0..len).rev() {
         let rp = *fiber
             .resume_stack
@@ -184,6 +371,28 @@ pub(super) fn materialize_jit_frames(
                 .ok_or(JitFrameMaterializeError::Invariant(
                     "resume func_id is out of module range",
                 ))?;
+        if validate_call_frame_shape(func_def).is_err() {
+            return Err(JitFrameMaterializeError::Invariant(
+                "resume frame shape is invalid",
+            ));
+        }
+        validate_resume_return_window(fiber, module, i, rp, func_def)?;
+        if bp > sp {
+            return Err(JitFrameMaterializeError::Invariant(
+                "resume frame bp is outside materialized stack extent",
+            ));
+        }
+        let scan_end = bp.checked_add(func_def.gc_scan_slots as usize).ok_or(
+            FiberCapacityError::StackSlots {
+                required: usize::MAX,
+                limit: crate::fiber::MAX_STACK_CAPACITY,
+            },
+        )?;
+        if scan_end > sp {
+            return Err(JitFrameMaterializeError::Invariant(
+                "resume frame scan extent is outside materialized stack extent",
+            ));
+        }
 
         let pc = if i == 0 {
             resume_pc as usize
@@ -197,58 +406,192 @@ pub(super) fn materialize_jit_frames(
                 .resume_pc as usize
         };
 
-        let existing = fiber
-            .frames
-            .iter_mut()
-            .find(|f| f.func_id == func_id && f.bp == bp);
-
-        if let Some(frame) = existing {
-            frame.pc = pc;
-            frame.scan_slots = func_def.gc_scan_slots;
-        } else {
-            let mut frame = CallFrame::new(
-                func_id,
-                bp,
-                bp,
-                rp.ret_reg,
-                rp.ret_slots,
-                func_def.gc_scan_slots,
-                None,
-                0,
-                0,
-            );
-            frame.pc = pc;
-            fiber.frames.push(frame);
-        }
+        let mut frame = CallFrame::new(
+            func_id,
+            bp,
+            bp,
+            rp.ret_reg,
+            rp.ret_slots,
+            func_def.gc_scan_slots,
+            None,
+            0,
+            0,
+        );
+        frame.pc = pc;
+        frames.push(frame);
     }
 
-    fiber.sp = innermost_sp;
-    fiber.resume_stack.clear();
-    if let Err(err) = materialized_jit_frame_invariants(fiber, module) {
-        return Err(JitFrameMaterializeError::Invariant(err));
+    Ok(MaterializedResumePlan {
+        frames,
+        sp,
+        entry_pc,
+    })
+}
+
+fn validate_resume_return_window(
+    fiber: &Fiber,
+    module: &Module,
+    resume_index: usize,
+    rp: crate::fiber::ResumePoint,
+    callee_func: &vo_runtime::bytecode::FunctionDef,
+) -> Result<(), JitFrameMaterializeError> {
+    if rp.ret_slots != callee_func.ret_slots {
+        return Err(JitFrameMaterializeError::Invariant(
+            "resume return slots do not match callee metadata",
+        ));
+    }
+
+    let (caller_func_id, caller_bp) =
+        if let Some(caller_resume) = fiber.resume_stack.get(resume_index + 1) {
+            (caller_resume.func_id, caller_resume.bp)
+        } else {
+            let frame = fiber
+                .frames
+                .last()
+                .ok_or(JitFrameMaterializeError::Invariant(
+                    "outermost resume point has no materialized caller frame",
+                ))?;
+            (frame.func_id, frame.bp)
+        };
+    if rp.caller_bp != caller_bp {
+        return Err(JitFrameMaterializeError::Invariant(
+            "resume caller bp does not match caller frame",
+        ));
+    }
+    let caller_func = module.functions.get(caller_func_id as usize).ok_or(
+        JitFrameMaterializeError::Invariant("resume caller func_id is out of module range"),
+    )?;
+    let ret_end = (rp.ret_reg as usize)
+        .checked_add(rp.ret_slots as usize)
+        .ok_or(JitFrameMaterializeError::Capacity(
+            FiberCapacityError::StackSlots {
+                required: usize::MAX,
+                limit: crate::fiber::MAX_STACK_CAPACITY,
+            },
+        ))?;
+    if ret_end > caller_func.local_slots as usize {
+        return Err(JitFrameMaterializeError::Invariant(
+            "resume return window exceeds caller locals",
+        ));
     }
     Ok(())
+}
+
+fn preflight_existing_materialized_frame_invariants(
+    fiber: &Fiber,
+    module: &Module,
+    materialized_sp: usize,
+) -> Result<(), JitFrameMaterializeError> {
+    preflight_materialized_frame_invariants(&fiber.frames, module, materialized_sp)
+}
+
+fn preflight_materialized_frame_invariants(
+    frames: &[CallFrame],
+    module: &Module,
+    materialized_sp: usize,
+) -> Result<(), JitFrameMaterializeError> {
+    validate_materialized_frame_invariants(frames, module, materialized_sp, true)
+        .map_err(JitFrameMaterializeError::Invariant)
+}
+
+fn preflight_jit_call_materialization(
+    fiber: &mut Fiber,
+    callee_frames: usize,
+    callee_bp: usize,
+    callee_local_slots: usize,
+) -> Result<(), JitFrameMaterializeError> {
+    let frame_count = fiber.resume_stack.len().checked_add(callee_frames).ok_or(
+        JitFrameMaterializeError::Invariant("JIT call materialization frame count overflowed"),
+    )?;
+    fiber.try_reserve_call_frames(frame_count)?;
+    let callee_sp =
+        callee_bp
+            .checked_add(callee_local_slots)
+            .ok_or(FiberCapacityError::StackSlots {
+                required: usize::MAX,
+                limit: crate::fiber::MAX_STACK_CAPACITY,
+            })?;
+    fiber.try_ensure_capacity(callee_sp)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn preflight_prepared_call_final_frames(
+    fiber: &Fiber,
+    module: &Module,
+    callee_func_id: u32,
+    callee_ret_slots: u16,
+    call_ret_reg: u16,
+    callee_bp: usize,
+    callee_local_slots: usize,
+    callee_gc_scan_slots: u16,
+    caller_resume_pc: u32,
+) -> Result<(), JitFrameMaterializeError> {
+    let final_sp =
+        callee_bp
+            .checked_add(callee_local_slots)
+            .ok_or(FiberCapacityError::StackSlots {
+                required: usize::MAX,
+                limit: crate::fiber::MAX_STACK_CAPACITY,
+            })?;
+    let mut candidate_frames = if fiber.resume_stack.is_empty() {
+        fiber.frames.clone()
+    } else {
+        let plan = build_materialized_resume_plan(fiber, module, caller_resume_pc)?;
+        let mut frames = Vec::with_capacity(fiber.frames.len() + plan.frames.len());
+        frames.extend_from_slice(&fiber.frames);
+        frames.extend_from_slice(&plan.frames);
+        frames
+    };
+    candidate_frames.push(CallFrame::new(
+        callee_func_id,
+        callee_bp,
+        callee_bp,
+        call_ret_reg,
+        callee_ret_slots,
+        callee_gc_scan_slots,
+        None,
+        0,
+        0,
+    ));
+    preflight_materialized_frame_invariants(&candidate_frames, module, final_sp)
 }
 
 pub(super) fn materialized_jit_frame_invariants(
     fiber: &Fiber,
     module: &Module,
 ) -> Result<(), &'static str> {
-    #[cfg(feature = "jit")]
-    if !fiber.resume_stack.is_empty() {
-        return Err("resume_stack must be empty after JIT frame materialization");
-    }
-
     if fiber.sp > fiber.stack.len() {
         return Err("fiber.sp is outside allocated stack");
     }
+    validate_materialized_frame_invariants(
+        &fiber.frames,
+        module,
+        fiber.sp,
+        fiber.resume_stack.is_empty(),
+    )
+}
 
-    for (idx, frame) in fiber.frames.iter().enumerate() {
+fn validate_materialized_frame_invariants(
+    frames: &[CallFrame],
+    module: &Module,
+    sp: usize,
+    resume_stack_empty: bool,
+) -> Result<(), &'static str> {
+    #[cfg(feature = "jit")]
+    if !resume_stack_empty {
+        return Err("resume_stack must be empty after JIT frame materialization");
+    }
+
+    for (idx, frame) in frames.iter().enumerate() {
         let func = module
             .functions
             .get(frame.func_id as usize)
             .ok_or("materialized frame func_id is out of module range")?;
-        if frame.bp > fiber.sp {
+        if validate_call_frame_shape(func).is_err() {
+            return Err("materialized frame shape is invalid");
+        }
+        if frame.bp > sp {
             return Err("materialized frame bp is outside fiber.sp");
         }
         if frame.scan_slots > func.gc_scan_slots {
@@ -261,27 +604,39 @@ pub(super) fn materialized_jit_frame_invariants(
             .bp
             .checked_add(frame.scan_slots as usize)
             .ok_or("materialized frame scan extent overflowed")?;
-        if scan_end > fiber.sp {
+        if scan_end > sp {
             return Err("materialized frame scan extent is outside fiber.sp");
+        }
+        if idx > 0 {
+            let parent = frames
+                .get(idx - 1)
+                .ok_or("materialized frame parent frame disappeared")?;
+            let parent_func = module
+                .functions
+                .get(parent.func_id as usize)
+                .ok_or("materialized frame parent func_id is out of module range")?;
+            let parent_scan_slots_after_pop =
+                frame.caller_scan_slots_restore.unwrap_or(parent.scan_slots);
+            if parent_scan_slots_after_pop > parent_func.gc_scan_slots {
+                return Err("materialized frame parent scan restore exceeds metadata");
+            }
+            if parent_scan_slots_after_pop > parent_func.local_slots {
+                return Err("materialized frame parent scan restore exceeds locals");
+            }
+            let parent_scan_end = parent
+                .bp
+                .checked_add(parent_scan_slots_after_pop as usize)
+                .ok_or("materialized frame parent restored scan extent overflowed")?;
+            if parent_scan_end > frame.sp_restore {
+                return Err("materialized frame restore sp is below parent scan extent");
+            }
+        } else if frame.caller_scan_slots_restore.is_some() {
+            return Err("borrowed frame scan restore has no parent frame");
         }
 
         if let Some(restore) = frame.caller_scan_slots_restore {
             if idx == 0 {
                 return Err("borrowed frame scan restore has no parent frame");
-            }
-            let parent = fiber
-                .frames
-                .get(idx - 1)
-                .ok_or("borrowed frame parent frame disappeared")?;
-            let parent_func = module
-                .functions
-                .get(parent.func_id as usize)
-                .ok_or("borrowed frame parent func_id is out of module range")?;
-            if restore > parent_func.gc_scan_slots {
-                return Err("borrowed frame scan restore exceeds parent metadata");
-            }
-            if restore > parent_func.local_slots {
-                return Err("borrowed frame scan restore exceeds parent locals");
             }
             if frame.caller_zero_start > frame.caller_zero_end {
                 return Err("borrowed frame caller zero range is inverted");
@@ -292,7 +647,7 @@ pub(super) fn materialized_jit_frame_invariants(
         }
     }
 
-    if let Some(frame) = fiber.frames.last() {
+    if let Some(frame) = frames.last() {
         let func = module
             .functions
             .get(frame.func_id as usize)
@@ -301,7 +656,7 @@ pub(super) fn materialized_jit_frame_invariants(
             .bp
             .checked_add(func.local_slots as usize)
             .ok_or("innermost materialized frame stack extent overflowed")?;
-        if frame_end > fiber.sp {
+        if frame_end > sp {
             return Err("innermost materialized frame is outside fiber.sp");
         }
     }
@@ -310,123 +665,4 @@ pub(super) fn materialized_jit_frame_invariants(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::test_support::function;
-    use super::*;
-    use crate::fiber::ResumePoint;
-
-    #[test]
-    fn gc_materialized_frame_invariants_are_not_debug_only() {
-        let src = include_str!("materialize.rs");
-        assert!(
-            !src.contains(
-                "#[cfg(debug_assertions)]\n    if let Err(err) = materialized_jit_frame_invariants"
-            ),
-            "JIT frame materialization invariants must run in release builds"
-        );
-        assert!(
-            !src.contains(
-                "#[cfg(any(debug_assertions, test))]\nfn materialized_jit_frame_invariants"
-            ),
-            "JIT frame materialization invariant implementation must be available outside debug/test"
-        );
-    }
-
-    #[test]
-    fn gc_materialize_jit_frames_preserves_nested_frame_invariants() {
-        let mut module = Module::new("jit-frame-test".to_string());
-        module.functions.push(function(2, 0));
-        module.functions.push(function(3, 1));
-        module.functions.push(function(4, 2));
-
-        let mut fiber = Fiber::new(1);
-        let entry_bp = fiber.push_frame(0, 2, 0, 0, 0);
-        let outer_bp = fiber.reserve_slots_at(entry_bp + 2, 3) - 3;
-        let inner_bp = fiber.reserve_slots_at(outer_bp + 3, 4) - 4;
-
-        fiber.resume_stack.push(ResumePoint {
-            func_id: 2,
-            resume_pc: 22,
-            bp: inner_bp,
-            caller_bp: outer_bp,
-            ret_reg: 5,
-            ret_slots: 1,
-        });
-        fiber.resume_stack.push(ResumePoint {
-            func_id: 1,
-            resume_pc: 11,
-            bp: outer_bp,
-            caller_bp: entry_bp,
-            ret_reg: 3,
-            ret_slots: 1,
-        });
-
-        materialize_jit_frames(&mut fiber, &module, 33).expect("materialize");
-
-        assert!(fiber.resume_stack.is_empty());
-        assert_eq!(fiber.sp, inner_bp + 4);
-        assert_eq!(fiber.frames.len(), 3);
-        assert_eq!(fiber.frames[0].pc, 11);
-        assert_eq!(fiber.frames[1].func_id, 1);
-        assert_eq!(fiber.frames[1].pc, 22);
-        assert_eq!(fiber.frames[2].func_id, 2);
-        assert_eq!(fiber.frames[2].pc, 33);
-        assert!(materialized_jit_frame_invariants(&fiber, &module).is_ok());
-    }
-
-    #[test]
-    fn gc_materialize_jit_frames_without_shadow_frames_restores_entry_sp() {
-        let mut module = Module::new("jit-entry-frame-test".to_string());
-        module.functions.push(function(9, 3));
-
-        let mut fiber = Fiber::new(1);
-        let bp = fiber.push_frame(0, 9, 3, 0, 0);
-        fiber.sp = bp;
-
-        materialize_jit_frames(&mut fiber, &module, 17).expect("materialize");
-
-        assert!(fiber.resume_stack.is_empty());
-        assert_eq!(fiber.frames.len(), 1);
-        assert_eq!(fiber.frames[0].pc, 17);
-        assert_eq!(fiber.sp, bp + 9);
-        assert!(materialized_jit_frame_invariants(&fiber, &module).is_ok());
-    }
-
-    #[test]
-    fn gc_materialized_invariants_allow_borrowed_parent_above_current_sp() {
-        let mut module = Module::new("jit-borrowed-parent-frame-test".to_string());
-        module.functions.push(function(10, 4));
-        module.functions.push(function(2, 1));
-        module.functions.push(function(3, 1));
-
-        let mut fiber = Fiber::new(1);
-        let parent_bp = fiber.push_frame(0, 10, 4, 0, 0);
-        let entry_bp = fiber.push_borrowed_call_frame(1, 2, 0, 0, 2, 2, 1);
-        let inner_bp = fiber.reserve_slots_at(entry_bp + 2, 3) - 3;
-
-        assert_eq!(parent_bp, 0);
-        assert_eq!(entry_bp, 2);
-        assert_eq!(inner_bp, 4);
-        assert_eq!(fiber.frames[0].scan_slots, 2);
-
-        fiber.resume_stack.push(ResumePoint {
-            func_id: 2,
-            resume_pc: 22,
-            bp: inner_bp,
-            caller_bp: entry_bp,
-            ret_reg: 0,
-            ret_slots: 0,
-        });
-
-        materialize_jit_frames(&mut fiber, &module, 33).expect("materialize");
-
-        assert_eq!(fiber.sp, 7);
-        assert_eq!(fiber.frames.len(), 3);
-        assert_eq!(
-            fiber.frames[0].bp + module.functions[0].local_slots as usize,
-            10
-        );
-        assert!(fiber.frames[0].bp + module.functions[0].local_slots as usize > fiber.sp);
-        assert!(materialized_jit_frame_invariants(&fiber, &module).is_ok());
-    }
-}
+mod tests;

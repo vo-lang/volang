@@ -7,11 +7,11 @@ use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use vo_runtime::ffi::HostEventReplaySource;
+use vo_runtime::gc::GcRef;
 #[cfg(feature = "std")]
 use vo_runtime::io::IoToken;
 use vo_runtime::objects::interface::InterfaceSlot;
-
-use vo_runtime::gc::GcRef;
 
 use crate::vm::RuntimeTrapKind;
 
@@ -19,6 +19,48 @@ use crate::vm::RuntimeTrapKind;
 pub struct RemoteRecvResponse {
     pub data: Vec<u8>,
     pub closed: bool,
+    pub rejected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteEndpointWait {
+    Send { endpoint_id: u64, wait_id: u64 },
+    Recv { endpoint_id: u64, wait_id: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueWaitState {
+    pub queue_ref: GcRef,
+    pub kind: vo_runtime::objects::queue_state::SelectWaitKind,
+    pub registration_id: u64,
+}
+
+/// VM-owned slot payload that may survive to a GC-visible boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedSlotPayload {
+    pub values: Vec<u64>,
+    pub slot_types: Vec<vo_runtime::SlotType>,
+}
+
+impl TypedSlotPayload {
+    pub fn try_new(
+        values: Vec<u64>,
+        slot_types: Vec<vo_runtime::SlotType>,
+    ) -> Result<Self, String> {
+        if values.len() != slot_types.len() {
+            return Err(format!(
+                "typed slot payload width mismatch: values={} slot_types={}",
+                values.len(),
+                slot_types.len()
+            ));
+        }
+        Ok(Self { values, slot_types })
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -167,6 +209,10 @@ pub struct UnwindingState {
     /// Return values to write after all defers complete.
     /// None for void functions. For panic, may contain heap return values for recover().
     pub return_values: Option<ReturnValues>,
+    /// Function whose return metadata applies to `return_values`.
+    pub return_func_id: u32,
+    /// PC in the returning function when return/unwind started.
+    pub return_pc: usize,
     /// Where to write return values in caller's frame.
     pub caller_ret_reg: u16,
     /// How many slots caller expects.
@@ -198,25 +244,56 @@ pub enum SelectCaseKind {
     Recv,
 }
 
+impl SelectCaseKind {
+    #[inline]
+    pub fn wait_kind(self) -> vo_runtime::objects::queue_state::SelectWaitKind {
+        match self {
+            Self::Send => vo_runtime::objects::queue_state::SelectWaitKind::Send,
+            Self::Recv => vo_runtime::objects::queue_state::SelectWaitKind::Recv,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectCase {
     pub kind: SelectCaseKind,
+    pub result_index: u16,
     pub queue_reg: u16,
     pub val_reg: u16,
     pub elem_slots: u8,
+    pub elem_layout: Option<Vec<vo_runtime::SlotType>>,
     pub has_ok: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectRegisteredQueue {
+    pub case_index: u16,
+    pub queue: vo_runtime::gc::GcRef,
+    pub kind: SelectCaseKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectWokenResult {
+    SendAccepted,
+    Recv {
+        data: Vec<u64>,
+        slot_types: Vec<vo_runtime::SlotType>,
+        closed: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct SelectState {
     pub cases: Vec<SelectCase>,
+    pub expected_cases: u16,
     pub has_default: bool,
     pub woken_index: Option<usize>,
+    pub woken_result: Option<SelectWokenResult>,
     /// Unique ID for this select instance, used for cancellation.
     /// When one case becomes ready, we cancel waiters on other channels using this ID.
     pub select_id: u64,
     /// Channels we've registered waiters on (for cancellation when woken).
-    pub registered_queues: Vec<vo_runtime::gc::GcRef>,
+    pub registered_queues: Vec<SelectRegisteredQueue>,
 }
 
 /// Fiber lifecycle state - single source of truth.
@@ -268,7 +345,41 @@ pub enum BlockReason {
     HostEvent { token: u64, delay_ms: u32 },
     /// Waiting for a host-side async op that produces a result (e.g. fetch Promise).
     /// Fiber re-executes the extern on wake (PC was undone before blocking).
-    HostEventReplay(u64),
+    HostEventReplay {
+        token: u64,
+        source: HostEventReplaySource,
+    },
+}
+
+#[cfg(feature = "jit")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JitExternSuspend {
+    Yield {
+        resume_pc: u32,
+    },
+    QueueBlock {
+        resume_pc: u32,
+    },
+    #[cfg(feature = "std")]
+    WaitIo {
+        token: vo_runtime::io::IoToken,
+        replay_pc: u32,
+    },
+    HostWait {
+        token: u64,
+        delay_ms: u32,
+        resume_pc: u32,
+    },
+    HostReplay {
+        token: u64,
+        source: HostEventReplaySource,
+        replay_pc: u32,
+    },
+    CallClosure {
+        closure_ref: GcRef,
+        args: TypedSlotPayload,
+        replay_pc: u32,
+    },
 }
 
 /// Unified panic state for both recoverable and fatal panics.
@@ -309,8 +420,9 @@ pub struct ClosureReplayState {
     /// Each entry is (return_values, slot_types) from one closure call.
     /// slot_types are needed for GC scanning — without them, non-GcRef values
     /// (int, float, interface slot0 metadata) would be dereferenced as pointers.
-    /// On extern replay, results are consumed in order via `index`.
-    /// Cleared when extern finally returns Ok/Panic (not CallClosure).
+    /// On extern replay, results are consumed in order within the active
+    /// extern scope. The scope is cleared when that extern finally returns a
+    /// terminal result, but parent scopes survive nested extern calls.
     pub results: Vec<(Vec<u64>, Vec<vo_runtime::SlotType>)>,
     /// Consumption index during extern replay.
     /// Tracks how many cached results have been consumed in the current replay.
@@ -327,6 +439,18 @@ pub struct ClosureReplayState {
     pub panic_message: Option<String>,
     /// Stack of saved `depth` values for nested replay cycles.
     pub depth_stack: Vec<usize>,
+    /// Active extern replay scope.
+    pub extern_scope: Option<ClosureReplayExternScope>,
+    /// Saved parent extern scopes for nested extern calls.
+    pub extern_scope_stack: Vec<ClosureReplayExternScope>,
+    /// Saved parent panic messages for nested extern calls.
+    pub panic_message_stack: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosureReplayExternScope {
+    pub result_start: usize,
+    pub frame_depth: usize,
 }
 
 impl Default for ClosureReplayState {
@@ -343,6 +467,9 @@ impl ClosureReplayState {
             depth: 0,
             panic_message: None,
             depth_stack: Vec::new(),
+            extern_scope: None,
+            extern_scope_stack: Vec::new(),
+            panic_message_stack: Vec::new(),
         }
     }
 
@@ -352,15 +479,91 @@ impl ClosureReplayState {
         self.depth = 0;
         self.panic_message = None;
         self.depth_stack.clear();
+        self.extern_scope = None;
+        self.extern_scope_stack.clear();
+        self.panic_message_stack.clear();
     }
 
-    /// Prepare for a new CallExtern execution: take results, reset index.
-    /// Returns (results, panic_message) for passing to the extern call.
-    /// The results are stripped of slot_types (only needed for GC scanning while cached).
-    pub fn take_for_extern(&mut self) -> (Vec<Vec<u64>>, Option<String>) {
-        let typed_results = core::mem::take(&mut self.results);
-        let results: Vec<Vec<u64>> = typed_results.into_iter().map(|(vals, _)| vals).collect();
-        let panic_message = self.panic_message.take();
+    /// Prepare a replay snapshot for a new CallExtern execution.
+    ///
+    /// The fiber keeps the authoritative typed replay log until the extern
+    /// returns a terminal result. That lets multi-step replay re-run from the
+    /// beginning and keeps cached GC references visible to VM root scanning.
+    pub fn snapshot_for_extern(
+        &mut self,
+        frame_depth: usize,
+    ) -> (Vec<vo_runtime::ffi::ExternReplayResult>, Option<String>) {
+        self.begin_extern_scope(frame_depth);
+        let result_start = self
+            .extern_scope
+            .map(|scope| scope.result_start.min(self.results.len()))
+            .unwrap_or(0);
+        let results = self
+            .results
+            .iter()
+            .skip(result_start)
+            .map(|(vals, slot_types)| {
+                vo_runtime::ffi::ExternReplayResult::new(vals.clone(), slot_types.clone())
+            })
+            .collect();
+        let panic_message = self.panic_message.clone();
+        self.index = result_start;
+        (results, panic_message)
+    }
+
+    fn begin_extern_scope(&mut self, frame_depth: usize) {
+        match self.extern_scope {
+            Some(scope) if scope.frame_depth == frame_depth => {}
+            Some(scope) => {
+                self.extern_scope_stack.push(scope);
+                self.panic_message_stack.push(self.panic_message.take());
+                self.extern_scope = Some(ClosureReplayExternScope {
+                    result_start: self.results.len(),
+                    frame_depth,
+                });
+            }
+            None => {
+                self.extern_scope = Some(ClosureReplayExternScope {
+                    result_start: self.results.len(),
+                    frame_depth,
+                });
+            }
+        }
+    }
+
+    /// Finish a terminal extern replay result.
+    ///
+    /// Nested externs can run while an outer extern's closure replay is still
+    /// pending. A terminal inner extern must discard only the replay results it
+    /// produced and then restore the parent replay scope.
+    pub fn finish_extern_terminal(&mut self) {
+        let Some(scope) = self.extern_scope.take() else {
+            self.reset();
+            return;
+        };
+        self.results
+            .truncate(scope.result_start.min(self.results.len()));
+        self.index = scope.result_start.min(self.results.len());
+        self.panic_message = self.panic_message_stack.pop().flatten();
+        self.extern_scope = self.extern_scope_stack.pop();
+        if self.extern_scope.is_none() {
+            self.index = 0;
+        }
+    }
+
+    /// Prepare a full unscoped replay snapshot for tests and root scanning.
+    #[cfg(test)]
+    pub fn snapshot_all_for_test(
+        &mut self,
+    ) -> (Vec<vo_runtime::ffi::ExternReplayResult>, Option<String>) {
+        let results = self
+            .results
+            .iter()
+            .map(|(vals, slot_types)| {
+                vo_runtime::ffi::ExternReplayResult::new(vals.clone(), slot_types.clone())
+            })
+            .collect();
+        let panic_message = self.panic_message.clone();
         self.index = 0;
         (results, panic_message)
     }
@@ -491,6 +694,10 @@ impl FiberCapacityError {
 #[derive(Debug)]
 pub struct Fiber {
     pub id: u32,
+    /// Generation for protocols that carry opaque fiber handles across turns.
+    /// Incremented whenever a scheduler slot is reused so stale responses cannot
+    /// target a new fiber that happens to occupy the same slot.
+    pub generation: u32,
     /// Unified state machine (single source of truth).
     pub state: FiberState,
     pub stack: Vec<u64>,
@@ -499,6 +706,7 @@ pub struct Fiber {
     pub frames: Vec<CallFrame>,
     pub defer_stack: Vec<DeferEntry>,
     pub unwinding: Option<UnwindingState>,
+    pub queue_wait_state: Option<QueueWaitState>,
     pub select_state: Option<SelectState>,
     /// Counter for generating unique select IDs within this fiber.
     pub next_select_id: u64,
@@ -527,6 +735,8 @@ pub struct Fiber {
     /// Lazily allocated on first JIT use. Per-fiber to avoid data races between goroutines.
     #[cfg(feature = "jit")]
     pub ic_table: Vec<vo_runtime::jit_api::DynCallIC>,
+    #[cfg(feature = "jit")]
+    pub jit_extern_suspend: Option<JitExternSuspend>,
     pub call_iface_ic_table: Vec<CallIfaceICEntry>,
     /// Closure callback suspend/replay state for extern functions.
     pub closure_replay: ClosureReplayState,
@@ -543,6 +753,9 @@ pub struct Fiber {
     /// JIT panic message — the interface{} value passed to panic().
     #[cfg(feature = "jit")]
     pub jit_panic_msg: InterfaceSlot,
+    /// JIT infrastructure diagnostic message published by runtime callbacks.
+    #[cfg(feature = "jit")]
+    pub jit_infra_error_message: String,
     /// Pending remote recv response data from home island.
     /// Set by handle_chan_response_command before waking fiber.
     /// Consumed by ChanRecv handler on retry.
@@ -551,18 +764,23 @@ pub struct Fiber {
     /// Set by handle_chan_response_command(SendAck{closed:true}) before waking fiber.
     /// Consumed by ChanSend handler on retry.
     pub remote_send_closed: bool,
+    /// Source-specific identity for an outstanding remote endpoint wait.
+    pub remote_endpoint_wait: Option<RemoteEndpointWait>,
+    next_remote_endpoint_wait_id: u64,
 }
 
 impl Fiber {
     pub fn new(id: u32) -> Self {
         Self {
             id,
+            generation: 1,
             state: FiberState::Runnable,
             stack: Vec::with_capacity(INITIAL_STACK_CAPACITY),
             sp: 0,
             frames: Vec::new(),
             defer_stack: Vec::new(),
             unwinding: None,
+            queue_wait_state: None,
             select_state: None,
             next_select_id: 0,
             panic_state: None,
@@ -577,6 +795,8 @@ impl Fiber {
             resume_stack: Vec::new(), // Lazy: only allocates on first push (Call/WaitIo)
             #[cfg(feature = "jit")]
             ic_table: Vec::new(), // Lazy: allocated on first JIT dispatch
+            #[cfg(feature = "jit")]
+            jit_extern_suspend: None,
             call_iface_ic_table: Vec::new(),
             closure_replay: ClosureReplayState::new(),
             #[cfg(feature = "jit")]
@@ -587,8 +807,12 @@ impl Fiber {
             jit_safepoint_flag: false,
             #[cfg(feature = "jit")]
             jit_panic_msg: InterfaceSlot::default(),
+            #[cfg(feature = "jit")]
+            jit_infra_error_message: String::new(),
             remote_recv_response: None,
             remote_send_closed: false,
+            remote_endpoint_wait: None,
+            next_remote_endpoint_wait_id: 1,
         }
     }
 
@@ -602,24 +826,146 @@ impl Fiber {
         closed
     }
 
-    pub fn apply_endpoint_response(&mut self, kind: &vo_runtime::island::EndpointResponseKind) {
-        match kind {
-            vo_runtime::island::EndpointResponseKind::SendAck { closed } => {
+    pub fn wake_key_packed(&self) -> u64 {
+        ((self.generation as u64) << 32) | self.id as u64
+    }
+
+    pub fn endpoint_response_key(&self) -> u64 {
+        self.wake_key_packed()
+    }
+
+    pub fn begin_queue_wait(&mut self, waiter: &vo_runtime::objects::queue_state::QueueWaiter) {
+        self.queue_wait_state = waiter.kind.map(|kind| QueueWaitState {
+            queue_ref: waiter.queue_ref as GcRef,
+            kind,
+            registration_id: waiter.registration_id,
+        });
+    }
+
+    pub fn clear_queue_wait(&mut self) {
+        self.queue_wait_state = None;
+    }
+
+    pub fn queue_wait_matches(
+        &self,
+        waiter: &vo_runtime::objects::queue_state::QueueWaiter,
+    ) -> bool {
+        match (self.queue_wait_state, waiter.kind) {
+            (Some(state), Some(kind)) => {
+                state.queue_ref as u64 == waiter.queue_ref
+                    && state.kind == kind
+                    && state.registration_id != 0
+                    && state.registration_id == waiter.registration_id
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn alloc_remote_endpoint_wait_id(&mut self) -> u64 {
+        let wait_id = self.next_remote_endpoint_wait_id.max(1);
+        self.next_remote_endpoint_wait_id = wait_id.wrapping_add(1).max(1);
+        wait_id
+    }
+
+    pub fn begin_remote_endpoint_send_wait(&mut self, endpoint_id: u64) -> u64 {
+        let wait_id = self.alloc_remote_endpoint_wait_id();
+        self.remote_endpoint_wait = Some(RemoteEndpointWait::Send {
+            endpoint_id,
+            wait_id,
+        });
+        wait_id
+    }
+
+    pub fn begin_remote_endpoint_recv_wait(&mut self, endpoint_id: u64) -> u64 {
+        let wait_id = self.alloc_remote_endpoint_wait_id();
+        self.remote_endpoint_wait = Some(RemoteEndpointWait::Recv {
+            endpoint_id,
+            wait_id,
+        });
+        wait_id
+    }
+
+    pub fn apply_endpoint_response(
+        &mut self,
+        endpoint_id: u64,
+        wait_id: u64,
+        kind: &vo_runtime::island::EndpointResponseKind,
+    ) -> bool {
+        match (self.remote_endpoint_wait, kind) {
+            (
+                Some(RemoteEndpointWait::Send {
+                    endpoint_id: expected,
+                    wait_id: expected_wait_id,
+                }),
+                vo_runtime::island::EndpointResponseKind::SendAck { closed },
+            ) if expected == endpoint_id && expected_wait_id == wait_id => {
                 if *closed {
                     self.remote_send_closed = true;
-                    if let Some(frame) = self.current_frame_mut() {
-                        frame.pc = frame.pc.saturating_sub(1);
-                    }
                 }
+                self.remote_endpoint_wait = None;
+                true
             }
-            vo_runtime::island::EndpointResponseKind::RecvData { data, closed } => {
+            (
+                Some(RemoteEndpointWait::Recv {
+                    endpoint_id: expected,
+                    wait_id: expected_wait_id,
+                }),
+                vo_runtime::island::EndpointResponseKind::RecvData { data, closed },
+            ) if expected == endpoint_id && expected_wait_id == wait_id => {
                 self.remote_recv_response = Some(RemoteRecvResponse {
                     data: data.clone(),
                     closed: *closed,
+                    rejected: false,
                 });
+                self.remote_endpoint_wait = None;
+                true
             }
-            vo_runtime::island::EndpointResponseKind::Closed => {}
+            (
+                Some(RemoteEndpointWait::Recv {
+                    endpoint_id: expected,
+                    wait_id: expected_wait_id,
+                }),
+                vo_runtime::island::EndpointResponseKind::RecvError,
+            ) if expected == endpoint_id && expected_wait_id == wait_id => {
+                self.remote_recv_response = Some(RemoteRecvResponse {
+                    data: Vec::new(),
+                    closed: false,
+                    rejected: true,
+                });
+                self.remote_endpoint_wait = None;
+                true
+            }
+            _ => false,
         }
+    }
+
+    pub fn can_apply_endpoint_response(
+        &self,
+        endpoint_id: u64,
+        wait_id: u64,
+        kind: &vo_runtime::island::EndpointResponseKind,
+    ) -> bool {
+        matches!(
+            (self.remote_endpoint_wait, kind),
+            (
+                Some(RemoteEndpointWait::Send {
+                    endpoint_id: expected,
+                    wait_id: expected_wait_id,
+                }),
+                vo_runtime::island::EndpointResponseKind::SendAck { .. },
+            ) if expected == endpoint_id && expected_wait_id == wait_id
+        ) || matches!(
+            (self.remote_endpoint_wait, kind),
+            (
+                Some(RemoteEndpointWait::Recv {
+                    endpoint_id: expected,
+                    wait_id: expected_wait_id,
+                }),
+                vo_runtime::island::EndpointResponseKind::RecvData { .. }
+                    | vo_runtime::island::EndpointResponseKind::RecvError,
+            ) if expected == endpoint_id && expected_wait_id == wait_id
+        )
     }
 
     /// Reset fiber for reuse.
@@ -629,6 +975,7 @@ impl Fiber {
         self.frames.clear();
         self.defer_stack.clear();
         self.unwinding = None;
+        self.queue_wait_state = None;
         self.select_state = None;
         self.next_select_id = 0;
         self.panic_state = None;
@@ -643,6 +990,10 @@ impl Fiber {
         self.resume_host_event_data = None;
         #[cfg(feature = "jit")]
         self.resume_stack.clear();
+        #[cfg(feature = "jit")]
+        {
+            self.jit_extern_suspend = None;
+        }
         #[cfg(feature = "jit")]
         if !self.ic_table.is_empty() {
             // Zero all IC entries (key=0 means invalid). memset is faster than per-entry clear.
@@ -666,9 +1017,12 @@ impl Fiber {
             self.jit_is_user_panic = false;
             self.jit_safepoint_flag = false;
             self.jit_panic_msg = InterfaceSlot::default();
+            self.jit_infra_error_message.clear();
         }
         self.remote_recv_response = None;
         self.remote_send_closed = false;
+        self.remote_endpoint_wait = None;
+        self.next_remote_endpoint_wait_id = 1;
     }
 
     /// Ensure IC table is allocated (lazy allocation on first JIT dispatch).
@@ -702,6 +1056,7 @@ impl Fiber {
         match self.panic_state.take() {
             Some(PanicState::Recoverable(val)) => {
                 self.panic_trap_kind = None;
+                self.panic_source_loc = None;
                 Some(val)
             }
             other => {
@@ -837,6 +1192,16 @@ impl Fiber {
         self.try_ensure_capacity(new_sp)?;
         self.sp = new_sp;
         Ok(new_sp)
+    }
+
+    #[inline]
+    pub fn try_reserve_call_window(
+        &mut self,
+        bp: usize,
+        slot_count: usize,
+    ) -> Result<usize, FiberCapacityError> {
+        self.try_reserve_call_frame()?;
+        self.try_reserve_slots_at(bp, slot_count)
     }
 
     #[inline]
@@ -1009,12 +1374,12 @@ impl Fiber {
         local_slots: u16,
         scan_slots: u16,
     ) -> Result<usize, FiberCapacityError> {
-        assert!(
-            scan_slots <= local_slots,
-            "push_borrowed_call_frame: scan_slots={} local_slots={}",
-            scan_slots,
-            local_slots,
-        );
+        if scan_slots > local_slots {
+            return Err(FiberCapacityError::StackSlots {
+                required: scan_slots as usize,
+                limit: local_slots as usize,
+            });
+        }
         let caller_frame = self
             .frames
             .last()
@@ -1034,6 +1399,7 @@ impl Fiber {
         };
 
         let bp = caller_bp + borrowed_start as usize;
+        self.try_reserve_call_frame()?;
         self.try_reserve_slots_at(bp, local_slots as usize)?;
         self.frames
             .last_mut()
@@ -1080,7 +1446,7 @@ impl Fiber {
             });
         }
         let bp = self.sp;
-        self.try_reserve_slots_at(bp, local_slots as usize)?;
+        self.try_reserve_call_window(bp, local_slots as usize)?;
         // Zero the new frame's slots. ensure_capacity zeros newly-allocated memory, but
         // previously-used slots (from prior calls that shared this stack region) contain
         // stale values. GC root scanning uses slot_types to determine which slots hold
@@ -1114,6 +1480,7 @@ impl Fiber {
         match self.panic_state.take() {
             Some(PanicState::Recoverable(val)) => {
                 let kind = self.panic_trap_kind.take();
+                self.panic_source_loc = None;
                 Some((kind, val))
             }
             other => {
@@ -1207,6 +1574,8 @@ mod tests {
         DeferArgLayout, Fiber, FiberCapacityError, INITIAL_STACK_CAPACITY, MAX_CALL_FRAMES,
         MAX_STACK_CAPACITY,
     };
+    use vo_runtime::island::EndpointResponseKind;
+    use vo_runtime::InterfaceSlot;
     use vo_runtime::SlotType;
 
     #[test]
@@ -1249,6 +1618,181 @@ mod tests {
                 limit: MAX_CALL_FRAMES,
             })
         );
+    }
+
+    #[test]
+    fn endpoint_response_replay_is_not_bound_to_a_specific_wait_turn() {
+        let mut fiber = Fiber::new(1);
+        let response = EndpointResponseKind::SendAck { closed: false };
+
+        let first_wait_id = fiber.begin_remote_endpoint_send_wait(42);
+        assert!(fiber.apply_endpoint_response(42, first_wait_id, &response));
+
+        let second_wait_id = fiber.begin_remote_endpoint_send_wait(42);
+        assert!(
+            !fiber.apply_endpoint_response(42, first_wait_id, &response),
+            "a response accepted for one wait turn must not be accepted again for the next wait"
+        );
+        assert!(fiber.apply_endpoint_response(42, second_wait_id, &response));
+    }
+
+    #[test]
+    fn vm_panic_recover_loc_001_recover_clears_consumed_panic_source_loc() {
+        let mut fiber = Fiber::new(1);
+        fiber.push_frame(7, 0, 0, 0, 0);
+        fiber.current_frame_mut().unwrap().pc = 12;
+        fiber.set_recoverable_panic(InterfaceSlot::nil());
+        fiber.capture_panic_source_loc();
+        assert_eq!(fiber.panic_source_loc, Some((7, 11)));
+
+        assert!(fiber.take_recoverable_panic().is_some());
+        assert!(
+            fiber.panic_source_loc.is_none(),
+            "recover must clear the consumed panic source location"
+        );
+
+        let frame = fiber.current_frame_mut().unwrap();
+        frame.func_id = 9;
+        frame.pc = 21;
+        fiber.set_recoverable_panic(InterfaceSlot::nil());
+        fiber.capture_panic_source_loc();
+
+        assert_eq!(
+            fiber.panic_source_loc,
+            Some((9, 20)),
+            "a later independent panic must report its own source location"
+        );
+    }
+
+    #[test]
+    fn closure_replay_snapshot_keeps_fiber_owned_typed_log() {
+        let mut replay = super::ClosureReplayState::new();
+        let (empty, _) = replay.snapshot_for_extern(1);
+        assert!(empty.is_empty());
+
+        replay.results.push((vec![11], vec![SlotType::GcRef]));
+
+        let (first, panic) = replay.snapshot_for_extern(1);
+        assert!(panic.is_none());
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].values, vec![11]);
+        assert_eq!(first[0].slot_types, vec![SlotType::GcRef]);
+        assert_eq!(replay.results.len(), 1);
+
+        replay.results.push((vec![22], vec![SlotType::Value]));
+        let (second, _) = replay.snapshot_for_extern(1);
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].values, vec![11]);
+        assert_eq!(second[1].values, vec![22]);
+        assert_eq!(replay.results.len(), 2);
+    }
+
+    #[test]
+    fn nested_extern_replay_scope_discards_inner_results_only() {
+        let mut replay = super::ClosureReplayState::new();
+
+        let (outer_empty, _) = replay.snapshot_for_extern(1);
+        assert!(outer_empty.is_empty());
+
+        replay.results.push((vec![11], vec![SlotType::Value]));
+        let (outer_first, _) = replay.snapshot_for_extern(1);
+        assert_eq!(outer_first.len(), 1);
+        assert_eq!(outer_first[0].values, vec![11]);
+
+        let (inner_empty, _) = replay.snapshot_for_extern(2);
+        assert!(inner_empty.is_empty());
+
+        replay.results.push((vec![99], vec![SlotType::Value]));
+        let (inner_replay, _) = replay.snapshot_for_extern(2);
+        assert_eq!(inner_replay.len(), 1);
+        assert_eq!(inner_replay[0].values, vec![99]);
+
+        replay.finish_extern_terminal();
+        assert_eq!(replay.results.len(), 1);
+        assert_eq!(replay.results[0].0, vec![11]);
+
+        replay.results.push((vec![22], vec![SlotType::GcRef]));
+        let (outer_second, _) = replay.snapshot_for_extern(1);
+        assert_eq!(outer_second.len(), 2);
+        assert_eq!(outer_second[0].values, vec![11]);
+        assert_eq!(outer_second[1].values, vec![22]);
+
+        replay.finish_extern_terminal();
+        assert!(replay.results.is_empty());
+        assert!(replay.extern_scope.is_none());
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn vm_fiber_reset_clears_jit_extern_suspend_roots_059() {
+        let mut fiber = Fiber::new(1);
+        fiber.jit_extern_suspend = Some(super::JitExternSuspend::CallClosure {
+            closure_ref: 0x1000 as vo_runtime::gc::GcRef,
+            args: super::TypedSlotPayload::try_new(vec![0x2000], vec![SlotType::GcRef])
+                .expect("typed payload"),
+            replay_pc: 7,
+        });
+
+        fiber.reset();
+
+        assert!(
+            fiber.jit_extern_suspend.is_none(),
+            "fiber reuse must not preserve stale GC-visible JIT extern suspend roots"
+        );
+    }
+
+    #[test]
+    fn failed_borrowed_call_frame_setup_leaves_stack_and_caller_scan_unchanged() {
+        let mut fiber = Fiber::new(1);
+        for _ in 0..MAX_CALL_FRAMES {
+            fiber
+                .try_push_call_frame_extended(0, 0, 4, 0, 0, 4, None, 0, 0)
+                .unwrap();
+        }
+        fiber.sp = 4;
+        fiber.stack.resize(8, 0);
+        fiber.frames.last_mut().unwrap().scan_slots = 4;
+
+        let old_sp = fiber.sp;
+        let old_scan = fiber.frames.last().unwrap().scan_slots;
+        let result = fiber.try_push_borrowed_call_frame(1, 1, 1, 0, 1, 4, 4);
+
+        assert_eq!(
+            result,
+            Err(FiberCapacityError::CallFrames {
+                required: MAX_CALL_FRAMES + 1,
+                limit: MAX_CALL_FRAMES,
+            })
+        );
+        assert_eq!(fiber.sp, old_sp);
+        assert_eq!(fiber.frames.last().unwrap().scan_slots, old_scan);
+    }
+
+    #[test]
+    fn borrowed_call_frame_rejects_scan_slots_beyond_locals_without_panic_062() {
+        let mut fiber = Fiber::new(1);
+        fiber.try_push_call_frame(0, 4, 1, 0, 0).unwrap();
+        let old_frame_count = fiber.frames.len();
+        let old_sp = fiber.sp;
+        let old_scan = fiber.frames.last().unwrap().scan_slots;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fiber.try_push_borrowed_call_frame(1, 1, 1, 0, 1, 1, 2)
+        }));
+
+        let err = result
+            .expect("borrowed frame scan/local drift must return an error, not panic")
+            .expect_err("borrowed frame scan/local drift must be rejected");
+        assert_eq!(
+            err,
+            FiberCapacityError::StackSlots {
+                required: 2,
+                limit: 1,
+            }
+        );
+        assert_eq!(fiber.frames.len(), old_frame_count);
+        assert_eq!(fiber.sp, old_sp);
+        assert_eq!(fiber.frames.last().unwrap().scan_slots, old_scan);
     }
 
     #[test]

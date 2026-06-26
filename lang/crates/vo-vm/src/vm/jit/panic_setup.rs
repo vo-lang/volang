@@ -5,7 +5,7 @@ use vo_runtime::bytecode::Module;
 use vo_runtime::jit_api::JitRuntimeTrapKind;
 use vo_runtime::objects::interface::InterfaceSlot;
 
-use crate::fiber::{Fiber, FiberCapacityError};
+use crate::fiber::{Fiber, FiberCapacityError, PanicState};
 use crate::vm::{helpers, RuntimeTrapKind};
 
 use super::context::JitContextWrapper;
@@ -106,12 +106,19 @@ pub(super) fn setup_jit_panic(
             fiber.set_recoverable_trap(kind, interface_string(gc, msg));
         }
     }
-    let (trap_kind, panic_msg) = fiber
-        .take_recoverable_panic_with_kind()
-        .ok_or(SetupJitPanicError::MissingPayload)?;
+    let trap_kind = match fiber.panic_state {
+        Some(PanicState::Recoverable(_)) => fiber.panic_trap_kind,
+        _ => return Err(SetupJitPanicError::MissingPayload),
+    };
 
     let trap_pc = (ctx.ctx.runtime_trap_pc != u32::MAX).then_some(ctx.ctx.runtime_trap_pc);
     let user_panic_pc = (ctx.ctx.user_panic_pc != u32::MAX).then_some(ctx.ctx.user_panic_pc);
+    let (panic_pc, missing_location) = if trap_kind.is_some() {
+        (trap_pc, "runtime_trap_pc")
+    } else {
+        (user_panic_pc, "user_panic_pc")
+    };
+    let panic_pc = panic_pc.ok_or(SetupJitPanicError::MissingLocation(missing_location))?;
 
     materialize_jit_frames(fiber, module, 0).map_err(|err| match err {
         JitFrameMaterializeError::Capacity(err) => SetupJitPanicError::Capacity(err),
@@ -120,18 +127,34 @@ pub(super) fn setup_jit_panic(
         }
     })?;
 
-    if fiber.panic_source_loc.is_none() {
-        let (pc, missing) = if trap_kind.is_some() {
-            (trap_pc, "runtime_trap_pc")
-        } else {
-            (user_panic_pc, "user_panic_pc")
-        };
-        let pc = pc.ok_or(SetupJitPanicError::MissingLocation(missing))?;
-        fiber.panic_source_loc = fiber.current_frame().map(|f| (f.func_id, pc));
-    }
+    let (trap_kind, panic_msg) = fiber
+        .take_recoverable_panic_with_kind()
+        .ok_or(SetupJitPanicError::MissingPayload)?;
+    fiber.panic_source_loc = fiber.current_frame().map(|f| (f.func_id, panic_pc));
 
     Ok(JitPanicInfo {
         trap_kind,
         msg: panic_msg,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vm_jit_panic_setup_materializes_before_consuming_recoverable_payload_060() {
+        let source = crate::source_contract::production_source_without_test_modules(include_str!(
+            "panic_setup.rs"
+        ));
+        let materialize_pos = source
+            .find("materialize_jit_frames(")
+            .expect("JIT panic setup must materialize JIT frames");
+        let take_pos = source
+            .find("take_recoverable_panic_with_kind()")
+            .expect("JIT panic setup must consume the recoverable payload after setup");
+
+        assert!(
+            materialize_pos < take_pos,
+            "JIT panic setup must keep the recoverable payload rooted until frame materialization succeeds"
+        );
+    }
 }

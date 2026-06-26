@@ -44,11 +44,14 @@ use std::string::ToString;
 
 use vo_common_core::bytecode::ReturnFlags;
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::closure;
 
 use crate::bytecode::{FunctionDef, Module};
 use crate::fiber::{
     CallFrame, DeferEntry, Fiber, PanicState, ReturnValues, UnwindingMode, UnwindingState,
+};
+use crate::frame_call::{
+    validate_closure_arg_shape, validate_closure_callsite_arg_layout, validate_closure_target,
+    validate_function_arg_shape, validate_function_callsite_arg_layout,
 };
 use crate::instruction::Instruction;
 use crate::vm::helpers::{self, stack_get, stack_set};
@@ -88,7 +91,7 @@ pub fn handle_return(
         return match mode {
             UnwindingMode::Return => {
                 let include_errdefers =
-                    match compute_include_errdefers(fiber, inst, func, is_error_return) {
+                    match compute_include_errdefers(gc, fiber, inst, func, is_error_return) {
                         Ok(include) => include,
                         Err(result) => return result,
                     };
@@ -134,7 +137,96 @@ pub fn handle_jit_ok_return(
         .is_some_and(|e| e.frame_depth == current_frame_depth);
 
     if fiber.closure_replay.at_replay_boundary(current_frame_depth) && current_frame_depth > 0 {
+        if has_defers {
+            let return_values = if heap_returns {
+                let bp = current_frame.bp;
+                let stack = fiber.stack.as_ptr();
+                let gcref_count = func.heap_ret_gcref_count as usize;
+                let gcref_start = func.heap_ret_gcref_start as usize;
+                let gcrefs = match try_collect_heap_return_refs_from_stack(
+                    gc,
+                    stack,
+                    bp,
+                    gcref_start,
+                    gcref_count,
+                    current_frame.func_id,
+                    current_frame.pc,
+                    "JIT closure replay deferred heap return",
+                ) {
+                    Ok(gcrefs) => gcrefs,
+                    Err(result) => return result,
+                };
+                let slots_per_ref = match try_require_heap_ret_slots(
+                    func,
+                    current_frame.func_id,
+                    current_frame.pc,
+                    gcref_count,
+                    "JIT closure replay deferred heap return",
+                ) {
+                    Ok(slots) => slots,
+                    Err(result) => return result,
+                };
+                Some(ReturnValues::Heap {
+                    gcrefs,
+                    slots_per_ref,
+                })
+            } else {
+                let slot_types = match try_require_slot_types(
+                    func,
+                    current_frame.func_id,
+                    current_frame.pc,
+                    ret_start,
+                    ret.len(),
+                    "JIT closure replay deferred stack return",
+                ) {
+                    Ok(slots) => slots,
+                    Err(result) => return result,
+                };
+                Some(ReturnValues::Stack {
+                    vals: ret.to_vec(),
+                    slot_types,
+                })
+            };
+            let mut pending = collect_defers(
+                &mut fiber.defer_stack,
+                current_frame_depth,
+                include_errdefers,
+            );
+            let frame = match pop_frame(fiber) {
+                Some(f) => f,
+                None => return ExecResult::Done,
+            };
+            if pending.is_empty() {
+                return finalize_closure_replay_return(
+                    gc,
+                    fiber,
+                    module,
+                    return_values,
+                    frame.ret_count as usize,
+                    frame.func_id,
+                    frame.pc,
+                );
+            }
+            let first_defer = pending.remove(0);
+
+            fiber.unwinding = Some(UnwindingState {
+                pending,
+                target_depth: fiber.frames.len(),
+                mode: UnwindingMode::Return,
+                current_defer_generation: first_defer.registered_at_generation,
+                return_values,
+                return_func_id: frame.func_id,
+                return_pc: frame.pc,
+                caller_ret_reg: frame.ret_reg,
+                caller_ret_count: frame.ret_count as usize,
+                is_closure_replay: true,
+            });
+
+            return call_defer_entry(gc, fiber, &first_defer, module);
+        }
+
         let (vals, slot_types) = match jit_return_values_for_replay(
+            gc,
             fiber,
             func,
             current_frame,
@@ -147,36 +239,6 @@ pub fn handle_jit_ok_return(
         };
         fiber.closure_replay.results.push((vals, slot_types));
         fiber.closure_replay.pop_depth();
-
-        if has_defers {
-            let mut pending = collect_defers(
-                &mut fiber.defer_stack,
-                current_frame_depth,
-                include_errdefers,
-            );
-            let frame = match pop_frame(fiber) {
-                Some(f) => f,
-                None => return ExecResult::Done,
-            };
-            if pending.is_empty() {
-                return ExecResult::FrameChanged;
-            }
-            let first_defer = pending.remove(0);
-
-            fiber.unwinding = Some(UnwindingState {
-                pending,
-                target_depth: fiber.frames.len(),
-                mode: UnwindingMode::Return,
-                current_defer_generation: first_defer.registered_at_generation,
-                return_values: None,
-                caller_ret_reg: frame.ret_reg,
-                caller_ret_count: frame.ret_count as usize,
-                is_closure_replay: true,
-            });
-
-            return call_defer_entry(gc, fiber, &first_defer, module);
-        }
-
         let _ = pop_frame(fiber);
         return ExecResult::FrameChanged;
     }
@@ -198,9 +260,19 @@ pub fn handle_jit_ok_return(
     let (return_values, pending_defers) = if heap_returns {
         let gcref_count = func.heap_ret_gcref_count as usize;
         let gcref_start = func.heap_ret_gcref_start as usize;
-        let gcrefs: Vec<u64> = (0..gcref_count)
-            .map(|i| stack_get(stack, bp + gcref_start + i))
-            .collect();
+        let gcrefs = match try_collect_heap_return_refs_from_stack(
+            gc,
+            stack,
+            bp,
+            gcref_start,
+            gcref_count,
+            current_frame.func_id,
+            current_frame.pc,
+            "JIT heap return",
+        ) {
+            Ok(gcrefs) => gcrefs,
+            Err(result) => return result,
+        };
         let slots_per_ref = match try_require_heap_ret_slots(
             func,
             current_frame.func_id,
@@ -278,6 +350,8 @@ pub fn handle_jit_ok_return(
             mode: UnwindingMode::Return,
             current_defer_generation: first_defer.registered_at_generation,
             return_values,
+            return_func_id: frame.func_id,
+            return_pc: frame.pc,
             caller_ret_reg: frame.ret_reg,
             caller_ret_count: frame.ret_count as usize,
             is_closure_replay: false,
@@ -286,7 +360,14 @@ pub fn handle_jit_ok_return(
         return call_defer_entry(gc, fiber, &first_defer, module);
     }
 
-    let ret_vals = match return_values_to_vec(return_values, frame.ret_count as usize) {
+    let ret_vals = match return_values_to_vec(
+        gc,
+        return_values,
+        frame.ret_count as usize,
+        frame.func_id,
+        frame.pc,
+        "JIT heap return finalization",
+    ) {
         Ok(vals) => vals,
         Err(result) => return result,
     };
@@ -294,6 +375,7 @@ pub fn handle_jit_ok_return(
 }
 
 fn jit_return_values_for_replay(
+    gc: &Gc,
     fiber: &Fiber,
     func: &FunctionDef,
     frame: CallFrame,
@@ -317,9 +399,16 @@ fn jit_return_values_for_replay(
     let stack = fiber.stack.as_ptr();
     let gcref_count = func.heap_ret_gcref_count as usize;
     let gcref_start = func.heap_ret_gcref_start as usize;
-    let gcrefs: Vec<u64> = (0..gcref_count)
-        .map(|i| stack_get(stack, bp + gcref_start + i))
-        .collect();
+    let gcrefs = try_collect_heap_return_refs_from_stack(
+        gc,
+        stack,
+        bp,
+        gcref_start,
+        gcref_count,
+        frame.func_id,
+        frame.pc,
+        "JIT closure replay heap return",
+    )?;
     let slots_per_ref = try_require_heap_ret_slots(
         func,
         frame.func_id,
@@ -327,13 +416,19 @@ fn jit_return_values_for_replay(
         gcref_count,
         "JIT closure replay heap return",
     )?;
-    let vals = try_read_heap_gcrefs(&gcrefs, &slots_per_ref)?;
-    let slot_types = try_require_slot_types(
+    let vals = try_read_heap_gcrefs(
+        gc,
+        &gcrefs,
+        &slots_per_ref,
+        frame.func_id,
+        frame.pc,
+        "JIT closure replay heap return",
+    )?;
+    let slot_types = try_heap_return_slot_types(
         func,
         frame.func_id,
         frame.pc,
-        ret_start,
-        vals.len(),
+        &slots_per_ref,
         "JIT closure replay heap return",
     )?;
     Ok((vals, slot_types))
@@ -343,6 +438,7 @@ fn jit_return_values_for_replay(
 /// Returns true if: (1) explicit fail statement, or (2) function returns error and it's non-nil.
 #[inline]
 fn compute_include_errdefers(
+    gc: &Gc,
     fiber: &Fiber,
     inst: &Instruction,
     func: &FunctionDef,
@@ -375,21 +471,17 @@ fn compute_include_errdefers(
                 frame.func_id, frame.pc
             )));
         }
-        let error_gcref_slot = bp
-            .checked_add(inst.a as usize)
-            .and_then(|slot| slot.checked_add(gcref_count - 1))
-            .ok_or_else(|| {
-                ExecResult::JitError(format!(
-                    "errdefer heap return slot overflow: func_id={} pc={} bp={} start={} count={}",
-                    frame.func_id, frame.pc, bp, inst.a, inst.b
-                ))
-            })?;
-        let gcref = stack_get(stack, error_gcref_slot) as GcRef;
-        if gcref.is_null() {
-            0 // nil error
-        } else {
-            unsafe { *gcref }
-        }
+        read_heap_error_return_slot0_for_errdefer(
+            gc,
+            fiber,
+            func,
+            frame.bp,
+            inst.a as usize,
+            gcref_count,
+            frame.func_id,
+            frame.pc,
+            "errdefer heap return check",
+        )?
     } else {
         // stack returns: use error_ret_slot offset directly
         let slot = bp + inst.a as usize + func.error_ret_slot as usize;
@@ -397,6 +489,59 @@ fn compute_include_errdefers(
     };
 
     Ok((error_slot0 & 0xFF) != 0)
+}
+
+pub(crate) fn read_heap_error_return_slot0_for_errdefer(
+    gc: &Gc,
+    fiber: &Fiber,
+    func: &FunctionDef,
+    bp: usize,
+    gcref_start: usize,
+    gcref_count: usize,
+    func_id: u32,
+    pc: usize,
+    context: &'static str,
+) -> Result<u64, ExecResult> {
+    if gcref_count == 0 {
+        return Err(ExecResult::JitError(format!(
+            "{context} has zero gcref count: func_id={func_id} pc={pc}"
+        )));
+    }
+    let error_gcref_slot = bp
+        .checked_add(gcref_start)
+        .and_then(|slot| slot.checked_add(gcref_count - 1))
+        .ok_or_else(|| {
+            ExecResult::JitError(format!(
+                "{context} slot overflow: func_id={func_id} pc={pc} bp={bp} start={gcref_start} count={gcref_count}"
+            ))
+        })?;
+    let Some(&gcref_raw) = fiber.stack.get(error_gcref_slot) else {
+        return Err(ExecResult::JitError(format!(
+            "{context} slot {error_gcref_slot} is outside fiber stack"
+        )));
+    };
+    if gcref_raw == 0 {
+        return Ok(0);
+    }
+    let slots_per_ref = try_require_heap_ret_slots(func, func_id, pc, gcref_count, context)?;
+    let error_heap_width = slots_per_ref.last().copied().unwrap_or(0);
+    if error_heap_width == 0 {
+        return Err(ExecResult::JitError(format!(
+            "{context} has zero-width error heap return: func_id={func_id} pc={pc}"
+        )));
+    }
+    let gcref =
+        try_canonicalize_heap_return_ref(gc, gcref_raw, func_id, pc, error_gcref_slot, context)?;
+    validate_heap_return_ref_width(
+        gc,
+        gcref,
+        error_heap_width,
+        func_id,
+        pc,
+        gcref_count - 1,
+        context,
+    )?;
+    Ok(unsafe { *gcref })
 }
 
 fn try_require_slot_types(
@@ -445,6 +590,46 @@ fn try_require_heap_ret_slots(
     Ok(func.heap_ret_slots.iter().map(|&s| s as usize).collect())
 }
 
+fn try_heap_return_slot_types(
+    func: &FunctionDef,
+    func_id: u32,
+    pc: usize,
+    slots_per_ref: &[usize],
+    context: &'static str,
+) -> Result<Vec<vo_runtime::SlotType>, ExecResult> {
+    if func.heap_ret_slots.len() != slots_per_ref.len() {
+        return Err(ExecResult::JitError(format!(
+            "{} heap return metadata mismatch: func_id={} name={} pc={} heap_ret_slots={} slots_per_ref={}",
+            context,
+            func_id,
+            func.name,
+            pc,
+            func.heap_ret_slots.len(),
+            slots_per_ref.len()
+        )));
+    }
+    let total_slots = slots_per_ref.iter().try_fold(0usize, |sum, &slot_count| {
+        sum.checked_add(slot_count).ok_or_else(|| {
+            ExecResult::JitError(format!(
+                "{} heap return slot count overflow: func_id={} name={} pc={}",
+                context, func_id, func.name, pc
+            ))
+        })
+    })?;
+    if total_slots != func.ret_slot_types.len() {
+        return Err(ExecResult::JitError(format!(
+            "{} heap return slot metadata mismatch: func_id={} name={} pc={} heap return slots={} ret_slot_types={}",
+            context,
+            func_id,
+            func.name,
+            pc,
+            total_slots,
+            func.ret_slot_types.len()
+        )));
+    }
+    Ok(func.ret_slot_types.clone())
+}
+
 /// Handle initial return (not continuing from defer).
 fn handle_initial_return(
     gc: &mut Gc,
@@ -461,41 +646,69 @@ fn handle_initial_return(
 
     // Check: is this return from a closure-for-extern-replay?
     if fiber.closure_replay.at_replay_boundary(current_frame_depth) && current_frame_depth > 0 {
-        let ret_start = inst.a as usize;
-        let ret_count = inst.b as usize;
-        let current_bp = current_frame.bp;
-        let stack = fiber.stack.as_ptr();
-
-        // Cache return values with slot_types for safe GC scanning.
-        // Without slot_types, the GC would treat all cached values as GcRefs,
-        // causing UB when non-pointer values (int, float, slot0 metadata) are dereferenced.
-        let vals: Vec<u64> = (0..ret_count)
-            .map(|i| stack_get(stack, current_bp + ret_start + i))
-            .collect();
-        let ret_slot_types = match try_require_slot_types(
-            func,
-            current_frame.func_id,
-            current_frame.pc,
-            ret_start,
-            ret_count,
-            "closure replay return",
-        ) {
-            Ok(slot_types) => slot_types,
-            Err(result) => return result,
+        let heap_returns = match verified_return_flags(inst) {
+            Ok(flags) => flags.has_heap_returns(),
+            Err(err) => return err,
         };
-
-        fiber.closure_replay.results.push((vals, ret_slot_types));
-        fiber.closure_replay.pop_depth();
-
-        // Check for defers in the closure — they must run first
         let has_defers = fiber
             .defer_stack
             .last()
             .is_some_and(|e| e.frame_depth == current_frame_depth);
+        let stack = fiber.stack.as_ptr();
+        let current_bp = current_frame.bp;
+        let return_values = if heap_returns {
+            let gcref_start = inst.a as usize;
+            let gcref_count = inst.b as usize;
+            let gcrefs = match try_collect_heap_return_refs_from_stack(
+                gc,
+                stack,
+                current_bp,
+                gcref_start,
+                gcref_count,
+                current_frame.func_id,
+                current_frame.pc,
+                "closure replay deferred heap return",
+            ) {
+                Ok(gcrefs) => gcrefs,
+                Err(result) => return result,
+            };
+            let slots_per_ref = match try_require_heap_ret_slots(
+                func,
+                current_frame.func_id,
+                current_frame.pc,
+                gcref_count,
+                "closure replay deferred heap return",
+            ) {
+                Ok(slots) => slots,
+                Err(result) => return result,
+            };
+            Some(ReturnValues::Heap {
+                gcrefs,
+                slots_per_ref,
+            })
+        } else {
+            let ret_start = inst.a as usize;
+            let ret_count = inst.b as usize;
+            let vals: Vec<u64> = (0..ret_count)
+                .map(|i| stack_get(stack, current_bp + ret_start + i))
+                .collect();
+            let slot_types = match try_require_slot_types(
+                func,
+                current_frame.func_id,
+                current_frame.pc,
+                ret_start,
+                ret_count,
+                "closure replay deferred stack return",
+            ) {
+                Ok(slot_types) => slot_types,
+                Err(result) => return result,
+            };
+            Some(ReturnValues::Stack { vals, slot_types })
+        };
 
         if has_defers {
             let include_errdefers =
-                match compute_include_errdefers(fiber, inst, func, is_error_return) {
+                match compute_include_errdefers(gc, fiber, inst, func, is_error_return) {
                     Ok(include) => include,
                     Err(result) => return result,
                 };
@@ -510,7 +723,15 @@ fn handle_initial_return(
                 None => return ExecResult::Done,
             };
             if pending.is_empty() {
-                return ExecResult::FrameChanged;
+                return finalize_closure_replay_return(
+                    gc,
+                    fiber,
+                    module,
+                    return_values,
+                    frame.ret_count as usize,
+                    frame.func_id,
+                    frame.pc,
+                );
             }
             let first_defer = pending.remove(0);
 
@@ -519,7 +740,9 @@ fn handle_initial_return(
                 target_depth: fiber.frames.len(),
                 mode: UnwindingMode::Return,
                 current_defer_generation: first_defer.registered_at_generation,
-                return_values: None, // No return values to write (replay handles it)
+                return_values,
+                return_func_id: frame.func_id,
+                return_pc: frame.pc,
                 caller_ret_reg: frame.ret_reg,
                 caller_ret_count: frame.ret_count as usize,
                 is_closure_replay: true,
@@ -531,8 +754,19 @@ fn handle_initial_return(
         // No defers — pop closure frame and return FrameChanged.
         // Caller's PC still points at CallExtern (we did pc -= 1 earlier).
         // VM will re-execute CallExtern → extern replays → consumes cached result.
-        let _ = pop_frame(fiber);
-        return ExecResult::FrameChanged;
+        let frame = match pop_frame(fiber) {
+            Some(f) => f,
+            None => return ExecResult::Done,
+        };
+        return finalize_closure_replay_return(
+            gc,
+            fiber,
+            module,
+            return_values,
+            frame.ret_count as usize,
+            frame.func_id,
+            frame.pc,
+        );
     }
 
     let heap_returns = match verified_return_flags(inst) {
@@ -547,12 +781,13 @@ fn handle_initial_return(
     // Fast path: no defers, small return count, stack returns
     if !has_defers {
         if heap_returns {
-            return fast_complete_heap_return(fiber, func, inst);
+            return fast_complete_heap_return(gc, fiber, func, inst);
         }
         return fast_complete_stack_return(fiber, inst);
     }
 
-    let include_errdefers = match compute_include_errdefers(fiber, inst, func, is_error_return) {
+    let include_errdefers = match compute_include_errdefers(gc, fiber, inst, func, is_error_return)
+    {
         Ok(include) => include,
         Err(result) => return result,
     };
@@ -564,9 +799,19 @@ fn handle_initial_return(
         let gcref_count = inst.b as usize;
         let current_bp = current_frame.bp;
 
-        let gcrefs: Vec<u64> = (0..gcref_count)
-            .map(|i| stack_get(stack, current_bp + gcref_start + i))
-            .collect();
+        let gcrefs = match try_collect_heap_return_refs_from_stack(
+            gc,
+            stack,
+            current_bp,
+            gcref_start,
+            gcref_count,
+            current_frame.func_id,
+            current_frame.pc,
+            "deferred heap return",
+        ) {
+            Ok(gcrefs) => gcrefs,
+            Err(result) => return result,
+        };
 
         // Read slot counts from FunctionDef (supports mixed sizes)
         let slots_per_ref = match try_require_heap_ret_slots(
@@ -650,6 +895,8 @@ fn handle_initial_return(
             mode: UnwindingMode::Return,
             current_defer_generation: first_defer.registered_at_generation,
             return_values,
+            return_func_id: frame.func_id,
+            return_pc: frame.pc,
             caller_ret_reg: frame.ret_reg,
             caller_ret_count: frame.ret_count as usize,
             is_closure_replay: false,
@@ -659,7 +906,14 @@ fn handle_initial_return(
     }
 
     // No defers - complete return immediately
-    let ret_vals = match return_values_to_vec(return_values, frame.ret_count as usize) {
+    let ret_vals = match return_values_to_vec(
+        gc,
+        return_values,
+        frame.ret_count as usize,
+        frame.func_id,
+        frame.pc,
+        "heap return finalization",
+    ) {
         Ok(vals) => vals,
         Err(result) => return result,
     };
@@ -700,14 +954,30 @@ fn handle_return_defer_returned(
     let caller_ret_reg = state.caller_ret_reg;
     let caller_ret_count = state.caller_ret_count;
     let is_closure_replay = state.is_closure_replay;
+    let return_func_id = state.return_func_id;
+    let return_pc = state.return_pc;
     fiber.unwinding = None;
 
-    // Closure-replay return: no return values to write (handled by extern replay)
     if is_closure_replay {
-        return ExecResult::FrameChanged;
+        return finalize_closure_replay_return(
+            gc,
+            fiber,
+            module,
+            return_values,
+            caller_ret_count,
+            return_func_id,
+            return_pc,
+        );
     }
 
-    let ret_vals = match return_values_to_vec(return_values, caller_ret_count) {
+    let ret_vals = match return_values_to_vec(
+        gc,
+        return_values,
+        caller_ret_count,
+        return_func_id,
+        return_pc,
+        "return defer heap finalization",
+    ) {
         Ok(vals) => vals,
         Err(result) => return result,
     };
@@ -769,9 +1039,31 @@ fn handle_panic_defer_returned(gc: &mut Gc, fiber: &mut Fiber, module: &Module) 
         let return_values = state.return_values.take();
         let caller_ret_reg = state.caller_ret_reg;
         let caller_ret_count = state.caller_ret_count;
+        let is_closure_replay = state.is_closure_replay;
+        let return_func_id = state.return_func_id;
+        let return_pc = state.return_pc;
         fiber.unwinding = None;
 
-        let ret_vals = match return_values_to_vec(return_values, caller_ret_count) {
+        if is_closure_replay {
+            return finalize_closure_replay_return(
+                gc,
+                fiber,
+                module,
+                return_values,
+                caller_ret_count,
+                return_func_id,
+                return_pc,
+            );
+        }
+
+        let ret_vals = match return_values_to_vec(
+            gc,
+            return_values,
+            caller_ret_count,
+            return_func_id,
+            return_pc,
+            "panic recovery heap finalization",
+        ) {
             Ok(vals) => vals,
             Err(result) => return result,
         };
@@ -841,10 +1133,45 @@ fn start_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecRe
             return ExecResult::Panic;
         }
 
-        // Intercept panic at closure replay boundary: convert to error for extern replay.
-        // The closure frame is at depth == closure_replay_depth. When panic unwinds
-        // to or past it, we pop the closure frame and let the caller's CallExtern replay
-        // with the panicked flag set.
+        let frame_depth = fiber.frames.len();
+        let pending = collect_defers(&mut fiber.defer_stack, frame_depth, true);
+
+        if !pending.is_empty() {
+            let is_closure_replay = fiber.closure_replay.at_replay_boundary(frame_depth);
+            let (return_values, caller_ret_reg, caller_ret_count) =
+                match extract_frame_return_values(gc, fiber, module) {
+                    Ok(values) => values,
+                    Err(result) => return result,
+                };
+
+            let Some(frame) = pop_frame(fiber) else {
+                return ExecResult::JitError(
+                    "panic unwind expected current frame for pending defers".to_string(),
+                );
+            };
+            fiber.clear_parent_borrowed_slots(&frame, 0, 0);
+
+            let mut pending = pending;
+            let first_defer = pending.remove(0);
+
+            fiber.unwinding = Some(UnwindingState {
+                pending,
+                target_depth: fiber.frames.len(),
+                mode: UnwindingMode::Panic,
+                current_defer_generation: first_defer.registered_at_generation,
+                return_values,
+                return_func_id: frame.func_id,
+                return_pc: frame.pc,
+                caller_ret_reg,
+                caller_ret_count,
+                is_closure_replay,
+            });
+
+            return call_defer_entry(gc, fiber, &first_defer, module);
+        }
+
+        // Intercept panic at closure replay boundary only after the replayed
+        // closure has had a chance to collect and run its own defers/recover.
         if fiber
             .closure_replay
             .should_intercept_panic(fiber.frames.len())
@@ -870,40 +1197,6 @@ fn start_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecRe
             return ExecResult::FrameChanged;
         }
 
-        let frame_depth = fiber.frames.len();
-        let pending = collect_defers(&mut fiber.defer_stack, frame_depth, true);
-
-        if !pending.is_empty() {
-            let (return_values, caller_ret_reg, caller_ret_count) =
-                match extract_frame_return_values(fiber, module) {
-                    Ok(values) => values,
-                    Err(result) => return result,
-                };
-
-            let Some(frame) = pop_frame(fiber) else {
-                return ExecResult::JitError(
-                    "panic unwind expected current frame for pending defers".to_string(),
-                );
-            };
-            fiber.clear_parent_borrowed_slots(&frame, 0, 0);
-
-            let mut pending = pending;
-            let first_defer = pending.remove(0);
-
-            fiber.unwinding = Some(UnwindingState {
-                pending,
-                target_depth: fiber.frames.len(),
-                mode: UnwindingMode::Panic,
-                current_defer_generation: first_defer.registered_at_generation,
-                return_values,
-                caller_ret_reg,
-                caller_ret_count,
-                is_closure_replay: false,
-            });
-
-            return call_defer_entry(gc, fiber, &first_defer, module);
-        }
-
         if let Some(frame) = pop_frame(fiber) {
             fiber.clear_parent_borrowed_slots(&frame, 0, 0);
         }
@@ -917,8 +1210,12 @@ fn start_panic_unwind(gc: &mut Gc, fiber: &mut Fiber, module: &Module) -> ExecRe
 /// Convert Option<ReturnValues> to return values vector.
 #[inline]
 fn return_values_to_vec(
+    gc: &Gc,
     rv: Option<ReturnValues>,
     caller_ret_count: usize,
+    func_id: u32,
+    pc: usize,
+    context: &'static str,
 ) -> Result<Vec<u64>, ExecResult> {
     match rv {
         None => Ok(vec![0u64; caller_ret_count]),
@@ -926,14 +1223,88 @@ fn return_values_to_vec(
         Some(ReturnValues::Heap {
             gcrefs,
             slots_per_ref,
-        }) => try_read_heap_gcrefs(&gcrefs, &slots_per_ref),
+        }) => try_read_heap_gcrefs(gc, &gcrefs, &slots_per_ref, func_id, pc, context),
     }
+}
+
+fn return_values_to_replay_result(
+    gc: &Gc,
+    rv: Option<ReturnValues>,
+    caller_ret_count: usize,
+    func: &FunctionDef,
+    func_id: u32,
+    pc: usize,
+    context: &'static str,
+) -> Result<(Vec<u64>, Vec<vo_runtime::SlotType>), ExecResult> {
+    match rv {
+        None => Ok((
+            vec![0u64; caller_ret_count],
+            vec![vo_runtime::SlotType::Value; caller_ret_count],
+        )),
+        Some(ReturnValues::Stack { vals, slot_types }) => Ok((vals, slot_types)),
+        Some(ReturnValues::Heap {
+            gcrefs,
+            slots_per_ref,
+        }) => {
+            let vals = try_read_heap_gcrefs(gc, &gcrefs, &slots_per_ref, func_id, pc, context)?;
+            let slot_types =
+                try_heap_return_slot_types(func, func_id, pc, &slots_per_ref, context)?;
+            Ok((vals, slot_types))
+        }
+    }
+}
+
+fn finalize_closure_replay_return(
+    gc: &Gc,
+    fiber: &mut Fiber,
+    module: &Module,
+    return_values: Option<ReturnValues>,
+    caller_ret_count: usize,
+    return_func_id: u32,
+    return_pc: usize,
+) -> ExecResult {
+    let (vals, slot_types) = match return_values {
+        None => (
+            vec![0u64; caller_ret_count],
+            vec![vo_runtime::SlotType::Value; caller_ret_count],
+        ),
+        Some(ReturnValues::Stack { vals, slot_types }) => (vals, slot_types),
+        Some(ReturnValues::Heap {
+            gcrefs,
+            slots_per_ref,
+        }) => {
+            let Some(func) = module.functions.get(return_func_id as usize) else {
+                return ExecResult::JitError(format!(
+                    "closure replay return missing function id {return_func_id}"
+                ));
+            };
+            match return_values_to_replay_result(
+                gc,
+                Some(ReturnValues::Heap {
+                    gcrefs,
+                    slots_per_ref,
+                }),
+                caller_ret_count,
+                func,
+                return_func_id,
+                return_pc,
+                "closure replay return finalization",
+            ) {
+                Ok(result) => result,
+                Err(result) => return result,
+            }
+        }
+    };
+    fiber.closure_replay.results.push((vals, slot_types));
+    fiber.closure_replay.pop_depth();
+    ExecResult::FrameChanged
 }
 
 /// Extract return values from current frame for panic/recover.
 /// Returns (return_values, ret_reg, ret_count). Only heap returns are captured;
 /// stack returns are None since they'll be zeroed on panic anyway.
 fn extract_frame_return_values(
+    gc: &Gc,
     fiber: &Fiber,
     module: &Module,
 ) -> Result<(Option<ReturnValues>, u16, usize), ExecResult> {
@@ -951,9 +1322,16 @@ fn extract_frame_return_values(
     let gcref_count = func.heap_ret_gcref_count as usize;
     let gcref_start = func.heap_ret_gcref_start as usize;
     let stack = fiber.stack.as_ptr();
-    let gcrefs: Vec<u64> = (0..gcref_count)
-        .map(|i| stack_get(stack, frame.bp + gcref_start + i))
-        .collect();
+    let gcrefs = try_collect_heap_return_refs_from_stack(
+        gc,
+        stack,
+        frame.bp,
+        gcref_start,
+        gcref_count,
+        frame.func_id,
+        frame.pc,
+        "panic unwind heap return",
+    )?;
 
     let slots_per_ref = try_require_heap_ret_slots(
         func,
@@ -1013,6 +1391,7 @@ fn fast_complete_stack_return(fiber: &mut Fiber, inst: &Instruction) -> ExecResu
 /// Complete a no-defer heap return directly from the current frame.
 #[inline]
 fn fast_complete_heap_return(
+    gc: &Gc,
     fiber: &mut Fiber,
     func: &FunctionDef,
     inst: &Instruction,
@@ -1036,11 +1415,15 @@ fn fast_complete_heap_return(
     };
     let heap_ret_slots: Vec<u16> = heap_ret_slots.iter().map(|&slots| slots as u16).collect();
     let ret_vals = match try_read_heap_return_values_from_frame(
+        gc,
         fiber,
         frame.bp,
         gcref_start,
         gcref_count,
         &heap_ret_slots,
+        frame.func_id,
+        frame.pc,
+        "fast heap return",
     ) {
         Ok(vals) => vals,
         Err(result) => return result,
@@ -1054,11 +1437,15 @@ fn fast_complete_heap_return(
 /// Read heap-return values from the returning frame.
 #[inline]
 fn try_read_heap_return_values_from_frame(
+    gc: &Gc,
     fiber: &Fiber,
     bp: usize,
     gcref_start: usize,
     gcref_count: usize,
     slots_per_ref: &[u16],
+    func_id: u32,
+    pc: usize,
+    context: &'static str,
 ) -> Result<Vec<u64>, ExecResult> {
     if slots_per_ref.len() != gcref_count {
         return Err(ExecResult::JitError(format!(
@@ -1071,12 +1458,110 @@ fn try_read_heap_return_values_from_frame(
     let mut vals = Vec::with_capacity(total_slots);
     let stack = fiber.stack.as_ptr();
     for (i, &slot_count) in slots_per_ref.iter().enumerate() {
-        let gcref = stack_get(stack, bp + gcref_start + i) as GcRef;
+        let stack_slot = bp + gcref_start + i;
+        let gcref = try_canonicalize_heap_return_ref(
+            gc,
+            stack_get(stack, stack_slot),
+            func_id,
+            pc,
+            stack_slot,
+            context,
+        )?;
+        validate_heap_return_ref_width(gc, gcref, slot_count as usize, func_id, pc, i, context)?;
         for offset in 0..slot_count as usize {
             vals.push(unsafe { *gcref.add(offset) });
         }
     }
     Ok(vals)
+}
+
+fn try_collect_heap_return_refs_from_stack(
+    gc: &Gc,
+    stack: *const u64,
+    bp: usize,
+    gcref_start: usize,
+    gcref_count: usize,
+    func_id: u32,
+    pc: usize,
+    context: &'static str,
+) -> Result<Vec<u64>, ExecResult> {
+    let mut gcrefs = Vec::with_capacity(gcref_count);
+    for i in 0..gcref_count {
+        let stack_slot = bp
+            .checked_add(gcref_start)
+            .and_then(|slot| slot.checked_add(i))
+            .ok_or_else(|| {
+                ExecResult::JitError(format!(
+                    "{context} heap return slot overflow: func_id={func_id} pc={pc} bp={bp} start={gcref_start} index={i}"
+                ))
+            })?;
+        let gcref = try_canonicalize_heap_return_ref(
+            gc,
+            stack_get(stack, stack_slot),
+            func_id,
+            pc,
+            stack_slot,
+            context,
+        )?;
+        gcrefs.push(gcref as u64);
+    }
+    Ok(gcrefs)
+}
+
+pub(crate) fn try_canonicalize_heap_return_ref(
+    gc: &Gc,
+    raw: u64,
+    func_id: u32,
+    pc: usize,
+    stack_slot: usize,
+    context: &'static str,
+) -> Result<GcRef, ExecResult> {
+    if raw == 0 {
+        return Err(ExecResult::JitError(format!(
+            "{context} heap return GcRef is nil or uninitialized: func_id={func_id} pc={pc} stack_slot={stack_slot}"
+        )));
+    }
+    let raw_ref = raw as GcRef;
+    let Some(canonical) = gc.canonicalize_ref(raw_ref) else {
+        return Err(ExecResult::JitError(format!(
+            "{context} heap return GcRef is invalid: func_id={func_id} pc={pc} stack_slot={stack_slot} raw=0x{raw:016x}"
+        )));
+    };
+    if canonical != raw_ref {
+        return Err(ExecResult::JitError(format!(
+            "{context} heap return GcRef is not canonical: func_id={func_id} pc={pc} stack_slot={stack_slot} raw=0x{raw:016x} canonical={canonical:p}"
+        )));
+    }
+    Ok(canonical)
+}
+
+fn validate_heap_return_ref_width(
+    gc: &Gc,
+    gcref: GcRef,
+    slot_count: usize,
+    func_id: u32,
+    pc: usize,
+    index: usize,
+    context: &'static str,
+) -> Result<(), ExecResult> {
+    let required_bytes = slot_count
+        .checked_mul(vo_runtime::slot::SLOT_BYTES)
+        .ok_or_else(|| {
+            ExecResult::JitError(format!(
+                "{context} heap return slot width overflows: func_id={func_id} pc={pc} index={index} slots={slot_count}"
+            ))
+        })?;
+    let Some(actual_bytes) = gc.allocated_data_size_bytes(gcref) else {
+        return Err(ExecResult::JitError(format!(
+            "{context} heap return allocation size missing: func_id={func_id} pc={pc} index={index} gcref={gcref:p}"
+        )));
+    };
+    if actual_bytes < required_bytes {
+        return Err(ExecResult::JitError(format!(
+            "{context} heap return allocation too small: func_id={func_id} pc={pc} index={index} required_slots={slot_count} required_bytes={required_bytes} actual_bytes={actual_bytes}"
+        )));
+    }
+    Ok(())
 }
 
 /// Write return values to caller's stack.
@@ -1108,8 +1593,12 @@ fn write_return_values(
 /// Read values from heap GcRefs with per-ref slot counts.
 #[inline]
 fn try_read_heap_gcrefs(
+    gc: &Gc,
     heap_gcrefs: &[u64],
     slots_per_ref: &[usize],
+    func_id: u32,
+    pc: usize,
+    context: &'static str,
 ) -> Result<Vec<u64>, ExecResult> {
     if heap_gcrefs.len() != slots_per_ref.len() {
         return Err(ExecResult::JitError(format!(
@@ -1120,8 +1609,9 @@ fn try_read_heap_gcrefs(
     }
     let total_slots: usize = slots_per_ref.iter().sum();
     let mut vals = Vec::with_capacity(total_slots);
-    for (&gcref_raw, &slot_count) in heap_gcrefs.iter().zip(slots_per_ref.iter()) {
-        let gcref: GcRef = gcref_raw as GcRef;
+    for (i, (&gcref_raw, &slot_count)) in heap_gcrefs.iter().zip(slots_per_ref.iter()).enumerate() {
+        let gcref = try_canonicalize_heap_return_ref(gc, gcref_raw, func_id, pc, i, context)?;
+        validate_heap_return_ref_width(gc, gcref, slot_count, func_id, pc, i, context)?;
         for offset in 0..slot_count {
             vals.push(unsafe { *gcref.add(offset) });
         }
@@ -1194,33 +1684,60 @@ fn call_defer_entry(
         return helpers::runtime_trap(gc, fiber, stack, module, RuntimeTrapKind::NilFuncCall);
     }
 
-    let func_id = if entry.is_closure {
-        closure::func_id(entry.closure)
+    let validated_closure = if entry.is_closure {
+        match validate_closure_target(gc, module, entry.closure as u64, "defer closure") {
+            Ok(target) => Some(target),
+            Err(err) => return ExecResult::JitError(err),
+        }
     } else {
-        entry.func_id
+        None
     };
-
-    let Some(func) = module.functions.get(func_id as usize) else {
-        return ExecResult::JitError(format!(
-            "defer target function {func_id} out of bounds (functions={})",
-            module.functions.len()
-        ));
+    let (func_id, func) = if let Some(target) = validated_closure.as_ref() {
+        (target.func_id, target.func)
+    } else {
+        let Some(func) = module.functions.get(entry.func_id as usize) else {
+            return ExecResult::JitError(format!(
+                "defer target function {} out of bounds (functions={})",
+                entry.func_id,
+                module.functions.len()
+            ));
+        };
+        (entry.func_id, func)
     };
     let arg_slots = entry.arg_layout.arg_slots() as usize;
+    if let Some(target) = validated_closure.as_ref() {
+        if let Err(err) = validate_closure_arg_shape("defer closure", target, arg_slots) {
+            return ExecResult::JitError(err);
+        }
+        if let Err(err) = validate_closure_callsite_arg_layout(
+            "defer closure",
+            target,
+            &entry.arg_layout.slot_types,
+        ) {
+            return ExecResult::JitError(err);
+        }
+    } else if let Err(err) = validate_function_arg_shape("static defer", func_id, func, arg_slots) {
+        return ExecResult::JitError(err);
+    } else if let Err(err) = validate_function_callsite_arg_layout(
+        "static defer",
+        func_id,
+        func,
+        0,
+        arg_slots,
+        &entry.arg_layout.slot_types,
+    ) {
+        return ExecResult::JitError(err);
+    }
 
     let args_start = fiber.sp;
 
     // Use common closure call layout logic
-    let layout = if entry.is_closure {
-        vo_runtime::objects::closure::call_layout(
-            entry.closure as u64,
-            entry.closure,
-            func.recv_slots as usize,
-            func.is_closure,
-        )
+    let layout = if let Some(target) = validated_closure.as_ref() {
+        target.layout
     } else {
         vo_runtime::objects::closure::ClosureCallLayout {
             slot0: None,
+            receiver_capture_count: 0,
             arg_offset: 0,
         }
     };
@@ -1228,14 +1745,27 @@ fn call_defer_entry(
     // Ensure stack has enough space for both local_slots and arg_offset+args
     let arg_space = layout.arg_offset + arg_slots;
     let total_slots = (func.local_slots as usize).max(arg_space);
-    fiber.reserve_slots_at(args_start, total_slots);
+    if fiber
+        .try_reserve_call_window(args_start, total_slots)
+        .is_err()
+    {
+        let stack = fiber.stack_ptr();
+        return helpers::runtime_trap(gc, fiber, stack, module, RuntimeTrapKind::StackOverflow);
+    }
     if layout.slot0.is_some() && layout.arg_offset > 1 {
         fiber.zero_slots_at(args_start + 1, layout.arg_offset - 1);
     }
     fiber.zero_slots_tail_at(args_start, func.gc_scan_slots as usize, arg_space);
     let stack = fiber.stack_ptr();
 
-    // Set slot 0 if needed
+    for i in 0..layout.receiver_capture_count {
+        let target = validated_closure
+            .as_ref()
+            .expect("receiver captures require validated closure target");
+        stack_set(stack, args_start + i, target.capture(i));
+    }
+
+    // Set slot 0 if needed.
     if let Some(slot0_val) = layout.slot0 {
         stack_set(stack, args_start, slot0_val);
     }
@@ -1247,319 +1777,16 @@ fn call_defer_entry(
         }
     }
 
-    fiber.push_call_frame(func_id, args_start, 0, 0, func.gc_scan_slots);
+    if fiber
+        .try_push_call_frame(func_id, args_start, 0, 0, func.gc_scan_slots)
+        .is_err()
+    {
+        let stack = fiber.stack_ptr();
+        return helpers::runtime_trap(gc, fiber, stack, module, RuntimeTrapKind::StackOverflow);
+    }
 
     ExecResult::FrameChanged
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use vo_runtime::instruction::Opcode;
-    use vo_runtime::SlotType;
-
-    fn func_with_slot_types(slot_types: Vec<SlotType>) -> FunctionDef {
-        FunctionDef {
-            name: "ret_meta".to_string(),
-            param_count: 0,
-            param_slots: 0,
-            local_slots: slot_types.len() as u16,
-            gc_scan_slots: FunctionDef::compute_gc_scan_slots(&slot_types),
-            ret_slots: 0,
-            ret_slot_types: Vec::new(),
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: false,
-            error_ret_slot: -1,
-            has_defer: false,
-            has_calls: false,
-            has_call_extern: false,
-            code: Vec::new(),
-            jit_metadata: Vec::new(),
-            slot_types,
-            borrowed_scan_slots_prefix: Vec::new(),
-            capture_types: Vec::new(),
-            capture_slot_types: Vec::new(),
-            param_types: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn stack_return_slot_metadata_missing_fails_fast() {
-        let func = func_with_slot_types(vec![SlotType::Value]);
-        match try_require_slot_types(&func, 3, 9, 1, 2, "test return") {
-            Err(ExecResult::JitError(msg)) => {
-                assert!(msg.contains("func_id=3"));
-                assert!(msg.contains("pc=9"));
-                assert!(msg.contains("slot range 1..3"));
-                assert!(msg.contains("actual slot_types=1"));
-            }
-            other => panic!("missing return metadata should return JitError, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn heap_return_slot_count_mismatch_fails_fast() {
-        let mut func = func_with_slot_types(Vec::new());
-        func.heap_ret_slots = vec![1];
-        match try_require_heap_ret_slots(&func, 4, 10, 2, "test heap return") {
-            Err(ExecResult::JitError(msg)) => {
-                assert!(msg.contains("func_id=4"));
-                assert!(msg.contains("pc=10"));
-                assert!(msg.contains("expected heap_ret_slots=2 actual=1"));
-            }
-            other => panic!("missing heap return metadata should return JitError, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn heap_return_reader_rejects_missing_slot_counts() {
-        match try_read_heap_gcrefs(&[0x1234], &[]) {
-            Err(ExecResult::JitError(msg)) => {
-                assert!(msg.contains("heap return metadata count mismatch"));
-                assert!(msg.contains("gcrefs=1"));
-                assert!(msg.contains("slots_per_ref=0"));
-            }
-            other => panic!("heap return reader should return JitError, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn jit_ok_return_missing_stack_metadata_is_jit_error_instead_of_panic() {
-        let mut gc = Gc::new();
-        let module = Module::new("jit-return-metadata-test".to_string());
-        let mut func = func_with_slot_types(vec![SlotType::Value]);
-        func.ret_slots = 2;
-
-        let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 0, 0, 2, 1);
-        fiber.defer_stack.push(DeferEntry {
-            frame_depth: fiber.frames.len(),
-            func_id: 0,
-            closure: core::ptr::null_mut(),
-            args: core::ptr::null_mut(),
-            arg_layout: crate::fiber::DeferArgLayout {
-                slot_types: Vec::new(),
-            },
-            is_closure: false,
-            is_errdefer: false,
-            registered_at_generation: 0,
-        });
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handle_jit_ok_return(
-                &mut gc,
-                &mut fiber,
-                &func,
-                &module,
-                &[10, 20],
-                false,
-                0,
-                0,
-                false,
-            )
-        }));
-
-        match result {
-            Ok(ExecResult::JitError(msg)) => {
-                assert!(msg.contains("JIT stack return"));
-                assert!(msg.contains("slot range 0..2"));
-            }
-            Ok(other) => panic!("missing return metadata should be JitError, got {other:?}"),
-            Err(_) => panic!("missing return metadata must not panic across the JIT bridge"),
-        }
-    }
-
-    #[test]
-    fn fast_heap_return_missing_slot_counts_is_jit_error_instead_of_panic() {
-        let mut func = func_with_slot_types(vec![SlotType::GcRef]);
-        func.heap_ret_gcref_count = 1;
-        func.heap_ret_gcref_start = 0;
-        func.heap_ret_slots = Vec::new();
-
-        let mut fiber = Fiber::new(0);
-        fiber.push_frame(0, 1, 1, 0, 0);
-        fiber.stack[0] = 0;
-        let inst = Instruction::new(Opcode::Return, 0, 1, 0);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            fast_complete_heap_return(&mut fiber, &func, &inst)
-        }));
-
-        match result {
-            Ok(ExecResult::JitError(msg)) => {
-                assert!(msg.contains("fast heap return"), "{msg}");
-                assert!(msg.contains("expected heap_ret_slots=1 actual=0"), "{msg}");
-            }
-            Ok(other) => {
-                panic!("missing fast heap return metadata should be JitError, got {other:?}")
-            }
-            Err(_) => panic!("missing fast heap return metadata must not panic"),
-        }
-    }
-
-    #[test]
-    fn jit_ok_return_at_closure_replay_boundary_caches_results() {
-        let mut gc = Gc::new();
-        let module = Module::new("jit-closure-replay-return-test".to_string());
-        let mut func = func_with_slot_types(vec![
-            SlotType::Value,
-            SlotType::Interface0,
-            SlotType::Interface1,
-        ]);
-        func.ret_slots = 3;
-        let mut fiber = Fiber::new(0);
-        fiber.push_frame(7, 3, 0, 0, 3);
-        fiber.closure_replay.push_depth(fiber.frames.len());
-
-        let result = handle_jit_ok_return(
-            &mut gc,
-            &mut fiber,
-            &func,
-            &module,
-            &[42, 0, 0],
-            false,
-            0,
-            0,
-            false,
-        );
-
-        assert!(matches!(result, ExecResult::FrameChanged));
-        assert!(fiber.frames.is_empty());
-        assert_eq!(fiber.closure_replay.depth, 0);
-        assert_eq!(fiber.closure_replay.results.len(), 1);
-        assert_eq!(fiber.closure_replay.results[0].0, vec![42, 0, 0]);
-        assert_eq!(
-            fiber.closure_replay.results[0].1,
-            vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1]
-        );
-    }
-
-    #[test]
-    fn jit_closure_replay_return_skips_errdefer_without_panicking() {
-        let mut gc = Gc::new();
-        let module = Module::new("jit-closure-replay-errdefer-test".to_string());
-        let mut func = func_with_slot_types(vec![SlotType::Value]);
-        func.ret_slots = 1;
-        let mut fiber = Fiber::new(0);
-        fiber.push_frame(7, 1, 0, 0, 1);
-        fiber.closure_replay.push_depth(fiber.frames.len());
-        fiber.defer_stack.push(DeferEntry {
-            frame_depth: fiber.frames.len(),
-            func_id: 0,
-            closure: core::ptr::null_mut(),
-            args: core::ptr::null_mut(),
-            arg_layout: crate::fiber::DeferArgLayout {
-                slot_types: Vec::new(),
-            },
-            is_closure: false,
-            is_errdefer: true,
-            registered_at_generation: 0,
-        });
-
-        let result = handle_jit_ok_return(
-            &mut gc,
-            &mut fiber,
-            &func,
-            &module,
-            &[99],
-            false,
-            0,
-            0,
-            false,
-        );
-
-        assert!(matches!(result, ExecResult::FrameChanged));
-        assert!(fiber.frames.is_empty());
-        assert!(fiber.defer_stack.is_empty());
-        assert!(fiber.unwinding.is_none());
-        assert_eq!(fiber.closure_replay.results[0].0, vec![99]);
-    }
-
-    #[test]
-    fn interpreter_closure_replay_return_skips_errdefer_without_panicking() {
-        let mut gc = Gc::new();
-        let module = Module::new("interp-closure-replay-errdefer-test".to_string());
-        let mut func = func_with_slot_types(vec![SlotType::Value]);
-        func.ret_slots = 1;
-        let inst = Instruction::new(Opcode::Return, 0, 1, 0);
-        let mut fiber = Fiber::new(0);
-        fiber.push_frame(7, 1, 0, 0, 1);
-        fiber.stack[0] = 123;
-        fiber.closure_replay.push_depth(fiber.frames.len());
-        fiber.defer_stack.push(DeferEntry {
-            frame_depth: fiber.frames.len(),
-            func_id: 0,
-            closure: core::ptr::null_mut(),
-            args: core::ptr::null_mut(),
-            arg_layout: crate::fiber::DeferArgLayout {
-                slot_types: Vec::new(),
-            },
-            is_closure: false,
-            is_errdefer: true,
-            registered_at_generation: 0,
-        });
-
-        let result = handle_return(&mut gc, &mut fiber, &inst, &func, &module, false);
-
-        assert!(matches!(result, ExecResult::FrameChanged));
-        assert!(fiber.frames.is_empty());
-        assert!(fiber.defer_stack.is_empty());
-        assert!(fiber.unwinding.is_none());
-        assert_eq!(fiber.closure_replay.results[0].0, vec![123]);
-    }
-
-    #[test]
-    fn defer_call_missing_function_is_jit_error_instead_of_index_panic() {
-        let mut gc = Gc::new();
-        let mut fiber = Fiber::new(0);
-        let module = Module::new("missing-defer-target-test".to_string());
-        let entry = DeferEntry {
-            frame_depth: 1,
-            func_id: 9,
-            closure: core::ptr::null_mut(),
-            args: core::ptr::null_mut(),
-            arg_layout: crate::fiber::DeferArgLayout {
-                slot_types: Vec::new(),
-            },
-            is_closure: false,
-            is_errdefer: false,
-            registered_at_generation: 0,
-        };
-
-        let result = call_defer_entry(&mut gc, &mut fiber, &entry, &module);
-
-        assert!(matches!(
-            result,
-            ExecResult::JitError(msg)
-                if msg.contains("defer target function 9 out of bounds")
-        ));
-    }
-
-    #[test]
-    fn execute_next_defer_empty_pending_is_jit_error_instead_of_remove_panic() {
-        let mut gc = Gc::new();
-        let mut fiber = Fiber::new(0);
-        let module = Module::new("empty-pending-defer-test".to_string());
-        fiber.unwinding = Some(UnwindingState {
-            pending: Vec::new(),
-            target_depth: 0,
-            mode: UnwindingMode::Return,
-            current_defer_generation: 0,
-            return_values: None,
-            caller_ret_reg: 0,
-            caller_ret_count: 0,
-            is_closure_replay: false,
-        });
-
-        let result = execute_next_defer(&mut gc, &mut fiber, &module);
-
-        assert!(matches!(
-            result,
-            ExecResult::JitError(msg)
-                if msg.contains("unwind state has no pending defer to execute")
-        ));
-    }
-}
+mod tests;

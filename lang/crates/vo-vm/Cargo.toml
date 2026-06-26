@@ -21,3 +21,6 @@ libc = { version = "0.2", optional = true }
 
 # Optional JIT compiler
 vo-jit = { path = "../vo-jit", optional = true }
+
+[dev-dependencies]
+vo-source-contract = { path = "../vo-source-contract" }

@@ -1,8 +1,14 @@
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 #[cfg(feature = "std")]
-use std::{string::String, vec::Vec};
+use std::{string::String, vec, vec::Vec};
 
+use core::fmt;
 use vo_runtime::gc::GcRef;
 use vo_runtime::island::{EndpointRequestKind, EndpointResponseKind};
 use vo_runtime::island_msg;
@@ -10,60 +16,210 @@ use vo_runtime::objects::queue;
 use vo_runtime::objects::queue_state::{QueueBacking, QueueWaiter};
 
 use crate::bytecode::Module;
+use crate::runtime_boundary::{
+    validate_canonical_fiber_key, EndpointTombstone, IslandCommandEffect, ResumePolicy,
+    RuntimeBoundary, RuntimeCommand, RuntimeCommandOutcome, RuntimeTransition, WakeCommand,
+};
+use crate::vm::GcRootEffect;
 
-use super::types::EndpointEntry;
+use super::types::{EndpointEntry, VmError};
 use super::{helpers, Vm};
 
-pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) {
-    let payload = island_msg::decode_spawn_header(data);
-    let (capture_types, param_types, struct_metas, runtime_types) = {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnFiberError {
+    message: String,
+}
+
+impl SpawnFiberError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for SpawnFiberError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+pub(crate) fn handle_spawn_fiber(vm: &mut Vm, data: &[u8]) -> Result<(), SpawnFiberError> {
+    let payload = island_msg::decode_spawn_header(data).map_err(|err| {
+        SpawnFiberError::new(format!(
+            "GoIsland spawn payload header decode failed: {err:?}"
+        ))
+    })?;
+    let (capture_types, param_types, struct_metas, named_type_metas, runtime_types) = {
         let module = vm.module().expect("module loaded");
         let func_idx = payload.func_id as usize;
-        assert!(
-            func_idx < module.functions.len(),
-            "island spawn: invalid func_id {}",
-            payload.func_id
-        );
-        let func_def = &module.functions[func_idx];
+        let func_def = module.functions.get(func_idx).ok_or_else(|| {
+            SpawnFiberError::new(format!(
+                "GoIsland spawn payload references missing func_id {}",
+                payload.func_id
+            ))
+        })?;
+        let capture_types = if payload.raw_capture_slots > 0 {
+            let plan = crate::exec::direct_method_receiver_transfer_plan(
+                module,
+                payload.func_id,
+                func_def,
+                payload.raw_capture_slots,
+            )
+            .map_err(|msg| {
+                SpawnFiberError::new(format!(
+                    "GoIsland spawn payload receiver metadata error for func_id {}: {msg}",
+                    payload.func_id
+                ))
+            })?;
+            vec![plan.transfer_type]
+        } else if func_def.capture_types.is_empty()
+            && func_def.recv_slots > 0
+            && payload.num_captures > 0
+        {
+            let plan = crate::exec::direct_method_receiver_transfer_plan(
+                module,
+                payload.func_id,
+                func_def,
+                func_def.recv_slots,
+            )
+            .map_err(|msg| {
+                SpawnFiberError::new(format!(
+                    "GoIsland spawn payload receiver metadata error for func_id {}: {msg}",
+                    payload.func_id
+                ))
+            })?;
+            if plan.raw_capture_slots != 0 {
+                return Err(SpawnFiberError::new(format!(
+                    "GoIsland spawn payload receiver metadata error for func_id {}: boxed receiver plan produced raw slots {}",
+                    payload.func_id, plan.raw_capture_slots
+                )));
+            }
+            vec![plan.transfer_type]
+        } else {
+            func_def.capture_types.clone()
+        };
+        let param_types = crate::exec::go_island_payload_param_transfer_types(
+            module,
+            payload.func_id,
+            func_def,
+            payload.num_args as usize,
+        )
+        .map_err(|msg| {
+            SpawnFiberError::new(format!(
+                "GoIsland spawn payload param metadata error for func_id {}: {msg}",
+                payload.func_id
+            ))
+        })?;
         (
-            func_def.capture_types.clone(),
-            func_def.param_types.clone(),
+            capture_types,
+            param_types,
             module.struct_metas.clone(),
+            module.named_type_metas.clone(),
             module.runtime_types.clone(),
         )
     };
 
-    let (gc, endpoint_registry) = (&mut vm.state.gc, &mut vm.state.endpoint_registry);
-    let (unpacked_captures, unpacked_args) = island_msg::unpack_spawn_payload(
-        gc,
-        data,
-        &payload,
-        &capture_types,
-        &param_types,
-        &struct_metas,
-        &runtime_types,
-        |gc, handle| crate::exec::resolve_unpacked_queue_handle(gc, handle, endpoint_registry),
-    );
+    let endpoint_registry_snapshot = vm.state.endpoint_registry.snapshot();
+    let (unpacked_args, closure_ref) = {
+        let (gc, endpoint_registry) = (&mut vm.state.gc, &mut vm.state.endpoint_registry);
+        let mut handle_error = None;
+        let unpack_result = island_msg::unpack_spawn_payload(
+            gc,
+            data,
+            &payload,
+            &capture_types,
+            &param_types,
+            &struct_metas,
+            &named_type_metas,
+            &runtime_types,
+            |gc, handle| match crate::exec::try_resolve_unpacked_queue_handle(
+                gc,
+                handle,
+                endpoint_registry,
+            ) {
+                Ok(queue_ref) => queue_ref,
+                Err(err) => {
+                    if handle_error.is_none() {
+                        handle_error = Some(err);
+                    }
+                    core::ptr::null_mut()
+                }
+            },
+        );
+        let (unpacked_captures, unpacked_args) = match unpack_result {
+            Ok(value) => value,
+            Err(err) => {
+                endpoint_registry.restore(endpoint_registry_snapshot);
+                return Err(SpawnFiberError::new(format!(
+                    "GoIsland spawn payload unpack failed for func_id {}: {err:?}",
+                    payload.func_id
+                )));
+            }
+        };
+        if let Some(err) = handle_error {
+            endpoint_registry.restore(endpoint_registry_snapshot);
+            return Err(SpawnFiberError::new(format!(
+                "GoIsland spawn payload queue handle resolution failed for func_id {}: {err}",
+                payload.func_id
+            )));
+        }
 
-    let closure_ref =
-        vo_runtime::objects::closure::create(gc, payload.func_id, payload.num_captures as usize);
+        let capture_count = if payload.raw_capture_slots == 0 {
+            payload.num_captures as usize
+        } else {
+            unpacked_captures.len()
+        };
+        let closure_ref = vo_runtime::objects::closure::create(gc, payload.func_id, capture_count);
 
-    for (i, &cap_ref) in unpacked_captures.iter().enumerate() {
-        vo_runtime::objects::closure::set_capture(closure_ref, i, cap_ref as u64);
-    }
-    gc.mark_allocated_for_scan(closure_ref);
+        for (i, &slot) in unpacked_captures.iter().enumerate() {
+            // Safety: `closure_ref` is freshly allocated; it is marked for
+            // scanning after all captures are initialized.
+            unsafe { vo_runtime::objects::closure::set_capture(closure_ref, i, slot) };
+        }
+        gc.mark_allocated_for_scan(closure_ref);
+        (unpacked_args, closure_ref)
+    };
     vm.mark_gc_all_roots_dirty();
 
-    let new_fiber = unsafe {
-        helpers::build_closure_fiber_from_args_ptr(
-            &vm.module().expect("module loaded").functions,
+    let new_fiber = match unsafe {
+        helpers::try_build_closure_fiber_from_args_ptr(
+            &vm.state.gc,
+            vm.module().expect("module loaded"),
             vm.scheduler.fibers.len() as u32,
             closure_ref as u64,
             unpacked_args.as_ptr(),
             unpacked_args.len() as u32,
         )
+    } {
+        Ok(fiber) => fiber,
+        Err(err) => {
+            vm.state
+                .endpoint_registry
+                .restore(endpoint_registry_snapshot);
+            vm.mark_gc_all_roots_dirty();
+            return Err(SpawnFiberError::new(format!(
+                "GoIsland spawn closure fiber build failed for func_id {}: {err:?}",
+                payload.func_id
+            )));
+        }
     };
-    vm.scheduler.spawn(new_fiber);
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Continue,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::AllRootsDirty,
+    );
+    transition.spawns.push(new_fiber);
+    if let Err(err) = vm.apply_runtime_transition(None, transition) {
+        vm.state
+            .endpoint_registry
+            .restore(endpoint_registry_snapshot);
+        vm.mark_gc_all_roots_dirty();
+        return Err(SpawnFiberError::new(format!(
+            "GoIsland spawn transition failed: {err:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn endpoint_send_ack(closed: bool) -> EndpointResponseKind {
@@ -77,10 +233,177 @@ fn endpoint_recv_closed() -> EndpointResponseKind {
     }
 }
 
+fn endpoint_recv_error() -> EndpointResponseKind {
+    EndpointResponseKind::RecvError
+}
+
 fn endpoint_recv_data(data: Vec<u8>) -> EndpointResponseKind {
     EndpointResponseKind::RecvData {
         data,
         closed: false,
+    }
+}
+
+fn endpoint_request_authorized(vm: &Vm, ch: GcRef, from_island: u32) -> bool {
+    queue::home_info(ch).is_some_and(|info| {
+        from_island == vm.state.current_island_id || info.peers.contains(&from_island)
+    })
+}
+
+fn preflight_endpoint_response_route(
+    vm: &Vm,
+    target: QueueWaiter,
+    context: &str,
+) -> Result<(), VmError> {
+    if target.endpoint_wait_id() == 0 && target.island_id == vm.state.current_island_id {
+        return Ok(());
+    }
+    crate::exec::preflight_island_route(&vm.state, target.island_id, context).map_err(VmError::Jit)
+}
+
+fn preflight_endpoint_peer_route(vm: &Vm, peer: u32, context: &str) -> Result<(), VmError> {
+    crate::exec::preflight_island_route(&vm.state, peer, context).map_err(VmError::Jit)
+}
+
+fn preflight_endpoint_request_routes(
+    vm: &Vm,
+    ch: GcRef,
+    kind: &EndpointRequestKind,
+    from: QueueWaiter,
+) -> Result<(), VmError> {
+    match kind {
+        EndpointRequestKind::Send { .. } => {
+            preflight_endpoint_response_route(vm, from, "EndpointRequest send requester route")?;
+            if let Some(receiver) =
+                queue::next_remote_direct_receiver(ch, vm.state.current_island_id)
+            {
+                preflight_endpoint_response_route(
+                    vm,
+                    receiver,
+                    "EndpointRequest send receiver route",
+                )?;
+            }
+        }
+        EndpointRequestKind::Recv => {
+            preflight_endpoint_response_route(vm, from, "EndpointRequest recv requester route")?;
+            if let Some(sender) = queue::next_recv_endpoint_sender(ch) {
+                preflight_endpoint_response_route(vm, sender, "EndpointRequest recv sender route")?;
+            }
+        }
+        EndpointRequestKind::Close => {
+            if let Some(info) = queue::home_info(ch) {
+                for peer in info.peers.iter().copied() {
+                    if peer != from.island_id {
+                        preflight_endpoint_peer_route(
+                            vm,
+                            peer,
+                            "EndpointRequest close peer route",
+                        )?;
+                    }
+                }
+            }
+            let state = queue::local_state(ch);
+            for receiver in state.waiting_receivers.iter().cloned() {
+                preflight_endpoint_response_route(
+                    vm,
+                    receiver,
+                    "EndpointRequest close receiver route",
+                )?;
+            }
+            for (sender, _) in state.waiting_senders.iter() {
+                preflight_endpoint_response_route(
+                    vm,
+                    sender.clone(),
+                    "EndpointRequest close sender route",
+                )?;
+            }
+        }
+        EndpointRequestKind::Transfer { .. } => {}
+    }
+    Ok(())
+}
+
+fn reject_endpoint_request_kind(kind: &EndpointRequestKind) -> Option<EndpointResponseKind> {
+    match kind {
+        EndpointRequestKind::Send { .. } => Some(endpoint_send_ack(true)),
+        EndpointRequestKind::Recv => Some(endpoint_recv_error()),
+        EndpointRequestKind::Close | EndpointRequestKind::Transfer { .. } => None,
+    }
+}
+
+fn reject_endpoint_request(
+    vm: &mut Vm,
+    endpoint_id: u64,
+    kind: &EndpointRequestKind,
+    from_island: u32,
+    fiber_key: u64,
+    wait_id: u64,
+) -> Result<(), VmError> {
+    if fiber_key == 0 || wait_id == 0 {
+        return Ok(());
+    }
+    let Some(response) = reject_endpoint_request_kind(kind) else {
+        return Ok(());
+    };
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Continue,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::None,
+    );
+    transition
+        .island_commands
+        .push(IslandCommandEffect::endpoint_response(
+            from_island,
+            vm.state.current_island_id,
+            endpoint_id,
+            response,
+            fiber_key,
+            wait_id,
+        ));
+    vm.apply_runtime_transition(None, transition)?;
+    Ok(())
+}
+
+pub(crate) fn preflight_endpoint_request_command(
+    vm: &Vm,
+    endpoint_id: u64,
+    kind: &EndpointRequestKind,
+    from_island: u32,
+    fiber_key: u64,
+    wait_id: u64,
+) -> Result<(), VmError> {
+    let from = QueueWaiter::endpoint(from_island, fiber_key, wait_id);
+
+    if matches!(kind, EndpointRequestKind::Transfer { .. }) {
+        return Ok(());
+    }
+    preflight_endpoint_request_response_identity(kind, fiber_key, wait_id)?;
+
+    match vm.state.endpoint_registry.entries.get(&endpoint_id) {
+        Some(EndpointEntry::Live(ch_ref)) => {
+            let ch = *ch_ref;
+            if !endpoint_request_authorized(vm, ch, from_island) {
+                if fiber_key != 0 && wait_id != 0 && reject_endpoint_request_kind(kind).is_some() {
+                    preflight_endpoint_response_route(
+                        vm,
+                        from,
+                        "EndpointRequest reject requester route",
+                    )?;
+                }
+                return Ok(());
+            }
+            preflight_endpoint_request_routes(vm, ch, kind, from)
+        }
+        Some(EndpointEntry::Tombstone { .. }) | None => match kind {
+            EndpointRequestKind::Send { .. } | EndpointRequestKind::Recv => {
+                preflight_endpoint_response_route(
+                    vm,
+                    from,
+                    "EndpointRequest missing endpoint requester route",
+                )
+            }
+            EndpointRequestKind::Close | EndpointRequestKind::Transfer { .. } => Ok(()),
+        },
     }
 }
 
@@ -89,21 +412,29 @@ pub(crate) fn handle_endpoint_request_command(
     endpoint_id: u64,
     kind: EndpointRequestKind,
     from_island: u32,
-    fiber_id: u64,
-) {
-    let from = QueueWaiter::simple(from_island, fiber_id);
-    let is_close = matches!(kind, EndpointRequestKind::Close);
+    fiber_key: u64,
+    wait_id: u64,
+) -> Result<(), VmError> {
+    preflight_endpoint_request_response_identity(&kind, fiber_key, wait_id)?;
+    let from = QueueWaiter::endpoint(from_island, fiber_key, wait_id);
+    let is_close = matches!(&kind, EndpointRequestKind::Close);
 
     if let EndpointRequestKind::Transfer { new_peer } = &kind {
         if let Some(ch) = vm.state.endpoint_registry.get_live(endpoint_id) {
-            queue::add_home_peer(ch, *new_peer);
+            if endpoint_request_authorized(vm, ch, from_island) {
+                queue::add_home_peer(ch, *new_peer);
+            }
         }
-        return;
+        return Ok(());
     }
 
     match vm.state.endpoint_registry.entries.get(&endpoint_id) {
         Some(EndpointEntry::Live(ch_ref)) => {
             let ch = *ch_ref;
+            if !endpoint_request_authorized(vm, ch, from_island) {
+                reject_endpoint_request(vm, endpoint_id, &kind, from_island, fiber_key, wait_id)?;
+                return Ok(());
+            }
             assert!(
                 vo_runtime::objects::queue_state::backing(ch) == QueueBacking::Local,
                 "EndpointRequest arrived at non-LOCAL channel"
@@ -111,18 +442,26 @@ pub(crate) fn handle_endpoint_request_command(
 
             let cap = vo_runtime::objects::queue_state::capacity(ch);
             let elem_meta = vo_runtime::objects::queue_state::elem_meta(ch);
+            let elem_rttid = vo_runtime::objects::queue_state::elem_rttid(ch);
             let elem_slots = vo_runtime::objects::queue_state::elem_slots(ch) as usize;
             let home_island = vm.state.current_island_id;
             let module = vm.module.as_ref().expect("module loaded");
 
-            let mut responses: Vec<(u32, EndpointResponseKind, u64)> = Vec::new();
-            let mut local_wakes: Vec<QueueWaiter> = Vec::new();
+            let mut responses: Vec<(u32, EndpointResponseKind, u64, u64)> = Vec::new();
+            let mut local_wakes: Vec<WakeCommand> = Vec::new();
+            let mut island_effects = Vec::new();
+
+            preflight_endpoint_request_routes(vm, ch, &kind, from.clone())?;
+            let queue_snapshot = queue::local_state(ch).clone();
+            let endpoint_registry_snapshot = vm.state.endpoint_registry.snapshot();
+            let mut transfer_commit = crate::exec::QueueTransferCommit::default();
 
             let ctx = EndpointRequestCtx {
                 ch,
                 cap,
                 home_island,
                 elem_meta,
+                elem_rttid,
                 elem_slots,
                 struct_metas: &module.struct_metas,
                 runtime_types: &module.runtime_types,
@@ -137,32 +476,101 @@ pub(crate) fn handle_endpoint_request_command(
                     &mut vm.state,
                     &mut responses,
                     &mut local_wakes,
+                    &mut transfer_commit,
+                    &mut island_effects,
                 );
             });
 
-            if is_close {
-                finalize_closed_home_endpoint(vm, endpoint_id, Some(from_island));
-            }
-
-            for (target_island, resp_kind, resp_fiber) in responses {
-                vm.state
-                    .send_endpoint_response(target_island, endpoint_id, resp_kind, resp_fiber);
-            }
-
-            for waiter in local_wakes {
-                vm.scheduler.wake_queue_waiter(&waiter);
+            if is_close
+                || !island_effects.is_empty()
+                || !responses.is_empty()
+                || !local_wakes.is_empty()
+            {
+                let mut transition = RuntimeTransition::new(
+                    RuntimeBoundary::Continue,
+                    ResumePolicy::PreserveFramePc,
+                    GcRootEffect::AllRootsDirty,
+                );
+                transition.island_commands.append(&mut island_effects);
+                if is_close {
+                    append_closed_home_endpoint_effects(
+                        vm,
+                        endpoint_id,
+                        Some(from_island),
+                        &mut transition,
+                    );
+                }
+                transition.island_commands.extend(responses.into_iter().map(
+                    |(target_island, resp_kind, resp_fiber, resp_wait_id)| {
+                        IslandCommandEffect::endpoint_response(
+                            target_island,
+                            home_island,
+                            endpoint_id,
+                            resp_kind,
+                            resp_fiber,
+                            resp_wait_id,
+                        )
+                    },
+                ));
+                transition.wakes.append(&mut local_wakes);
+                if let Err(err) = vm.apply_runtime_transition(None, transition) {
+                    transfer_commit.restore_committed_local_endpoint_state(&mut vm.state);
+                    queue::with_local_state(ch, |state| {
+                        *state = queue_snapshot;
+                    });
+                    vm.state
+                        .endpoint_registry
+                        .restore(endpoint_registry_snapshot);
+                    vm.mark_gc_all_roots_dirty();
+                    return Err(err);
+                }
             }
         }
-        Some(EndpointEntry::Tombstone) | None => {
+        Some(EndpointEntry::Tombstone { .. }) | None => {
             let resp = match kind {
                 EndpointRequestKind::Send { .. } => endpoint_send_ack(true),
                 EndpointRequestKind::Recv => endpoint_recv_closed(),
-                EndpointRequestKind::Close | EndpointRequestKind::Transfer { .. } => return,
+                EndpointRequestKind::Close | EndpointRequestKind::Transfer { .. } => return Ok(()),
             };
-            vm.state
-                .send_endpoint_response(from_island, endpoint_id, resp, fiber_id);
+            let mut transition = RuntimeTransition::new(
+                RuntimeBoundary::Continue,
+                ResumePolicy::PreserveFramePc,
+                GcRootEffect::None,
+            );
+            transition
+                .island_commands
+                .push(IslandCommandEffect::endpoint_response(
+                    from_island,
+                    vm.state.current_island_id,
+                    endpoint_id,
+                    resp,
+                    fiber_key,
+                    wait_id,
+                ));
+            vm.apply_runtime_transition(None, transition)?;
         }
     }
+    Ok(())
+}
+
+fn preflight_endpoint_request_response_identity(
+    kind: &EndpointRequestKind,
+    fiber_key: u64,
+    wait_id: u64,
+) -> Result<(), VmError> {
+    if !matches!(
+        kind,
+        EndpointRequestKind::Send { .. } | EndpointRequestKind::Recv
+    ) {
+        return Ok(());
+    }
+    if fiber_key == 0 || wait_id == 0 {
+        return Err(VmError::Jit(
+            "endpoint request missing response wait identity".to_string(),
+        ));
+    }
+    validate_canonical_fiber_key(fiber_key, "endpoint request response identity")
+        .map_err(VmError::Jit)
 }
 
 struct EndpointRequestCtx<'a> {
@@ -170,6 +578,7 @@ struct EndpointRequestCtx<'a> {
     cap: usize,
     home_island: u32,
     elem_meta: vo_runtime::ValueMeta,
+    elem_rttid: vo_runtime::ValueRttid,
     elem_slots: usize,
     struct_metas: &'a [vo_common_core::bytecode::StructMeta],
     runtime_types: &'a [vo_common_core::RuntimeType],
@@ -182,24 +591,42 @@ fn handle_endpoint_request_inner(
     req: EndpointRequestKind,
     from: QueueWaiter,
     vm_state: &mut crate::vm::VmState,
-    responses: &mut Vec<(u32, EndpointResponseKind, u64)>,
-    local_wakes: &mut Vec<QueueWaiter>,
+    responses: &mut Vec<(u32, EndpointResponseKind, u64, u64)>,
+    local_wakes: &mut Vec<WakeCommand>,
+    transfer_commit: &mut crate::exec::QueueTransferCommit,
+    island_effects: &mut Vec<IslandCommandEffect>,
 ) {
     let home_island = ctx.home_island;
     match req {
         EndpointRequestKind::Send { data } => {
             let requester = from.clone();
-            let value = crate::exec::unpack_transport_message(
+            let registry_snapshot = vm_state.endpoint_registry.snapshot();
+            let value = match crate::exec::unpack_transport_message(
                 &mut vm_state.gc,
                 &data,
+                ctx.elem_meta,
+                ctx.elem_rttid,
                 ctx.elem_slots,
                 ctx.struct_metas,
+                &ctx.module.named_type_metas,
                 ctx.runtime_types,
                 &mut vm_state.endpoint_registry,
-            );
+            ) {
+                Ok(value) => value,
+                Err(_) => {
+                    dispatch_response(
+                        requester,
+                        home_island,
+                        endpoint_send_ack(true),
+                        responses,
+                        local_wakes,
+                    );
+                    return;
+                }
+            };
             vm_state.mark_gc_all_roots_dirty();
-            if ctx.elem_meta.value_kind().may_contain_gc_refs() {
-                if vo_runtime::gc_types::try_typed_write_barrier_by_meta(
+            if ctx.elem_meta.value_kind().may_contain_gc_refs()
+                && vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                     &mut vm_state.gc,
                     ctx.ch,
                     &value,
@@ -207,7 +634,23 @@ fn handle_endpoint_request_inner(
                     Some(ctx.module),
                 )
                 .is_err()
+            {
+                vm_state.endpoint_registry.restore(registry_snapshot);
+                dispatch_response(
+                    requester,
+                    home_island,
+                    endpoint_send_ack(true),
+                    responses,
+                    local_wakes,
+                );
+                return;
+            }
+            let direct_receiver = state.waiting_receivers.front().cloned();
+            if let Some(receiver) = direct_receiver.as_ref() {
+                if validate_endpoint_recv_payload_for_waiter(ctx, receiver, &value, vm_state)
+                    .is_err()
                 {
+                    vm_state.endpoint_registry.restore(registry_snapshot);
                     dispatch_response(
                         requester,
                         home_island,
@@ -218,9 +661,75 @@ fn handle_endpoint_request_inner(
                     return;
                 }
             }
+            let select_recv_slot_types = if !state.is_closed()
+                && state
+                    .waiting_receivers
+                    .front()
+                    .is_some_and(|receiver| receiver.is_local_select_recv(home_island))
+            {
+                match crate::exec::queue::select_woken_recv_slot_types(ctx.ch, Some(ctx.module))
+                    .and_then(|slot_types| {
+                        crate::exec::queue::validate_select_woken_recv_payload_width(
+                            value.len(),
+                            slot_types.len(),
+                        )?;
+                        Ok(slot_types)
+                    }) {
+                    Ok(slot_types) => Some(slot_types),
+                    Err(_) => {
+                        vm_state.endpoint_registry.restore(registry_snapshot);
+                        dispatch_response(
+                            requester,
+                            home_island,
+                            endpoint_send_ack(true),
+                            responses,
+                            local_wakes,
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let mut select_recv_slot_types = select_recv_slot_types;
             match state.send_or_block_resolved(value, ctx.cap, from, home_island) {
-                vo_runtime::objects::queue_state::ResolvedSendResult::Wake(receiver) => {
-                    local_wakes.push(receiver);
+                vo_runtime::objects::queue_state::ResolvedSendResult::Wake {
+                    receiver,
+                    payload,
+                } => {
+                    let wake = match payload {
+                        Some(payload) => {
+                            let Some(slot_types) = select_recv_slot_types.take() else {
+                                dispatch_response(
+                                    requester,
+                                    home_island,
+                                    endpoint_send_ack(true),
+                                    responses,
+                                    local_wakes,
+                                );
+                                return;
+                            };
+                            match crate::exec::queue::select_woken_recv_payload_with_slot_types(
+                                payload, slot_types,
+                            ) {
+                                Ok(payload) => {
+                                    WakeCommand::queue_waiter_with_result(receiver, payload)
+                                }
+                                Err(_) => {
+                                    dispatch_response(
+                                        requester,
+                                        home_island,
+                                        endpoint_send_ack(true),
+                                        responses,
+                                        local_wakes,
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        None => WakeCommand::queue_waiter(receiver),
+                    };
+                    local_wakes.push(wake);
                     dispatch_response(
                         requester,
                         home_island,
@@ -233,10 +742,14 @@ fn handle_endpoint_request_inner(
                     receiver,
                     payload: value,
                 } => {
-                    let recv_kind = pack_recv_data_for_waiter(ctx, &receiver, &value, vm_state)
-                        .unwrap_or_else(|msg| {
-                            panic!("endpoint recv queue-transfer metadata contract error: {msg}")
-                        });
+                    let (recv_kind, commit) =
+                        pack_recv_data_for_waiter(ctx, &receiver, &value, vm_state, island_effects)
+                            .unwrap_or_else(|msg| {
+                                panic!(
+                                    "endpoint recv queue-transfer metadata contract error: {msg}"
+                                )
+                            });
+                    transfer_commit.absorb(commit);
                     dispatch_response(receiver, home_island, recv_kind, responses, local_wakes);
                     dispatch_response(
                         requester,
@@ -269,14 +782,31 @@ fn handle_endpoint_request_inner(
         }
         EndpointRequestKind::Recv => {
             let requester = from.clone();
+            if preflight_endpoint_recv_value_for_waiter(ctx, state, &requester, vm_state).is_err() {
+                dispatch_response(
+                    requester,
+                    home_island,
+                    endpoint_recv_error(),
+                    responses,
+                    local_wakes,
+                );
+                return;
+            }
             let (result, value) = state.recv_or_block(from);
             match result {
                 vo_runtime::objects::queue_state::RecvResult::Success(woke_sender) => {
                     let value = value.expect("recv_or_block success without payload");
-                    let recv_kind = pack_recv_data_for_waiter(ctx, &requester, &value, vm_state)
-                        .unwrap_or_else(|msg| {
-                            panic!("endpoint recv queue-transfer metadata contract error: {msg}")
-                        });
+                    let (recv_kind, commit) = pack_recv_data_for_waiter(
+                        ctx,
+                        &requester,
+                        &value,
+                        vm_state,
+                        island_effects,
+                    )
+                    .unwrap_or_else(|msg| {
+                        panic!("endpoint recv queue-transfer metadata contract error: {msg}")
+                    });
+                    transfer_commit.absorb(commit);
                     dispatch_response(requester, home_island, recv_kind, responses, local_wakes);
                     if let Some(sender) = woke_sender {
                         dispatch_response(
@@ -332,50 +862,141 @@ fn handle_endpoint_request_inner(
     }
 }
 
+fn preflight_endpoint_recv_value_for_waiter(
+    ctx: &EndpointRequestCtx<'_>,
+    state: &vo_runtime::objects::queue_state::LocalQueueState,
+    target: &QueueWaiter,
+    vm_state: &mut crate::vm::VmState,
+) -> Result<(), String> {
+    let value = state
+        .buffer
+        .front()
+        .map(|value| value.as_ref())
+        .or_else(|| {
+            state
+                .waiting_senders
+                .front()
+                .map(|(_, value)| value.as_ref())
+        });
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_endpoint_recv_payload_for_waiter(ctx, target, value, vm_state)
+}
+
+fn validate_endpoint_recv_payload_for_waiter(
+    ctx: &EndpointRequestCtx<'_>,
+    target: &QueueWaiter,
+    value: &[u64],
+    vm_state: &mut crate::vm::VmState,
+) -> Result<(), String> {
+    if !endpoint_recv_response_serializes(ctx, target)
+        || !ctx.elem_meta.value_kind().may_contain_gc_refs()
+    {
+        return Ok(());
+    }
+    crate::exec::validate_value_queue_handles_for_transfer(
+        value,
+        ctx.elem_meta,
+        target.island_id,
+        ctx.struct_metas,
+        &ctx.module.named_type_metas,
+        ctx.runtime_types,
+        vm_state,
+    )
+}
+
+fn endpoint_recv_response_serializes(ctx: &EndpointRequestCtx<'_>, target: &QueueWaiter) -> bool {
+    target.endpoint_wait_id() != 0 || target.island_id != ctx.home_island
+}
+
+fn prepare_endpoint_recv_payload_for_waiter(
+    ctx: &EndpointRequestCtx<'_>,
+    target: &QueueWaiter,
+    value: &[u64],
+    vm_state: &mut crate::vm::VmState,
+    island_effects: &mut Vec<IslandCommandEffect>,
+) -> Result<crate::exec::QueueTransferCommit, String> {
+    if !endpoint_recv_response_serializes(ctx, target)
+        || !ctx.elem_meta.value_kind().may_contain_gc_refs()
+    {
+        return Ok(crate::exec::QueueTransferCommit::default());
+    }
+    crate::exec::prepare_value_queue_handles_for_transfer_with_commit(
+        value,
+        ctx.elem_meta,
+        target.island_id,
+        ctx.struct_metas,
+        &ctx.module.named_type_metas,
+        ctx.runtime_types,
+        vm_state,
+        island_effects,
+    )
+}
+
 fn pack_recv_data_for_waiter(
     ctx: &EndpointRequestCtx<'_>,
     target: &QueueWaiter,
     value: &[u64],
     vm_state: &mut crate::vm::VmState,
-) -> Result<EndpointResponseKind, String> {
-    if target.island_id != ctx.home_island && ctx.elem_meta.value_kind().may_contain_gc_refs() {
-        crate::exec::prepare_value_queue_handles_for_transfer(
-            value,
-            ctx.elem_meta,
-            target.island_id,
-            ctx.struct_metas,
-            ctx.runtime_types,
-            vm_state,
-        )?;
-    }
+    island_effects: &mut Vec<IslandCommandEffect>,
+) -> Result<(EndpointResponseKind, crate::exec::QueueTransferCommit), String> {
+    let commit =
+        prepare_endpoint_recv_payload_for_waiter(ctx, target, value, vm_state, island_effects)?;
     let data = crate::exec::pack_transport_message(
         &vm_state.gc,
         value,
         ctx.elem_meta,
         ctx.struct_metas,
+        &ctx.module.named_type_metas,
         ctx.runtime_types,
     );
-    Ok(endpoint_recv_data(data))
+    Ok((endpoint_recv_data(data), commit))
 }
 
 fn dispatch_response(
     target: QueueWaiter,
     home_island: u32,
     kind: EndpointResponseKind,
-    responses: &mut Vec<(u32, EndpointResponseKind, u64)>,
-    local_wakes: &mut Vec<QueueWaiter>,
+    responses: &mut Vec<(u32, EndpointResponseKind, u64, u64)>,
+    local_wakes: &mut Vec<WakeCommand>,
 ) {
-    if target.island_id == home_island {
-        local_wakes.push(target);
-    } else {
-        responses.push((target.island_id, kind, target.fiber_id));
+    if target.endpoint_wait_id() == 0 && target.island_id == home_island {
+        match kind {
+            EndpointResponseKind::RecvData { closed: true, .. }
+            | EndpointResponseKind::RecvError
+            | EndpointResponseKind::Closed => {
+                crate::runtime_boundary::push_queue_close_wake(
+                    local_wakes,
+                    WakeCommand::queue_closed_receiver(target, None),
+                );
+            }
+            EndpointResponseKind::SendAck { closed: true } => {
+                crate::runtime_boundary::push_queue_close_wake(
+                    local_wakes,
+                    WakeCommand::queue_closed_sender(target, None),
+                );
+            }
+            EndpointResponseKind::SendAck { closed: false }
+            | EndpointResponseKind::RecvData { closed: false, .. } => {
+                local_wakes.push(WakeCommand::queue_waiter(target));
+            }
+        }
+        return;
     }
+    responses.push((
+        target.island_id,
+        kind,
+        target.fiber_key(),
+        target.endpoint_wait_id(),
+    ));
 }
 
-pub(crate) fn finalize_closed_home_endpoint(
-    vm: &mut Vm,
+pub(crate) fn append_closed_home_endpoint_effects(
+    vm: &Vm,
     endpoint_id: u64,
     exclude_peer: Option<u32>,
+    transition: &mut RuntimeTransition,
 ) {
     let peers = vm
         .state
@@ -389,12 +1010,23 @@ pub(crate) fn finalize_closed_home_endpoint(
         if Some(peer) == exclude_peer {
             continue;
         }
-        vm.state
-            .send_endpoint_response(peer, endpoint_id, EndpointResponseKind::Closed, 0);
+        transition
+            .island_commands
+            .push(IslandCommandEffect::endpoint_response(
+                peer,
+                vm.state.current_island_id,
+                endpoint_id,
+                EndpointResponseKind::Closed,
+                0,
+                0,
+            ));
     }
-
-    vm.mark_gc_all_roots_dirty();
-    vm.state.endpoint_registry.mark_tombstone(endpoint_id);
+    transition
+        .endpoint_tombstones
+        .push(EndpointTombstone::with_response_source(
+            endpoint_id,
+            vm.state.current_island_id,
+        ));
 }
 
 fn mark_remote_endpoint_closed(vm: &mut Vm, endpoint_id: u64) {
@@ -405,62 +1037,120 @@ fn mark_remote_endpoint_closed(vm: &mut Vm, endpoint_id: u64) {
     }
 }
 
-fn resume_endpoint_response(vm: &mut Vm, fiber_id: u64, kind: &EndpointResponseKind) {
-    vm.state.pending_island_responses = vm.state.pending_island_responses.saturating_sub(1);
-    let fid = crate::scheduler::FiberId::from_raw(fiber_id as u32);
-    let Some(fiber) = vm.scheduler.try_get_fiber_mut(fid) else {
-        return;
-    };
-    if !fiber.state.is_blocked() {
-        return;
+pub(crate) fn endpoint_response_from_authorized_source(
+    vm: &Vm,
+    endpoint_id: u64,
+    from_island: u32,
+) -> bool {
+    match vm.state.endpoint_registry.entries.get(&endpoint_id) {
+        Some(EndpointEntry::Live(ch)) if queue::is_remote(*ch) => {
+            queue::remote_proxy(*ch).home_island == from_island
+        }
+        Some(EndpointEntry::Live(_)) => from_island == vm.state.current_island_id,
+        None => false,
+        Some(EndpointEntry::Tombstone {
+            response_source: Some(source),
+        }) => *source == from_island,
+        Some(EndpointEntry::Tombstone {
+            response_source: None,
+        }) => from_island == vm.state.current_island_id,
     }
-    fiber.apply_endpoint_response(kind);
-    vm.scheduler.try_wake_fiber(fid);
+}
+
+fn resume_endpoint_response(
+    vm: &mut Vm,
+    endpoint_id: u64,
+    from_island: u32,
+    fiber_key: u64,
+    wait_id: u64,
+    kind: EndpointResponseKind,
+) -> RuntimeCommandOutcome {
+    vm.apply_runtime_command(RuntimeCommand::endpoint_response(
+        endpoint_id,
+        from_island,
+        fiber_key,
+        wait_id,
+        kind,
+    ))
 }
 
 pub(crate) fn handle_endpoint_response_command(
     vm: &mut Vm,
     endpoint_id: u64,
     kind: EndpointResponseKind,
-    fiber_id: u64,
-) {
-    match &kind {
+    from_island: u32,
+    fiber_key: u64,
+    wait_id: u64,
+) -> Result<(), VmError> {
+    if !endpoint_response_from_authorized_source(vm, endpoint_id, from_island) {
+        return Ok(());
+    }
+    match kind {
         EndpointResponseKind::Closed => {
-            mark_remote_endpoint_closed(vm, endpoint_id);
-            vm.mark_gc_all_roots_dirty();
-            vm.state.endpoint_registry.mark_tombstone(endpoint_id);
+            let outcome = vm.apply_runtime_command(RuntimeCommand::endpoint_closed_response(
+                endpoint_id,
+                from_island,
+            ));
+            if !outcome.applied || !outcome.payload_accepted {
+                return Err(VmError::Jit(String::from(
+                    "endpoint closed response command was rejected by the VM",
+                )));
+            }
         }
         EndpointResponseKind::SendAck { closed } => {
-            if *closed {
+            let outcome = resume_endpoint_response(
+                vm,
+                endpoint_id,
+                from_island,
+                fiber_key,
+                wait_id,
+                EndpointResponseKind::SendAck { closed },
+            );
+            if closed && outcome.payload_accepted {
                 mark_remote_endpoint_closed(vm, endpoint_id);
             }
-            resume_endpoint_response(vm, fiber_id, &kind);
+            if !outcome.applied || !outcome.payload_accepted {
+                return Err(VmError::Jit(String::from(
+                    "endpoint send response command was rejected by the VM",
+                )));
+            }
         }
-        EndpointResponseKind::RecvData { closed, .. } => {
-            if *closed {
+        EndpointResponseKind::RecvData { data, closed } => {
+            let outcome = resume_endpoint_response(
+                vm,
+                endpoint_id,
+                from_island,
+                fiber_key,
+                wait_id,
+                EndpointResponseKind::RecvData { data, closed },
+            );
+            if closed && outcome.payload_accepted {
                 mark_remote_endpoint_closed(vm, endpoint_id);
             }
-            resume_endpoint_response(vm, fiber_id, &kind);
+            if !outcome.applied || !outcome.payload_accepted {
+                return Err(VmError::Jit(String::from(
+                    "endpoint recv response command was rejected by the VM",
+                )));
+            }
+        }
+        EndpointResponseKind::RecvError => {
+            let outcome = resume_endpoint_response(
+                vm,
+                endpoint_id,
+                from_island,
+                fiber_key,
+                wait_id,
+                EndpointResponseKind::RecvError,
+            );
+            if !outcome.applied || !outcome.payload_accepted {
+                return Err(VmError::Jit(String::from(
+                    "endpoint recv error response command was rejected by the VM",
+                )));
+            }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn endpoint_request_backing_invariant_is_not_debug_only() {
-        let source = include_str!("island_shared.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("island_shared source should contain tests section");
-
-        assert!(
-            !source.contains("debug_assert!"),
-            "EndpointRequest backing invariants must be enforced in release builds"
-        );
-        assert!(
-            source.contains("EndpointRequest arrived at non-LOCAL channel"),
-            "the endpoint backing invariant should stay explicit"
-        );
-    }
-}
+mod tests;

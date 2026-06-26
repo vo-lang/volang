@@ -14,7 +14,7 @@ use vo_runtime::objects::interface;
 use vo_runtime::slot::Slot;
 use vo_runtime::{RuntimeType, ValueKind};
 
-use crate::bytecode::{Constant, Module};
+use crate::bytecode::{Constant, Module, IFACE_ASSIGN_NO_ITAB};
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 use crate::vm::ExecResult;
@@ -97,21 +97,32 @@ pub fn exec_iface_assign(
             if let Some(named_type_id) = named_type_id_opt {
                 // Value types (non-pointer) cannot use pointer receiver methods
                 let src_is_pointer = src_vk == ValueKind::Pointer;
-                itab_cache.get_or_create(
-                    named_type_id,
-                    iface_meta_id,
-                    src_is_pointer,
-                    &module.named_type_metas,
-                    &module.interface_metas,
-                )
+                itab_cache
+                    .try_get_or_create(
+                        named_type_id,
+                        iface_meta_id,
+                        src_is_pointer,
+                        &module.named_type_metas,
+                        &module.interface_metas,
+                    )
+                    .ok_or_else(|| {
+                        format!(
+                            "IfaceAssign interface conversion failed: named_type_id={named_type_id} target_iface_meta_id={iface_meta_id} src_vk={src_vk:?}"
+                        )
+                    })?
+            } else if iface_meta_id == 0 {
+                0
             } else {
-                0 // primitive or nil - no methods, itab_id=0 means empty itab
+                return Err(format!(
+                    "IfaceAssign interface conversion missing named receiver: target_iface_meta_id={iface_meta_id} src_rttid={src_rttid} src_vk={src_vk:?}"
+                ));
             }
         };
         (src_rttid, src_vk, itab_id)
     } else {
         // Concrete type -> Interface: compile-time itab
-        (rttid, vk, low) // low = itab_id
+        let itab_id = if low == IFACE_ASSIGN_NO_ITAB { 0 } else { low };
+        (rttid, vk, itab_id)
     };
 
     let slot0 = interface::pack_slot0(itab_id, actual_rttid, actual_vk);
@@ -186,8 +197,9 @@ pub fn exec_iface_assert(
         }
     };
 
-    // Helper to write successful result
-    let write_success = |stack: *mut Slot, itab_cache: &mut ItabCache| -> Result<(), String> {
+    let materialize_success = |out: &mut [Slot; 32],
+                               itab_cache: &mut ItabCache|
+     -> Result<usize, String> {
         if assert_kind == 1 {
             // Interface assertion: return new interface with itab for target interface
             // Use extract_named_type_id to handle Pointer(Named(id)) case
@@ -220,23 +232,23 @@ pub fn exec_iface_assert(
                 };
                 itab_id
             };
-            let new_slot0 = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
-            stack_set(stack, bp + inst.a as usize, new_slot0);
-            stack_set(stack, bp + inst.a as usize + 1, slot1);
+            out[0] = interface::pack_slot0(new_itab_id, src_rttid, src_vk);
+            out[1] = slot1;
+            Ok(2)
         } else if src_vk == ValueKind::Struct {
             // Concrete type assertion for struct: copy value from GcRef
             let gc_ref = slot1 as GcRef;
             let slots = target_slots.max(1);
             if slot1 != 0 {
                 for i in 0..slots {
-                    let val = unsafe { *gc_ref.add(i as usize) };
-                    stack_set(stack, bp + inst.a as usize + i as usize, val);
+                    out[i as usize] = unsafe { *gc_ref.add(i as usize) };
                 }
             } else {
                 for i in 0..slots {
-                    stack_set(stack, bp + inst.a as usize + i as usize, 0);
+                    out[i as usize] = 0;
                 }
             }
+            Ok(slots as usize)
         } else if src_vk == ValueKind::Array {
             // Concrete type assertion for array: copy elements from GcRef
             // Array layout: [ArrayHeader(2 slots)][elements...]
@@ -247,19 +259,19 @@ pub fn exec_iface_assert(
                 // Copy data from after ArrayHeader (data_ptr_bytes skips ArrayHeader)
                 let data_ptr = array::data_ptr_bytes(gc_ref) as *const u64;
                 for i in 0..slots {
-                    let val = unsafe { *data_ptr.add(i as usize) };
-                    stack_set(stack, bp + inst.a as usize + i as usize, val);
+                    out[i as usize] = unsafe { *data_ptr.add(i as usize) };
                 }
             } else {
                 for i in 0..slots {
-                    stack_set(stack, bp + inst.a as usize + i as usize, 0);
+                    out[i as usize] = 0;
                 }
             }
+            Ok(slots as usize)
         } else {
             // Concrete type assertion for other types: slot1 is the value
-            stack_set(stack, bp + inst.a as usize, slot1);
+            out[0] = slot1;
+            Ok(1)
         }
-        Ok(())
     };
 
     if has_ok {
@@ -270,11 +282,16 @@ pub fn exec_iface_assert(
         } else {
             inst.a + 1
         };
-        stack_set(stack, bp + ok_slot as usize, matches as u64);
         if matches {
-            if let Err(msg) = write_success(stack, itab_cache) {
-                return ExecResult::JitError(msg);
+            let mut result_slots = [0; 32];
+            let result_len = match materialize_success(&mut result_slots, itab_cache) {
+                Ok(result_len) => result_len,
+                Err(msg) => return ExecResult::JitError(msg),
+            };
+            for (idx, value) in result_slots.iter().take(result_len).enumerate() {
+                stack_set(stack, bp + inst.a as usize + idx, *value);
             }
+            stack_set(stack, bp + ok_slot as usize, 1);
         } else {
             // Zero out destination on failure
             let dst_slots = if assert_kind == 1 {
@@ -285,11 +302,17 @@ pub fn exec_iface_assert(
             for i in 0..dst_slots {
                 stack_set(stack, bp + inst.a as usize + i as usize, 0);
             }
+            stack_set(stack, bp + ok_slot as usize, 0);
         }
         ExecResult::FrameChanged
     } else if matches {
-        if let Err(msg) = write_success(stack, itab_cache) {
-            return ExecResult::JitError(msg);
+        let mut result_slots = [0; 32];
+        let result_len = match materialize_success(&mut result_slots, itab_cache) {
+            Ok(result_len) => result_len,
+            Err(msg) => return ExecResult::JitError(msg),
+        };
+        for (idx, value) in result_slots.iter().take(result_len).enumerate() {
+            stack_set(stack, bp + inst.a as usize + idx, *value);
         }
         ExecResult::FrameChanged
     } else {
@@ -321,4 +344,39 @@ pub fn exec_iface_eq(
 
     stack_set(stack, bp + inst.a as usize, result);
     ExecResult::FrameChanged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::InterfaceMeta;
+    use crate::instruction::{pack_iface_assert_flags, Opcode};
+
+    #[test]
+    fn exec_iface_assert_has_ok_does_not_write_ok_before_success_materialization_061() {
+        let mut module = Module::new("iface-assert-commit-order".to_string());
+        module
+            .runtime_types
+            .push(RuntimeType::Basic(ValueKind::String));
+        module.interface_metas.push(InterfaceMeta {
+            name: "Any0".to_string(),
+            method_names: Vec::new(),
+            methods: Vec::new(),
+        });
+        module.interface_metas.push(InterfaceMeta {
+            name: "Any1".to_string(),
+            method_names: Vec::new(),
+            methods: Vec::new(),
+        });
+        let flags = pack_iface_assert_flags(1, true, 2).expect("valid IfaceAssert flags");
+        let inst = Instruction::with_flags(Opcode::IfaceAssert, flags, 2, 0, 1);
+        let mut itab_cache = ItabCache::new();
+        let source_slot0 = interface::pack_slot0(0, 0, ValueKind::String);
+        let mut stack = [source_slot0, 0xfeed_u64, 0xaaaa_u64, 0xbbbb_u64, 0xcccc_u64];
+
+        let result = exec_iface_assert(stack.as_mut_ptr(), 0, &inst, &mut itab_cache, &module);
+
+        assert!(matches!(result, ExecResult::JitError(_)));
+        assert_eq!(stack[2..5], [0xaaaa, 0xbbbb, 0xcccc]);
+    }
 }

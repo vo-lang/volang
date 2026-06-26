@@ -107,8 +107,8 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
         // 1. Process all pending commands first
         loop {
             match transport.try_recv() {
-                Ok(Some(cmd)) => {
-                    if handle_command(vm, cmd) {
+                Ok(Some(envelope)) => {
+                    if handle_command(vm, envelope.source_island_id, envelope.command) {
                         return;
                     }
                 }
@@ -120,7 +120,10 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
 
         // 2. Run scheduler if there's work
         if vm.scheduler.has_work() {
-            let _ = vm.run_scheduled();
+            if let Err(err) = vm.run_scheduled() {
+                eprintln!("island scheduler failed: {err:?}");
+                return;
+            }
             vm.state.clear_endpoint_tombstones_if_quiescent();
             continue; // Check for new commands after running
         }
@@ -131,23 +134,23 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
         if has_waiters {
             // Has pending I/O or blocked fibers - use timeout to allow periodic polling
             match transport.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(cmd) => {
-                    if handle_command(vm, cmd) {
+                Ok(envelope) => {
+                    if handle_command(vm, envelope.source_island_id, envelope.command) {
                         return;
                     }
                     vm.state.clear_endpoint_tombstones_if_quiescent();
                 }
                 Err(vo_runtime::island_transport::TransportError::Timeout) => {
                     // Poll I/O to check for completions
-                    vm.scheduler.poll_io(&mut vm.state.io);
+                    vm.poll_io_ready_commands();
                 }
                 Err(_) => return,
             }
         } else {
             // Completely idle - block until command arrives
             match transport.recv() {
-                Ok(cmd) => {
-                    if handle_command(vm, cmd) {
+                Ok(envelope) => {
+                    if handle_command(vm, envelope.source_island_id, envelope.command) {
                         return;
                     }
                     vm.state.clear_endpoint_tombstones_if_quiescent();
@@ -180,41 +183,118 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod source_contract_tests {
+    #[test]
+    fn island_thread_run_scheduled_errors_exit_loop_050() {
+        let source = crate::source_contract::production_source_without_test_modules(include_str!(
+            "island_thread.rs"
+        ));
+        assert!(
+            !source.contains("let _ = vm.run_scheduled();"),
+            "island threads must not silently discard scheduler execution errors"
+        );
+        assert!(
+            source.contains("if let Err(err) = vm.run_scheduled()")
+                || source.contains("match vm.run_scheduled()"),
+            "island threads must exit through an explicit run_scheduled error path"
+        );
+    }
+}
+
 /// Returns true if should exit loop.
-fn handle_command(vm: &mut Vm, cmd: IslandCommand) -> bool {
+fn handle_command(vm: &mut Vm, source_island_id: u32, cmd: IslandCommand) -> bool {
     match cmd {
         IslandCommand::Shutdown => true,
         IslandCommand::SpawnFiber { closure_data } => {
-            island_shared::handle_spawn_fiber(vm, closure_data.data());
+            if let Err(err) = island_shared::handle_spawn_fiber(vm, closure_data.data()) {
+                eprintln!("island spawn failed: {err}");
+                return true;
+            }
             false
         }
-        IslandCommand::WakeFiber { fiber_id } => {
-            vm.scheduler
-                .try_wake_fiber(crate::scheduler::FiberId::from_raw(fiber_id));
-            false
+        IslandCommand::WakeFiber { waiter } => {
+            let _ = (source_island_id, waiter);
+            eprintln!("island wake failed: WakeFiber transport ingress was rejected");
+            true
         }
         IslandCommand::EndpointRequest {
             endpoint_id,
             kind,
             from_island,
-            fiber_id,
+            fiber_key,
+            wait_id,
         } => {
-            island_shared::handle_endpoint_request_command(
+            if source_island_id != from_island {
+                eprintln!("island endpoint request failed: transport source was rejected");
+                return true;
+            }
+            if let Err(err) = island_shared::handle_endpoint_request_command(
                 vm,
                 endpoint_id,
                 kind,
                 from_island,
-                fiber_id,
-            );
+                fiber_key,
+                wait_id,
+            ) {
+                eprintln!("island endpoint request failed: {err:?}");
+                return true;
+            }
             false
         }
         IslandCommand::EndpointResponse {
             endpoint_id,
             kind,
-            fiber_id,
+            from_island,
+            fiber_key,
+            wait_id,
         } => {
-            island_shared::handle_endpoint_response_command(vm, endpoint_id, kind, fiber_id);
+            if source_island_id != from_island {
+                eprintln!("island endpoint response failed: transport source was rejected");
+                return true;
+            }
+            if let Err(err) = island_shared::handle_endpoint_response_command(
+                vm,
+                endpoint_id,
+                kind,
+                from_island,
+                fiber_key,
+                wait_id,
+            ) {
+                eprintln!("island endpoint response failed: {err:?}");
+                return true;
+            }
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::fiber::{BlockReason, FiberState};
+
+    #[test]
+    fn island_thread_wake_ingress_rejection_exits_loop_045() {
+        let mut vm = Vm::new();
+        let fid = vm.scheduler.spawn(crate::fiber::Fiber::new(0));
+        let key = vm.scheduler.get_fiber(fid).wake_key_packed();
+        vm.scheduler.schedule_next().unwrap();
+        vm.scheduler.block_for_queue();
+
+        let should_exit = handle_command(
+            &mut vm,
+            1,
+            IslandCommand::WakeFiber {
+                waiter: vo_runtime::objects::queue_state::QueueWaiter::simple(1, key),
+            },
+        );
+
+        assert!(should_exit);
+        assert_eq!(
+            vm.scheduler.get_fiber(fid).state,
+            FiberState::Blocked(BlockReason::Queue)
+        );
+        assert!(vm.scheduler.ready_queue.is_empty());
     }
 }

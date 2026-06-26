@@ -4,13 +4,24 @@
 //! They handle: func_id resolution, jit_func_table lookup, push_frame, and arg layout.
 
 use vo_runtime::bytecode::FunctionDef;
-use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::jit_api::{
     set_jit_infra_error, DynCallIC, JitContext, JitResult, JitRuntimeTrapKind, PreparedCall,
     JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_MISSING_CALLBACK,
+    JIT_INFRA_ERROR_SENTINEL,
 };
 use vo_runtime::objects::closure;
-use vo_runtime::ValueKind;
+use vo_runtime::SlotType;
+
+use crate::exec::{
+    resolve_iface_call_target, validate_call_iface_itab_for_callsite,
+    validate_iface_receiver_layout,
+};
+use crate::fiber::Fiber;
+use crate::frame_call::{
+    call_iface_layout_for_callsite, call_layout_for_callsite, validate_call_frame_shape,
+    validate_call_return_window, validate_closure_callsite_layout, validate_closure_target,
+    validate_function_callsite_layout, ValidClosureTarget,
+};
 
 use super::helpers::record_runtime_trap;
 
@@ -49,23 +60,18 @@ fn reject_prepared_call_state(
     set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, detail)
 }
 
-fn reject_invalid_object_kind(
+#[inline]
+fn reject_null_prepared_callee_args(
     ctx: &mut JitContext,
     out: *mut PreparedCall,
-    raw_ref: u64,
+    detail: u64,
 ) -> JitResult {
     unsafe { write_trapped_prepared_call(out) };
-    set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, raw_ref)
-}
-
-fn canonical_object_with_kind(
-    ctx: &JitContext,
-    raw_ref: u64,
-    expected: ValueKind,
-) -> Option<GcRef> {
-    let gc = unsafe { &*ctx.gc };
-    let obj = gc.canonicalize_ref(raw_ref as GcRef)?;
-    (Gc::header(obj).kind() == expected).then_some(obj)
+    if ctx.runtime_trap_arg0 == JIT_INFRA_ERROR_SENTINEL {
+        JitResult::JitError
+    } else {
+        set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, detail)
+    }
 }
 
 struct PreparedCallShape {
@@ -83,6 +89,9 @@ fn validate_prepared_call_shape(
     out: *mut PreparedCall,
     shape: PreparedCallShape,
 ) -> Option<JitResult> {
+    if out.is_null() {
+        return Some(reject_prepared_call_state(ctx, out, 0));
+    }
     if shape.user_arg_count as usize != shape.expected_user_arg_count {
         return Some(reject_prepared_call_state(
             ctx,
@@ -106,6 +115,154 @@ fn validate_prepared_call_shape(
     None
 }
 
+#[inline]
+fn validate_prepared_call_raw_abi(
+    ctx: &mut JitContext,
+    out: *mut PreparedCall,
+    user_args: *const u64,
+    user_arg_count: u32,
+    ret_ptr: *mut u64,
+    ret_slots: u32,
+) -> Option<JitResult> {
+    if out.is_null() {
+        return Some(reject_prepared_call_state(ctx, out, 0));
+    }
+    if user_arg_count != 0 && user_args.is_null() {
+        return Some(reject_prepared_call_state(ctx, out, user_arg_count as u64));
+    }
+    if ret_slots != 0 && ret_ptr.is_null() {
+        return Some(reject_prepared_call_state(ctx, out, ret_slots as u64));
+    }
+    None
+}
+
+#[inline]
+fn validate_prepared_call_resume_pc(
+    ctx: &mut JitContext,
+    out: *mut PreparedCall,
+    caller_resume_pc: u32,
+) -> Result<u32, JitResult> {
+    caller_resume_pc
+        .checked_sub(1)
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_resume_pc as u64))
+}
+
+fn validate_prepared_callback_return_window(
+    ctx: &mut JitContext,
+    out: *mut PreparedCall,
+    module: &vo_runtime::bytecode::Module,
+    ret_reg: u32,
+    ret_slots: u32,
+) -> Result<(), JitResult> {
+    let ret_reg =
+        u16::try_from(ret_reg).map_err(|_| reject_prepared_call_state(ctx, out, ret_reg as u64))?;
+    let ret_slots = u16::try_from(ret_slots)
+        .map_err(|_| reject_prepared_call_state(ctx, out, ret_slots as u64))?;
+    let fiber = unsafe { (ctx.fiber as *const Fiber).as_ref() }
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, ret_reg as u64))?;
+    let caller_frame = fiber
+        .current_frame()
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, ret_reg as u64))?;
+    let caller_func = module
+        .functions
+        .get(caller_frame.func_id as usize)
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_frame.func_id as u64))?;
+    validate_call_return_window(caller_func, ret_reg, ret_slots)
+        .map_err(|_| reject_prepared_call_state(ctx, out, ret_reg as u64))
+}
+
+fn prepared_callsite_layout<'a>(
+    ctx: &mut JitContext,
+    out: *mut PreparedCall,
+    module: &'a vo_runtime::bytecode::Module,
+    caller_resume_pc: u32,
+    context: &str,
+) -> Result<(u32, &'a [SlotType], &'a [SlotType]), JitResult> {
+    let Some(callsite_pc) = caller_resume_pc.checked_sub(1) else {
+        return Err(reject_prepared_call_state(
+            ctx,
+            out,
+            caller_resume_pc as u64,
+        ));
+    };
+    let fiber = unsafe { (ctx.fiber as *const Fiber).as_ref() }
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_resume_pc as u64))?;
+    let caller_frame = fiber
+        .current_frame()
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_resume_pc as u64))?;
+    let caller_func = module
+        .functions
+        .get(caller_frame.func_id as usize)
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_frame.func_id as u64))?;
+    let (arg_layout, ret_layout) =
+        call_layout_for_callsite(caller_func, callsite_pc as usize, context)
+            .map_err(|_| reject_prepared_call_state(ctx, out, callsite_pc as u64))?;
+    Ok((callsite_pc, arg_layout, ret_layout))
+}
+
+fn prepared_iface_callsite_layout<'a>(
+    ctx: &mut JitContext,
+    out: *mut PreparedCall,
+    module: &'a vo_runtime::bytecode::Module,
+    caller_resume_pc: u32,
+    context: &str,
+) -> Result<(u32, u32, &'a [SlotType], &'a [SlotType]), JitResult> {
+    let Some(callsite_pc) = caller_resume_pc.checked_sub(1) else {
+        return Err(reject_prepared_call_state(
+            ctx,
+            out,
+            caller_resume_pc as u64,
+        ));
+    };
+    let fiber = unsafe { (ctx.fiber as *const Fiber).as_ref() }
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_resume_pc as u64))?;
+    let caller_frame = fiber
+        .current_frame()
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_resume_pc as u64))?;
+    let caller_func = module
+        .functions
+        .get(caller_frame.func_id as usize)
+        .ok_or_else(|| reject_prepared_call_state(ctx, out, caller_frame.func_id as u64))?;
+    let (iface_meta_id, arg_layout, ret_layout) =
+        call_iface_layout_for_callsite(caller_func, callsite_pc as usize, context)
+            .map_err(|_| reject_prepared_call_state(ctx, out, callsite_pc as u64))?;
+    Ok((callsite_pc, iface_meta_id, arg_layout, ret_layout))
+}
+
+fn validate_jit_closure_callsite(
+    ctx: &mut JitContext,
+    out: *mut PreparedCall,
+    arg_layout: &[SlotType],
+    ret_layout: &[SlotType],
+    target: &ValidClosureTarget<'_>,
+) -> Result<(), JitResult> {
+    validate_closure_callsite_layout("JIT CallClosure", target, arg_layout, ret_layout)
+        .map_err(|_| reject_prepared_call_state(ctx, out, target.func_id as u64))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_jit_iface_callsite(
+    ctx: &mut JitContext,
+    out: *mut PreparedCall,
+    arg_layout: &[SlotType],
+    ret_layout: &[SlotType],
+    func_id: u32,
+    func: &FunctionDef,
+    recv_slots: usize,
+    expected_user_arg_count: usize,
+) -> Result<(), JitResult> {
+    validate_function_callsite_layout(
+        "JIT CallIface",
+        func_id,
+        func,
+        recv_slots,
+        expected_user_arg_count,
+        arg_layout,
+        ret_layout,
+    )
+    .map_err(|_| reject_prepared_call_state(ctx, out, func_id as u64))
+}
+
 /// Prepare a closure call for JIT dispatch.
 ///
 /// Always does push_frame + arg layout so callee_args_ptr is valid for both paths.
@@ -123,33 +280,43 @@ pub extern "C" fn jit_prepare_closure_call(
 ) -> JitResult {
     let ctx = unsafe { &mut *ctx };
     let module = unsafe { &*(ctx.module) };
+    if let Some(result) =
+        validate_prepared_call_raw_abi(ctx, out, user_args, user_arg_count, ret_ptr, ret_slots)
+    {
+        return result;
+    }
+    let callsite_pc = match validate_prepared_call_resume_pc(ctx, out, caller_resume_pc) {
+        Ok(callsite_pc) => callsite_pc,
+        Err(result) => return result,
+    };
+    let (_, arg_layout, ret_layout) =
+        match prepared_callsite_layout(ctx, out, module, caller_resume_pc, "JIT CallClosure") {
+            Ok(layout) => layout,
+            Err(result) => return result,
+        };
     if closure_ref == 0 {
-        record_runtime_trap(
-            ctx,
-            JitRuntimeTrapKind::NilFuncCall,
-            caller_resume_pc.saturating_sub(1),
-        );
+        record_runtime_trap(ctx, JitRuntimeTrapKind::NilFuncCall, callsite_pc);
         unsafe { write_trapped_prepared_call(out) };
         return JitResult::Panic;
     }
 
-    // 1. Resolve func_id from closure
-    let Some(closure_gcref) = canonical_object_with_kind(ctx, closure_ref, ValueKind::Closure)
-    else {
-        return reject_invalid_object_kind(ctx, out, closure_ref);
+    // 1. Resolve and validate closure target through the VM-shared frame-call contract.
+    let gc = unsafe { &*ctx.gc };
+    let target = match validate_closure_target(gc, module, closure_ref, "JIT closure call") {
+        Ok(target) => target,
+        Err(_) => {
+            unsafe { write_trapped_prepared_call(out) };
+            return set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, closure_ref);
+        }
     };
-    let func_id = closure::func_id(closure_gcref);
-    let Some(func_def) = module.functions.get(func_id as usize) else {
-        unsafe { write_trapped_prepared_call(out) };
-        return set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, func_id as u64);
-    };
+    let closure_gcref = target.closure_gcref;
+    let func_id = target.func_id;
+    let func_def = target.func;
+    let layout = target.layout;
+    if validate_call_frame_shape(func_def).is_err() {
+        return reject_prepared_call_state(ctx, out, func_id as u64);
+    }
     let local_slots = func_def.local_slots as usize;
-    let layout = closure::call_layout(
-        closure_ref,
-        closure_gcref,
-        func_def.recv_slots as usize,
-        func_def.is_closure,
-    );
     let Some(expected_user_arg_count) =
         (func_def.param_slots as usize).checked_sub(layout.arg_offset)
     else {
@@ -169,9 +336,21 @@ pub extern "C" fn jit_prepare_closure_call(
     ) {
         return result;
     }
+    if let Err(result) = validate_jit_closure_callsite(ctx, out, arg_layout, ret_layout, &target) {
+        return result;
+    }
+    if let Err(result) =
+        validate_prepared_callback_return_window(ctx, out, module, ret_reg, ret_slots)
+    {
+        return result;
+    }
 
     // 2. Determine if callee can use JIT fast path
-    let jit_func_ptr = lookup_direct_call_ptr(ctx, func_id, func_def);
+    let jit_func_ptr = if layout.receiver_capture_count > 1 {
+        core::ptr::null()
+    } else {
+        lookup_direct_call_ptr(ctx, func_id, func_def)
+    };
 
     // 3. push_frame: always allocate callee frame on fiber.stack.
     //    Both fast path (JIT direct call) and slow path (call_vm trampoline) need valid callee_args_ptr.
@@ -188,11 +367,15 @@ pub extern "C" fn jit_prepare_closure_call(
         caller_resume_pc,
     );
     if callee_args_ptr.is_null() {
-        unsafe { write_trapped_prepared_call(out) };
-        return JitResult::Panic;
+        return reject_null_prepared_callee_args(ctx, out, local_slots as u64);
     }
 
     // 4. Copy args with correct closure layout
+    for i in 0..layout.receiver_capture_count {
+        unsafe {
+            *callee_args_ptr.add(i) = closure::get_capture(closure_gcref, i);
+        }
+    }
     if let Some(slot0_val) = layout.slot0 {
         unsafe { *callee_args_ptr = slot0_val };
     }
@@ -206,7 +389,7 @@ pub extern "C" fn jit_prepare_closure_call(
 
     // Determine slot0_kind for IC population
     let cap_count = closure::capture_count(closure_gcref);
-    let slot0_kind = if func_def.recv_slots > 0 && cap_count > 0 {
+    let slot0_kind = if layout.receiver_capture_count == 1 {
         DynCallIC::SLOT0_CAPTURE0
     } else if cap_count > 0 || func_def.is_closure {
         DynCallIC::SLOT0_CLOSURE_REF
@@ -250,34 +433,65 @@ pub extern "C" fn jit_prepare_iface_call(
     let ctx_ref = unsafe { &mut *ctx };
     let module = unsafe { &*(ctx_ref.module) };
     let itab_cache = unsafe { &*ctx_ref.itab_cache };
+    if let Some(result) =
+        validate_prepared_call_raw_abi(ctx_ref, out, user_args, user_arg_count, ret_ptr, ret_slots)
+    {
+        return result;
+    }
+    let callsite_pc = match validate_prepared_call_resume_pc(ctx_ref, out, caller_resume_pc) {
+        Ok(callsite_pc) => callsite_pc,
+        Err(result) => return result,
+    };
+    let (_, expected_iface_meta_id, arg_layout, ret_layout) = match prepared_iface_callsite_layout(
+        ctx_ref,
+        out,
+        module,
+        caller_resume_pc,
+        "JIT CallIface",
+    ) {
+        Ok(layout) => layout,
+        Err(result) => return result,
+    };
     if interface::is_nil(iface_slot0) {
         record_runtime_trap(
             ctx_ref,
             JitRuntimeTrapKind::NilPointerDereference,
-            caller_resume_pc.saturating_sub(1),
+            callsite_pc,
         );
         unsafe { write_trapped_prepared_call(out) };
         return JitResult::Panic;
     }
 
-    // 1. Resolve func_id from itab
+    // 1. Resolve func_id from itab through the same ABI validator as the interpreter.
     let itab_id = interface::unpack_itab_id(iface_slot0);
-    let Some(itab) = itab_cache.get_itab(itab_id) else {
-        unsafe { write_trapped_prepared_call(out) };
-        return set_jit_infra_error(
-            ctx_ref,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-            itab_id as u64,
-        );
-    };
-    let Some(&func_id) = itab.methods.get(method_idx as usize) else {
+    if validate_call_iface_itab_for_callsite(
+        itab_cache,
+        itab_id,
+        method_idx as usize,
+        expected_iface_meta_id,
+        "JIT CallIface",
+    )
+    .is_err()
+    {
         unsafe { write_trapped_prepared_call(out) };
         return set_jit_infra_error(
             ctx_ref,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
             method_idx as u64,
         );
+    }
+    let target = match resolve_iface_call_target(module, itab_cache, itab_id, method_idx as usize) {
+        Ok(target) => target,
+        Err(_) => {
+            unsafe { write_trapped_prepared_call(out) };
+            return set_jit_infra_error(
+                ctx_ref,
+                JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                method_idx as u64,
+            );
+        }
     };
+    let func_id = target.func_id;
     let Some(func_def) = module.functions.get(func_id as usize) else {
         unsafe { write_trapped_prepared_call(out) };
         return set_jit_infra_error(
@@ -286,11 +500,19 @@ pub extern "C" fn jit_prepare_iface_call(
             func_id as u64,
         );
     };
-    let local_slots = func_def.local_slots as usize;
+    if validate_call_frame_shape(func_def).is_err() {
+        return reject_prepared_call_state(ctx_ref, out, func_id as u64);
+    }
+    let local_slots = target.local_slots as usize;
     let recv_slots = func_def.recv_slots as usize;
     let param_slots = func_def.param_slots as usize;
     if recv_slots > param_slots {
         return reject_prepared_call_state(ctx_ref, out, func_def.param_slots as u64);
+    }
+    if validate_iface_receiver_layout(module, iface_slot0, func_def, func_id, "JIT CallIface")
+        .is_err()
+    {
+        return reject_prepared_call_state(ctx_ref, out, func_id as u64);
     }
     let expected_user_arg_count = param_slots - recv_slots;
     if let Some(result) = validate_prepared_call_shape(
@@ -305,6 +527,23 @@ pub extern "C" fn jit_prepare_iface_call(
             ret_ptr,
         },
     ) {
+        return result;
+    }
+    if let Err(result) = validate_jit_iface_callsite(
+        ctx_ref,
+        out,
+        arg_layout,
+        ret_layout,
+        func_id,
+        func_def,
+        recv_slots,
+        expected_user_arg_count,
+    ) {
+        return result;
+    }
+    if let Err(result) =
+        validate_prepared_callback_return_window(ctx_ref, out, module, ret_reg, ret_slots)
+    {
         return result;
     }
 
@@ -325,8 +564,7 @@ pub extern "C" fn jit_prepare_iface_call(
         caller_resume_pc,
     );
     if callee_args_ptr.is_null() {
-        unsafe { write_trapped_prepared_call(out) };
-        return JitResult::Panic;
+        return reject_null_prepared_callee_args(ctx_ref, out, local_slots as u64);
     }
 
     // 4. Copy args: receiver at slot 0, user args at recv_slots
@@ -354,331 +592,4 @@ pub extern "C" fn jit_prepare_iface_call(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use core::ffi::c_void;
-    use vo_runtime::bytecode::{Itab, Module};
-    use vo_runtime::ffi::SentinelErrorCache;
-    use vo_runtime::gc::Gc;
-    use vo_runtime::island;
-    use vo_runtime::itab::ItabCache;
-    use vo_runtime::jit_api::{JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_SENTINEL};
-    use vo_runtime::objects::interface;
-    use vo_runtime::output::CaptureSink;
-    use vo_runtime::{InterfaceSlot, ValueKind};
-
-    fn func(has_defer: bool, has_calls: bool, has_call_extern: bool) -> FunctionDef {
-        FunctionDef {
-            name: "callee".to_string(),
-            param_count: 0,
-            param_slots: 0,
-            local_slots: 1,
-            gc_scan_slots: 0,
-            ret_slots: 0,
-            ret_slot_types: Vec::new(),
-            recv_slots: 0,
-            heap_ret_gcref_count: 0,
-            heap_ret_gcref_start: 0,
-            heap_ret_slots: Vec::new(),
-            is_closure: false,
-            error_ret_slot: -1,
-            has_defer,
-            has_calls,
-            has_call_extern,
-            code: Vec::new(),
-            jit_metadata: Vec::new(),
-            slot_types: Vec::new(),
-            borrowed_scan_slots_prefix: Vec::new(),
-            capture_types: Vec::new(),
-            capture_slot_types: Vec::new(),
-            param_types: Vec::new(),
-        }
-    }
-
-    extern "C" fn test_push_frame(
-        ctx: *mut JitContext,
-        _func_id: u32,
-        _local_slots: u32,
-        _ret_reg: u32,
-        _ret_slots: u32,
-        _caller_resume_pc: u32,
-    ) -> *mut u64 {
-        unsafe { (*ctx).stack_ptr }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn test_context(
-        gc: &mut Gc,
-        module: &Module,
-        itab_cache: &mut ItabCache,
-        stack: &mut [u64],
-        safepoint_flag: &bool,
-        panic_flag: &mut bool,
-        is_user_panic: &mut bool,
-        panic_msg: &mut InterfaceSlot,
-        program_args: &Vec<String>,
-        sentinel_errors: &mut SentinelErrorCache,
-        output: &CaptureSink,
-        host_output: &mut Option<Vec<u8>>,
-    ) -> JitContext {
-        JitContext {
-            gc,
-            globals: core::ptr::null_mut(),
-            safepoint_flag,
-            panic_flag,
-            is_user_panic,
-            panic_msg,
-            user_panic_pc: u32::MAX,
-            runtime_trap_kind: JitRuntimeTrapKind::None as u8,
-            runtime_trap_arg0: 0,
-            runtime_trap_arg1: 0,
-            runtime_trap_pc: u32::MAX,
-            vm: core::ptr::null_mut::<c_void>(),
-            fiber: core::ptr::null_mut::<c_void>(),
-            itab_cache,
-            extern_registry: core::ptr::null(),
-            call_extern_fn: None,
-            module,
-            jit_func_table: core::ptr::null(),
-            jit_func_count: 0,
-            direct_call_table: core::ptr::null(),
-            direct_call_count: 0,
-            program_args,
-            sentinel_errors,
-            output: output as *const dyn vo_runtime::output::OutputSink,
-            host_output,
-            #[cfg(feature = "std")]
-            io: core::ptr::null_mut(),
-            call_func_id: 0,
-            call_arg_start: 0,
-            call_resume_pc: 0,
-            call_ret_slots: 0,
-            call_ret_reg: 0,
-            call_kind: 0,
-            #[cfg(feature = "std")]
-            wait_io_token: 0,
-            loop_exit_pc: 0,
-            stack_ptr: stack.as_mut_ptr(),
-            stack_cap: stack.len() as u32,
-            stack_limit: stack.len() as u32,
-            call_depth: 0,
-            call_depth_limit: 64,
-            jit_bp: 0,
-            fiber_sp: 0,
-            push_frame_fn: Some(test_push_frame),
-            pop_frame_fn: None,
-            stack_overflow_fn: None,
-            push_resume_point_fn: None,
-            create_island_fn: None,
-            queue_close_fn: None,
-            queue_send_fn: None,
-            queue_recv_fn: None,
-            go_start_fn: None,
-            go_island_fn: None,
-            defer_push_fn: None,
-            recover_fn: None,
-            select_begin_fn: None,
-            select_send_fn: None,
-            select_recv_fn: None,
-            select_exec_fn: None,
-            is_error_return: 0,
-            ret_gcref_start: 0,
-            ret_is_heap: 0,
-            ret_start: 0,
-            prepare_closure_call_fn: None,
-            prepare_iface_call_fn: None,
-            ic_table: core::ptr::null_mut(),
-        }
-    }
-
-    #[test]
-    fn direct_call_lookup_predicate_uses_frame_elision_contract() {
-        assert!(can_use_direct_call_table_entry(&func(false, false, false)));
-        assert!(!can_use_direct_call_table_entry(&func(true, false, false)));
-        assert!(!can_use_direct_call_table_entry(&func(false, true, false)));
-        assert!(!can_use_direct_call_table_entry(&func(false, false, true)));
-
-        let mut alloc = func(false, false, false);
-        alloc.code = vec![vo_runtime::instruction::Instruction::new(
-            vo_runtime::instruction::Opcode::PtrNew,
-            0,
-            1,
-            1,
-        )];
-        assert!(!can_use_direct_call_table_entry(&alloc));
-    }
-
-    #[test]
-    fn prepare_closure_call_rejects_arg_slot_drift() {
-        let mut module = Module::new("test".to_string());
-        let mut callee = func(false, false, false);
-        callee.param_slots = 2;
-        callee.local_slots = 4;
-        callee.ret_slots = 1;
-        module.functions.push(callee);
-
-        let mut gc = Gc::new();
-        let closure_ref = closure::create(&mut gc, 0, 0) as u64;
-        let mut itab_cache = ItabCache::new();
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let program_args = Vec::new();
-        let mut sentinel_errors = SentinelErrorCache::new();
-        let output = CaptureSink::new();
-        let mut host_output = None;
-        let mut stack = [0_u64; 16];
-        let mut ctx = test_context(
-            &mut gc,
-            &module,
-            &mut itab_cache,
-            &mut stack,
-            &safepoint_flag,
-            &mut panic_flag,
-            &mut is_user_panic,
-            &mut panic_msg,
-            &program_args,
-            &mut sentinel_errors,
-            &output,
-            &mut host_output,
-        );
-        let user_args = [11_u64];
-        let mut returns = [0_u64; 1];
-        let mut out = PreparedCall::vm_materialization(0, 0);
-
-        let result = jit_prepare_closure_call(
-            &mut ctx,
-            closure_ref,
-            4,
-            1,
-            10,
-            user_args.as_ptr(),
-            user_args.len() as u32,
-            returns.as_mut_ptr(),
-            &mut out,
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(
-            ctx.runtime_trap_arg1,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
-        );
-    }
-
-    #[test]
-    fn prepare_closure_call_rejects_non_closure_gcref_before_header_read() {
-        let mut module = Module::new("test".to_string());
-        module.functions.push(func(false, false, false));
-
-        let mut gc = Gc::new();
-        let wrong_ref = island::create(&mut gc, 0) as u64;
-        let mut itab_cache = ItabCache::new();
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let program_args = Vec::new();
-        let mut sentinel_errors = SentinelErrorCache::new();
-        let output = CaptureSink::new();
-        let mut host_output = None;
-        let mut stack = [0_u64; 16];
-        let mut ctx = test_context(
-            &mut gc,
-            &module,
-            &mut itab_cache,
-            &mut stack,
-            &safepoint_flag,
-            &mut panic_flag,
-            &mut is_user_panic,
-            &mut panic_msg,
-            &program_args,
-            &mut sentinel_errors,
-            &output,
-            &mut host_output,
-        );
-        let mut out = PreparedCall::vm_materialization(0, 0);
-
-        let result = jit_prepare_closure_call(
-            &mut ctx,
-            wrong_ref,
-            0,
-            0,
-            10,
-            core::ptr::null(),
-            0,
-            core::ptr::null_mut(),
-            &mut out,
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(
-            ctx.runtime_trap_arg1,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
-        );
-    }
-
-    #[test]
-    fn prepare_iface_call_rejects_arg_slot_drift() {
-        let mut module = Module::new("test".to_string());
-        let mut callee = func(false, false, false);
-        callee.param_slots = 3;
-        callee.recv_slots = 1;
-        callee.local_slots = 4;
-        callee.ret_slots = 1;
-        module.functions.push(callee);
-
-        let mut gc = Gc::new();
-        let mut itab_cache = ItabCache::from_module_itabs(vec![Itab { methods: vec![0] }]);
-        let safepoint_flag = false;
-        let mut panic_flag = false;
-        let mut is_user_panic = false;
-        let mut panic_msg = InterfaceSlot::nil();
-        let program_args = Vec::new();
-        let mut sentinel_errors = SentinelErrorCache::new();
-        let output = CaptureSink::new();
-        let mut host_output = None;
-        let mut stack = [0_u64; 16];
-        let mut ctx = test_context(
-            &mut gc,
-            &module,
-            &mut itab_cache,
-            &mut stack,
-            &safepoint_flag,
-            &mut panic_flag,
-            &mut is_user_panic,
-            &mut panic_msg,
-            &program_args,
-            &mut sentinel_errors,
-            &output,
-            &mut host_output,
-        );
-        let slot0 = interface::pack_slot0(0, 0, ValueKind::Pointer);
-        let user_args = [22_u64];
-        let mut returns = [0_u64; 1];
-        let mut out = PreparedCall::vm_materialization(0, 0);
-
-        let result = jit_prepare_iface_call(
-            &mut ctx,
-            slot0,
-            0,
-            0,
-            4,
-            1,
-            10,
-            user_args.as_ptr(),
-            user_args.len() as u32,
-            returns.as_mut_ptr(),
-            &mut out,
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(
-            ctx.runtime_trap_arg1,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
-        );
-    }
-}
+mod tests;

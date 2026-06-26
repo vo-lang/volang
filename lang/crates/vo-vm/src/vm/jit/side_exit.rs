@@ -22,7 +22,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gc_side_exit_call_kind_mapping_is_shared_by_full_and_osr_result_handling() {
+    fn vm_gc_side_exit_call_kind_mapping_is_shared_by_full_and_osr_result_handling() {
         assert_eq!(
             call_kind_reason(JitContext::CALL_KIND_YIELD),
             Some(JitSideExitReason::Yield)

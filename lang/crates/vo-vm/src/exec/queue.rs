@@ -9,6 +9,7 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 #[cfg(feature = "std")]
@@ -18,49 +19,437 @@ use std::{
     vec::Vec,
 };
 
-use vo_common_core::bytecode::StructMeta;
+use vo_common_core::bytecode::{Module, StructMeta};
 use vo_common_core::instruction::QUEUE_KIND_PORT_FLAG;
 use vo_common_core::RuntimeType;
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::queue::{self, RecvResult};
-use vo_runtime::objects::queue_state::{self, QueueKind, QueueWaiter};
+use vo_runtime::objects::queue_state::{
+    self, QueueKind, QueueMessage, QueueWaiter, SelectWaitKind,
+};
 use vo_runtime::slot::Slot;
-use vo_runtime::{ValueMeta, ValueRttid};
+use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
 
+use crate::fiber::SelectWokenResult;
 use crate::instruction::Instruction;
+use crate::runtime_boundary::IslandCommandEffect;
 use crate::vm::helpers::{stack_get, stack_set};
 use crate::vm::RuntimeTrapKind;
+
+pub fn validate_queue_handle(gc: &Gc, q: GcRef, context: &str) -> Result<GcRef, String> {
+    let Some(base) = gc.canonicalize_ref(q) else {
+        return Err(format!("{context}: invalid queue handle"));
+    };
+    if base != q {
+        return Err(format!("{context}: queue handle must be an object base"));
+    }
+    let kind = Gc::header(base).kind();
+    if !kind.is_queue() {
+        return Err(format!("{context}: expected queue handle, got {:?}", kind));
+    }
+    Ok(base)
+}
+
+pub fn validate_queue_payload_slots(
+    ch: GcRef,
+    payload_slots: usize,
+    context: &str,
+) -> Result<(), String> {
+    let expected = queue_state::elem_slots(ch) as usize;
+    if payload_slots != expected {
+        return Err(format!(
+            "{context} payload slots {payload_slots} do not match queue element slots {expected}"
+        ));
+    }
+    Ok(())
+}
+
+pub fn select_woken_recv_slot_types(
+    ch: GcRef,
+    module: Option<&vo_runtime::bytecode::Module>,
+) -> Result<Vec<SlotType>, String> {
+    let elem_meta = queue_state::elem_meta(ch);
+    let elem_slots = queue_state::elem_slots(ch) as usize;
+    let kind = elem_meta.value_kind();
+    Ok(match kind {
+        ValueKind::Struct => {
+            let meta_id = elem_meta.meta_id() as usize;
+            module
+                .and_then(|module| module.struct_metas.get(meta_id))
+                .map(|meta| meta.slot_types.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "select wake recv missing StructMeta id {meta_id} for payload root scan"
+                    )
+                })?
+        }
+        ValueKind::Array => {
+            let module = module.ok_or_else(|| {
+                "select wake recv missing module runtime metadata for array payload root scan"
+                    .to_string()
+            })?;
+            let rttid = if elem_meta.meta_id() != 0 {
+                ValueRttid::new(elem_meta.meta_id(), ValueKind::Array)
+            } else {
+                queue_state::elem_rttid(ch)
+            };
+            select_woken_slot_types_for_rttid(rttid, module, 0)?
+        }
+        ValueKind::Interface => vec![SlotType::Interface0, SlotType::Interface1],
+        ValueKind::Float32 | ValueKind::Float64 => vec![SlotType::Float; elem_slots],
+        kind if kind.may_contain_gc_refs() => vec![SlotType::GcRef; elem_slots],
+        _ => vec![SlotType::Value; elem_slots],
+    })
+}
+
+pub fn validate_queue_payload_layout(
+    ch: GcRef,
+    payload_layout: &[SlotType],
+    context: &str,
+    module: Option<&vo_runtime::bytecode::Module>,
+) -> Result<(), String> {
+    let expected = select_woken_recv_slot_types(ch, module)?;
+    if payload_layout != expected.as_slice() {
+        return Err(format!(
+            "{context} payload layout {payload_layout:?} does not match queue element layout {expected:?}"
+        ));
+    }
+    validate_queue_payload_slots(ch, payload_layout.len(), context)
+}
+
+pub fn preflight_island_route(
+    state: &crate::vm::VmState,
+    target_island: u32,
+    context: &str,
+) -> Result<(), String> {
+    if target_island == state.current_island_id {
+        return Ok(());
+    }
+    #[cfg(feature = "std")]
+    {
+        state
+            .can_route_to_island(target_island)
+            .map_err(|error| format!("{context}: {error}"))
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = (state, target_island, context);
+        Ok(())
+    }
+}
+
+pub fn preflight_queue_close_routes(state: &crate::vm::VmState, ch: GcRef) -> Result<(), String> {
+    if ch.is_null() {
+        return Ok(());
+    }
+    let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueClose") else {
+        return Ok(());
+    };
+    if queue::is_remote(ch) {
+        let proxy = queue::remote_proxy(ch);
+        if !proxy.closed {
+            preflight_island_route(state, proxy.home_island, "QueueClose remote home route")?;
+        }
+        return Ok(());
+    }
+    if let Some(info) = queue::home_info(ch) {
+        for peer in info.peers.iter().copied() {
+            preflight_island_route(state, peer, "QueueClose endpoint peer route")?;
+        }
+    }
+    Ok(())
+}
+
+pub fn preflight_queue_send_routes(state: &crate::vm::VmState, ch: GcRef) -> Result<(), String> {
+    if ch.is_null() {
+        return Ok(());
+    }
+    let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueSend") else {
+        return Ok(());
+    };
+    if queue::is_remote(ch) {
+        let proxy = queue::remote_proxy(ch);
+        if !proxy.closed {
+            preflight_island_route(state, proxy.home_island, "QueueSend remote home route")?;
+        }
+        return Ok(());
+    }
+    if let Some(receiver) = queue::next_remote_direct_receiver(ch, state.current_island_id) {
+        if queue::home_info(ch).is_none() {
+            return Err(format!(
+                "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
+                receiver.island_id, receiver.fiber_key
+            ));
+        }
+        preflight_island_route(
+            state,
+            receiver.island_id,
+            "QueueSend remote receiver response route",
+        )?;
+    }
+    Ok(())
+}
+
+pub fn preflight_queue_recv_routes(state: &crate::vm::VmState, ch: GcRef) -> Result<(), String> {
+    if ch.is_null() {
+        return Ok(());
+    }
+    let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueRecv") else {
+        return Ok(());
+    };
+    if queue::is_remote(ch) {
+        let proxy = queue::remote_proxy(ch);
+        if !proxy.closed {
+            preflight_island_route(state, proxy.home_island, "QueueRecv remote home route")?;
+        }
+        return Ok(());
+    }
+    queue_recv_endpoint_ack_preflight(ch)?;
+    if let Some(sender) = queue::next_recv_endpoint_sender(ch) {
+        preflight_island_route(
+            state,
+            sender.island_id,
+            "QueueRecv remote sender response route",
+        )?;
+    }
+    Ok(())
+}
+
+fn select_woken_leaf_slot_type(kind: ValueKind) -> SlotType {
+    match kind {
+        ValueKind::Float32 | ValueKind::Float64 => SlotType::Float,
+        kind if kind.may_contain_gc_refs() => SlotType::GcRef,
+        _ => SlotType::Value,
+    }
+}
+
+fn select_woken_slot_types_for_rttid(
+    rttid: ValueRttid,
+    module: &vo_runtime::bytecode::Module,
+    depth: usize,
+) -> Result<Vec<SlotType>, String> {
+    if depth > module.runtime_types.len() + module.named_type_metas.len() + 1 {
+        return Err(format!(
+            "select wake recv recursive runtime type depth exceeded at rttid {}",
+            rttid.rttid()
+        ));
+    }
+
+    match rttid.value_kind() {
+        ValueKind::Struct => {
+            let runtime_type = module
+                .runtime_types
+                .get(rttid.rttid() as usize)
+                .ok_or_else(|| {
+                    format!(
+                    "select wake recv missing RuntimeType rttid {} for struct payload root scan",
+                    rttid.rttid()
+                )
+                })?;
+            match runtime_type {
+                RuntimeType::Struct { meta_id, .. } => module
+                    .struct_metas
+                    .get(*meta_id as usize)
+                    .map(|meta| meta.slot_types.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "select wake recv missing StructMeta id {meta_id} for payload root scan"
+                        )
+                    }),
+                RuntimeType::Named { id, .. } => {
+                    let named = module.named_type_metas.get(*id as usize).ok_or_else(|| {
+                        format!(
+                            "select wake recv missing NamedTypeMeta id {id} for payload root scan"
+                        )
+                    })?;
+                    select_woken_slot_types_for_rttid(named.underlying_rttid, module, depth + 1)
+                }
+                other => Err(format!(
+                    "select wake recv RuntimeType rttid {} is {:?}, expected Struct",
+                    rttid.rttid(),
+                    other
+                )),
+            }
+        }
+        ValueKind::Array => {
+            let runtime_type = module
+                .runtime_types
+                .get(rttid.rttid() as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "select wake recv missing RuntimeType rttid {} for array payload root scan",
+                        rttid.rttid()
+                    )
+                })?;
+            match runtime_type {
+                RuntimeType::Array { len, elem } => {
+                    let elem_slot_types =
+                        select_woken_slot_types_for_rttid(*elem, module, depth + 1)?;
+                    let elem_len = elem_slot_types.len();
+                    let total = (*len as usize).checked_mul(elem_len).ok_or_else(|| {
+                        "select wake recv array payload slot width overflow".to_string()
+                    })?;
+                    let mut slot_types = Vec::with_capacity(total);
+                    for _ in 0..*len {
+                        slot_types.extend_from_slice(&elem_slot_types);
+                    }
+                    Ok(slot_types)
+                }
+                RuntimeType::Named { id, .. } => {
+                    let named = module.named_type_metas.get(*id as usize).ok_or_else(|| {
+                        format!(
+                            "select wake recv missing NamedTypeMeta id {id} for payload root scan"
+                        )
+                    })?;
+                    select_woken_slot_types_for_rttid(named.underlying_rttid, module, depth + 1)
+                }
+                other => Err(format!(
+                    "select wake recv RuntimeType rttid {} is {:?}, expected Array",
+                    rttid.rttid(),
+                    other
+                )),
+            }
+        }
+        ValueKind::Interface => Ok(vec![SlotType::Interface0, SlotType::Interface1]),
+        kind => Ok(vec![select_woken_leaf_slot_type(kind)]),
+    }
+}
+
+pub(crate) fn validate_select_woken_recv_payload_width(
+    payload_len: usize,
+    slot_types_len: usize,
+) -> Result<(), String> {
+    if slot_types_len != payload_len {
+        return Err(format!(
+            "select wake recv payload width {} does not match slot metadata {}",
+            payload_len, slot_types_len
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_select_woken_recv_payload_contract(
+    payload_len: usize,
+    slot_types_len: usize,
+    elem_slots: usize,
+    closed: bool,
+) -> Result<(), String> {
+    if closed {
+        if payload_len != 0 || slot_types_len != 0 {
+            return Err(format!(
+                "closed select wake recv carried payload width {payload_len} and slot metadata {slot_types_len}"
+            ));
+        }
+        return Ok(());
+    }
+    validate_select_woken_recv_payload_width(payload_len, slot_types_len)?;
+    if payload_len != elem_slots {
+        return Err(format!(
+            "select wake recv payload width {payload_len} does not match element slots {elem_slots}"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_select_woken_recv_payload_layout(
+    payload_len: usize,
+    slot_types: &[SlotType],
+    expected_slot_types: &[SlotType],
+    closed: bool,
+) -> Result<(), String> {
+    if closed {
+        if payload_len != 0 || !slot_types.is_empty() {
+            return Err(format!(
+                "closed select wake recv carried payload width {payload_len} and slot metadata {}",
+                slot_types.len()
+            ));
+        }
+        return Ok(());
+    }
+    validate_select_woken_recv_payload_width(payload_len, slot_types.len())?;
+    if slot_types != expected_slot_types {
+        return Err(format!(
+            "select wake recv slot metadata {:?} does not match queue element layout {:?}",
+            slot_types, expected_slot_types
+        ));
+    }
+    Ok(())
+}
+
+pub fn select_woken_recv_payload_with_slot_types(
+    payload: QueueMessage,
+    slot_types: Vec<SlotType>,
+) -> Result<SelectWokenResult, String> {
+    validate_select_woken_recv_payload_width(payload.len(), slot_types.len())?;
+    Ok(SelectWokenResult::Recv {
+        data: payload.into_vec(),
+        slot_types,
+        closed: false,
+    })
+}
+
+pub fn select_woken_recv_payload(
+    ch: GcRef,
+    payload: QueueMessage,
+    module: Option<&vo_runtime::bytecode::Module>,
+) -> Result<SelectWokenResult, String> {
+    let slot_types = select_woken_recv_slot_types(ch, module)?;
+    select_woken_recv_payload_with_slot_types(payload, slot_types)
+}
 
 #[derive(Debug)]
 pub enum QueueAction {
     Continue,
-    Block,
-    ReplayThenBlock,
-    Wake(QueueWaiter),
+    Block {
+        waiter: Option<QueueWaiter>,
+    },
+    ReplayThenBlock {
+        waiter: Option<QueueWaiter>,
+    },
+    Wake {
+        waiter: QueueWaiter,
+        payload: Option<SelectWokenResult>,
+    },
     Trap(RuntimeTrapKind),
     Malformed(String),
     Close {
-        waiters: Vec<QueueWaiter>,
+        receivers: Vec<QueueWaiter>,
+        senders: Vec<QueueWaiter>,
         endpoint_id: Option<u64>,
+        rollback: crate::runtime_boundary::RuntimeRollback,
     },
     RemoteSend {
         endpoint_id: u64,
         home_island: u32,
         data: Vec<u8>,
+        island_effects: Vec<IslandCommandEffect>,
+        transfer_commit: super::QueueTransferCommit,
     },
     RemoteRecv {
         endpoint_id: u64,
         home_island: u32,
     },
+    RemoteSendAck {
+        endpoint_id: u64,
+        target_island: u32,
+        fiber_key: u64,
+        wait_id: u64,
+        closed: bool,
+        rollback: Option<crate::runtime_boundary::RuntimeRollback>,
+    },
     RemoteRecvData {
         endpoint_id: u64,
         target_island: u32,
-        fiber_id: u64,
+        fiber_key: u64,
+        wait_id: u64,
         data: Vec<u8>,
+        island_effects: Vec<IslandCommandEffect>,
+        rollback: Option<crate::runtime_boundary::RuntimeRollback>,
     },
     RemoteClose {
         endpoint_id: u64,
         home_island: u32,
+        rollback: crate::runtime_boundary::RuntimeRollback,
     },
 }
 
@@ -72,7 +461,9 @@ pub enum QueueRecvCoreResult {
         data: Box<[u64]>,
         wake_sender: Option<QueueWaiter>,
     },
-    WouldBlock,
+    WouldBlock {
+        waiter: Option<QueueWaiter>,
+    },
     Closed,
     Remote {
         endpoint_id: u64,
@@ -93,6 +484,12 @@ where
 {
     match result {
         QueueRecvCoreResult::Success { data, wake_sender } => {
+            if data.len() != elem_slots {
+                return Err(QueueRecvCoreResult::Malformed(format!(
+                    "QueueRecv payload slots {} do not match queue element slots {elem_slots}",
+                    data.len()
+                )));
+            }
             write_recv_result(Some(data.as_ref()), elem_slots, has_ok, write_slot);
             Ok(wake_sender)
         }
@@ -107,22 +504,31 @@ where
 pub fn decode_remote_queue_recv_response(
     gc: &mut Gc,
     response: crate::fiber::RemoteRecvResponse,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
     elem_slots: usize,
     struct_metas: &[StructMeta],
+    named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
     runtime_types: &[RuntimeType],
     endpoint_registry: &mut crate::vm::EndpointRegistry,
-) -> Option<Box<[u64]>> {
-    if response.closed {
-        None
+) -> Result<Option<Box<[u64]>>, super::transport::QueueHandleValidationError> {
+    if response.rejected {
+        Err(super::transport::QueueHandleValidationError::EndpointRecvRejected)
+    } else if response.closed {
+        Ok(None)
     } else {
-        Some(super::transport::unpack_transport_message(
+        super::transport::unpack_transport_message(
             gc,
             &response.data,
+            elem_meta,
+            elem_rttid,
             elem_slots,
             struct_metas,
+            named_type_metas,
             runtime_types,
             endpoint_registry,
-        ))
+        )
+        .map(Some)
     }
 }
 
@@ -154,28 +560,45 @@ pub fn write_recv_result<F>(
     }
 }
 
+pub fn stack_slot_snapshot(stack: *const Slot, start: usize, len: usize) -> Vec<(usize, Slot)> {
+    (0..len)
+        .map(|offset| {
+            let index = start + offset;
+            (index, stack_get(stack, index))
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn replay_remote_queue_recv_response<F>(
     gc: &mut Gc,
     response: crate::fiber::RemoteRecvResponse,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
     elem_slots: usize,
     has_ok: bool,
     struct_metas: &[StructMeta],
+    named_type_metas: &[vo_common_core::bytecode::NamedTypeMeta],
     runtime_types: &[RuntimeType],
     endpoint_registry: &mut crate::vm::EndpointRegistry,
     write_slot: F,
-) where
+) -> Result<(), super::transport::QueueHandleValidationError>
+where
     F: FnMut(usize, u64),
 {
     let decoded = decode_remote_queue_recv_response(
         gc,
         response,
+        elem_meta,
+        elem_rttid,
         elem_slots,
         struct_metas,
+        named_type_metas,
         runtime_types,
         endpoint_registry,
-    );
+    )?;
     write_recv_result(decoded.as_deref(), elem_slots, has_ok, write_slot);
+    Ok(())
 }
 
 #[inline]
@@ -203,6 +626,7 @@ pub fn exec_queue_new(
     bp: usize,
     inst: &Instruction,
     gc: &mut Gc,
+    module: &Module,
 ) -> QueueNewResult {
     let kind = queue_new_kind_from_flags(inst.flags);
     let packed_type = stack_get(stack, bp + inst.b as usize);
@@ -211,7 +635,9 @@ pub fn exec_queue_new(
     let cap = stack_get(stack, bp + inst.c as usize) as i64;
     let elem_slots = inst.queue_new_elem_slots();
 
-    match queue::create_checked(gc, kind, elem_meta, elem_rttid, elem_slots, cap) {
+    match queue::create_checked_with_module(
+        gc, kind, elem_meta, elem_rttid, elem_slots, cap, module,
+    ) {
         Ok(ch) => {
             stack_set(stack, bp + inst.a as usize, ch as u64);
             Ok(())
@@ -227,14 +653,54 @@ pub fn queue_send_core(
     ch: GcRef,
     src: &[u64],
     island_id: u32,
-    fiber_id: u64,
+    fiber_key: u64,
+    state: &mut crate::vm::VmState,
+    struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
+    module: Option<&vo_runtime::bytecode::Module>,
+) -> QueueExecResult {
+    queue_send_core_with_layout(
+        ch,
+        src,
+        None,
+        island_id,
+        fiber_key,
+        state,
+        struct_metas,
+        runtime_types,
+        module,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn queue_send_core_with_layout(
+    ch: GcRef,
+    src: &[u64],
+    src_layout: Option<&[SlotType]>,
+    island_id: u32,
+    fiber_key: u64,
     state: &mut crate::vm::VmState,
     struct_metas: &[StructMeta],
     runtime_types: &[RuntimeType],
     module: Option<&vo_runtime::bytecode::Module>,
 ) -> QueueExecResult {
     if ch.is_null() {
-        return QueueExecResult::Block;
+        return QueueExecResult::Block { waiter: None };
+    }
+    let ch = match validate_queue_handle(&state.gc, ch, "QueueSend") {
+        Ok(ch) => ch,
+        Err(msg) => return QueueExecResult::Malformed(msg),
+    };
+    if let Err(msg) = validate_queue_payload_slots(ch, src.len(), "QueueSend") {
+        return QueueExecResult::Malformed(msg);
+    }
+    if let Some(src_layout) = src_layout {
+        if let Err(msg) = validate_queue_payload_layout(ch, src_layout, "QueueSend", module) {
+            return QueueExecResult::Malformed(msg);
+        }
+    }
+    if let Err(msg) = preflight_queue_send_routes(state, ch) {
+        return QueueExecResult::Malformed(msg);
     }
 
     // REMOTE channel — send via message passing
@@ -243,11 +709,19 @@ pub fn queue_send_core(
         if proxy.closed {
             return QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel);
         }
-        if let Err(msg) =
-            super::prepare_remote_send_value_if_needed(ch, src, struct_metas, runtime_types, state)
-        {
-            return QueueExecResult::Malformed(msg);
-        }
+        let mut island_effects = Vec::new();
+        let transfer_commit = match super::prepare_remote_send_value_if_needed(
+            ch,
+            src,
+            struct_metas,
+            module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+            runtime_types,
+            state,
+            &mut island_effects,
+        ) {
+            Ok(commit) => commit,
+            Err(msg) => return QueueExecResult::Malformed(msg),
+        };
         let elem_meta = queue_state::elem_meta(ch);
         let result = QueueExecResult::RemoteSend {
             endpoint_id: proxy.endpoint_id,
@@ -257,8 +731,11 @@ pub fn queue_send_core(
                 src,
                 elem_meta,
                 struct_metas,
+                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
                 runtime_types,
             ),
+            island_effects,
+            transfer_commit,
         };
 
         return result;
@@ -269,6 +746,15 @@ pub fn queue_send_core(
     // Write barrier: type-aware to avoid UB on mixed-slot types.
     // Must be done before send_or_block because the value is moved into the buffer.
     let em = queue_state::elem_meta(ch);
+    let remote_direct_receiver = queue::next_remote_direct_receiver(ch, island_id);
+    if let Some(receiver) = remote_direct_receiver.as_ref() {
+        if queue::home_info(ch).is_none() {
+            return QueueExecResult::Malformed(format!(
+                "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
+                receiver.island_id, receiver.fiber_key
+            ));
+        }
+    }
     if em.value_kind().may_contain_gc_refs() {
         if let Err(err) = vo_runtime::gc_types::try_typed_write_barrier_by_meta(
             &mut state.gc,
@@ -279,31 +765,83 @@ pub fn queue_send_core(
         ) {
             return QueueExecResult::Malformed(err.to_string());
         }
+        if remote_direct_receiver.is_some() {
+            if let Err(msg) = super::validate_value_queue_handles_for_transfer(
+                value.as_ref(),
+                em,
+                island_id,
+                struct_metas,
+                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+                runtime_types,
+                state,
+            ) {
+                return QueueExecResult::Malformed(msg);
+            }
+        }
     }
+    let select_recv_slot_types = if queue::next_local_select_recv_receiver(ch, island_id).is_some()
+    {
+        match select_woken_recv_slot_types(ch, module).and_then(|slot_types| {
+            validate_select_woken_recv_payload_width(value.len(), slot_types.len())?;
+            Ok(slot_types)
+        }) {
+            Ok(slot_types) => Some(slot_types),
+            Err(msg) => return QueueExecResult::Malformed(msg),
+        }
+    } else {
+        None
+    };
 
-    let waiter = QueueWaiter::simple(island_id, fiber_id);
-    match queue::send_or_block_resolved(ch, value, waiter, island_id) {
-        queue::ResolvedSendResult::Wake(receiver) => QueueExecResult::Wake(receiver),
+    let waiter = QueueWaiter::simple_queue(island_id, fiber_key, ch as u64, SelectWaitKind::Send);
+    let mut select_recv_slot_types = select_recv_slot_types;
+    let mut rollback = crate::runtime_boundary::RuntimeRollback::local_queue(state, ch);
+    match queue::send_or_block_resolved(ch, value, waiter.clone(), island_id) {
+        queue::ResolvedSendResult::Wake { receiver, payload } => {
+            let payload = match payload {
+                Some(payload) => {
+                    let Some(slot_types) = select_recv_slot_types.take() else {
+                        return QueueExecResult::Malformed(
+                            "select wake recv payload returned without preflight".to_string(),
+                        );
+                    };
+                    match select_woken_recv_payload_with_slot_types(payload, slot_types) {
+                        Ok(payload) => Some(payload),
+                        Err(msg) => return QueueExecResult::Malformed(msg),
+                    }
+                }
+                None => None,
+            };
+            QueueExecResult::Wake {
+                waiter: receiver,
+                payload,
+            }
+        }
         queue::ResolvedSendResult::RemoteDirect {
             receiver,
             payload: value,
         } => {
-            if em.value_kind().may_contain_gc_refs() {
-                if let Err(msg) = super::prepare_value_queue_handles_for_transfer(
-                    value.as_ref(),
-                    em,
-                    receiver.island_id,
-                    struct_metas,
-                    runtime_types,
-                    state,
-                ) {
-                    return QueueExecResult::Malformed(msg);
-                }
+            let mut island_effects = Vec::new();
+            let transfer_commit = match super::prepare_value_queue_handles_for_transfer_with_commit(
+                value.as_ref(),
+                em,
+                receiver.island_id,
+                struct_metas,
+                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+                runtime_types,
+                state,
+                &mut island_effects,
+            ) {
+                Ok(commit) => commit,
+                Err(msg) => return QueueExecResult::Malformed(msg),
+            };
+            if let Some(endpoint_rollback) = transfer_commit.into_runtime_rollback() {
+                rollback =
+                    crate::runtime_boundary::RuntimeRollback::combine(rollback, endpoint_rollback);
             }
             let Some(home_info) = queue::home_info(ch) else {
                 return QueueExecResult::Malformed(format!(
-                    "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_fiber={}",
-                    receiver.island_id, receiver.fiber_id
+                    "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
+                    receiver.island_id, receiver.fiber_key
                 ));
             };
             let endpoint_id = home_info.endpoint_id;
@@ -312,27 +850,37 @@ pub fn queue_send_core(
                 value.as_ref(),
                 em,
                 struct_metas,
+                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
                 runtime_types,
             );
             QueueExecResult::RemoteRecvData {
                 endpoint_id,
                 target_island: receiver.island_id,
-                fiber_id: receiver.fiber_id,
+                fiber_key: receiver.fiber_key,
+                wait_id: receiver.endpoint_wait_id(),
                 data,
+                island_effects,
+                rollback: Some(rollback),
             }
         }
         queue::ResolvedSendResult::Buffered => QueueExecResult::Continue,
-        queue::ResolvedSendResult::Blocked => QueueExecResult::Block,
+        queue::ResolvedSendResult::Blocked => QueueExecResult::Block {
+            waiter: Some(waiter),
+        },
         queue::ResolvedSendResult::Closed => {
             QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel)
         }
     }
 }
 
-pub fn queue_recv_core(ch: GcRef, island_id: u32, fiber_id: u64) -> QueueRecvCoreResult {
+pub fn queue_recv_core(gc: &Gc, ch: GcRef, island_id: u32, fiber_key: u64) -> QueueRecvCoreResult {
     if ch.is_null() {
-        return QueueRecvCoreResult::WouldBlock;
+        return QueueRecvCoreResult::WouldBlock { waiter: None };
     }
+    let ch = match validate_queue_handle(gc, ch, "QueueRecv") {
+        Ok(ch) => ch,
+        Err(msg) => return QueueRecvCoreResult::Malformed(msg),
+    };
 
     // REMOTE channel — recv via message passing
     if queue::is_remote(ch) {
@@ -345,9 +893,12 @@ pub fn queue_recv_core(ch: GcRef, island_id: u32, fiber_id: u64) -> QueueRecvCor
             home_island: proxy.home_island,
         };
     }
+    if let Err(msg) = queue_recv_endpoint_ack_preflight(ch) {
+        return QueueRecvCoreResult::Malformed(msg);
+    }
 
-    let waiter = QueueWaiter::simple(island_id, fiber_id);
-    let (result, value_opt) = queue::recv_or_block(ch, waiter);
+    let waiter = QueueWaiter::simple_queue(island_id, fiber_key, ch as u64, SelectWaitKind::Recv);
+    let (result, value_opt) = queue::recv_or_block(ch, waiter.clone());
 
     match result {
         RecvResult::Success(woke_sender) => {
@@ -362,8 +913,52 @@ pub fn queue_recv_core(ch: GcRef, island_id: u32, fiber_id: u64) -> QueueRecvCor
                 )
             }
         }
-        RecvResult::Blocked | RecvResult::WouldBlock => QueueRecvCoreResult::WouldBlock,
+        RecvResult::Blocked | RecvResult::WouldBlock => QueueRecvCoreResult::WouldBlock {
+            waiter: Some(waiter),
+        },
         RecvResult::Closed => QueueRecvCoreResult::Closed,
+    }
+}
+
+pub fn queue_recv_endpoint_ack_preflight(ch: GcRef) -> Result<(), String> {
+    if let Some(sender) = queue::next_recv_endpoint_sender(ch) {
+        if queue::home_info(ch).is_none() {
+            return Err(format!(
+                "remote endpoint sender missing HomeInfo: sender_island={} sender_key={}",
+                sender.island_id,
+                sender.fiber_key()
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn queue_sender_ack_or_wake(
+    ch: GcRef,
+    sender: QueueWaiter,
+    closed: bool,
+    rollback: Option<crate::runtime_boundary::RuntimeRollback>,
+) -> QueueExecResult {
+    if sender.endpoint_wait_id() == 0 {
+        return QueueExecResult::Wake {
+            waiter: sender,
+            payload: None,
+        };
+    }
+    let Some(home_info) = queue::home_info(ch) else {
+        return QueueExecResult::Malformed(format!(
+            "remote endpoint sender missing HomeInfo: sender_island={} sender_key={}",
+            sender.island_id,
+            sender.fiber_key()
+        ));
+    };
+    QueueExecResult::RemoteSendAck {
+        endpoint_id: home_info.endpoint_id,
+        target_island: sender.island_id,
+        fiber_key: sender.fiber_key(),
+        wait_id: sender.endpoint_wait_id(),
+        closed,
+        rollback,
     }
 }
 
@@ -371,23 +966,59 @@ pub fn exec_queue_recv(
     stack: *mut Slot,
     bp: usize,
     island_id: u32,
-    fiber_id: u32,
+    fiber_key: u64,
     inst: &Instruction,
+    state: &crate::vm::VmState,
+    module: Option<&vo_runtime::bytecode::Module>,
+    elem_layout: Option<&[SlotType]>,
 ) -> QueueExecResult {
     let ch = stack_get(stack, bp + inst.b as usize) as GcRef;
     let elem_slots = inst.recv_elem_slots() as usize;
     let has_ok = inst.recv_has_ok();
     let dst_start = bp + inst.a as usize;
 
+    if !ch.is_null() {
+        let ch = match validate_queue_handle(&state.gc, ch, "QueueRecv") {
+            Ok(ch) => ch,
+            Err(msg) => return QueueExecResult::Malformed(msg),
+        };
+        if let Err(msg) = validate_queue_payload_slots(ch, elem_slots, "QueueRecv") {
+            return QueueExecResult::Malformed(msg);
+        }
+        if let Some(elem_layout) = elem_layout {
+            if let Err(msg) = validate_queue_payload_layout(ch, elem_layout, "QueueRecv", module) {
+                return QueueExecResult::Malformed(msg);
+            }
+        }
+    }
+    if let Err(msg) = preflight_queue_recv_routes(state, ch) {
+        return QueueExecResult::Malformed(msg);
+    }
+    let remote_sender_rollback =
+        if !ch.is_null() && !queue::is_remote(ch) && queue::next_recv_endpoint_sender(ch).is_some()
+        {
+            Some(
+                crate::runtime_boundary::RuntimeRollback::local_queue_with_stack_slots(
+                    state,
+                    ch,
+                    stack_slot_snapshot(stack, dst_start, elem_slots + usize::from(has_ok)),
+                ),
+            )
+        } else {
+            None
+        };
+
     match complete_queue_recv(
-        queue_recv_core(ch, island_id, fiber_id as u64),
+        queue_recv_core(&state.gc, ch, island_id, fiber_key),
         elem_slots,
         has_ok,
         |i, value| stack_set(stack, dst_start + i, value),
     ) {
-        Ok(Some(sender)) => QueueExecResult::Wake(sender),
+        Ok(Some(sender)) => queue_sender_ack_or_wake(ch, sender, false, remote_sender_rollback),
         Ok(None) => QueueExecResult::Continue,
-        Err(QueueRecvCoreResult::WouldBlock) => QueueExecResult::ReplayThenBlock,
+        Err(QueueRecvCoreResult::WouldBlock { waiter }) => {
+            QueueExecResult::ReplayThenBlock { waiter }
+        }
         Err(QueueRecvCoreResult::Remote {
             endpoint_id,
             home_island,
@@ -414,19 +1045,38 @@ pub fn queue_len(ch: GcRef) -> usize {
 }
 
 #[inline]
-pub fn exec_queue_get<F>(stack: *mut Slot, bp: usize, inst: &Instruction, get: F)
+pub fn exec_queue_get<F>(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &Gc,
+    get: F,
+) -> QueueExecResult
 where
     F: FnOnce(GcRef) -> usize,
 {
     let obj = stack_get(stack, bp + inst.b as usize) as GcRef;
-    let val = if obj.is_null() { 0 } else { get(obj) };
+    let val = if obj.is_null() {
+        0
+    } else {
+        let obj = match validate_queue_handle(gc, obj, "QueueGet") {
+            Ok(obj) => obj,
+            Err(msg) => return QueueExecResult::Malformed(msg),
+        };
+        get(obj)
+    };
     stack_set(stack, bp + inst.a as usize, val as u64);
+    QueueExecResult::Continue
 }
 
-pub fn queue_close_core(ch: GcRef) -> QueueExecResult {
+pub fn queue_close_core(state: &crate::vm::VmState, ch: GcRef) -> QueueExecResult {
     if ch.is_null() {
         return QueueExecResult::Trap(RuntimeTrapKind::CloseNilChannel);
     }
+    let ch = match validate_queue_handle(&state.gc, ch, "QueueClose") {
+        Ok(ch) => ch,
+        Err(msg) => return QueueExecResult::Malformed(msg),
+    };
 
     // REMOTE channel close — send message to home island
     if queue::is_remote(ch) {
@@ -436,290 +1086,53 @@ pub fn queue_close_core(ch: GcRef) -> QueueExecResult {
         }
         let endpoint_id = proxy.endpoint_id;
         let home_island = proxy.home_island;
+        let rollback = crate::runtime_boundary::RuntimeRollback::remote_queue_proxy(state, ch);
         queue::mark_remote_closed(ch);
         return QueueExecResult::RemoteClose {
             endpoint_id,
             home_island,
+            rollback,
         };
     }
 
     if queue::is_closed(ch) {
         return QueueExecResult::Trap(RuntimeTrapKind::CloseClosedChannel);
     }
+    if queue::has_endpoint_waiters(ch) && queue::home_info(ch).is_none() {
+        return QueueExecResult::Malformed(
+            "QueueClose missing HomeInfo for remote endpoint waiters".to_string(),
+        );
+    }
+    let rollback = crate::runtime_boundary::RuntimeRollback::local_queue(state, ch);
     queue::close(ch);
-    let mut waiters: Vec<QueueWaiter> = queue::take_waiting_receivers(ch);
-    waiters.extend(queue::take_waiting_senders(ch).into_iter().map(|(w, _)| w));
+    let receivers = queue::take_waiting_receivers(ch);
+    let senders = queue::take_waiting_senders(ch)
+        .into_iter()
+        .map(|(w, _)| w)
+        .collect::<Vec<_>>();
     let endpoint_id = queue::home_info(ch).map(|info| info.endpoint_id);
-    if waiters.is_empty() && endpoint_id.is_none() {
+    if receivers.is_empty() && senders.is_empty() && endpoint_id.is_none() {
         QueueExecResult::Continue
     } else {
         QueueExecResult::Close {
-            waiters,
+            receivers,
+            senders,
             endpoint_id,
+            rollback,
         }
     }
 }
 
 #[inline]
-pub fn exec_queue_close(stack: *const Slot, bp: usize, inst: &Instruction) -> QueueExecResult {
+pub fn exec_queue_close(
+    stack: *const Slot,
+    bp: usize,
+    inst: &Instruction,
+    state: &crate::vm::VmState,
+) -> QueueExecResult {
     let ch = stack_get(stack, bp + inst.a as usize) as GcRef;
-    queue_close_core(ch)
+    queue_close_core(state, ch)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fiber::RemoteRecvResponse;
-    use crate::vm::{EndpointRegistry, VmState};
-    use vo_common_core::bytecode::Module;
-    use vo_runtime::objects::slice;
-    use vo_runtime::ValueKind;
-
-    fn make_byte_slice(gc: &mut Gc, bytes: &[u8]) -> GcRef {
-        let slice_ref = slice::create(
-            gc,
-            ValueMeta::new(0, ValueKind::Uint8),
-            1,
-            bytes.len(),
-            bytes.len(),
-        );
-        for (i, &byte) in bytes.iter().enumerate() {
-            slice::set(slice_ref, i, byte as u64, 1);
-        }
-        slice_ref
-    }
-
-    fn assert_byte_slice_eq(slice_ref: GcRef, expected: &[u8]) {
-        assert!(!slice_ref.is_null());
-        assert_eq!(slice::elem_meta(slice_ref).value_kind(), ValueKind::Uint8);
-        assert_eq!(slice::len(slice_ref), expected.len());
-        for (i, &byte) in expected.iter().enumerate() {
-            assert_eq!(slice::get(slice_ref, i, 1), byte as u64);
-        }
-    }
-
-    #[test]
-    fn nil_queue_send_blocks() {
-        let mut state = VmState::new();
-        let result = queue_send_core(
-            core::ptr::null_mut(),
-            &[123],
-            0,
-            1,
-            &mut state,
-            &[],
-            &[],
-            None,
-        );
-        assert!(matches!(result, QueueExecResult::Block));
-    }
-
-    #[test]
-    fn nil_queue_recv_blocks() {
-        let result = queue_recv_core(core::ptr::null_mut(), 0, 1);
-        assert!(matches!(result, QueueRecvCoreResult::WouldBlock));
-    }
-
-    #[test]
-    fn remote_direct_send_without_home_info_is_malformed_instead_of_expect_panic() {
-        let mut state = VmState::new();
-        let ch = queue::create(
-            &mut state.gc,
-            QueueKind::Port,
-            ValueMeta::new(0, ValueKind::Int64),
-            ValueRttid::new(0, ValueKind::Int64),
-            1,
-            1,
-        );
-        queue::register_receiver(ch, QueueWaiter::simple(7, 99));
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            queue_send_core(ch, &[123], 0, 1, &mut state, &[], &[], None)
-        }));
-
-        match result {
-            Ok(QueueExecResult::Malformed(msg)) => {
-                assert!(msg.contains("RemoteDirect send missing HomeInfo"), "{msg}");
-            }
-            Ok(other) => {
-                panic!("missing HomeInfo should be a malformed queue action, got {other:?}")
-            }
-            Err(_) => panic!("missing HomeInfo must not panic"),
-        }
-    }
-
-    #[test]
-    fn queue_send_core_reports_typed_barrier_metadata_errors_without_unwinding() {
-        let mut state = VmState::new();
-        let module = Module::new("queue-barrier-contract".to_string());
-        let ch = queue::create(
-            &mut state.gc,
-            QueueKind::Chan,
-            ValueMeta::new(99, ValueKind::Struct),
-            ValueRttid::new(999, ValueKind::Struct),
-            1,
-            1,
-        );
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            queue_send_core(ch, &[0], 0, 1, &mut state, &[], &[], Some(&module))
-        }));
-
-        match result {
-            Ok(QueueExecResult::Malformed(msg)) => {
-                assert!(msg.contains("typed_write_barrier_by_meta"), "{msg}");
-                assert!(msg.contains("missing StructMeta"), "{msg}");
-            }
-            Ok(other) => panic!("invalid typed barrier metadata must be malformed, got {other:?}"),
-            Err(_) => panic!("JIT-reachable queue_send_core must not unwind on metadata errors"),
-        }
-    }
-
-    #[test]
-    fn remote_queue_send_rejects_non_sendable_metadata_before_pack() {
-        let mut state = VmState::new();
-        let ch = queue::create_remote_proxy(
-            &mut state.gc,
-            QueueKind::Port,
-            77,
-            8,
-            1,
-            ValueMeta::new(0, ValueKind::Interface),
-            ValueRttid::new(0, ValueKind::Interface),
-            2,
-        );
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            queue_send_core(ch, &[0, 0], 0, 1, &mut state, &[], &[], None)
-        }));
-
-        match result {
-            Ok(QueueExecResult::Malformed(msg)) => {
-                assert!(msg.contains("non-sendable"), "{msg}");
-                assert!(msg.contains("Interface"), "{msg}");
-            }
-            Ok(other) => {
-                panic!("non-sendable remote queue metadata must be malformed, got {other:?}")
-            }
-            Err(_) => panic!("non-sendable remote queue metadata must not panic in pack"),
-        }
-    }
-
-    #[test]
-    fn queue_send_core_uses_result_typed_barrier_for_jit_callback_path() {
-        let source = include_str!("queue.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("queue source should contain tests section");
-
-        assert!(
-            source.contains("try_typed_write_barrier_by_meta"),
-            "queue_send_core must use the Result-returning typed barrier helper"
-        );
-        assert!(
-            !source.contains("typed_write_barrier_by_meta(&mut state.gc"),
-            "queue_send_core is called from JIT callbacks and must not call the panic barrier"
-        );
-    }
-
-    #[test]
-    fn replay_remote_queue_recv_response_restores_closed_result() {
-        let mut gc = Gc::new();
-        let struct_metas = vec![];
-        let runtime_types = vec![];
-        let mut endpoint_registry = EndpointRegistry::new();
-        let response = RemoteRecvResponse {
-            data: Vec::new(),
-            closed: true,
-        };
-        let mut dst = [99u64, 99u64];
-
-        replay_remote_queue_recv_response(
-            &mut gc,
-            response,
-            1,
-            true,
-            &struct_metas,
-            &runtime_types,
-            &mut endpoint_registry,
-            |i, value| dst[i] = value,
-        );
-
-        assert_eq!(dst[0], 0);
-        assert_eq!(dst[1], 0);
-    }
-
-    #[test]
-    fn replay_remote_queue_recv_response_restores_empty_byte_slice() {
-        let mut gc = Gc::new();
-        let struct_metas = vec![];
-        let runtime_types = vec![];
-        let mut endpoint_registry = EndpointRegistry::new();
-        let slice_ref = make_byte_slice(&mut gc, &[]);
-        let response = RemoteRecvResponse {
-            data: crate::exec::transport::pack_transport_message(
-                &gc,
-                &[slice_ref as u64],
-                ValueMeta::new(0, ValueKind::Slice),
-                &struct_metas,
-                &runtime_types,
-            ),
-            closed: false,
-        };
-        let mut dst = [0u64; 2];
-
-        replay_remote_queue_recv_response(
-            &mut gc,
-            response,
-            1,
-            true,
-            &struct_metas,
-            &runtime_types,
-            &mut endpoint_registry,
-            |i, value| dst[i] = value,
-        );
-
-        let unpacked = dst[0] as GcRef;
-        assert_byte_slice_eq(unpacked, &[]);
-        assert_eq!(dst[1], 1);
-        assert_ne!(slice_ref, unpacked);
-        assert_ne!(slice::array_ref(slice_ref), slice::array_ref(unpacked));
-    }
-
-    #[test]
-    fn replay_remote_queue_recv_response_restores_non_empty_byte_slice() {
-        let mut gc = Gc::new();
-        let struct_metas = vec![];
-        let runtime_types = vec![];
-        let mut endpoint_registry = EndpointRegistry::new();
-        let slice_ref = make_byte_slice(&mut gc, &[30, 1, 0, 0, 0]);
-        let response = RemoteRecvResponse {
-            data: crate::exec::transport::pack_transport_message(
-                &gc,
-                &[slice_ref as u64],
-                ValueMeta::new(0, ValueKind::Slice),
-                &struct_metas,
-                &runtime_types,
-            ),
-            closed: false,
-        };
-        let mut dst = [0u64; 2];
-
-        replay_remote_queue_recv_response(
-            &mut gc,
-            response,
-            1,
-            true,
-            &struct_metas,
-            &runtime_types,
-            &mut endpoint_registry,
-            |i, value| dst[i] = value,
-        );
-
-        let unpacked = dst[0] as GcRef;
-        assert_byte_slice_eq(unpacked, &[30, 1, 0, 0, 0]);
-        assert_eq!(dst[1], 1);
-        assert_ne!(slice_ref, unpacked);
-        assert_ne!(slice::array_ref(slice_ref), slice::array_ref(unpacked));
-    }
-}
+mod tests;
