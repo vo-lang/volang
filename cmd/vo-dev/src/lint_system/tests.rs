@@ -371,26 +371,27 @@ fn ffi_task_file(
 }
 
 fn docs_lint_task() -> Task {
-    task_with_inputs(
+    let mut task = task_with_inputs(
         "docs-lint",
         &[
-            "README.md",
-            "rust-toolchain.toml",
-            "eng/toolchains.toml",
-            "eng/tests.toml",
-            "benchmarks/manifest.toml",
-            "cmd/vo-dev/src/dev_bench.rs",
-            "cmd/vo-dev/src/task_graph.rs",
-            "cmd/vo-dev/src/task_planner.rs",
-            "cmd/vo-dev/src/task_runner.rs",
-            "cmd/vo-dev/src/task_system.rs",
-            "lang/crates/vo-ffi-macro/src/lib.rs",
+            "cmd/vo-dev/**",
+            "eng/tasks.toml",
+            "scripts/ci/docs_lint.mjs",
+            "scripts/ci/docs_sync.mjs",
+            "lang/docs/spec/**",
             "lang/docs/dev/**",
-            "apps/studio/src/lib/backend/web_backend.ts",
-            "apps/studio/src/lib/studio_wasm.ts",
-            "apps/studio/wasm/src/lib.rs",
+            "lang/docs/dev-notes/**",
+            "lang/docs/vo-for-gophers.md",
+            "apps/playground-legacy/src/assets/docs/generated/**",
+            "apps/studio/docs/manifest.toml",
+            "apps/studio/docs/pages/**",
         ],
-    )
+    );
+    task.tools = ["node", "rust", "vo-dev"]
+        .iter()
+        .map(|tool| (*tool).to_string())
+        .collect();
+    task
 }
 
 fn docs_task_file(
@@ -1038,17 +1039,17 @@ fn lint_docs_contract_requires_docs_lint_source_fact_inputs() {
         .iter_mut()
         .find(|task| task.name == "docs-lint")
         .expect("docs-lint task");
-    docs_lint.inputs.retain(|input| input != "eng/tests.toml");
+    docs_lint.inputs.retain(|input| input != "eng/tasks.toml");
 
     let err = lint_vm_production_selects_docs_contract(&config).unwrap_err();
     assert!(
-        format!("{err:#}").contains("docs-lint inputs must include eng/tests.toml"),
+        format!("{err:#}").contains("docs-lint inputs must include eng/tasks.toml"),
         "{err:#}"
     );
 }
 
 #[test]
-fn lint_docs_contract_requires_docs_lint_final_selector_source_input_060() {
+fn lint_docs_contract_requires_docs_lint_vo_dev_source_input_060() {
     let mut config = docs_task_file(
         vec!["docs-contract"],
         vec!["docs-contract"],
@@ -1059,23 +1060,18 @@ fn lint_docs_contract_requires_docs_lint_final_selector_source_input_060() {
         .iter_mut()
         .find(|task| task.name == "docs-lint")
         .expect("docs-lint task");
-    docs_lint
-        .inputs
-        .retain(|input| input != "cmd/vo-dev/src/task_runner.rs");
+    docs_lint.inputs.retain(|input| input != "cmd/vo-dev/**");
 
     let err = lint_vm_production_selects_docs_contract(&config).unwrap_err();
     assert!(
-        format!("{err:#}").contains("docs-lint inputs must include cmd/vo-dev/src/task_runner.rs"),
+        format!("{err:#}").contains("docs-lint inputs must include cmd/vo-dev/**"),
         "{err:#}"
     );
 }
 
 #[test]
-fn lint_docs_contract_requires_docs_lint_task_plan_source_inputs_060() {
-    for required in [
-        "cmd/vo-dev/src/task_graph.rs",
-        "cmd/vo-dev/src/task_planner.rs",
-    ] {
+fn lint_docs_contract_requires_docs_lint_script_inputs_060() {
+    for required in ["scripts/ci/docs_lint.mjs", "scripts/ci/docs_sync.mjs"] {
         let mut config = docs_task_file(
             vec!["docs-contract"],
             vec!["docs-contract"],
@@ -1097,7 +1093,7 @@ fn lint_docs_contract_requires_docs_lint_task_plan_source_inputs_060() {
 }
 
 #[test]
-fn lint_docs_contract_requires_docs_lint_studio_wasm_source_input() {
+fn lint_docs_contract_requires_docs_lint_studio_docs_manifest_input() {
     let mut config = docs_task_file(
         vec!["docs-contract"],
         vec!["docs-contract"],
@@ -1110,17 +1106,17 @@ fn lint_docs_contract_requires_docs_lint_studio_wasm_source_input() {
         .expect("docs-lint task");
     docs_lint
         .inputs
-        .retain(|input| input != "apps/studio/wasm/src/lib.rs");
+        .retain(|input| input != "apps/studio/docs/manifest.toml");
 
     let err = lint_vm_production_selects_docs_contract(&config).unwrap_err();
     assert!(
-        format!("{err:#}").contains("docs-lint inputs must include apps/studio/wasm/src/lib.rs"),
+        format!("{err:#}").contains("docs-lint inputs must include apps/studio/docs/manifest.toml"),
         "{err:#}"
     );
 }
 
 #[test]
-fn lint_docs_contract_requires_docs_lint_studio_wasm_types_input() {
+fn lint_docs_contract_requires_docs_lint_studio_docs_pages_input() {
     let mut config = docs_task_file(
         vec!["docs-contract"],
         vec!["docs-contract"],
@@ -1133,12 +1129,11 @@ fn lint_docs_contract_requires_docs_lint_studio_wasm_types_input() {
         .expect("docs-lint task");
     docs_lint
         .inputs
-        .retain(|input| input != "apps/studio/src/lib/studio_wasm.ts");
+        .retain(|input| input != "apps/studio/docs/pages/**");
 
     let err = lint_vm_production_selects_docs_contract(&config).unwrap_err();
     assert!(
-        format!("{err:#}")
-            .contains("docs-lint inputs must include apps/studio/src/lib/studio_wasm.ts"),
+        format!("{err:#}").contains("docs-lint inputs must include apps/studio/docs/pages/**"),
         "{err:#}"
     );
 }
