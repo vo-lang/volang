@@ -787,6 +787,7 @@ owner = "eng"
 name = "wasm-check"
 title = "vo-web wasm check"
 command = ["cargo", "check", "-p", "vo-web", "--target", "wasm32-unknown-unknown"]
+env = { CARGO_TARGET_DIR = "target/vo-web-wasm-check" }
 tools = ["rust"]
 inputs = ["lang/crates/**", "lang/stdlib/**", "apps/studio/wasm/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
@@ -1291,12 +1292,14 @@ owner = "release"
 name = "wasm-check-release"
 title = "vo-web wasm release check"
 command = ["cargo", "check", "-p", "vo-web", "--target", "wasm32-unknown-unknown", "--release"]
+env = { CARGO_TARGET_DIR = "target/vo-web-wasm-check" }
 tools = ["rust"]
 inputs = ["lang/crates/**", "lang/stdlib/**", "apps/studio/wasm/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
 tier = "test"
 tags = ["app-build", "release-verify", "web-wasm"]
 owner = "web-wasm"
+timeout_sec = 1800
 
 [[task]]
 name = "vo-web-wasm-build"

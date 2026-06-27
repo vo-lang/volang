@@ -4,7 +4,7 @@ pub mod cache;
 pub mod digest;
 pub mod ephemeral;
 pub mod ext_manifest;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-registry"))]
 pub mod github_registry;
 pub mod identity;
 pub mod inline_mod;

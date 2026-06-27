@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Vo module system: identity, schema, resolution, registry, and build policy"
 
+[features]
+default = ["native-registry"]
+native-registry = ["dep:ureq"]
+
 [dependencies]
 vo-common = { path = "../vo-common", default-features = false }
 vo-syntax = { path = "../vo-syntax", default-features = false }
@@ -16,7 +20,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 tar = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-ureq = { version = "2", features = ["gzip"] }
+ureq = { version = "2", features = ["gzip"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
