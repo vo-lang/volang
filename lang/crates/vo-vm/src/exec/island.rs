@@ -941,7 +941,7 @@ fn validate_slice_transfer_layout(
             ));
         }
         let elem_offset = data_addr - array_layout.data_start;
-        if elem_offset % array_layout.elem_bytes != 0 {
+        if !elem_offset.is_multiple_of(array_layout.elem_bytes) {
             return Err(format!(
                 "{context} Slice layout data pointer is not on an element boundary"
             ));

@@ -1987,10 +1987,7 @@ impl Vm {
             return None;
         };
         if matches!(kind, EndpointResponseKind::Closed)
-            || (effect.island_id == self.state.current_island_id
-                && *from_island != self.state.current_island_id)
-            || (effect.island_id != self.state.current_island_id
-                && *from_island != self.state.current_island_id)
+            || *from_island != self.state.current_island_id
         {
             return None;
         }
@@ -2310,9 +2307,9 @@ impl Vm {
                 "runtime queue waiter wake was rejected".to_string(),
             ));
         }
-        return Err(VmError::Jit(
+        Err(VmError::Jit(
             "remote queue waiter wake must use an endpoint response".to_string(),
-        ));
+        ))
     }
 
     fn preflight_remote_wake_fiber_command(&self, waiter: &QueueWaiter) -> Result<(), VmError> {

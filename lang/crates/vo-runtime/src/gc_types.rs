@@ -546,7 +546,7 @@ where
     let len = array::len(obj);
     let elem_bytes = array::elem_bytes(obj);
     assert!(
-        elem_bytes % SLOT_BYTES == 0,
+        elem_bytes.is_multiple_of(SLOT_BYTES),
         "scan_array: GC-containing element kind {elem_kind:?} has non-slot-aligned elem_bytes={elem_bytes}"
     );
     if elem_bytes == 0 {

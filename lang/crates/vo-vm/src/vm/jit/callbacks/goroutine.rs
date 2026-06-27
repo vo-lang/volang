@@ -34,16 +34,13 @@ fn validate_regular_go_start_abi(
     args_ptr: *const u64,
     arg_slots: u32,
 ) -> Result<(), JitResult> {
-    let validated_arg_slots = match validate_callback_raw_slots(
+    let validated_arg_slots = validate_callback_raw_slots(
         ctx,
         JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
         func_id as u64,
         args_ptr,
         arg_slots,
-    ) {
-        Ok(arg_slots) => arg_slots,
-        Err(result) => return Err(result),
-    };
+    )?;
     if u32::try_from(validated_arg_slots).ok() != Some(arg_slots)
         || validate_function_arg_shape("JIT GoStart", func_id, func, validated_arg_slots).is_err()
     {
@@ -257,17 +254,17 @@ pub extern "C" fn jit_go_start(
             }
         }
         match unsafe { build_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) } {
-            Ok(new_fiber) => return commit_go_spawn(ctx, vm, new_fiber),
+            Ok(new_fiber) => commit_go_spawn(ctx, vm, new_fiber),
             Err(helpers::ClosureFiberBuildError::Trap(kind)) => {
                 let trap = match kind {
                     crate::vm::RuntimeTrapKind::StackOverflow => JitRuntimeTrapKind::StackOverflow,
                     _ => JitRuntimeTrapKind::NilFuncCall,
                 };
                 record_runtime_trap(ctx, trap, ctx.runtime_trap_pc);
-                return JitResult::Panic;
+                JitResult::Panic
             }
             Err(helpers::ClosureFiberBuildError::Malformed(_)) => {
-                return reject_invalid_callback_state(ctx, closure_ref);
+                reject_invalid_callback_state(ctx, closure_ref)
             }
         }
     } else {
@@ -306,7 +303,7 @@ pub extern "C" fn jit_go_start(
         for i in 0..arg_slots as usize {
             unsafe { *new_stack.add(i) = *args_ptr.add(i) };
         }
-        return commit_go_spawn(ctx, vm, new_fiber);
+        commit_go_spawn(ctx, vm, new_fiber)
     }
 }
 
@@ -384,17 +381,17 @@ pub extern "C" fn jit_go_island(
 
     if island_id == vm.state.current_island_id {
         match unsafe { build_closure_fiber(vm, module, closure_ref, args_ptr, arg_slots) } {
-            Ok(new_fiber) => return commit_go_spawn(ctx, vm, new_fiber),
+            Ok(new_fiber) => commit_go_spawn(ctx, vm, new_fiber),
             Err(helpers::ClosureFiberBuildError::Trap(kind)) => {
                 let trap = match kind {
                     crate::vm::RuntimeTrapKind::StackOverflow => JitRuntimeTrapKind::StackOverflow,
                     _ => JitRuntimeTrapKind::NilFuncCall,
                 };
                 record_runtime_trap(ctx, trap, ctx.runtime_trap_pc);
-                return JitResult::Panic;
+                JitResult::Panic
             }
             Err(helpers::ClosureFiberBuildError::Malformed(_)) => {
-                return reject_invalid_callback_state(ctx, closure_ref);
+                reject_invalid_callback_state(ctx, closure_ref)
             }
         }
     } else {
@@ -506,7 +503,7 @@ pub extern "C" fn jit_go_island(
             PendingTransitionTerminalPolicy::CommitOnLanguagePanic
         };
         let rollback = transfer_commit.into_runtime_rollback();
-        return commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback);
+        commit_go_island_commands(ctx, vm, island_effects, terminal_policy, rollback)
     }
 }
 

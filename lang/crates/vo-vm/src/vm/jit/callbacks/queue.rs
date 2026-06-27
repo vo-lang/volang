@@ -554,7 +554,7 @@ pub extern "C" fn jit_queue_recv(
                 ctx,
                 JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
                 JIT_QUEUE_RECV_INVALID_HANDLE,
-                "QueueRecv replay requires a queue handle".to_string(),
+                "QueueRecv replay requires a queue handle",
             );
         }
         ch

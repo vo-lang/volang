@@ -460,8 +460,7 @@ where
         );
         captures.extend_from_slice(&value_slots);
     } else {
-        for i in 0..payload.num_captures as usize {
-            let transfer_type = capture_types[i];
+        for &transfer_type in capture_types.iter().take(payload.num_captures as usize) {
             let Some(packed_data) = read_spawn_packed_chunk(data, &mut offset, transfer_type)?
             else {
                 captures.push(0);
@@ -503,8 +502,7 @@ where
         }
     }
 
-    for i in 0..payload.num_args as usize {
-        let transfer_type = param_types[i];
+    for &transfer_type in param_types.iter().take(payload.num_args as usize) {
         let value_meta = ValueMeta::from_raw(transfer_type.meta_raw);
 
         let Some(packed_data) = read_spawn_packed_chunk(data, &mut offset, transfer_type)? else {

@@ -1969,11 +1969,13 @@ fn jit_metadata_lookup_required(ctx_ref: &JitContext) -> bool {
     ctx_ref.jit_func_count != 0 || ctx_ref.direct_call_count != 0
 }
 
-fn current_jit_metadata<'a>(
-    ctx_ref: &'a JitContext,
+type JitMapLayoutSlices<'a> = (&'a [SlotType], &'a [SlotType]);
+
+fn current_jit_metadata(
+    ctx_ref: &JitContext,
     ctx: *mut JitContext,
     detail: u64,
-) -> Result<Option<&'a JitInstructionMetadata>, u64> {
+) -> Result<Option<&JitInstructionMetadata>, u64> {
     if ctx_ref.current_func_id == u32::MAX || ctx_ref.runtime_trap_pc == u32::MAX {
         if jit_metadata_lookup_required(ctx_ref) {
             return Err(set_invalid_map_metadata(ctx, detail));
@@ -1992,11 +1994,11 @@ fn current_jit_metadata<'a>(
     Ok(Some(metadata))
 }
 
-fn current_jit_metadata_result<'a>(
-    ctx_ref: &'a JitContext,
+fn current_jit_metadata_result(
+    ctx_ref: &JitContext,
     ctx: *mut JitContext,
     detail: u64,
-) -> Result<Option<&'a JitInstructionMetadata>, JitResult> {
+) -> Result<Option<&JitInstructionMetadata>, JitResult> {
     if ctx_ref.current_func_id == u32::MAX || ctx_ref.runtime_trap_pc == u32::MAX {
         if jit_metadata_lookup_required(ctx_ref) {
             return Err(set_jit_infra_error(
@@ -2031,11 +2033,11 @@ fn current_jit_metadata_result<'a>(
     Ok(Some(metadata))
 }
 
-fn jit_map_key_value_layout_for_current_pc<'a>(
-    ctx_ref: &'a JitContext,
+fn jit_map_key_value_layout_for_current_pc(
+    ctx_ref: &JitContext,
     ctx: *mut JitContext,
     detail: u64,
-) -> Result<Option<(&'a [SlotType], &'a [SlotType])>, u64> {
+) -> Result<Option<JitMapLayoutSlices<'_>>, u64> {
     match current_jit_metadata(ctx_ref, ctx, detail)? {
         None => Ok(None),
         Some(
@@ -2057,11 +2059,11 @@ fn jit_map_key_value_layout_for_current_pc<'a>(
     }
 }
 
-fn jit_map_key_layout_for_current_pc<'a>(
-    ctx_ref: &'a JitContext,
+fn jit_map_key_layout_for_current_pc(
+    ctx_ref: &JitContext,
     ctx: *mut JitContext,
     detail: u64,
-) -> Result<Option<&'a [SlotType]>, u64> {
+) -> Result<Option<&[SlotType]>, u64> {
     match current_jit_metadata(ctx_ref, ctx, detail)? {
         None => Ok(None),
         Some(JitInstructionMetadata::MapDelete { key_layout }) => Ok(Some(key_layout.as_slice())),
@@ -3308,12 +3310,12 @@ unsafe fn materialize_iface_assert_success(
         let gc_ref = slot1 as GcRef;
         let slots = target_slots.max(1);
         if slot1 != 0 {
-            for i in 0..slots {
-                out[i] = *gc_ref.add(i);
+            for (i, slot) in out.iter_mut().enumerate().take(slots) {
+                *slot = *gc_ref.add(i);
             }
         } else {
-            for i in 0..slots {
-                out[i] = 0;
+            for slot in out.iter_mut().take(slots) {
+                *slot = 0;
             }
         }
         Ok(slots)
@@ -3324,12 +3326,12 @@ unsafe fn materialize_iface_assert_success(
         let slots = target_slots.max(1);
         if slot1 != 0 {
             let data_ptr = array::data_ptr_bytes(gc_ref) as *const u64;
-            for i in 0..slots {
-                out[i] = *data_ptr.add(i);
+            for (i, slot) in out.iter_mut().enumerate().take(slots) {
+                *slot = *data_ptr.add(i);
             }
         } else {
-            for i in 0..slots {
-                out[i] = 0;
+            for slot in out.iter_mut().take(slots) {
+                *slot = 0;
             }
         }
         Ok(slots)

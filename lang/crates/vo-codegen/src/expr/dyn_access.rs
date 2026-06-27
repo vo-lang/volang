@@ -367,9 +367,8 @@ fn call_result_types_len(
         let slots = info.type_slot_count(ret_type);
         let vk = info.type_value_kind(ret_type);
 
-        let width = if is_any {
-            2
-        } else if slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array) {
+        let width = if is_any || (slots > 2 && (vk == ValueKind::Struct || vk == ValueKind::Array))
+        {
             2 // (0, GcRef) format for large structs
         } else if slots == 1 {
             1

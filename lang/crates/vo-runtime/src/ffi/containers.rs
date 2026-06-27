@@ -1,8 +1,12 @@
 #![allow(clippy::should_implement_trait)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //! Type-safe container accessors for Vo FFI.
 //!
 //! This module provides ergonomic APIs for working with Vo container types
 //! (slice, map, array, string, bytes) from Rust.
+//! `GcRef` arguments are VM-owned handles; the raw dereferences are contained in
+//! the lower-level runtime object primitives that enforce their own unsafe
+//! contracts.
 
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};

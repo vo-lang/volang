@@ -1556,6 +1556,7 @@ where
     new_arr
 }
 
+#[allow(clippy::too_many_arguments)]
 fn unpack_array_value_inline<F>(
     gc: &mut Gc,
     data: &[u8],

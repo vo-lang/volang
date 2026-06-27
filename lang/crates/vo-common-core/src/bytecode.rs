@@ -1147,33 +1147,18 @@ impl Module {
             return None;
         }
         match self.runtime_types.get(value_rttid.rttid() as usize)? {
-            RuntimeType::Basic(kind) => {
-                let mut layout = Vec::with_capacity(1);
-                layout.push(slot_type_for_value_kind(*kind));
-                Some(layout)
-            }
+            RuntimeType::Basic(kind) => Some(vec![slot_type_for_value_kind(*kind)]),
             RuntimeType::Pointer(elem) => {
                 self.canonical_struct_meta_id(*elem, depth + 1, limit)?;
-                let mut layout = Vec::with_capacity(1);
-                layout.push(SlotType::GcRef);
-                Some(layout)
+                Some(vec![SlotType::GcRef])
             }
             RuntimeType::Slice(_)
             | RuntimeType::Map { .. }
             | RuntimeType::Chan { .. }
             | RuntimeType::Port { .. }
             | RuntimeType::Func { .. }
-            | RuntimeType::Island => {
-                let mut layout = Vec::with_capacity(1);
-                layout.push(SlotType::GcRef);
-                Some(layout)
-            }
-            RuntimeType::Interface { .. } => {
-                let mut layout = Vec::with_capacity(2);
-                layout.push(SlotType::Interface0);
-                layout.push(SlotType::Interface1);
-                Some(layout)
-            }
+            | RuntimeType::Island => Some(vec![SlotType::GcRef]),
+            RuntimeType::Interface { .. } => Some(vec![SlotType::Interface0, SlotType::Interface1]),
             RuntimeType::Struct { meta_id, .. } => self
                 .struct_metas
                 .get(*meta_id as usize)

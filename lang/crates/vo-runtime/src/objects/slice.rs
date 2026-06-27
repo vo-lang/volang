@@ -207,6 +207,9 @@ pub fn elem_meta(s: GcRef) -> ValueMeta {
 }
 
 #[inline]
+/// # Safety
+/// `s` must be a live slice object whose element storage contains `idx`.
+/// `elem_bytes` must match the slice element width.
 pub unsafe fn get(s: GcRef, idx: usize, elem_bytes: usize) -> u64 {
     let ptr = unsafe { data_ptr(s).add(idx * elem_bytes) };
     unsafe {
@@ -220,6 +223,9 @@ pub unsafe fn get(s: GcRef, idx: usize, elem_bytes: usize) -> u64 {
 }
 
 #[inline]
+/// # Safety
+/// `base_ptr` must point to a live slice element buffer containing `idx`.
+/// `elem_bytes` and `elem_kind` must describe the stored element representation.
 pub unsafe fn get_auto(
     base_ptr: *mut u8,
     idx: usize,
@@ -247,6 +253,10 @@ pub unsafe fn get_auto(
 }
 
 #[inline]
+/// # Safety
+/// `s` must be a live slice object whose element storage contains `idx`.
+/// `elem_bytes` must match the slice element width, and callers must maintain
+/// any required GC write barriers before publishing reference values.
 pub unsafe fn set(s: GcRef, idx: usize, val: u64, elem_bytes: usize) {
     let ptr = unsafe { data_ptr(s).add(idx * elem_bytes) };
     unsafe {
@@ -260,6 +270,10 @@ pub unsafe fn set(s: GcRef, idx: usize, val: u64, elem_bytes: usize) {
 }
 
 #[inline]
+/// # Safety
+/// `base_ptr` must point to a live slice element buffer containing `idx`.
+/// `elem_bytes` and `elem_kind` must describe the stored element representation,
+/// and callers must maintain any required GC write barriers.
 pub unsafe fn set_auto(
     base_ptr: *mut u8,
     idx: usize,
@@ -284,6 +298,10 @@ pub unsafe fn set_auto(
     }
 }
 
+/// # Safety
+/// `s` must be a live slice object whose element storage contains `idx`.
+/// `dest` must be large enough for the decoded element slots, and
+/// `elem_bytes` must match the slice element width.
 pub unsafe fn get_n(s: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
     let ptr = unsafe { data_ptr(s).add(idx * elem_bytes) };
     match elem_bytes {
@@ -298,6 +316,10 @@ pub unsafe fn get_n(s: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
     }
 }
 
+/// # Safety
+/// `s` must be a live slice object whose element storage contains `idx`.
+/// `src` must contain enough bytes for one element, `elem_bytes` must match the
+/// slice element width, and callers must maintain any required GC write barriers.
 pub unsafe fn set_n(s: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
     let ptr = unsafe { data_ptr(s).add(idx * elem_bytes) };
     match elem_bytes {

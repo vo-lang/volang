@@ -111,7 +111,7 @@ fn collect_jit_context_offsets_from_source_tree_062(
 ) {
     let qualifiers_by_source = jit_context_qualifiers_by_source_tree_062(sources);
     for ((_module_path, source), qualifiers) in sources.iter().zip(&qualifiers_by_source) {
-        collect_jit_context_offsets_with_qualifiers_062(source, &qualifiers, out);
+        collect_jit_context_offsets_with_qualifiers_062(source, qualifiers, out);
     }
 }
 
@@ -189,7 +189,7 @@ fn expand_jit_context_qualifiers_in_source_062(
     }
     for statement in rust_type_alias_statements_062(src) {
         if let Some((alias, target)) =
-            jit_context_type_alias_062(&statement, &module_aliases, qualifiers)
+            jit_context_type_alias_062(&statement, module_aliases, qualifiers)
         {
             if qualifiers.contains(&target) && insert_jit_context_qualifier_062(qualifiers, alias) {
                 changed = true;
@@ -1103,7 +1103,7 @@ fn jit_context_type_alias_062(
     let target = target
         .strip_prefix("vo_runtime::jit_api::")
         .unwrap_or(target);
-    let target = normalize_jit_context_module_alias_target_062(&target, module_aliases);
+    let target = normalize_jit_context_module_alias_target_062(target, module_aliases);
     let target = normalize_relative_jit_context_type_alias_target_062(target, known_qualifiers);
     Some((alias.trim().to_string(), target.to_string()))
 }

@@ -833,11 +833,10 @@ impl Scheduler {
                 }
                 select_state.woken_index = Some(select.case_index as usize);
                 select_state.woken_result = select_result;
-            } else if fiber.select_state.is_some() {
-                return false;
-            } else if select_result.is_some() {
-                return false;
-            } else if !fiber.queue_wait_matches(waiter) {
+            } else if fiber.select_state.is_some()
+                || select_result.is_some()
+                || !fiber.queue_wait_matches(waiter)
+            {
                 return false;
             } else {
                 fiber.clear_queue_wait();
@@ -901,9 +900,7 @@ impl Scheduler {
                     return Ok(false);
                 }
                 select_state.woken_index = Some(select.case_index as usize);
-            } else if fiber.select_state.is_some() {
-                return Ok(false);
-            } else if !fiber.queue_wait_matches(waiter) {
+            } else if fiber.select_state.is_some() || !fiber.queue_wait_matches(waiter) {
                 return Ok(false);
             } else {
                 fiber.remote_send_closed = true;

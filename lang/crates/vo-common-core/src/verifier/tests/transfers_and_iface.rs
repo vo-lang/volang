@@ -378,9 +378,9 @@ fn vm_iface_assign_receiver_layout_058_no_itab_sentinel_skips_itab_zero() {
     module
         .interface_metas
         .push(single_method_interface_meta("Close", 1));
-    module.constants.push(Constant::Int(
-        ((0_i64) << 32) | i64::from(IFACE_ASSIGN_NO_ITAB),
-    ));
+    module
+        .constants
+        .push(Constant::Int(i64::from(IFACE_ASSIGN_NO_ITAB)));
 
     let mut caller = function_with_slot_types(vec![
         SlotType::Interface0,

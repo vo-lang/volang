@@ -882,6 +882,7 @@ impl FuncBuilder {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn emit_call_iface(
         &mut self,
         iface_meta_id: u32,

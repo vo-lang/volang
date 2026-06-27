@@ -656,7 +656,7 @@ fn collect_file_declarations(
                             )
                         };
                         let value_kind = info.type_value_kind(type_key) as u8;
-                        let meta_id = (ctx.compute_value_meta_raw(type_key, info) >> 8) as u32;
+                        let meta_id = ctx.compute_value_meta_raw(type_key, info) >> 8;
                         let obj_key = info.get_def(name);
                         ctx.register_global(
                             obj_key,

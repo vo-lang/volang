@@ -1548,9 +1548,7 @@ impl CodegenContext {
         def: GlobalDef,
     ) -> u16 {
         let slot_offset = self.global_slot_offset;
-        let total_slots = slot_offset
-            .checked_add(u32::from(def.slots))
-            .unwrap_or(u32::MAX);
+        let total_slots = slot_offset.saturating_add(u32::from(def.slots));
         if total_slots > u32::from(u16::MAX) + 1 {
             self.record_layout_error(format!(
                 "global slot count exceeds u16 operand width: {total_slots} slots"

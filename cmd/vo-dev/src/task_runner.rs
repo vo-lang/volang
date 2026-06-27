@@ -217,6 +217,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

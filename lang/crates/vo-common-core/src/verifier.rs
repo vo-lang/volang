@@ -62,6 +62,42 @@ struct InstructionVerifierContext<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct VerifierAnalyses<'a> {
+    module: &'a Module,
+    constant_facts: &'a ConstantFactAnalysis,
+    index_check_facts: &'a IndexCheckAnalysis,
+    container_layout_facts: &'a ContainerLayoutAnalysis,
+}
+
+#[derive(Clone, Copy)]
+struct LocalSlotRange {
+    access: &'static str,
+    start: u16,
+    count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct IndexedAccessLabels {
+    base: &'static str,
+    index: &'static str,
+    value: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct MapLayoutExpectation<'a> {
+    key_layout: &'a [SlotType],
+    val_layout: &'a [SlotType],
+}
+
+#[derive(Clone, Copy)]
+struct ItabReceiverContract<'a> {
+    rttid: u32,
+    value_kind: ValueKind,
+    itab_id: u32,
+    itab: &'a crate::bytecode::Itab,
+}
+
+#[derive(Clone, Copy)]
 enum SlotExpectation<'a> {
     Exact(SlotType),
     OneOf(&'a [SlotType]),
@@ -1407,6 +1443,12 @@ fn verify_function_common(
     let constant_facts = ConstantFactAnalysis::analyze(func, module);
     let index_check_facts = IndexCheckAnalysis::analyze(func, module, &constant_facts);
     let container_layout_facts = ContainerLayoutAnalysis::analyze(func, module);
+    let analyses = VerifierAnalyses {
+        module,
+        constant_facts: &constant_facts,
+        index_check_facts: &index_check_facts,
+        container_layout_facts: &container_layout_facts,
+    };
 
     for (pc, inst) in func.code.iter().copied().enumerate() {
         let opcode = inst.opcode();
@@ -1417,16 +1459,7 @@ fn verify_function_common(
                 raw: inst.op,
             });
         }
-        verify_instruction_contract(
-            func,
-            module,
-            &constant_facts,
-            &index_check_facts,
-            &container_layout_facts,
-            pc,
-            inst,
-            opcode,
-        )?;
+        verify_instruction_contract(func, analyses, pc, inst, opcode)?;
     }
 
     Ok(())
@@ -1913,8 +1946,7 @@ fn validate_transfer_shape_invariants(
             )
         };
         if param_transfer_layout != expected_without_receiver_layout
-            && expected_with_receiver_layout
-                .map_or(true, |expected| param_transfer_layout != expected)
+            && expected_with_receiver_layout != Some(param_transfer_layout)
         {
             return Err(invariant(format!(
                 "param_types slot layout {:?} does not match frame parameter layout {:?}{}",
@@ -2171,14 +2203,17 @@ fn validate_function_gc_layout(
 
 fn verify_instruction_contract(
     func: &FunctionDef,
-    module: &Module,
-    constant_facts: &ConstantFactAnalysis,
-    index_check_facts: &IndexCheckAnalysis,
-    container_layout_facts: &ContainerLayoutAnalysis,
+    analyses: VerifierAnalyses<'_>,
     pc: usize,
     inst: Instruction,
     opcode: Opcode,
 ) -> Result<(), ModuleVerificationError> {
+    let VerifierAnalyses {
+        module,
+        constant_facts,
+        index_check_facts,
+        container_layout_facts,
+    } = analyses;
     let ctx = InstructionVerifierContext {
         func,
         pc,
@@ -2192,41 +2227,23 @@ fn verify_instruction_contract(
         Opcode::LoadConst => verify_load_const_contract(func, module, pc, inst),
         Opcode::Copy => verify_copy_contract(func, pc, opcode, inst),
         Opcode::CopyN => verify_copy_n_contract(func, pc, opcode, inst),
-        Opcode::SlotGet => verify_slot_get_contract(
-            func,
-            index_check_facts,
-            pc,
-            opcode,
-            inst.a,
-            inst.b,
-            inst.c,
-            1,
-        ),
+        Opcode::SlotGet => {
+            verify_slot_get_contract(ctx, index_check_facts, inst.a, inst.b, inst.c, 1)
+        }
         Opcode::SlotGetN => verify_slot_get_contract(
-            func,
+            ctx,
             index_check_facts,
-            pc,
-            opcode,
             inst.a,
             inst.b,
             inst.c,
             inst.flags as u16,
         ),
-        Opcode::SlotSet => verify_slot_set_contract(
-            func,
-            index_check_facts,
-            pc,
-            opcode,
-            inst.a,
-            inst.b,
-            inst.c,
-            1,
-        ),
+        Opcode::SlotSet => {
+            verify_slot_set_contract(ctx, index_check_facts, inst.a, inst.b, inst.c, 1)
+        }
         Opcode::SlotSetN => verify_slot_set_contract(
-            func,
+            ctx,
             index_check_facts,
-            pc,
-            opcode,
             inst.a,
             inst.b,
             inst.c,
@@ -2496,67 +2513,61 @@ fn verify_instruction_contract(
             verify_array_new_contract(func, module, constant_facts, pc, opcode, inst)
         }
         Opcode::ArrayGet => verify_indexed_get_contract(
-            func,
+            ctx,
             constant_facts,
-            pc,
-            opcode,
-            inst,
-            "Array source",
-            "Array index",
-            "ArrayGet destination",
+            IndexedAccessLabels {
+                base: "Array source",
+                index: "Array index",
+                value: "ArrayGet destination",
+            },
         ),
         Opcode::ArraySet => verify_indexed_set_contract(
-            func,
+            ctx,
             constant_facts,
-            pc,
-            opcode,
-            inst,
-            "ArraySet target",
-            "ArraySet index",
-            "ArraySet source",
+            IndexedAccessLabels {
+                base: "ArraySet target",
+                index: "ArraySet index",
+                value: "ArraySet source",
+            },
         ),
         Opcode::ArrayAddr => verify_indexed_addr_contract(
-            func,
+            ctx,
             constant_facts,
-            pc,
-            opcode,
-            inst,
-            "ArrayAddr destination",
-            "Array source",
-            "Array index",
+            IndexedAccessLabels {
+                base: "Array source",
+                index: "Array index",
+                value: "ArrayAddr destination",
+            },
         ),
         Opcode::SliceNew => {
             verify_slice_new_contract(func, module, constant_facts, pc, opcode, inst)
         }
         Opcode::SliceGet => verify_indexed_get_contract(
-            func,
+            ctx,
             constant_facts,
-            pc,
-            opcode,
-            inst,
-            "Slice source",
-            "Slice index",
-            "SliceGet destination",
+            IndexedAccessLabels {
+                base: "Slice source",
+                index: "Slice index",
+                value: "SliceGet destination",
+            },
         ),
         Opcode::SliceSet => verify_indexed_set_contract(
-            func,
+            ctx,
             constant_facts,
-            pc,
-            opcode,
-            inst,
-            "SliceSet target",
-            "SliceSet index",
-            "SliceSet source",
+            IndexedAccessLabels {
+                base: "SliceSet target",
+                index: "SliceSet index",
+                value: "SliceSet source",
+            },
         ),
         Opcode::SliceAddr => verify_indexed_addr_contract(
-            func,
+            ctx,
             constant_facts,
-            pc,
-            opcode,
-            inst,
-            "SliceAddr destination",
-            "Slice source",
-            "Slice index",
+            IndexedAccessLabels {
+                base: "Slice source",
+                index: "Slice index",
+                value: "SliceAddr destination",
+            },
         ),
         Opcode::SliceLen | Opcode::SliceCap => {
             verify_layout(
@@ -4125,27 +4136,25 @@ fn verify_range(
 }
 
 fn verify_disjoint_local_ranges(
-    func: &FunctionDef,
-    pc: usize,
-    opcode: Opcode,
-    lhs_access: &'static str,
-    lhs_start: u16,
-    lhs_count: usize,
-    rhs_access: &'static str,
-    rhs_start: u16,
-    rhs_count: usize,
+    ctx: InstructionVerifierContext<'_>,
+    lhs: LocalSlotRange,
+    rhs: LocalSlotRange,
 ) -> Result<(), ModuleVerificationError> {
-    let lhs_end = local_range_end(func, pc, lhs_start, lhs_count, lhs_access)?;
-    let rhs_end = local_range_end(func, pc, rhs_start, rhs_count, rhs_access)?;
-    let lhs_start = usize::from(lhs_start);
-    let rhs_start = usize::from(rhs_start);
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
+    let lhs_end = local_range_end(func, pc, lhs.start, lhs.count, lhs.access)?;
+    let rhs_end = local_range_end(func, pc, rhs.start, rhs.count, rhs.access)?;
+    let lhs_start = usize::from(lhs.start);
+    let rhs_start = usize::from(rhs.start);
     if lhs_start < rhs_end && rhs_start < lhs_end {
         return Err(call_shape_mismatch(
             func,
             pc,
             opcode,
             format!(
-                "{lhs_access} aliases {rhs_access}: {lhs_start}..{lhs_end} overlaps {rhs_start}..{rhs_end}"
+                "{} aliases {}: {lhs_start}..{lhs_end} overlaps {rhs_start}..{rhs_end}",
+                lhs.access, rhs.access
             ),
         ));
     }
@@ -5074,15 +5083,16 @@ fn verify_copy_contract(
 }
 
 fn verify_slot_get_contract(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     index_check_facts: &IndexCheckAnalysis,
-    pc: usize,
-    opcode: Opcode,
     dst_start: u16,
     base_start: u16,
     index_slot: u16,
     count: u16,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
     let elem_layout = slot_elem_layout(func, pc, opcode)?;
     if elem_layout.len() != count as usize {
         return Err(call_shape_mismatch(
@@ -5105,10 +5115,8 @@ fn verify_slot_get_contract(
         "SlotGet index",
     )?;
     verify_dynamic_slot_span(
-        func,
+        ctx,
         index_check_facts,
-        pc,
-        opcode,
         base_start,
         index_slot,
         &elem_layout,
@@ -5125,15 +5133,16 @@ fn verify_slot_get_contract(
 }
 
 fn verify_slot_set_contract(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     index_check_facts: &IndexCheckAnalysis,
-    pc: usize,
-    opcode: Opcode,
     base_start: u16,
     index_slot: u16,
     src_start: u16,
     count: u16,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
     let elem_layout = slot_elem_layout(func, pc, opcode)?;
     if elem_layout.len() != count as usize {
         return Err(call_shape_mismatch(
@@ -5156,10 +5165,8 @@ fn verify_slot_set_contract(
         "SlotSet index",
     )?;
     verify_dynamic_slot_span(
-        func,
+        ctx,
         index_check_facts,
-        pc,
-        opcode,
         base_start,
         index_slot,
         &elem_layout,
@@ -5169,15 +5176,16 @@ fn verify_slot_set_contract(
 }
 
 fn verify_dynamic_slot_span(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     index_check_facts: &IndexCheckAnalysis,
-    pc: usize,
-    opcode: Opcode,
     base_start: u16,
     index_slot: u16,
     elem_layout: &[SlotType],
     access: &'static str,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
     let checked_len =
         index_checked_len_before(index_check_facts, func, pc, opcode, index_slot, access)?;
     let Some(total_slots) = elem_layout.len().checked_mul(usize::from(checked_len)) else {
@@ -5932,11 +5940,14 @@ fn verify_array_new_contract(
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = elem_runtime_layout_for_indexed(func, pc, opcode, inst.flags)?;
     verify_indexed_new_runtime_metadata(
-        func,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
         module,
         constant_facts,
-        pc,
-        opcode,
         inst.b,
         "ArrayNew element metadata",
         &elem_layout,
@@ -5994,11 +6005,14 @@ fn verify_slice_new_contract(
 ) -> Result<(), ModuleVerificationError> {
     let elem_layout = elem_runtime_layout_for_indexed(func, pc, opcode, inst.flags)?;
     verify_indexed_new_runtime_metadata(
-        func,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
         module,
         constant_facts,
-        pc,
-        opcode,
         inst.b,
         "SliceNew element metadata",
         &elem_layout,
@@ -6040,15 +6054,16 @@ fn verify_slice_new_contract(
 }
 
 fn verify_indexed_new_runtime_metadata(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     module: &Module,
     constant_facts: &ConstantFactAnalysis,
-    pc: usize,
-    opcode: Opcode,
     meta_slot: u16,
     label: &'static str,
     elem_layout: &[SlotType],
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
     if !constant_facts.is_reachable(pc) {
         return Ok(());
     }
@@ -6075,17 +6090,16 @@ fn verify_indexed_new_runtime_metadata(
 }
 
 fn verify_indexed_get_contract(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     constant_facts: &ConstantFactAnalysis,
-    pc: usize,
-    opcode: Opcode,
-    inst: Instruction,
-    source_access: &'static str,
-    index_access: &'static str,
-    dst_access: &'static str,
+    access: IndexedAccessLabels,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
+    let inst = ctx.inst;
     let elem_layout = elem_layout_for_indexed(func, pc, opcode, inst.flags)?;
-    let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 1, dst_access)?;
+    let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 1, access.value)?;
     verify_dynamic_elem_bytes_contract(
         constant_facts,
         func,
@@ -6094,27 +6108,26 @@ fn verify_indexed_get_contract(
         inst.flags,
         elem_bytes_slot,
     )?;
-    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], source_access)?;
-    verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], index_access)?;
+    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], access.base)?;
+    verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], access.index)?;
     if elem_layout.is_empty() {
         Ok(())
     } else {
-        verify_storage_layout_compatible(func, pc, opcode, inst.a, &elem_layout, dst_access)
+        verify_storage_layout_compatible(func, pc, opcode, inst.a, &elem_layout, access.value)
     }
 }
 
 fn verify_indexed_set_contract(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     constant_facts: &ConstantFactAnalysis,
-    pc: usize,
-    opcode: Opcode,
-    inst: Instruction,
-    target_access: &'static str,
-    index_access: &'static str,
-    source_access: &'static str,
+    access: IndexedAccessLabels,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
+    let inst = ctx.inst;
     let elem_layout = elem_layout_for_indexed(func, pc, opcode, inst.flags)?;
-    let elem_bytes_slot = checked_slot_offset(func, pc, inst.b, 1, source_access)?;
+    let elem_bytes_slot = checked_slot_offset(func, pc, inst.b, 1, access.value)?;
     verify_dynamic_elem_bytes_contract(
         constant_facts,
         func,
@@ -6123,28 +6136,27 @@ fn verify_indexed_set_contract(
         inst.flags,
         elem_bytes_slot,
     )?;
-    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], target_access)?;
-    verify_layout(func, pc, opcode, inst.b, &[SlotType::Value], index_access)?;
+    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], access.base)?;
+    verify_layout(func, pc, opcode, inst.b, &[SlotType::Value], access.index)?;
     if elem_layout.is_empty() {
         Ok(())
     } else {
-        verify_storage_layout_compatible(func, pc, opcode, inst.c, &elem_layout, source_access)
+        verify_storage_layout_compatible(func, pc, opcode, inst.c, &elem_layout, access.value)
     }
 }
 
 fn verify_indexed_addr_contract(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     constant_facts: &ConstantFactAnalysis,
-    pc: usize,
-    opcode: Opcode,
-    inst: Instruction,
-    dst_access: &'static str,
-    source_access: &'static str,
-    index_access: &'static str,
+    access: IndexedAccessLabels,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
+    let inst = ctx.inst;
     if inst.flags == 0 {
         let _ = elem_layout_for_indexed(func, pc, opcode, inst.flags)?;
-        let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 1, dst_access)?;
+        let elem_bytes_slot = checked_slot_offset(func, pc, inst.c, 1, access.value)?;
         verify_dynamic_elem_bytes_contract(
             constant_facts,
             func,
@@ -6154,9 +6166,9 @@ fn verify_indexed_addr_contract(
             elem_bytes_slot,
         )?;
     }
-    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], dst_access)?;
-    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], source_access)?;
-    verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], index_access)
+    verify_layout(func, pc, opcode, inst.a, &[SlotType::GcRef], access.value)?;
+    verify_layout(func, pc, opcode, inst.b, &[SlotType::GcRef], access.base)?;
+    verify_layout(func, pc, opcode, inst.c, &[SlotType::Value], access.index)
 }
 
 fn verify_slice_slice_contract(
@@ -6228,11 +6240,14 @@ fn verify_slice_append_contract(
         "SliceAppend elem metadata",
     )?;
     verify_indexed_new_runtime_metadata(
-        func,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
         module,
         constant_facts,
-        pc,
-        opcode,
         inst.c,
         "SliceAppend element metadata",
         &elem_runtime_layout,
@@ -6297,14 +6312,18 @@ fn verify_map_new_contract(
         ));
     }
     verify_map_new_runtime_metadata(
-        func,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
         module,
         constant_facts,
-        pc,
-        opcode,
-        inst,
-        &key_layout,
-        &val_layout,
+        MapLayoutExpectation {
+            key_layout: &key_layout,
+            val_layout: &val_layout,
+        },
     )?;
     verify_layout(
         func,
@@ -6325,15 +6344,15 @@ fn verify_map_new_contract(
 }
 
 fn verify_map_new_runtime_metadata(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     module: &Module,
     constant_facts: &ConstantFactAnalysis,
-    pc: usize,
-    opcode: Opcode,
-    inst: Instruction,
-    key_layout: &[SlotType],
-    val_layout: &[SlotType],
+    expected: MapLayoutExpectation<'_>,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
+    let inst = ctx.inst;
     if !constant_facts.is_reachable(pc) {
         return Ok(());
     }
@@ -6343,8 +6362,22 @@ fn verify_map_new_runtime_metadata(
     let val_meta = ValueMeta::from_raw(packed as u32);
     let key_meta_layout = value_meta_slot_layout(module, key_meta, "MapNew key metadata")?;
     let val_meta_layout = value_meta_slot_layout(module, val_meta, "MapNew value metadata")?;
-    verify_map_new_meta_layout_matches(func, pc, opcode, "key", &key_meta_layout, key_layout)?;
-    verify_map_new_meta_layout_matches(func, pc, opcode, "value", &val_meta_layout, val_layout)?;
+    verify_map_new_meta_layout_matches(
+        func,
+        pc,
+        opcode,
+        "key",
+        &key_meta_layout,
+        expected.key_layout,
+    )?;
+    verify_map_new_meta_layout_matches(
+        func,
+        pc,
+        opcode,
+        "value",
+        &val_meta_layout,
+        expected.val_layout,
+    )?;
 
     let key_rttid_slot = checked_slot_offset(func, pc, inst.b, 1, "MapNew key RTTID")?;
     let key_rttid_raw = constant_u64_for_slot_before(
@@ -6516,15 +6549,15 @@ fn value_meta_slot_layout(
 }
 
 fn verify_known_map_layout(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     facts: &ContainerLayoutAnalysis,
-    pc: usize,
-    opcode: Opcode,
     slot: u16,
     access: &'static str,
-    key_layout: &[SlotType],
-    val_layout: &[SlotType],
+    expected: MapLayoutExpectation<'_>,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
     match facts.fact_for_slot(pc, slot) {
         None | Some(ContainerLayoutFact::Unknown) => Ok(()),
         Some(ContainerLayoutFact::Conflict) => Err(call_shape_mismatch(
@@ -6541,23 +6574,25 @@ fn verify_known_map_layout(
             key_layout: known_key,
             val_layout: known_val,
         }) => {
-            if key_layout != known_key {
+            if expected.key_layout != known_key {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
                     opcode,
                     format!(
-                        "{access} key layout {key_layout:?} does not match known map key layout {known_key:?}"
+                        "{access} key layout {:?} does not match known map key layout {known_key:?}",
+                        expected.key_layout
                     ),
                 ));
             }
-            if val_layout != known_val {
+            if expected.val_layout != known_val {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
                     opcode,
                     format!(
-                        "{access} value layout {val_layout:?} does not match known map value layout {known_val:?}"
+                        "{access} value layout {:?} does not match known map value layout {known_val:?}",
+                        expected.val_layout
                     ),
                 ));
             }
@@ -6623,38 +6658,40 @@ fn verify_known_map_key_layout(
 }
 
 fn verify_known_map_iter_layout(
-    func: &FunctionDef,
+    ctx: InstructionVerifierContext<'_>,
     facts: &ContainerLayoutAnalysis,
-    pc: usize,
-    opcode: Opcode,
     slot: u16,
     access: &'static str,
-    key_layout: &[SlotType],
-    val_layout: &[SlotType],
+    expected: MapLayoutExpectation<'_>,
 ) -> Result<(), ModuleVerificationError> {
+    let func = ctx.func;
+    let pc = ctx.pc;
+    let opcode = ctx.opcode;
     match facts.fact_for_slot(pc, slot) {
         None | Some(ContainerLayoutFact::Unknown) => Ok(()),
         Some(ContainerLayoutFact::MapIter {
             key_layout: known_key,
             val_layout: known_val,
         }) => {
-            if key_layout != known_key {
+            if expected.key_layout != known_key {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
                     opcode,
                     format!(
-                        "{access} key layout {key_layout:?} does not match known map key layout {known_key:?}"
+                        "{access} key layout {:?} does not match known map key layout {known_key:?}",
+                        expected.key_layout
                     ),
                 ));
             }
-            if val_layout != known_val {
+            if expected.val_layout != known_val {
                 return Err(call_shape_mismatch(
                     func,
                     pc,
                     opcode,
                     format!(
-                        "{access} value layout {val_layout:?} does not match known map value layout {known_val:?}"
+                        "{access} value layout {:?} does not match known map value layout {known_val:?}",
+                        expected.val_layout
                     ),
                 ));
             }
@@ -6812,14 +6849,19 @@ fn verify_map_get_contract(
 ) -> Result<(), ModuleVerificationError> {
     let (key_layout, val_layout, has_ok) = map_get_layout(func, pc, opcode)?;
     verify_known_map_layout(
-        func,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
         container_layout_facts,
-        pc,
-        opcode,
         inst.b,
         "MapGet",
-        &key_layout,
-        &val_layout,
+        MapLayoutExpectation {
+            key_layout: &key_layout,
+            val_layout: &val_layout,
+        },
     )?;
     verify_metadata_layout_len_at_most(
         func,
@@ -6922,14 +6964,19 @@ fn verify_map_set_contract(
 ) -> Result<(), ModuleVerificationError> {
     let (key_layout, val_layout) = map_set_layout(func, pc, opcode)?;
     verify_known_map_layout(
-        func,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
         container_layout_facts,
-        pc,
-        opcode,
         inst.a,
         "MapSet",
-        &key_layout,
-        &val_layout,
+        MapLayoutExpectation {
+            key_layout: &key_layout,
+            val_layout: &val_layout,
+        },
     )?;
     verify_metadata_layout_len_at_most(
         func,
@@ -7092,14 +7139,19 @@ fn verify_map_iter_next_contract(
 ) -> Result<(), ModuleVerificationError> {
     let (key_layout, val_layout) = map_iter_next_layout(func, pc, opcode)?;
     verify_known_map_iter_layout(
-        func,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
         container_layout_facts,
-        pc,
-        opcode,
         inst.b,
         "MapIterNext",
-        &key_layout,
-        &val_layout,
+        MapLayoutExpectation {
+            key_layout: &key_layout,
+            val_layout: &val_layout,
+        },
     )?;
     if key_layout.len() != inst.map_iter_key_slots() as usize
         || val_layout.len() != inst.map_iter_val_slots() as usize
@@ -7151,59 +7203,94 @@ fn verify_map_iter_next_contract(
         "MapIterNext ok",
     )?;
     verify_disjoint_local_ranges(
-        func,
-        pc,
-        opcode,
-        "MapIterNext key",
-        key_start,
-        key_layout.len(),
-        "iterator state",
-        inst.b,
-        MAP_ITER_SLOTS,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
+        LocalSlotRange {
+            access: "MapIterNext key",
+            start: key_start,
+            count: key_layout.len(),
+        },
+        LocalSlotRange {
+            access: "iterator state",
+            start: inst.b,
+            count: MAP_ITER_SLOTS,
+        },
     )?;
     verify_disjoint_local_ranges(
-        func,
-        pc,
-        opcode,
-        "MapIterNext ok",
-        inst.c,
-        1,
-        "MapIterNext key",
-        key_start,
-        key_layout.len(),
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
+        LocalSlotRange {
+            access: "MapIterNext ok",
+            start: inst.c,
+            count: 1,
+        },
+        LocalSlotRange {
+            access: "MapIterNext key",
+            start: key_start,
+            count: key_layout.len(),
+        },
     )?;
     verify_disjoint_local_ranges(
-        func,
-        pc,
-        opcode,
-        "MapIterNext ok",
-        inst.c,
-        1,
-        "MapIterNext value",
-        value_start,
-        val_layout.len(),
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
+        LocalSlotRange {
+            access: "MapIterNext ok",
+            start: inst.c,
+            count: 1,
+        },
+        LocalSlotRange {
+            access: "MapIterNext value",
+            start: value_start,
+            count: val_layout.len(),
+        },
     )?;
     verify_disjoint_local_ranges(
-        func,
-        pc,
-        opcode,
-        "MapIterNext value",
-        value_start,
-        val_layout.len(),
-        "iterator state",
-        inst.b,
-        MAP_ITER_SLOTS,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
+        LocalSlotRange {
+            access: "MapIterNext value",
+            start: value_start,
+            count: val_layout.len(),
+        },
+        LocalSlotRange {
+            access: "iterator state",
+            start: inst.b,
+            count: MAP_ITER_SLOTS,
+        },
     )?;
     verify_disjoint_local_ranges(
-        func,
-        pc,
-        opcode,
-        "MapIterNext ok",
-        inst.c,
-        1,
-        "iterator state",
-        inst.b,
-        MAP_ITER_SLOTS,
+        InstructionVerifierContext {
+            func,
+            pc,
+            opcode,
+            inst,
+        },
+        LocalSlotRange {
+            access: "MapIterNext ok",
+            start: inst.c,
+            count: 1,
+        },
+        LocalSlotRange {
+            access: "iterator state",
+            start: inst.b,
+            count: MAP_ITER_SLOTS,
+        },
     )
 }
 
@@ -7840,7 +7927,16 @@ fn verify_iface_assign_metadata_schema(
         }
         let itab = &module.itabs[low as usize];
         verify_iface_assign_itab_receiver_layout(
-            func, module, pc, opcode, high, value_kind, low, itab,
+            func,
+            module,
+            pc,
+            opcode,
+            ItabReceiverContract {
+                rttid: high,
+                value_kind,
+                itab_id: low,
+                itab,
+            },
         )?;
     }
     Ok(())
@@ -7859,11 +7955,12 @@ fn verify_iface_assign_itab_receiver_layout(
     module: &Module,
     pc: usize,
     opcode: Opcode,
-    rttid: u32,
-    value_kind: ValueKind,
-    itab_id: u32,
-    itab: &crate::bytecode::Itab,
+    contract: ItabReceiverContract<'_>,
 ) -> Result<(), ModuleVerificationError> {
+    let rttid = contract.rttid;
+    let value_kind = contract.value_kind;
+    let itab_id = contract.itab_id;
+    let itab = contract.itab;
     if value_kind == ValueKind::Interface {
         return Ok(());
     }

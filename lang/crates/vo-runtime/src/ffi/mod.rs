@@ -1724,6 +1724,7 @@ impl<'a> ExternCallContext<'a> {
     /// The key is given as a Rust `&str`; a Vo string object is allocated internally.
     /// `val` must be a slice of exactly `val_slots` u64 words.
     #[inline]
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn map_set_string_key(&mut self, m: GcRef, key: &str, val: &[u64]) {
         assert_eq!(
             crate::objects::map::key_kind(m),

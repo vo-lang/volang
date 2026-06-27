@@ -344,7 +344,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
                         idx_reg,
                         src_offset,
                         ElemLayoutSpec::new(
-                            elem_bytes as usize,
+                            elem_bytes,
                             elem_vk,
                             &slot_types[(i * elem_slots) as usize..((i + 1) * elem_slots) as usize],
                         ),

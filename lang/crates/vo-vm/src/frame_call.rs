@@ -5,6 +5,8 @@ use alloc::format;
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use vo_common_core::runtime_type::RuntimeType;
@@ -585,8 +587,7 @@ fn extern_replay_user_arg_transfer_types(
                     target.func_id, target.func.name
                 ));
             }
-            let mut transfers = Vec::new();
-            transfers.push(extern_replay_receiver_transfer_type(module, target)?);
+            let transfers = vec![extern_replay_receiver_transfer_type(module, target)?];
             return Ok(Some(ExternReplayTransferPlan {
                 value_slot_offset: 0,
                 required_end_slot: explicit_receiver_slots,

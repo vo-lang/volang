@@ -1,4 +1,25 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![allow(
+    clippy::large_enum_variant,
+    clippy::result_large_err,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::vec_box
+)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::drop_non_drop,
+        clippy::items_after_test_module,
+        clippy::manual_contains,
+        clippy::manual_dangling_ptr,
+        clippy::manual_pattern_char_comparison,
+        clippy::needless_range_loop,
+        clippy::unneeded_struct_pattern,
+        clippy::useless_conversion,
+        clippy::useless_vec
+    )
+)]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;

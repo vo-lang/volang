@@ -264,10 +264,15 @@ pub fn iface_eq(b_slot0: u64, b_slot1: u64, c_slot0: u64, c_slot1: u64, module: 
     }
 
     let result = match vk {
-        ValueKind::String => try_shallow_eq(b_slot1, c_slot1)
-            .unwrap_or_else(|| string::as_str(b_slot1 as GcRef) == string::as_str(c_slot1 as GcRef))
-            .then_some(EqResult::Equal)
-            .unwrap_or(EqResult::NotEqual),
+        ValueKind::String => {
+            if try_shallow_eq(b_slot1, c_slot1).unwrap_or_else(|| {
+                string::as_str(b_slot1 as GcRef) == string::as_str(c_slot1 as GcRef)
+            }) {
+                EqResult::Equal
+            } else {
+                EqResult::NotEqual
+            }
+        }
         ValueKind::Struct => match try_shallow_eq(b_slot1, c_slot1) {
             Some(true) => EqResult::Equal,
             Some(false) => EqResult::NotEqual,
@@ -583,10 +588,15 @@ fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqRe
         };
 
         let eq = match elem_vk {
-            ValueKind::String => try_shallow_eq(a_val, b_val)
-                .unwrap_or_else(|| string::as_str(a_val as GcRef) == string::as_str(b_val as GcRef))
-                .then_some(EqResult::Equal)
-                .unwrap_or(EqResult::NotEqual),
+            ValueKind::String => {
+                if try_shallow_eq(a_val, b_val).unwrap_or_else(|| {
+                    string::as_str(a_val as GcRef) == string::as_str(b_val as GcRef)
+                }) {
+                    EqResult::Equal
+                } else {
+                    EqResult::NotEqual
+                }
+            }
             ValueKind::Struct => {
                 let slots = elem_slots;
                 let a_slots = unsafe { core::slice::from_raw_parts(a_data.add(offset), slots) };

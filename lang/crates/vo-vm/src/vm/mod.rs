@@ -4052,7 +4052,6 @@ impl Vm {
                         return ExecResult::Transition(transition);
                     } else {
                         let func_def = closure_target.func;
-                        let result = result;
                         let (result, capture_types) = if result.receiver_capture_slots == 0 {
                             (result, func_def.capture_types.clone())
                         } else {

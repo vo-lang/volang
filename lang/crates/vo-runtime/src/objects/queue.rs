@@ -292,6 +292,7 @@ pub fn home_info_snapshot(chan: GcRef) -> Option<HomeInfoSnapshot> {
     })
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn restore_home_info_snapshot(chan: GcRef, snapshot: Option<HomeInfoSnapshot>) {
     // Safety: callers restore an already-live local queue object as part of a
     // VM transaction rollback. The pointer being replaced is non-GC metadata.
@@ -328,6 +329,7 @@ pub fn add_home_peer(chan: GcRef, peer_island: u32) -> u64 {
 }
 
 /// Install HomeInfo on a LOCAL channel for first-time cross-island transfer.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32) {
     // Safety: `chan` is a live local queue object. The mutation installs a
     // non-GC HomeInfo pointer and does not publish GC-visible references.

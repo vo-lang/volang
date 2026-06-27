@@ -109,6 +109,10 @@ pub fn data_ptr_bytes(arr: GcRef) -> *mut u8 {
 }
 
 /// Read single element (returns u64, small types zero-extended)
+///
+/// # Safety
+/// `arr` must be a live array object whose element storage contains `idx`.
+/// `elem_bytes` must match the array element width.
 #[inline]
 pub unsafe fn get(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
     let byte_offset = idx * elem_bytes;
@@ -127,6 +131,10 @@ pub unsafe fn get(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
 /// - Signed integers: sign extension
 /// - Float32: f32 → f64 conversion
 /// - Others: zero extension
+///
+/// # Safety
+/// `arr` must be a live array object whose element storage contains `idx`.
+/// `elem_bytes` must match the array element width.
 #[inline]
 pub unsafe fn get_auto(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
     let byte_offset = idx * elem_bytes;
@@ -155,6 +163,11 @@ pub unsafe fn get_auto(arr: GcRef, idx: usize, elem_bytes: usize) -> u64 {
 }
 
 /// Write single element (val is u64, small types truncated)
+///
+/// # Safety
+/// `arr` must be a live array object whose element storage contains `idx`.
+/// `elem_bytes` must match the array element width, and callers must maintain
+/// any required GC write barriers before publishing reference values.
 #[inline]
 pub unsafe fn set(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
     let byte_offset = idx * elem_bytes;
@@ -170,6 +183,7 @@ pub unsafe fn set(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod public_api_contract_tests {
     #[test]
     fn raw_array_element_accessors_are_unsafe_public_primitives_055() {
@@ -196,6 +210,11 @@ mod public_api_contract_tests {
 /// Write single element with automatic type-aware conversion
 /// - Float32: f64 → f32 conversion
 /// - Others: truncation
+///
+/// # Safety
+/// `arr` must be a live array object whose element storage contains `idx`.
+/// `elem_bytes` must match the array element width, and callers must maintain
+/// any required GC write barriers before publishing reference values.
 #[inline]
 pub unsafe fn set_auto(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
     let byte_offset = idx * elem_bytes;
@@ -220,6 +239,11 @@ pub unsafe fn set_auto(arr: GcRef, idx: usize, val: u64, elem_bytes: usize) {
 }
 
 /// Read element to dest (supports packed and multi-slot)
+///
+/// # Safety
+/// `arr` must be a live array object whose element storage contains `idx`.
+/// `dest` must be large enough for the decoded element slots, and
+/// `elem_bytes` must match the array element width.
 pub unsafe fn get_n(arr: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
     let byte_offset = idx * elem_bytes;
     let ptr = unsafe { data_ptr_bytes(arr).add(byte_offset) };
@@ -237,6 +261,11 @@ pub unsafe fn get_n(arr: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize)
 }
 
 /// Write element from src (supports packed and multi-slot)
+///
+/// # Safety
+/// `arr` must be a live array object whose element storage contains `idx`.
+/// `src` must contain enough bytes for one element, `elem_bytes` must match the
+/// array element width, and callers must maintain any required GC write barriers.
 pub unsafe fn set_n(arr: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
     let byte_offset = idx * elem_bytes;
     let ptr = unsafe { data_ptr_bytes(arr).add(byte_offset) };
@@ -254,6 +283,10 @@ pub unsafe fn set_n(arr: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
 }
 
 /// Copy element range (by elem_bytes)
+///
+/// # Safety
+/// `src` and `dst` must be live array objects. The source and destination ranges
+/// must be in bounds, non-overlapping, and use the same `elem_bytes` width.
 pub unsafe fn copy_range(
     src: GcRef,
     src_idx: usize,
