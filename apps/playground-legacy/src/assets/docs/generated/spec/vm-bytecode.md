@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/vm-bytecode.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:2646d28baef63204f043c848c0128c83678f521e771e54e731df68c5079dc4d5
-Generated-At: 2026-01-29T19:15:13+08:00
+Generated-At: 2026-06-27T16:41:26+08:00
 -->
 # Vo VM and Bytecode Specification
 

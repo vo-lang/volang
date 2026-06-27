@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/memory-model-and-instructions.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:d983c72a74ab43fef2a96f78b12e02b0b687b9a0bbe208cf5f8452d76db798ff
-Generated-At: 2026-01-20T20:35:05+08:00
+Generated-At: 2026-06-27T16:41:26+08:00
 -->
 # Vo Memory Model and Instruction Set Specification
 

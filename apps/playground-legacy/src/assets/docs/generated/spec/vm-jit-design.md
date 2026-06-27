@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/vm-jit-design.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:7aba9c71d862a3efb599e62988e31adc68163a619abdd8a3b16965bb9266e4a2
-Generated-At: 2026-06-08T12:42:04+08:00
+Generated-At: 2026-06-27T16:41:26+08:00
 -->
 # Vo VM JIT Design
 
