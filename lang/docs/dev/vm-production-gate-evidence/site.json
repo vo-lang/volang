@@ -3,7 +3,7 @@
   "selector": "site",
   "changed": false,
   "passed": true,
-  "source_state": "vm-production-current-source:f6fe3d6c5aa458dfd0659a1ee8cd3f0f76c465c52176a19158ed444d8d91f79f",
+  "source_state": "vm-production-current-source:2926786af616af721c321b3c15db600c7835b176e65a195aced30fe56e26cc99",
   "tasks": [
     "vo-web-wasm-build",
     "vogui-npm-ci",
