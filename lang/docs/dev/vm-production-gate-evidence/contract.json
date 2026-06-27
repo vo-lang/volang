@@ -3,7 +3,7 @@
   "selector": "contract",
   "changed": false,
   "passed": true,
-  "source_state": "vm-production-current-source:b625c2ddd82eb7b3e0fb8e84397176edb590d072e1a3847fa170287ecaa00282",
+  "source_state": "vm-production-current-source:f6fe3d6c5aa458dfd0659a1ee8cd3f0f76c465c52176a19158ed444d8d91f79f",
   "tasks": [
     "cargo-test-common-core",
     "cargo-test-vm",
@@ -28,6 +28,7 @@
     "cargo-test-vo-playground-host-wake",
     "cargo-test-common-core-hardening",
     "cargo-test-jit-hardening",
+    "cargo-test-vo-source-contract",
     "cargo-test-vm-hardening",
     "cargo-test-vm-hardening-jit",
     "cargo-test-stdlib",

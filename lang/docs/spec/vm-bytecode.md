@@ -19,6 +19,12 @@
 
 This document specifies the Vo bytecode format and VM interpreter. The VM is Vo's core execution engine.
 
+The current Rust source is authoritative for exact layouts:
+
+- `lang/crates/vo-common-core/src/instruction.rs` defines `Instruction` and `Opcode`.
+- `lang/crates/vo-common-core/src/bytecode.rs` defines `Module`, `FunctionDef`, metadata tables, and serialization data.
+- `lang/crates/vo-common-core/src/verifier.rs` defines the shared VM/module verifier that must accept bytecode before VM, GC, WASM, embed, or JIT execution.
+
 ### 1.1 Core Principles
 
 - **8-byte fixed instruction format**: Simple decoding, cache-friendly
@@ -84,7 +90,7 @@ pub enum Opcode {
     GlobalSetN,   // globals[a..] = slots[b..b+flags], flags=n
 
     // === PTR: Heap pointer operations ===
-    PtrNew,       // slots[a] = alloc(slots[b]), b=meta_reg, flags=slots
+    PtrNew,       // slots[a] = alloc(slots[b]), b=meta_reg, c=slots, flags=reserved
     PtrGet,       // slots[a] = heap[slots[b]].offset[c]
     PtrSet,       // heap[slots[a]].offset[b] = slots[c]
     PtrGetN,      // slots[a..a+flags] = heap[slots[b]].offset[c..]
@@ -161,13 +167,13 @@ pub enum Opcode {
     MapIterInit,  // a=iter_slot (7 slots), b=map_reg
     MapIterNext,  // a=key_slot, b=iter_slot, flags=key_slots|(val_slots<<4)
 
-    // === CHAN: Channel operations ===
-    ChanNew,      // slots[a] = make(chan T, cap), b=meta_reg, c=cap_reg, flags=elem_slots
-    ChanSend,     // chan <- slots[b..b+flags], a=chan, flags=elem_slots
-    ChanRecv,     // slots[a..] = <-chan, b=chan, flags=(elem_slots<<1)|has_ok
-    ChanClose,    // close(slots[a])
-    ChanLen,      // slots[a] = len(slots[b])
-    ChanCap,      // slots[a] = cap(slots[b])
+    // === QUEUE: Channel/port operations ===
+    QueueNew,     // slots[a] = make(chan/port T, cap), b=meta_reg, c=cap_reg, flags=elem layout + port bit
+    QueueSend,    // queue <- slots[b..b+elem_slots], a=queue, flags=elem_slots
+    QueueRecv,    // slots[a..] = <-queue, b=queue, flags=(elem_slots<<1)|has_ok
+    QueueClose,   // close(slots[a])
+    QueueLen,     // slots[a] = len(slots[b])
+    QueueCap,     // slots[a] = cap(slots[b])
 
     // === SELECT: Select statement ===
     SelectBegin,  // a=case_count, flags: bit0=has_default
@@ -178,10 +184,12 @@ pub enum Opcode {
     // === CLOSURE: Closure operations ===
     ClosureNew,   // slots[a] = new_closure(func_id=b|(flags<<16), capture_count=c)
     ClosureGet,   // slots[a] = slots[0].captures[b] (closure implicit in r0)
-    ClosureSet,   // slots[0].captures[a] = slots[b] (closure implicit in r0)
 
-    // === GO: Goroutine ===
+    // === GO / ISLAND / LOOP ===
     GoStart,      // start goroutine, a=func_id_low/closure_reg, b=args_start, c=arg_slots, flags=is_closure|func_id_high
+    IslandNew,    // create island handle, a=dst
+    GoIsland,     // start closure on island, a=island, b=closure, c=args_start, flags=arg_slots
+    ForLoop,      // idx step/check/jump, a=idx, b=limit, c=offset, flags=signed/decrement
 
     // === DEFER: Defer and error handling ===
     DeferPush,    // push defer: closure=slots[a]
@@ -212,10 +220,10 @@ All container creation instructions use registers to pass `ValueMeta` (via `Load
 
 | Instruction | Encoding | Description |
 |-------------|----------|-------------|
-| `PtrNew` | `a=dst, b=meta_reg, flags=slots` | `slots[b]` = ValueMeta, `flags` = object size in slots |
+| `PtrNew` | `a=dst, b=meta_reg, c=slots, flags=reserved` | `slots[b]` = ValueMeta, `c` = object size in slots |
 | `ArrayNew` | `a=dst, b=meta_reg, c=len_reg, flags=elem_slots` | `slots[b]` = elem ValueMeta, `slots[c]` = length |
 | `SliceNew` | `a=dst, b=meta_reg, c=params, flags=elem_slots` | `slots[b]` = elem ValueMeta, `slots[c]` = len, `slots[c+1]` = cap |
-| `ChanNew` | `a=dst, b=meta_reg, c=cap_reg, flags=elem_slots` | `slots[b]` = elem ValueMeta, `slots[c]` = capacity |
+| `QueueNew` | `a=dst, b=meta_reg, c=cap_reg, flags=elem_slots plus optional port bit` | `slots[b]` = elem ValueMeta, `slots[c]` = capacity |
 | `MapNew` | `a=dst, b=type_info_reg, c=(key_slots<<8)\|val_slots` | `slots[b]` = packed type info |
 | `StrNew` | `a=dst, b=const_idx` | Load string from constants pool |
 | `ClosureNew` | `a=dst, b=func_id, c=capture_count` | Create closure |
@@ -263,7 +271,9 @@ pub struct FunctionDef {
     pub param_count: u16,    // parameter count
     pub param_slots: u16,    // slots used by parameters
     pub local_slots: u16,    // local variable slots
+    pub gc_scan_slots: u16,  // derived scan prefix for local GC roots
     pub ret_slots: u16,      // return value slots
+    pub ret_slot_types: Vec<SlotType>,
     /// Receiver slots for methods (0 for functions, >0 for methods)
     pub recv_slots: u16,
     /// Number of GcRefs for heap-allocated named returns
@@ -274,15 +284,47 @@ pub struct FunctionDef {
     pub heap_ret_slots: Vec<u16>,
     /// True if this is a closure (anonymous function) that expects closure ref in slot 0
     pub is_closure: bool,
+    pub error_ret_slot: i16,
+    pub has_defer: bool,
+    pub has_calls: bool,
+    pub has_call_extern: bool,
     pub code: Vec<Instruction>,
+    pub jit_metadata: Vec<JitInstructionMetadata>,
     pub slot_types: Vec<SlotType>,  // for GC scanning
+    pub borrowed_scan_slots_prefix: Vec<u16>,
+    pub capture_types: Vec<TransferType>,
+    pub capture_slot_types: Vec<SlotType>,
+    pub param_types: Vec<TransferType>,
 }
 
-/// External function
+pub enum ParamShape {
+    Exact { slots: u16 },
+    CallSiteVariadic,
+}
+
+pub struct ReturnShape {
+    pub slots: u16,
+    pub kinds: Vec<ExtSlotKind>,
+    pub slot_types: Vec<SlotType>,
+}
+
+// ReturnShape invariants:
+// - non-empty kinds and slot_types must each have exactly slots entries.
+// - Interface0 and Interface1 slot_types must appear as adjacent pairs.
+// - Empty kinds or slot_types mean the caller/provider has no precise
+//   per-slot metadata for that axis.
+// - A CallExternLayout ret_layout containing GcRef or interface slots requires
+//   a non-empty ReturnShape.slot_types vector that exactly matches the callsite
+//   layout; slots-only ReturnShape may be used only for all-Value returns.
+//
+// param_kinds is the precise parameter kind list for externs that have it.
+// When present it must match ParamShape::Exact slot count.
 pub struct ExternDef {
     pub name: String,
-    pub param_slots: u16,
-    pub ret_slots: u16,
+    pub params: ParamShape,
+    pub returns: ReturnShape,
+    pub allowed_effects: ExternEffects,
+    pub param_kinds: Vec<ExtSlotKind>,
 }
 
 /// Global variable
@@ -326,6 +368,7 @@ pub struct InterfaceMethodMeta {
 pub struct MethodInfo {
     pub func_id: u32,
     pub is_pointer_receiver: bool,
+    pub receiver_is_iface_boxed: bool,
     pub signature_rttid: u32,
 }
 
@@ -333,7 +376,8 @@ pub struct MethodInfo {
 pub struct NamedTypeMeta {
     pub name: String,
     pub underlying_meta: ValueMeta,             // [struct_meta_id:24 | value_kind:8]
-    pub methods: HashMap<String, MethodInfo>,
+    pub underlying_rttid: ValueRttid,
+    pub methods: BTreeMap<String, MethodInfo>,
 }
 
 /// Itab: interface method table (method_idx -> func_id)
@@ -355,12 +399,14 @@ pub struct Module {
     pub functions: Vec<FunctionDef>,
     pub externs: Vec<ExternDef>,
     pub entry_func: u32,
+    pub island_init_func: u32,
     pub debug_info: DebugInfo,
 }
 ```
 
 **Key Points**:
 - `slot_types` must match `local_slots` length
+- `jit_metadata` must have one entry per instruction. The common verifier checks shared layout shape; strict opcode/metadata pairing remains JIT-only policy.
 - `NamedTypeMeta` used by VM to build itab at runtime and for type assertion
 - Methods belong to named type, not receiver form (T and *T share one namespace)
 - `is_pointer_receiver` determines method set: T only has value receiver methods, *T has all
@@ -381,15 +427,20 @@ impl Module {
 **File format**:
 ```
 Magic: "VOB" (3 bytes)
-Version: u32
+Version: u32 (currently 9)
 struct_metas: [StructMeta]
 interface_metas: [InterfaceMeta]
 named_type_metas: [NamedTypeMeta]
+itabs: [Itab]
+runtime_types: [RuntimeType]
+well_known: WellKnownTypes
 constants: [Constant]
 globals: [GlobalDef]
 functions: [FunctionDef]
 externs: [ExternDef]
 entry_func: u32
+island_init_func: u32
+debug_info: DebugInfo
 ```
 
 Note: iface_dispatch removed, itab built lazily at runtime.
@@ -543,14 +594,16 @@ pub struct VmState {
 
 ```rust
 Opcode::Call => {
-    // a=func_id, b=arg_start, c=arg_slots, flags=ret_slots
+    // a=func_id, b=arg_start, c=(arg_slots<<8|ret_slots)
+    let arg_slots = c >> 8;
+    let ret_slots = c & 0xff;
     let func = &module.functions[a as usize];
     
     // Copy args (avoid overwrite after frame switch)
-    let args: Vec<u64> = (0..c).map(|i| self.read_reg(fiber_id, b + i)).collect();
+    let args: Vec<u64> = (0..arg_slots).map(|i| self.read_reg(fiber_id, b + i)).collect();
     
     // Push new frame
-    fiber.push_frame(a, func.local_slots, b, flags);
+    fiber.push_frame(a, func.local_slots, b, ret_slots);
     
     // Write args to new frame
     for (i, arg) in args.into_iter().enumerate() {
@@ -563,16 +616,18 @@ Opcode::Call => {
 
 ```rust
 Opcode::CallClosure => {
-    // a=closure_reg, b=arg_start, c=arg_slots, flags=ret_slots
+    // a=closure_reg, b=arg_start, c=(arg_slots<<8|ret_slots)
+    let arg_slots = c >> 8;
+    let ret_slots = c & 0xff;
     let closure = self.read_reg(fiber_id, a) as GcRef;
     let func_id = closure::func_id(closure);
     let func = &module.functions[func_id as usize];
     
     // Copy args
-    let args: Vec<u64> = (0..c).map(|i| self.read_reg(fiber_id, b + i)).collect();
+    let args: Vec<u64> = (0..arg_slots).map(|i| self.read_reg(fiber_id, b + i)).collect();
     
     // Push new frame
-    fiber.push_frame(func_id, func.local_slots, b, flags);
+    fiber.push_frame(func_id, func.local_slots, b, ret_slots);
     
     // Key: closure as r0
     fiber.write_reg(0, closure as u64);
@@ -702,10 +757,10 @@ GC scanning must cover:
 6.  **Trampoline Fibers**: Scan their stacks and states.
 
 
-### 6.8 Channel Operations
+### 6.8 Queue Operations
 
 ```rust
-Opcode::ChanSend => {
+Opcode::QueueSend => {
     // chan <- slots[b..b+elem_slots], a=chan, flags=elem_slots
     let chan = slots[a] as GcRef;
     let elem_slots = flags as usize;
@@ -725,7 +780,7 @@ Opcode::ChanSend => {
     }
 }
 
-Opcode::ChanRecv => {
+Opcode::QueueRecv => {
     // slots[a..] = <-chan, b=chan, flags=(elem_slots<<1)|has_ok
     let chan = slots[b] as GcRef;
     let elem_slots = (flags >> 1) as usize;
@@ -750,7 +805,7 @@ Opcode::ChanRecv => {
     }
 }
 
-Opcode::ChanClose => {
+Opcode::QueueClose => {
     let state = channel::get_state(slots[a] as GcRef);
     state.close();
     for id in state.take_waiting_receivers() { scheduler.wake_fiber(FiberId::from_raw(id)); }

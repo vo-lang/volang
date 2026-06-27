@@ -4,9 +4,13 @@ This note documents the current maintainer contract for `vo-jit`. It is meant
 to be checked before adding or changing bytecode lowering, metadata, verifier,
 or call behavior.
 
+Related context:
+
+- [`vm-production-readiness.md`](vm-production-readiness.md)
+
 ## Single Source Of Truth
 
-`lang/crates/vo-jit/src/semantics.rs` owns the opcode fact table:
+`lang/crates/vo-jit/src/semantics/` owns the opcode fact table:
 
 - `OPCODE_SEMANTICS` declares one named-field `semantic_row!` per valid opcode.
 - `INVALID_SEMANTICS` declares the strict invalid-opcode sentinel.
@@ -30,8 +34,8 @@ Each row should declare these facts once with named fields:
 - effect contract
 
 If a new opcode needs behavior that cannot be expressed in the row spec, add a
-small explicit spec enum to `semantics.rs`, then derive from it in the consumer.
-Do not duplicate opcode-family matches in each consumer.
+small explicit spec enum to the `semantics/` module, then derive from it in the
+consumer. Do not duplicate opcode-family matches in each consumer.
 
 ## Effects
 

@@ -57,7 +57,7 @@ rejected before a module can execute or enter strict JIT.
 
 ## Opcode Contract
 
-`vo-jit/src/semantics.rs` is the single opcode contract row for JIT semantics.
+`vo-jit/src/semantics/` is the opcode contract table for JIT semantics.
 Each row records packed operands, VM semantic source, lowering owner, verifier
 requirements, register effect shape, memory sync shape, runtime dependencies,
 helper return policy, frame policy, trap policy, fail-fast conditions,
@@ -66,7 +66,7 @@ keep the public API and data types, but their per-opcode answers delegate to the
 semantic row instead of maintaining separate matches.
 
 Metadata remains a specialized fact source in `metadata_contract.rs`.
-`semantics.rs` imports the opcode metadata requirement from that module, and the
+The semantics table imports the opcode metadata requirement from that module, and the
 tests reject any second metadata requirement table in the semantic row.
 Concrete read/write slot lists still come from `effects.rs` because they depend
 on instruction operands, module signatures, extern signatures, and typed
@@ -97,7 +97,7 @@ execution path accepts a module.
 - JIT capability, helper dependencies, ABI contracts, frame materialization,
   side exits, OSR, and direct-call contracts are described by the semantic row,
   contract graph, helper manifests, and lowering tests.
-- `semantics.rs` describes opcode effects, fail-fast policy, runtime
+- `vo-jit/src/semantics/` describes opcode effects, fail-fast policy, runtime
   dependencies, verifier requirements, and capability coverage. The contract
   graph consumes those rows rather than re-declaring opcode policy.
 - `call_helpers/plan.rs` owns static/dynamic call route selection.
@@ -159,7 +159,7 @@ Opcode maintenance is intentionally row-driven:
   needs JIT metadata.
 - Update `metadata_contract.rs` only if the opcode consumes per-PC JIT
   metadata.
-- Update the single semantic row in `semantics.rs`: packed operands, lowering
+- Update the semantic row in `vo-jit/src/semantics/`: packed operands, lowering
   owner, verifier requirements, register effect shape, runtime dependencies,
   helper/trap/fail-fast/frame policy, capability, and effect contract.
 - Add VM-shared slot/layout validation in `vo-common-core/src/verifier.rs`.

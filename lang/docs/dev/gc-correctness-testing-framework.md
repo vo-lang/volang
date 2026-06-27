@@ -33,10 +33,11 @@ materialization stay testable as explicit contracts.
 
 Related context:
 
+- [`vm-production-readiness.md`](vm-production-readiness.md)
 - [`lang/docs/dev-notes/gc-system-design.md`](../dev-notes/gc-system-design.md)
 - [`lang/docs/dev-notes/2026-05-09-gc-v1-plan.md`](../dev-notes/2026-05-09-gc-v1-plan.md)
 - [`lang/docs/dev-notes/2026-02-27-slot-types-gc-bug.md`](../dev-notes/2026-02-27-slot-types-gc-bug.md)
-- [`lang/docs/dev/jit-fact-source.md`](jit-fact-source.md)
+- [`jit-fact-source.md`](jit-fact-source.md)
 
 ## Goals
 
@@ -69,7 +70,8 @@ Completed in the current integration layer:
 - VM root matrix tests cover globals, live fiber stacks, call-frame scan slots,
   return values, defers, panic payloads, closure replay results, select roots,
   sentinel errors, endpoint registry live handles, dirty-fiber sweep rescue,
-  bounded root snapshots, root-scan restart, stable sweep skips, and load reset.
+  bounded root snapshots, root-scan restart, stable sweep skips, load reset, and
+  the JIT pending-transition GC-entry contract.
 - JIT materialization tests cover nested shadow-frame materialization, empty
   shadow-frame restoration, borrowed parent frames, and nested
   extern-yield/block special-call materialization before scheduler return.
@@ -119,7 +121,8 @@ The framework should make these bug classes cheap to reproduce:
    during bounded scans.
 5. JIT boundary bugs: live refs in registers or shadow frames not materialized
    before GC, panic/defer paths losing refs, side exits with stale frame
-   metadata, and verifier/runtime contract drift.
+   metadata, pending runtime payloads reaching GC without attachment or typed
+   roots, and verifier/runtime contract drift.
 
 ## Architecture
 
@@ -197,14 +200,15 @@ interface pairs before execution.
 
 Current file:
 
-- `lang/crates/vo-vm/src/gc_layout_validate.rs`
+- `lang/crates/vo-common-core/src/verifier.rs`
 
 Current API shape:
 
 ```rust
-pub fn validate_module_gc_layout(module: &Module) -> Result<(), String>;
-pub fn validate_slot_layout(label: &str, slots: usize, slot_types: &[SlotType]) -> Result<(), String>;
-pub fn validate_interface_pairs(label: &str, slot_types: &[SlotType]) -> Result<(), String>;
+pub fn verify_module(module: &Module) -> Result<VerifiedModule<'_>, ModuleVerificationError>;
+pub fn validate_module_gc_layout(module: &Module) -> Result<(), ModuleVerificationError>;
+pub fn validate_slot_layout(label: &str, slots: usize, slot_types: &[SlotType]) -> Result<(), ModuleVerificationError>;
+pub fn validate_interface_pairs(label: &str, slot_types: &[SlotType]) -> Result<(), ModuleVerificationError>;
 ```
 
 Rules:
