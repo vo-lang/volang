@@ -1,41 +1,53 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"io"
+	"time"
 )
 
 func main() {
-	println("Testing HTTP client...")
-	println("Calling http.Get...")
-	
-	// Test GET request to httpbin
-	resp, err := http.Get("http://httpbin.org/get")
-	println("http.Get returned")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/get", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("client-ok"))
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		println("GET failed:", err.Error())
-		return
+		panic("Listen failed: " + err.Error())
 	}
-	println("GET succeeded!")
+	addr := ln.Addr().String()
+	srv := &http.Server{Handler: mux}
+	done := make(chan error, 1)
+	go func() {
+		err := srv.Serve(ln)
+		if err != nil && err.Error() != http.ErrServerClosed.Error() {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + addr + "/get")
+	if err != nil {
+		panic("GET failed: " + err.Error())
+	}
 	defer resp.Body.Close()
-	
-	println("Status:", resp.Status)
-	println("StatusCode:", resp.StatusCode)
-	
-	// Read body
+
+	assert(resp.StatusCode == http.StatusOK)
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		println("Read body failed:", err.Error())
-		return
+		panic("Read body failed: " + err.Error())
 	}
-	
-	println("Body length:", len(body))
-	println("Body (first 200 chars):")
-	if len(body) > 200 {
-		println(string(body[:200]))
-	} else {
-		println(string(body))
+	assert(string(body) == "client-ok")
+
+	if err := srv.Close(); err != nil {
+		panic("server close failed: " + err.Error())
 	}
-	
-	println("\nHTTP client test passed!")
+	if err := <-done; err != nil {
+		panic("server failed: " + err.Error())
+	}
 }
