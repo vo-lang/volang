@@ -393,8 +393,9 @@ mod tests {
         module: &Module,
         func: ExternFn,
         effects: ExternEffects,
-    ) -> (Vm, Box<Fiber>, JitContextWrapper) {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+    ) -> (Box<Vm>, Box<Fiber>, JitContextWrapper) {
+        // `JitContext` stores raw pointers into the VM; keep the VM address stable after return.
+        let mut vm = Box::new(Vm::try_with_jit_config(JitConfig::default()).expect("jit vm"));
         vm.state.extern_registry.register_test_named_with_effects(
             0,
             module.externs[0].name.clone(),
@@ -408,11 +409,11 @@ mod tests {
             .expect("resolve test externs");
         let mut fiber = Box::new(Fiber::new(7));
         fiber.push_frame(0, 4, 0, 0, 0);
-        let ctx = build_jit_context(&mut vm, fiber.as_mut(), module).expect("jit context");
+        let ctx = build_jit_context(vm.as_mut(), fiber.as_mut(), module).expect("jit context");
         (vm, fiber, ctx)
     }
 
-    fn jit_context_for_extern_bridge(module: &Module) -> (Vm, Box<Fiber>, JitContextWrapper) {
+    fn jit_context_for_extern_bridge(module: &Module) -> (Box<Vm>, Box<Fiber>, JitContextWrapper) {
         jit_context_for_extern_bridge_with(module, noop_extern, ExternEffects::NONE)
     }
 
