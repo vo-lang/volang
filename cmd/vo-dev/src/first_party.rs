@@ -216,6 +216,27 @@ pub(crate) fn ci_checkout_for(root: &Path, repo: &str) -> Result<CiCheckout> {
     })
 }
 
+pub(crate) fn ci_checkout_untracked_prefixes(root: &Path) -> Result<Vec<String>> {
+    if !root.join("eng/project.toml").exists() {
+        return Ok(Vec::new());
+    }
+    let project = load_project(root)?;
+    let mut prefixes = Vec::new();
+    for entry in project
+        .first_party
+        .iter()
+        .chain(project.external_project.iter())
+    {
+        if entry.ci_checkout == Some(true) {
+            let prefix = format!("ci_modules/{}/", entry.name);
+            prefixes.push(prefix);
+        }
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    Ok(prefixes)
+}
+
 pub(crate) fn project_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
     let project = load_project(root)?;
     let entry = project_repo_entry(&project, repo)
