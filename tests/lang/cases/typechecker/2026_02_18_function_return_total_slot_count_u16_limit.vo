@@ -1,0 +1,9 @@
+package main
+
+func f() ([40000]int, [40000]int) {
+	return [40000]int{}, [40000]int{}
+}
+
+func main() {
+	_, _ = f()
+}

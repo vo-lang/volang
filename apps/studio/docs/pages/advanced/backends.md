@@ -87,8 +87,8 @@ vo run main.vo --mode=jit
 
 The language-test targets are configured in `eng/tests.toml`: `jit` sets
 `VO_JIT_CALL_THRESHOLD=1`, `osr` sets `VO_JIT_CALL_THRESHOLD=1000` and
-`VO_JIT_LOOP_THRESHOLD=1`, and `gc-jit` sets `VO_GC_DEBUG=1` plus
-`VO_JIT_CALL_THRESHOLD=1`.
+`VO_JIT_LOOP_THRESHOLD=1`, and `gc-jit` sets `VO_GC_STRESS=1`,
+`VO_GC_VERIFY=1`, and `VO_JIT_CALL_THRESHOLD=1`.
 
 ---
 

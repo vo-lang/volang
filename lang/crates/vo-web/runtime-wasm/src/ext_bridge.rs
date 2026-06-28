@@ -38,10 +38,9 @@
 //! - `window.voCallExt(extern_name, input): Uint8Array`
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
 use vo_runtime::bytecode::{ExtSlotKind, ExternDef};
-use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
+use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult, HostEventReplaySource};
 use wasm_bindgen::prelude::*;
 
 // Output tag constants (WASM standalone modules use these)
@@ -85,9 +84,6 @@ extern "C" {
 
 thread_local! {
     static LOADED_PREFIXES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-
-    /// Maps extern_id to its name and tagged input slots.
-    static EXTERN_ID_TO_INFO: RefCell<HashMap<u32, (String, Vec<ExtSlotKind>)>> = RefCell::new(HashMap::new());
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -145,43 +141,44 @@ pub async fn load_wasm_ext_module(
 }
 
 pub fn register_wasm_ext_bridges(reg: &mut ExternRegistry, externs: &[ExternDef]) {
-    EXTERN_ID_TO_INFO.with(|m| m.borrow_mut().clear());
+    use vo_runtime::bytecode::ExternEffects;
+
     for (id, def) in externs.iter().enumerate() {
+        if reg.registered_by_name(&def.name).is_some() {
+            continue;
+        }
         if is_wasm_ext_extern(&def.name) {
             let id = id as u32;
-            EXTERN_ID_TO_INFO.with(|m| {
-                m.borrow_mut()
-                    .insert(id, (def.name.clone(), def.param_kinds.clone()));
-            });
-            reg.register(id, wasm_ext_bridge);
+            reg.register_wasm_extension_bridge_with_effects(
+                id,
+                &def.name,
+                wasm_ext_bridge,
+                ExternEffects::MAY_HOST_WAIT | ExternEffects::MAY_HOST_REPLAY,
+            );
         }
     }
 }
 
 pub fn clear_wasm_ext_state() {
     LOADED_PREFIXES.with(|p| p.borrow_mut().clear());
-    EXTERN_ID_TO_INFO.with(|m| m.borrow_mut().clear());
 }
 
 /// Saved extern state for reentrant VM calls.
 pub struct SavedExternState {
-    id_to_info: HashMap<u32, (String, Vec<ExtSlotKind>)>,
     loaded_prefixes: Vec<String>,
 }
 
-/// Save the current extern state (ID mapping + loaded prefixes) for later restore.
+/// Save the current extern state for later restore.
 /// Used before reentrant VM calls (e.g. vox host bridge creating an inner VM)
-/// to prevent register_wasm_ext_bridges from clobbering the outer VM's state.
+/// to prevent extension prefix setup from clobbering the outer VM's state.
 pub fn save_extern_state() -> SavedExternState {
     SavedExternState {
-        id_to_info: EXTERN_ID_TO_INFO.with(|m| m.borrow().clone()),
         loaded_prefixes: LOADED_PREFIXES.with(|p| p.borrow().clone()),
     }
 }
 
 /// Restore a previously saved extern state.
 pub fn restore_extern_state(state: SavedExternState) {
-    EXTERN_ID_TO_INFO.with(|m| *m.borrow_mut() = state.id_to_info);
     LOADED_PREFIXES.with(|p| *p.borrow_mut() = state.loaded_prefixes);
 }
 
@@ -189,9 +186,13 @@ pub fn restore_extern_state(state: SavedExternState) {
 
 fn is_wasm_ext_extern(name: &str) -> bool {
     LOADED_PREFIXES.with(|p| {
-        p.borrow()
-            .iter()
-            .any(|prefix| name.starts_with(prefix.as_str()))
+        p.borrow().iter().any(|prefix| {
+            !prefix.is_empty()
+                && (name == prefix
+                    || name
+                        .strip_prefix(prefix.as_str())
+                        .is_some_and(|suffix| suffix.starts_with('_')))
+        })
     })
 }
 
@@ -217,6 +218,87 @@ fn encode_ext_input(call: &ExternCallContext, param_kinds: &[ExtSlotKind]) -> Ve
     buf
 }
 
+enum DecodedExtOutput<'a> {
+    NilError,
+    ErrorStr(String),
+    Value(u64),
+    Bytes(&'a [u8]),
+    NilRef,
+}
+
+impl DecodedExtOutput<'_> {
+    fn slot_width(&self) -> u16 {
+        match self {
+            Self::NilError | Self::ErrorStr(_) => 2,
+            Self::Value(_) | Self::Bytes(_) | Self::NilRef => 1,
+        }
+    }
+}
+
+fn decode_ext_output_items(
+    output: &[u8],
+    expected_slots: u16,
+) -> Result<Vec<DecodedExtOutput<'_>>, String> {
+    let mut items = Vec::new();
+    let mut pos = 0;
+    let mut slots = 0u16;
+    while pos < output.len() {
+        let tag = output[pos];
+        pos += 1;
+        let item = match tag {
+            TAG_NIL_ERROR => DecodedExtOutput::NilError,
+            TAG_ERROR_STR => {
+                if pos + 2 > output.len() {
+                    return Err("truncated error-string length".to_string());
+                }
+                let len = u16::from_le_bytes([output[pos], output[pos + 1]]) as usize;
+                pos += 2;
+                if pos + len > output.len() {
+                    return Err("truncated error-string payload".to_string());
+                }
+                let msg = std::str::from_utf8(&output[pos..pos + len])
+                    .unwrap_or("ext error")
+                    .to_string();
+                pos += len;
+                DecodedExtOutput::ErrorStr(msg)
+            }
+            TAG_VALUE => {
+                if pos + 8 > output.len() {
+                    return Err("truncated value payload".to_string());
+                }
+                let v = u64::from_le_bytes(output[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                DecodedExtOutput::Value(v)
+            }
+            TAG_BYTES => {
+                if pos + 4 > output.len() {
+                    return Err("truncated bytes length".to_string());
+                }
+                let len = u32::from_le_bytes(output[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+                if pos + len > output.len() {
+                    return Err("truncated bytes payload".to_string());
+                }
+                let bytes = &output[pos..pos + len];
+                pos += len;
+                DecodedExtOutput::Bytes(bytes)
+            }
+            TAG_NIL_REF => DecodedExtOutput::NilRef,
+            _ => return Err(format!("unknown output tag 0x{tag:02x}")),
+        };
+        slots = slots
+            .checked_add(item.slot_width())
+            .ok_or_else(|| "decoded output slot count overflow".to_string())?;
+        items.push(item);
+    }
+    if slots != expected_slots {
+        return Err(format!(
+            "decoded {slots} return slots, expected {expected_slots}"
+        ));
+    }
+    Ok(items)
+}
+
 /// Decode self-describing tagged output bytes and write to Vo return slots.
 ///
 /// Tags:
@@ -226,58 +308,40 @@ fn encode_ext_input(call: &ExternCallContext, param_kinds: &[ExtSlotKind]) -> Ve
 ///   0xE3 [u32][bytes] → []byte / string    (slot += 1)
 ///   0xE4              → nil reference      (slot += 1)
 fn decode_ext_output(call: &mut ExternCallContext, output: &[u8]) {
-    let mut pos = 0;
     let mut slot = 0u16;
-    while pos < output.len() {
-        let tag = output[pos];
-        pos += 1;
-        match tag {
-            TAG_NIL_ERROR => {
+    let items = match decode_ext_output_items(output, call.ret_slots()) {
+        Ok(items) => items,
+        Err(error) => {
+            call.record_contract_violation(format!(
+                "malformed WASM extension output for extern_id={}: {error}",
+                call.extern_id()
+            ));
+            return;
+        }
+    };
+    for item in items {
+        match item {
+            DecodedExtOutput::NilError => {
                 write_nil_error(call, slot);
                 slot += 2;
             }
-            TAG_ERROR_STR => {
-                if pos + 2 > output.len() {
-                    break;
-                }
-                let len = u16::from_le_bytes([output[pos], output[pos + 1]]) as usize;
-                pos += 2;
-                if pos + len > output.len() {
-                    break;
-                }
-                let msg = std::str::from_utf8(&output[pos..pos + len]).unwrap_or("ext error");
-                pos += len;
-                write_error_to(call, slot, msg);
+            DecodedExtOutput::ErrorStr(message) => {
+                write_error_to(call, slot, &message);
                 slot += 2;
             }
-            TAG_VALUE => {
-                if pos + 8 > output.len() {
-                    break;
-                }
-                let v = u64::from_le_bytes(output[pos..pos + 8].try_into().unwrap());
-                pos += 8;
+            DecodedExtOutput::Value(v) => {
                 call.ret_u64(slot, v);
                 slot += 1;
             }
-            TAG_BYTES => {
-                if pos + 4 > output.len() {
-                    break;
-                }
-                let len = u32::from_le_bytes(output[pos..pos + 4].try_into().unwrap()) as usize;
-                pos += 4;
-                if pos + len > output.len() {
-                    break;
-                }
-                let r = call.alloc_bytes(&output[pos..pos + len]);
-                pos += len;
+            DecodedExtOutput::Bytes(bytes) => {
+                let r = call.alloc_bytes(bytes);
                 call.ret_ref(slot, r);
                 slot += 1;
             }
-            TAG_NIL_REF => {
+            DecodedExtOutput::NilRef => {
                 call.ret_nil(slot);
                 slot += 1;
             }
-            _ => break,
         }
     }
 }
@@ -294,10 +358,15 @@ fn decode_ext_output(call: &mut ExternCallContext, output: &[u8]) {
 /// delegates to `voCallExtReplay` so JS can decode resume data into
 /// tagged output.
 fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
-    let id = call.extern_id();
-    let (name, param_kinds) = EXTERN_ID_TO_INFO
-        .with(|m| m.borrow().get(&id).cloned())
-        .unwrap_or_else(|| panic!("wasm_ext_bridge: extern_id {} not registered", id));
+    let (name, param_kinds) = call
+        .wasm_extension_bridge_abi()
+        .map(|(name, param_kinds)| (name.to_string(), param_kinds.to_vec()))
+        .unwrap_or_else(|| {
+            panic!(
+                "wasm_ext_bridge: extern_id {} missing resolved bridge ABI",
+                call.extern_id()
+            )
+        });
 
     // Replay path: fiber was suspended by TAG_SUSPEND, now resumed with event data.
     if let Some(_token) = call.take_resume_host_event_token() {
@@ -322,7 +391,12 @@ fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
         return match output[0] {
             TAG_SUSPEND => {
                 let token = call.next_host_event_token();
-                ExternResult::HostEventWaitAndReplay { token }
+                let source = if name.ends_with("waitForEvent") {
+                    HostEventReplaySource::GuiEvent
+                } else {
+                    HostEventReplaySource::Extension
+                };
+                ExternResult::HostEventWaitAndReplay { token, source }
             }
             TAG_DISPLAY_PULSE => {
                 let token = call.next_host_event_token();
@@ -332,13 +406,129 @@ fn wasm_ext_bridge(call: &mut ExternCallContext) -> ExternResult {
                 }
             }
             TAG_HOST_OUTPUT => {
-                call.set_host_output(output[1..].to_vec());
+                if call.ret_slots() != 0 {
+                    call.record_contract_violation(format!(
+                        "WASM extension extern_id={} returned host output for {} declared return slots",
+                        call.extern_id(),
+                        call.ret_slots()
+                    ));
+                } else {
+                    call.set_host_output(output[1..].to_vec());
+                }
                 ExternResult::Ok
             }
-            _ => ExternResult::Ok,
+            _ => {
+                call.record_contract_violation(format!(
+                    "WASM extension extern_id={} returned unknown control tag 0x{:02x}",
+                    call.extern_id(),
+                    output[0]
+                ));
+                ExternResult::Ok
+            }
         };
     }
 
     decode_ext_output(call, &output);
     ExternResult::Ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vo_runtime::bytecode::{ExternEffects, ParamShape, RegisteredExternSource, ReturnShape};
+
+    fn host_provider(_call: &mut ExternCallContext<'_>) -> ExternResult {
+        ExternResult::Ok
+    }
+
+    fn extern_def(name: &str) -> ExternDef {
+        ExternDef {
+            name: name.to_string(),
+            params: ParamShape::Exact { slots: 0 },
+            returns: ReturnShape::slots(0),
+            allowed_effects: ExternEffects::NONE,
+            param_kinds: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn wasm_extension_prefix_does_not_replace_existing_provider_051() {
+        clear_wasm_ext_state();
+        LOADED_PREFIXES.with(|prefixes| prefixes.borrow_mut().push("time".to_string()));
+        let mut registry = ExternRegistry::new();
+        registry.register_wasm_host_with_effects(
+            0,
+            "time_nowUnixNano",
+            host_provider,
+            ExternEffects::NONE,
+        );
+
+        register_wasm_ext_bridges(&mut registry, &[extern_def("time_nowUnixNano")]);
+
+        let provider = registry
+            .registered_by_name("time_nowUnixNano")
+            .expect("stdlib wasm host provider must remain registered");
+        assert_eq!(provider.source(), RegisteredExternSource::WasmHost);
+    }
+
+    #[test]
+    fn wasm_extension_prefix_requires_name_boundary_051() {
+        clear_wasm_ext_state();
+        LOADED_PREFIXES.with(|prefixes| prefixes.borrow_mut().push("math".to_string()));
+        let mut registry = ExternRegistry::new();
+
+        register_wasm_ext_bridges(&mut registry, &[extern_def("mathx_F")]);
+
+        assert!(
+            registry.registered_by_name("mathx_F").is_none(),
+            "loaded module key 'math' must not claim unrelated extern prefix 'mathx'"
+        );
+    }
+
+    #[test]
+    fn wasm_extension_output_decoder_is_total_source_contract_051() {
+        let source = include_str!("ext_bridge.rs");
+        assert!(
+            source.contains("fn decode_ext_output_items("),
+            "WASM extension output must be parsed by a total decoder before return slots are written"
+        );
+        assert!(
+            source.contains("record_contract_violation"),
+            "malformed WASM extension output must flow through the extern contract error channel"
+        );
+        let decode = source
+            .split("fn decode_ext_output(")
+            .nth(1)
+            .expect("decode_ext_output function")
+            .split("fn wasm_ext_bridge(")
+            .next()
+            .expect("decode_ext_output body");
+        assert!(
+            !decode.contains("break;"),
+            "malformed output must not be accepted by breaking out of decode_ext_output"
+        );
+    }
+
+    #[test]
+    fn wasm_extension_bridge_dispatch_061_uses_resolved_context_abi_not_global_side_table() {
+        let production = include_str!("ext_bridge.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("EXTERN_ID_TO_INFO"),
+            "WASM bridge dispatch ABI must not live in a process-global extern_id side table"
+        );
+        let bridge = production
+            .split("fn wasm_ext_bridge(")
+            .nth(1)
+            .expect("wasm_ext_bridge function")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("bridge body");
+        assert!(
+            bridge.contains("wasm_extension_bridge_abi()"),
+            "WASM bridge provider must use the resolved ABI bound to the current extern call"
+        );
+    }
 }

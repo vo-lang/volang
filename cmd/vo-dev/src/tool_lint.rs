@@ -20,7 +20,8 @@ pub(crate) fn lint_toolchain_file(root: &Path, config: &ToolchainFile) -> Result
             || tool.source.is_some()
             || tool.minimum.is_some()
             || tool.usage.is_some()
-            || tool.check.is_some();
+            || tool.check.is_some()
+            || tool.bootstrap.is_some();
         if !has_policy {
             bail!("tool {name} has no version, source, minimum, usage, or check policy");
         }
@@ -30,6 +31,14 @@ pub(crate) fn lint_toolchain_file(root: &Path, config: &ToolchainFile) -> Result
             }
             if check.iter().any(|arg| arg.trim().is_empty()) {
                 bail!("tool {name} check command contains an empty argument");
+            }
+        }
+        if let Some(bootstrap) = &tool.bootstrap {
+            if bootstrap.is_empty() {
+                bail!("tool {name} has an empty bootstrap command");
+            }
+            if bootstrap.iter().any(|arg| arg.trim().is_empty()) {
+                bail!("tool {name} bootstrap command contains an empty argument");
             }
         }
         if let Some(source) = &tool.version_from {

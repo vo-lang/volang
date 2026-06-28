@@ -47,6 +47,8 @@ mod host_log;
 
 pub use js_types::{CompileResult, RunResult};
 
+pub use vo_vm::scheduler::HostWaitKey;
+
 // ── Public re-exports: VM ───────────────────────────────────────────────────
 
 pub use vm::{

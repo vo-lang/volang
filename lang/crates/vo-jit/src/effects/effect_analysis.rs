@@ -8,7 +8,7 @@ use super::{
     EffectError, EffectFacts, InstructionEffects,
 };
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn try_instruction_effects_with_facts(
     inst: &Instruction,
     facts: EffectFacts<'_>,
@@ -16,6 +16,7 @@ pub fn try_instruction_effects_with_facts(
     try_instruction_effects_with_context(inst, facts, &[])
 }
 
+#[cfg(test)]
 pub fn try_instruction_effects_with_context(
     inst: &Instruction,
     facts: EffectFacts<'_>,

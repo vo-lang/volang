@@ -1,19 +1,21 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, FuncRef, InstBuilder, MemFlags, StackSlot, Value};
 
-use vo_runtime::jit_api::JitContext;
+use vo_runtime::jit_api::{JitContext, JitResult};
 
 use crate::translator::{HelperCallEmitter, IrEmitter};
 use crate::JitError;
 
 use super::{
     emit_checked_jit_result_indirect_callback_call, emit_raw_jit_context_callback_call,
-    NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE, NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE,
+    restore_caller_execution_context, NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE,
+    NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE,
 };
 
 // JitResult constants for readability in lowering code.
 pub const JIT_RESULT_OK: i32 = 0;
 pub const JIT_RESULT_CALL: i32 = 2;
+pub const JIT_RESULT_REPLAY: i32 = 5;
 
 /// Emit a helper/callback wrapper that returns `JitResult`, and route every
 /// non-Ok result back to the VM before local execution can continue.
@@ -43,6 +45,7 @@ pub struct NonOkSlowPathParams {
     pub ctx: Value,
     pub caller_bp: Value,
     pub old_fiber_sp: Value,
+    pub caller_func_id: Value,
     /// CALLEE's func_id, used in push_resume_point to create CallFrame(callee_func_id, callee_bp).
     pub callee_func_id_val: Value,
     pub local_slots_val: Value,
@@ -64,18 +67,8 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
 
     // The inline update set fiber_sp = old_fiber_sp + callee_local_slots; push_frame
     // uses fiber_sp as new_bp, so restore ctx to the caller window first.
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        p.caller_bp,
-        ctx,
-        JitContext::OFFSET_JIT_BP,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        p.old_fiber_sp,
-        ctx,
-        JitContext::OFFSET_FIBER_SP,
-    );
+    restore_caller_execution_context(emitter, ctx, p.caller_bp, p.old_fiber_sp, p.caller_func_id);
+    emitter.refresh_stack_base_after_reallocation();
 
     emitter.spill_all_vars();
 
@@ -103,7 +96,7 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
             JitError::Internal("push_frame_fn ABI did not return callee args pointer".into())
         })
     })?;
-    crate::contract::emit_return_if_runtime_trap_recorded(emitter);
+    emit_return_jit_error_if_null_callee_args(emitter, callee_fiber_args_ptr);
 
     // Self-recursive calls pass args via native stack slot. Regular/indirect
     // calls already have callee state spilled into fiber.stack.
@@ -154,6 +147,34 @@ pub fn emit_non_ok_slow_path<'a, E: IrEmitter<'a>>(
     Ok(())
 }
 
+fn emit_return_jit_error_if_null_callee_args<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    callee_fiber_args_ptr: Value,
+) {
+    let zero = emitter.builder().ins().iconst(types::I64, 0);
+    let is_null = emitter
+        .builder()
+        .ins()
+        .icmp(IntCC::Equal, callee_fiber_args_ptr, zero);
+    let error_block = emitter.builder().create_block();
+    let ok_block = emitter.builder().create_block();
+    emitter
+        .builder()
+        .ins()
+        .brif(is_null, error_block, &[], ok_block, &[]);
+
+    emitter.builder().switch_to_block(error_block);
+    emitter.builder().seal_block(error_block);
+    let jit_error = emitter
+        .builder()
+        .ins()
+        .iconst(types::I32, JitResult::JitError as i64);
+    emitter.builder().ins().return_(&[jit_error]);
+
+    emitter.builder().switch_to_block(ok_block);
+    emitter.builder().seal_block(ok_block);
+}
+
 /// Check call result and handle non-Ok cases.
 ///
 /// JitResult: Ok=0, Panic=1, Call=2, WaitIo=3, WaitQueue=4
@@ -186,4 +207,84 @@ pub fn check_call_result<'a, E: HelperCallEmitter<'a>>(
 
     emitter.builder().switch_to_block(ok_block);
     emitter.builder().seal_block(ok_block);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vm_osr_slowpath_stack_001_non_ok_slow_path_refreshes_before_spill() {
+        let src = vo_source_contract::production_source_without_test_modules(include_str!(
+            "result_flow.rs"
+        ));
+        let slow_path = src
+            .split("pub fn emit_non_ok_slow_path")
+            .nth(1)
+            .expect("non-OK slow path should exist")
+            .split("let push_frame_fn_ptr")
+            .next()
+            .expect("non-OK slow path should push a frame after spilling");
+        let refresh = slow_path
+            .find("refresh_stack_base_after_reallocation")
+            .expect("non-OK slow path must refresh cached stack bases");
+        let spill = slow_path
+            .find("spill_all_vars")
+            .expect("non-OK slow path should still spill caller locals");
+
+        assert!(
+            refresh < spill,
+            "non-OK slow path must refresh cached stack bases before spilling caller locals"
+        );
+    }
+
+    #[test]
+    fn vm_jit_resume_point_contract_062_non_ok_slow_path_restores_current_func_id_before_push_resume(
+    ) {
+        let src = vo_source_contract::production_source_without_test_modules(include_str!(
+            "result_flow.rs"
+        ));
+        let slow_path = src
+            .split("pub fn emit_non_ok_slow_path")
+            .nth(1)
+            .expect("non-OK slow path should exist");
+        let restore_current_func = slow_path
+            .find("restore_caller_execution_context")
+            .expect("non-OK slow path must restore caller execution context");
+        let push_resume = slow_path
+            .find("NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE")
+            .expect("non-OK slow path must push a resume point");
+
+        assert!(
+            restore_current_func < push_resume,
+            "non-OK slow path must restore caller current_func_id before resume-point publication"
+        );
+    }
+
+    #[test]
+    fn vm_jit_shadow_capacity_roots_062_non_ok_push_frame_failure_is_fatal_before_resume_publication(
+    ) {
+        let src = vo_source_contract::production_source_without_test_modules(include_str!(
+            "result_flow.rs"
+        ));
+        let slow_path = src
+            .split("pub fn emit_non_ok_slow_path")
+            .nth(1)
+            .expect("non-OK slow path should exist");
+        let push_frame = slow_path
+            .find("NON_OK_SLOW_PATH_PUSH_FRAME_CALLSITE")
+            .expect("non-OK slow path must push a frame");
+        let null_guard = slow_path
+            .find("emit_return_jit_error_if_null_callee_args")
+            .expect("non-OK slow path must return JitError when frame publication fails");
+        let push_resume = slow_path
+            .find("NON_OK_SLOW_PATH_PUSH_RESUME_POINT_CALLSITE")
+            .expect("non-OK slow path must push a resume point");
+        assert!(
+            push_frame < null_guard && null_guard < push_resume,
+            "non-OK slow path must reject push-frame publication failure before resume publication"
+        );
+        assert!(
+            !slow_path[push_frame..push_resume].contains("emit_return_if_runtime_trap_recorded"),
+            "push-frame publication failures before resume publication must not become recoverable language panics"
+        );
+    }
 }

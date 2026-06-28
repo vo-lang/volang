@@ -168,18 +168,7 @@ impl InterfaceSlot {
     /// Check if reference type.
     #[inline]
     pub fn is_ref_type(&self) -> bool {
-        matches!(
-            self.value_kind(),
-            ValueKind::Slice
-                | ValueKind::Map
-                | ValueKind::Pointer
-                | ValueKind::Struct
-                | ValueKind::Array
-                | ValueKind::Channel
-                | ValueKind::Port
-                | ValueKind::Closure
-                | ValueKind::String
-        )
+        data_is_gc_ref(self.slot0)
     }
 
     /// Create from u64.
@@ -247,5 +236,13 @@ mod tests {
 
         let typed_nil_pointer = pack_slot0(0, 42, ValueKind::Pointer);
         assert!(!is_nil(typed_nil_pointer));
+    }
+
+    #[test]
+    fn interface_slot_ref_predicate_matches_interface_gc_scanner() {
+        let slot = InterfaceSlot::from_ref(core::ptr::null_mut(), 0, ValueKind::Island);
+
+        assert!(data_is_gc_ref(slot.slot0));
+        assert!(slot.is_ref_type());
     }
 }

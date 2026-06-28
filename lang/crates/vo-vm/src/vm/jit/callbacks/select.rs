@@ -5,32 +5,75 @@
 
 use vo_runtime::instruction::{QUEUE_RECV_MAX_ELEM_SLOTS, QUEUE_SEND_MAX_ELEM_SLOTS};
 use vo_runtime::jit_api::{
-    set_jit_infra_error, JitContext, JitResult, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+    set_jit_infra_error, set_jit_infra_error_with_message, JitContext, JitResult,
+    JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
 };
 use vo_runtime::slot::Slot;
 
 use crate::exec::{self, SelectResult};
-use crate::vm::{helpers, RuntimeTrapKind};
+use crate::runtime_boundary::{
+    IslandCommandEffect, PendingTransitionTerminalPolicy, ResumePolicy, RuntimeBoundary,
+    RuntimeTransition, WakeCommand,
+};
+use crate::vm::{helpers, GcRootEffect, RuntimeTrapKind};
 
-use super::helpers::{extract_context, set_jit_panic, set_jit_trap};
+use super::helpers::{
+    extract_context, queue_layout_for_current_pc, set_jit_panic, set_jit_trap,
+    validate_callback_slot_count, validate_queue_layout_slot_count,
+};
 
 // =============================================================================
 // Public JIT Callbacks
 // =============================================================================
 
-fn reject_elem_slot_width_drift(
+fn validate_elem_slots(
     ctx: *mut JitContext,
     elem_slots: u32,
     max_slots: u16,
-) -> Option<JitResult> {
-    if elem_slots <= u32::from(max_slots) {
-        return None;
+) -> Result<u8, JitResult> {
+    if elem_slots > u32::from(max_slots) {
+        return Err(set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            elem_slots as u64,
+        ));
     }
-    Some(set_jit_infra_error(
-        ctx,
-        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-        elem_slots as u64,
-    ))
+    u8::try_from(elem_slots).map_err(|_| {
+        set_jit_infra_error(
+            ctx,
+            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+            elem_slots as u64,
+        )
+    })
+}
+
+fn validate_select_reg(ctx: *mut JitContext, reg: u32) -> Result<u16, JitResult> {
+    u16::try_from(reg)
+        .map_err(|_| set_jit_infra_error(ctx, JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, reg as u64))
+}
+
+fn commit_select_transition(
+    _ctx: *mut JitContext,
+    vm: &mut crate::vm::Vm,
+    mut transition: RuntimeTransition,
+) -> JitResult {
+    transition.set_pending_terminal_policy(PendingTransitionTerminalPolicy::CommitOnAnyTerminal);
+    vm.push_pending_runtime_transition(transition);
+    JitResult::Ok
+}
+
+fn commit_select_wake(
+    ctx: *mut JitContext,
+    vm: &mut crate::vm::Vm,
+    wake: WakeCommand,
+) -> JitResult {
+    let mut transition = RuntimeTransition::new(
+        RuntimeBoundary::Continue,
+        ResumePolicy::PreserveFramePc,
+        GcRootEffect::CurrentFiberDirty,
+    );
+    transition.wakes.push(wake);
+    commit_select_transition(ctx, vm, transition)
 }
 
 /// Initialize a new select statement.
@@ -43,9 +86,18 @@ pub extern "C" fn jit_select_begin(
     case_count: u32,
     has_default: u32,
 ) -> JitResult {
+    let case_count = match validate_callback_slot_count(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        case_count as u64,
+        case_count,
+    ) {
+        Ok(case_count) => case_count,
+        Err(result) => return result,
+    };
     let (_, fiber) = unsafe { extract_context(ctx) };
 
-    exec::exec_select_begin(fiber, case_count as usize, has_default != 0);
+    exec::exec_select_begin(fiber, case_count, has_default != 0);
     JitResult::Ok
 }
 
@@ -61,33 +113,74 @@ pub extern "C" fn jit_select_send(
     queue_reg: u32,
     val_reg: u32,
     elem_slots: u32,
-    _case_idx: u32,
+    case_idx: u32,
 ) -> JitResult {
-    if let Some(result) = reject_elem_slot_width_drift(ctx, elem_slots, QUEUE_SEND_MAX_ELEM_SLOTS) {
+    let queue_reg = match validate_select_reg(ctx, queue_reg) {
+        Ok(reg) => reg,
+        Err(result) => return result,
+    };
+    let val_reg = match validate_select_reg(ctx, val_reg) {
+        Ok(reg) => reg,
+        Err(result) => return result,
+    };
+    let elem_slots = match validate_elem_slots(ctx, elem_slots, QUEUE_SEND_MAX_ELEM_SLOTS) {
+        Ok(slots) => slots,
+        Err(result) => return result,
+    };
+    let case_idx = match validate_callback_slot_count(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        case_idx as u64,
+        case_idx,
+    ) {
+        Ok(case_idx) => case_idx,
+        Err(result) => return result,
+    };
+
+    let module = unsafe { &*((*ctx).module) };
+    let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
+        Ok(layout) => layout.map(|layout| layout.to_vec()),
+        Err(msg) => {
+            return set_jit_infra_error_with_message(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                u64::from(queue_reg),
+                msg,
+            )
+        }
+    };
+    if let Err(result) = validate_queue_layout_slot_count(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        u64::from(queue_reg),
+        elem_layout.as_deref(),
+        usize::from(elem_slots),
+    ) {
         return result;
     }
-
     let (_, fiber) = unsafe { extract_context(ctx) };
 
     if fiber.select_state.is_none() {
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-            queue_reg as u64,
+            u64::from(queue_reg),
         );
     }
-    if exec::exec_select_send(
+    if exec::exec_select_send_with_layout(
         &mut fiber.select_state,
-        queue_reg as u16,
-        val_reg as u16,
-        elem_slots as u8,
+        queue_reg,
+        val_reg,
+        elem_slots,
+        elem_layout,
+        case_idx,
     )
     .is_err()
     {
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-            queue_reg as u64,
+            u64::from(queue_reg),
         );
     }
     JitResult::Ok
@@ -107,34 +200,75 @@ pub extern "C" fn jit_select_recv(
     queue_reg: u32,
     elem_slots: u32,
     has_ok: u32,
-    _case_idx: u32,
+    case_idx: u32,
 ) -> JitResult {
-    if let Some(result) = reject_elem_slot_width_drift(ctx, elem_slots, QUEUE_RECV_MAX_ELEM_SLOTS) {
+    let dst_reg = match validate_select_reg(ctx, dst_reg) {
+        Ok(reg) => reg,
+        Err(result) => return result,
+    };
+    let queue_reg = match validate_select_reg(ctx, queue_reg) {
+        Ok(reg) => reg,
+        Err(result) => return result,
+    };
+    let elem_slots = match validate_elem_slots(ctx, elem_slots, QUEUE_RECV_MAX_ELEM_SLOTS) {
+        Ok(slots) => slots,
+        Err(result) => return result,
+    };
+    let case_idx = match validate_callback_slot_count(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        case_idx as u64,
+        case_idx,
+    ) {
+        Ok(case_idx) => case_idx,
+        Err(result) => return result,
+    };
+
+    let module = unsafe { &*((*ctx).module) };
+    let elem_layout = match queue_layout_for_current_pc(unsafe { &*ctx }, module) {
+        Ok(layout) => layout.map(|layout| layout.to_vec()),
+        Err(msg) => {
+            return set_jit_infra_error_with_message(
+                ctx,
+                JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+                u64::from(queue_reg),
+                msg,
+            )
+        }
+    };
+    if let Err(result) = validate_queue_layout_slot_count(
+        ctx,
+        JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
+        u64::from(queue_reg),
+        elem_layout.as_deref(),
+        usize::from(elem_slots),
+    ) {
         return result;
     }
-
     let (_, fiber) = unsafe { extract_context(ctx) };
 
     if fiber.select_state.is_none() {
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-            queue_reg as u64,
+            u64::from(queue_reg),
         );
     }
-    if exec::exec_select_recv(
+    if exec::exec_select_recv_with_layout(
         &mut fiber.select_state,
-        dst_reg as u16,
-        queue_reg as u16,
-        elem_slots as u8,
+        dst_reg,
+        queue_reg,
+        elem_slots,
+        elem_layout,
         has_ok != 0,
+        case_idx,
     )
     .is_err()
     {
         return set_jit_infra_error(
             ctx,
             JIT_INFRA_ERROR_INVALID_CALLBACK_STATE,
-            queue_reg as u64,
+            u64::from(queue_reg),
         );
     }
     JitResult::Ok
@@ -150,6 +284,10 @@ pub extern "C" fn jit_select_recv(
 /// - JitResult::WaitQueue if select blocked (fiber registered on channels)
 /// - JitResult::Panic if send on closed channel
 pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitResult {
+    let result_reg = match validate_select_reg(ctx, result_reg) {
+        Ok(reg) => reg,
+        Err(result) => return result,
+    };
     let (vm, fiber) = unsafe { extract_context(ctx) };
 
     if fiber.select_state.is_none() {
@@ -161,16 +299,24 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
     }
     let stack = fiber.stack.as_mut_ptr() as *mut Slot;
     let bp = unsafe { (*ctx).jit_bp as usize };
+    let module = unsafe { &*((*ctx).module) };
 
     match exec::exec_select_exec(
-        stack,
-        bp,
-        vm.state.current_island_id,
-        fiber.id,
+        exec::SelectExecContext {
+            stack,
+            bp,
+            island_id: vm.state.current_island_id,
+            fiber_key: fiber.wake_key_packed(),
+            vm_state: &mut vm.state,
+            module: Some(module),
+        },
         &mut fiber.select_state,
-        result_reg as u16,
+        result_reg,
     ) {
-        SelectResult::Continue => JitResult::Ok,
+        SelectResult::Continue => {
+            vm.mark_gc_fiber_roots_dirty(crate::scheduler::FiberId::from_raw(fiber.id));
+            JitResult::Ok
+        }
         SelectResult::Block => JitResult::WaitQueue,
         SelectResult::SendOnClosed => set_jit_trap(
             &mut vm.state.gc,
@@ -188,9 +334,71 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
                 helpers::ERR_SELECT_REMOTE_UNSUPPORTED,
             )
         }
-        SelectResult::Wake(waiter) => {
-            vm.state.wake_waiter(&waiter, &mut vm.scheduler);
-            JitResult::Ok
+        SelectResult::Wake { waiter, payload } => commit_select_wake(
+            ctx,
+            vm,
+            match payload {
+                Some(payload) => WakeCommand::queue_waiter_with_result(waiter, payload),
+                None => WakeCommand::queue_waiter(waiter),
+            },
+        ),
+        SelectResult::RemoteSendAck {
+            endpoint_id,
+            target_island,
+            fiber_key,
+            wait_id,
+            closed,
+            rollback,
+        } => {
+            let mut transition = RuntimeTransition::new(
+                RuntimeBoundary::Continue,
+                ResumePolicy::PreserveFramePc,
+                GcRootEffect::CurrentFiberDirty,
+            );
+            transition
+                .island_commands
+                .push(IslandCommandEffect::endpoint_response(
+                    target_island,
+                    vm.state.current_island_id,
+                    endpoint_id,
+                    vo_runtime::island::EndpointResponseKind::SendAck { closed },
+                    fiber_key,
+                    wait_id,
+                ));
+            if let Some(rollback) = rollback {
+                transition.set_rollback(rollback);
+            }
+            commit_select_transition(ctx, vm, transition)
+        }
+        SelectResult::RemoteRecvData {
+            endpoint_id,
+            target_island,
+            fiber_key,
+            wait_id,
+            data,
+            mut island_effects,
+            rollback,
+        } => {
+            let mut transition = RuntimeTransition::new(
+                RuntimeBoundary::Continue,
+                ResumePolicy::PreserveFramePc,
+                GcRootEffect::CurrentFiberDirty,
+            );
+            transition.island_commands.append(&mut island_effects);
+            transition
+                .island_commands
+                .push(IslandCommandEffect::endpoint_recv_data_response(
+                    target_island,
+                    vm.state.current_island_id,
+                    endpoint_id,
+                    data,
+                    fiber_key,
+                    wait_id,
+                ));
+            if let Some(rollback) = rollback {
+                transition.set_rollback(rollback);
+            }
+            commit_select_transition(ctx, vm, transition)
         }
         SelectResult::Malformed(_) => set_jit_infra_error(
             ctx,
@@ -201,61 +409,4 @@ pub extern "C" fn jit_select_exec(ctx: *mut JitContext, result_reg: u32) -> JitR
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fiber::Fiber;
-    use crate::vm::jit::build_jit_context;
-    use crate::vm::{JitConfig, Vm};
-    use vo_runtime::bytecode::Module;
-    use vo_runtime::instruction::{QUEUE_RECV_MAX_ELEM_SLOTS, QUEUE_SEND_MAX_ELEM_SLOTS};
-    use vo_runtime::jit_api::{JIT_INFRA_ERROR_INVALID_CALLBACK_STATE, JIT_INFRA_ERROR_SENTINEL};
-
-    fn assert_invalid_callback_state(ctx: &JitContext) {
-        assert_eq!(ctx.runtime_trap_arg0, JIT_INFRA_ERROR_SENTINEL);
-        assert_eq!(
-            ctx.runtime_trap_arg1,
-            JIT_INFRA_ERROR_INVALID_CALLBACK_STATE
-        );
-    }
-
-    #[test]
-    fn select_send_callback_rejects_elem_slot_width_drift() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = Module::new("jit-select-send-callback-contract-test".to_string());
-        let mut fiber = Fiber::new(7);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
-
-        assert_eq!(jit_select_begin(ctx.as_ptr(), 1, 0), JitResult::Ok);
-        let result = jit_select_send(
-            ctx.as_ptr(),
-            0,
-            1,
-            u32::from(QUEUE_SEND_MAX_ELEM_SLOTS) + 1,
-            0,
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_invalid_callback_state(&ctx.ctx);
-    }
-
-    #[test]
-    fn select_recv_callback_rejects_elem_slot_width_drift() {
-        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
-        let module = Module::new("jit-select-recv-callback-contract-test".to_string());
-        let mut fiber = Fiber::new(7);
-        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
-
-        assert_eq!(jit_select_begin(ctx.as_ptr(), 1, 0), JitResult::Ok);
-        let result = jit_select_recv(
-            ctx.as_ptr(),
-            2,
-            0,
-            u32::from(QUEUE_RECV_MAX_ELEM_SLOTS) + 1,
-            0,
-            0,
-        );
-
-        assert_eq!(result, JitResult::JitError);
-        assert_invalid_callback_state(&ctx.ctx);
-    }
-}
+mod tests;

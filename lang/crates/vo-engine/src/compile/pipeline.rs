@@ -13,6 +13,7 @@ use vo_module::inline_mod::InlineMod;
 use vo_module::project::{ProjectDeps, SingleFileContext};
 use vo_module::readiness::ReadyModule;
 use vo_stdlib::EmbeddedStdlib;
+use vo_vm::bytecode::Module;
 
 use super::native::{
     check_frozen_dependency_readiness, prepare_native_extension_specs_with_readiness,
@@ -137,6 +138,7 @@ impl AnalyzedCompilation {
 
         let module =
             compile_project(&self.project).map_err(|e| CompileError::Codegen(format!("{}", e)))?;
+        verify_generated_module(&module)?;
 
         Ok(CompileOutput {
             module,
@@ -145,6 +147,19 @@ impl AnalyzedCompilation {
             locked_modules: self.locked_modules,
         })
     }
+}
+
+fn verify_generated_module(module: &Module) -> Result<(), CompileError> {
+    vo_common_core::verifier::verify_module(module)
+        .map(|_| ())
+        .map_err(|err| CompileError::Codegen(format!("generated invalid bytecode: {err}")))
+}
+
+fn invalid_bytecode_error(err: impl std::fmt::Display) -> CompileError {
+    CompileError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("invalid bytecode: {err}"),
+    ))
 }
 
 fn collect_file_set<F: FileSystem>(
@@ -190,6 +205,9 @@ pub(super) fn load_bytecode(path: &Path) -> Result<CompileOutput, CompileError> 
             format!("{:?}", e),
         ))
     })?;
+    vo_common_core::verifier::verify_module(&module)
+        .map(|_| ())
+        .map_err(invalid_bytecode_error)?;
     Ok(CompileOutput {
         module,
         source_root: path.parent().unwrap_or(Path::new(".")).to_path_buf(),

@@ -172,7 +172,7 @@ WASM support is implemented in `lang/crates/vo-web/runtime-wasm/` (`vo-web-runti
 | `fmt`, `encoding/json`, `encoding/toml`, `io` | ✅ Full | Always registered; pure Rust/Vo, no OS deps |
 | `math/rand` | ⚠️ Partial | xoroshiro128++ works, but `auto_seed()` uses a **counter only** (no time/pid/thread) — output is predictable across runs; `Read` not available in wasm |
 | `regexp` | ⚠️ Partial | Backed by **JS `RegExp`** (not Rust `regex` crate); most patterns work, but Go-specific syntax (e.g., `(?P<name>...)` named groups, POSIX classes) may differ |
-| `time` | ⚠️ Partial | `Now()` works (JS `Date`), mono clock works (`Performance.now`); **`Sleep` panics** ("not supported on wasm"); **timezone externs not registered** — `LoadLocation`, `In`, `Zone`, `localOffsetAt`, etc. will panic with unregistered extern error |
+| `time` | ✅ Full enough for current tests | `Now()` uses JS `Date`, mono clock uses `Performance.now`, `Sleep` suspends through VM host events and JS `setTimeout`, and timezone externs are registered through JS `Intl` APIs. no_std still lacks time extern registration in `vo-embed`. |
 | `os` | ⚠️ Partial | Full file I/O via **in-memory VirtualFS** (JS-side state); `Getenv` returns `""`, `os.Args` = `["wasm"]`, `Exit` no-op, `Pipe` unimplemented, `symlink`/`link` return error |
 | `path/filepath` | ⚠️ Partial | Only `EvalSymlinks` has a wasm impl (VFS-backed); all other functions are pure Vo and work fine |
 | `bufio`, `log`, `flag`, `io/fs` | ✅ Full | Pure Vo; no wasm-specific issues |
@@ -181,9 +181,8 @@ WASM support is implemented in `lang/crates/vo-web/runtime-wasm/` (`vo-web-runti
 | `sync`, `context` | ❓ Scheduler-dependent | Island-local goroutines/channels; behavior depends on whether the WASM scheduler supports concurrent fibers |
 
 **Key gaps to address if full WASM support is needed:**
-- Timezone: register `localOffsetAt`, `ianaOffsetAt` etc. via JS `Intl.DateTimeFormat` in `vo-web-runtime-wasm/src/time.rs`
 - `rand` seeding: use `crypto.getRandomValues` for true entropy
-- `time.Sleep`: use a blocking-compatible yield mechanism (JS `setTimeout` callback)
+- `net/http` client/server completeness beyond the current browser-fetch path
 
 ### 2.5 WASM / no_std — Ultimate Target State
 
@@ -267,7 +266,9 @@ Tier 3 (native):        Everything
 | 1.1.11 | Add `Duration.String() string` | Vo |
 | 1.1.12 | Write comprehensive tests | Vo |
 
-**Deferred**: Timezone/`Location` support, `Timer`/`Ticker` (requires goroutine + channel integration).
+**Current status**: Timezone/`Location` support and `Timer`/`Ticker`/`After`
+are implemented. Remaining work in this package is compatibility polish and
+target-specific edge cases, not the core timer surface.
 
 #### Phase 1.2a: `net/url` Package (New — prerequisite for `net/http`)
 
@@ -508,7 +509,7 @@ All tests verified in both VM and JIT modes via `./d.py test both --release`.
 
 #### Phase W0: Async Suspension Substrate for WASM/no_std (~4-6 days)
 
-This is the prerequisite for W2 (`time.Sleep`) and W3 (`fetch`).
+This substrate is implemented for current timer and fetch-style host events.
 
 | Task | File | Description |
 |------|------|-------------|
@@ -517,11 +518,11 @@ This is the prerequisite for W2 (`time.Sleep`) and W3 (`fetch`).
 | W0.3 | `vo-web/src/lib.rs` + `vo-web/runtime-wasm` (new wake module) | Implement re-entrant dispatch entry for browser callbacks (`setTimeout`, `Promise.then`). Callback must wake specific fiber and continue scheduling safely. |
 | W0.4 | Tests (`vo-web` wasm tests) | Add suspend/resume conformance test using a minimal test extern: verify fiber blocks, callback wakes, and execution resumes at correct PC. |
 
-**Exit criteria:** no `std` feature dependency is introduced in WASM path; suspend/resume works for both timer and Promise-style callbacks.
+**Status:** complete for current `time.Sleep` and Promise-style host-event paths.
 
 #### Phase W1: Fix Critical WASM Runtime Gaps (~3-5 days)
 
-These are user-visible failures in playground flows (timezone APIs and entropy quality).
+These were user-visible failures in playground flows (timezone APIs and entropy quality).
 
 | Task | File | Description |
 |------|------|-------------|
@@ -530,11 +531,11 @@ These are user-visible failures in playground flows (timezone APIs and entropy q
 | W1.3 | `vo-stdlib/src/rand.rs` | WASM entropy path: use `crypto.getRandomValues` for `auto_seed()` and byte-fill operations used by `Read`. |
 | W1.4 | `vo-web/runtime-wasm/src/time.rs` + extern registration tests | Add regression check that exported symbol names exactly match Vo extern declarations (e.g., `time_blocking_sleepNano` vs `time_sleepNano`). |
 
-**Exit criteria:** timezone APIs no longer panic on WASM; entropy source is cryptographically strong in browser; symbol mapping test prevents silent mismatch regressions.
+**Status:** timezone APIs are registered via JS `Intl`; entropy quality remains a gap.
 
 #### Phase W2: `time.Sleep` / Timer / Ticker on WASM (~3-5 days)
 
-`time.Sleep` currently panics; `Timer`/`Ticker`/`After` rely on it.
+`time.Sleep` now uses the host-event substrate; `Timer`/`Ticker`/`After` rely on it.
 
 | Task | File | Description |
 |------|------|-------------|
@@ -543,7 +544,7 @@ These are user-visible failures in playground flows (timezone APIs and entropy q
 | W2.3 | `tests/lang` + wasm integration tests | Add tests for `time.Sleep`, `time.After`, `NewTimer`, `NewTicker`, reset/stop behavior, and no-busy-loop guarantees. |
 | W2.4 | Scheduler re-entry tests | Verify callback-driven re-entry remains correct with nested goroutines and multiple concurrent sleepers. |
 
-**Exit criteria:** no panic path for `Sleep` on WASM; timer family behaves consistently with native semantics for supported cases.
+**Status:** `Sleep` and the timer family run on WASM through host-event wakeups for the supported test surface.
 
 #### Phase W3: `net/http` Client via Browser `fetch` (~5-8 days)
 

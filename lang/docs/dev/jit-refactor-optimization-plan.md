@@ -36,7 +36,7 @@ Key benchmarks:
 ```
 vo-jit/src/
 ├── lib.rs              JitCompiler, JitCache, JitFunc signature
-├── semantics.rs        Named opcode fact rows: capability, effects, verifier, metadata, fail-fast
+├── semantics/          Named opcode fact rows: capability, effects, verifier, metadata, fail-fast
 ├── translator.rs       IrEmitter trait, HelperFuncs, compute_memory_only_start
 ├── translate.rs        ~120 opcodes → Cranelift IR (shared by func+loop compilers)
 ├── func_compiler.rs    Full function compilation (FunctionCompiler)

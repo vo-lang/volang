@@ -156,12 +156,16 @@ impl ToolchainHost for EngineToolchainHost {
     }
 
     fn save_bytecode_binary(&self, module: &ToolchainModule, path: &str) -> Result<(), String> {
+        vo_common_core::verifier::verify_module(&module.module)
+            .map_err(|err| format!("invalid bytecode: {err}"))?;
         fs::write(path, module.module.serialize()).map_err(|e| e.to_string())
     }
 
     fn load_bytecode_binary(&self, path: &str) -> Result<ToolchainModule, String> {
         let bytes = fs::read(path).map_err(|e| e.to_string())?;
         let module = Module::deserialize(&bytes).map_err(|e| format!("{:?}", e))?;
+        vo_common_core::verifier::verify_module(&module)
+            .map_err(|err| format!("invalid bytecode: {err}"))?;
         let source_root = Path::new(path)
             .parent()
             .unwrap_or(Path::new("."))

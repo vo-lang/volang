@@ -9,6 +9,7 @@ entry points before editing.
 - [Change Type Rules Or Diagnostics](#change-type-rules-or-diagnostics)
 - [Change Codegen Lowering Without Adding Opcodes](#change-codegen-lowering-without-adding-opcodes)
 - [Add Or Change A Bytecode Instruction](#add-or-change-a-bytecode-instruction)
+- [Change VM Runtime Boundary Or Scheduler Wakes](#change-vm-runtime-boundary-or-scheduler-wakes)
 - [Change JIT Semantics, Contracts, Or Lowering](#change-jit-semantics-contracts-or-lowering)
 - [Change GC Or Root Scanning](#change-gc-or-root-scanning)
 - [Change Module Resolution Or Lock Semantics](#change-module-resolution-or-lock-semantics)
@@ -146,6 +147,43 @@ Audit serialization, text dump, debug info, GC slot metadata, call/return frame
 shape, `FunctionDef` derived metadata, `slot_types`, `capture_slot_types`,
 runtime/JIT ABI helper needs, JIT side exits, and VM call materialization.
 
+## Change VM Runtime Boundary Or Scheduler Wakes
+
+Touch likely areas:
+
+- `lang/crates/vo-vm/src/runtime_boundary.rs`
+- `lang/crates/vo-vm/src/scheduler.rs`
+- `lang/crates/vo-vm/src/fiber.rs`
+- `lang/crates/vo-vm/src/exec/*`
+- `lang/crates/vo-vm/src/vm/mod.rs`
+- `lang/crates/vo-vm/src/vm/jit/*`
+- `lang/crates/vo-runtime/src/jit_api.rs`
+- `lang/docs/dev/vm-runtime-boundary-architecture.md`
+- `lang/docs/dev/vm-runtime-boundary-repair-plan.md`
+
+Checks:
+
+```sh
+cargo test -p vo-vm
+cargo test -p vo-vm --features jit
+./d.py test both tests/lang/cases/<case>.vo
+./d.py test osr tests/lang/cases/<case>.vo
+./d.py test wasm tests/lang/cases/<case>.vo
+cargo run -q -p vo-dev -- task run gc-contract
+```
+
+Use `RuntimeTransition`/`RuntimeCommand` for runtime side effects. JIT
+callbacks that cannot commit immediately should publish pending transitions and
+let the next VM boundary commit them; terminal discard must drop the pending
+transition as a unit. Do not mutate scheduler state directly from JIT callback
+helpers unless the helper is explicitly the boundary applier.
+
+Use `FiberWakeKey`/generation checks for host event, island, queue, and I/O
+wakes. Raw `FiberId`/slot identity is insufficient across reuse. Treat
+`GcRootEffect` as part of the boundary contract: new block/yield/suspend paths
+must either mark the current fiber, all roots, or intentionally preserve the
+existing dirty-root protocol.
+
 ## Change JIT Semantics, Contracts, Or Lowering
 
 Touch likely areas:
@@ -160,6 +198,7 @@ Touch likely areas:
 - `lang/crates/vo-jit/src/translate/*`
 - `lang/crates/vo-jit/src/call_helpers/*`
 - `lang/crates/vo-vm/src/vm/jit/*`
+- `lang/crates/vo-vm/src/runtime_boundary.rs`
 - `lang/crates/vo-vm/src/vm/jit_mgr.rs`
 - `tests/lang/cases` and `tests/lang/manifest.toml`
 
@@ -183,16 +222,16 @@ effect contract derived from it.
 semantic row. Do not create a second opcode-to-metadata match. Missing metadata,
 wrong metadata kind, invalid references, call-shape drift, helper/callback ABI
 drift, and slot-layout mismatches are strict JIT errors, not implicit
-interpreter fallbacks.
+interpreter side paths.
 
-Keep verifier dispatch in `verifier/instruction_contracts/dispatch.rs` and
-shared helpers in `context.rs`, `layout.rs`, and `preflight.rs`. Concrete
-contracts belong to focused family modules such as `calls`, `collections`,
-`control`, `interface`, `memory`, and `scalar`.
+Keep VM-shared bytecode/module validation in
+`vo-common-core/src/verifier.rs`. Strict JIT verifier code should only add
+JIT-specific metadata policy and lowering/ABI capability checks after the shared
+`ModuleVerifier` has accepted the module.
 
 Use `RuntimePathPolicy`, `JitSideExitReason`, "VM call materialization", and
-"side exit" precisely. Avoid broad "fallback" language unless referring to
-legacy language-test manifest compatibility at the test boundary.
+"side exit" precisely. Avoid broad interpreter-path language unless referring to
+language-test manifest side-exit observation fields at the test boundary.
 
 For call work, follow `call_helpers/*`: plan route selection in `plan.rs`,
 dynamic call state in `dynamic/*`, extern behavior in `externs.rs`, prepared
@@ -200,6 +239,11 @@ calls in `prepared.rs`, result handling in `result_flow.rs`, VM materialization
 in `vm_materialization.rs`, and callback ABI wrappers in `callback_abi.rs`.
 VM-side bridge code belongs under `vo-vm/src/vm/jit/*`, with grouped transition
 state preferred over long argument lists.
+
+When a JIT helper performs local runtime side effects such as spawning,
+waking, host-event resume, queue/select interaction, or island response
+handling, audit whether it returns a `RuntimeTransition`, a pending transition,
+or a terminal discard. Tests should cover commit-at-boundary and discard paths.
 
 ## Change GC Or Root Scanning
 
@@ -221,6 +265,7 @@ Checks:
 cargo test -p vo-runtime gc
 cargo test -p vo-vm gc
 cargo test -p vo-jit
+cargo run -q -p vo-dev -- task run gc-contract
 cargo run -q -p vo-dev -- gc-perf --release --json dead-sweep
 ```
 
@@ -329,6 +374,7 @@ Touch likely areas:
 - `lang/crates/vo-ffi-macro/src/*`
 - `lang/crates/vo-runtime/src/ffi/*`
 - `lang/crates/vo-runtime/src/ext_loader.rs`
+- `lang/crates/vo-stdlib/src/extern_manifest.rs`
 - `lang/crates/vo-engine/src/compile/native.rs`
 - `lang/crates/vo-module/src/ext_manifest.rs`
 - `lang/docs/spec/native-ffi.md`
@@ -338,6 +384,7 @@ Checks:
 ```sh
 cargo test -p vo-ffi-macro
 cargo test -p vo-ext
+cargo test -p vo-runtime --release resolved_call_rejects_provider_identity_drift_after_load
 ./d.py test both tests/lang/cases/<extension-case>.vo
 ```
 
@@ -348,6 +395,12 @@ path, and runtime lookup names.
 `#[vo_fn]` supports simple, result, and manual wrapper modes. Result wrappers
 expect `String` errors. Native exports must provide `vo_ext_get_entries` and
 the ABI fingerprint expected by the runtime loader.
+
+Resolved extern calls compare provider identity allocated by the registry, not
+function pointer addresses. Release builds may merge identical functions, so
+never use `ExternFn` pointer equality as a provider drift check. Keep declared
+extern effects, provider manifest effects, resolved extern tables, and JIT
+routing policy in sync.
 
 Do not copy `#[vo_extern]` examples from older docs without fixing them.
 Also verify stale ABI snippets before copying fields or result variants.
@@ -406,6 +459,7 @@ Checks:
 ```sh
 ./d.py ci task docs-lint
 node scripts/ci/docs_sync.mjs --check
+node scripts/ci/docs_sync.mjs
 ```
 
 Generated Playground docs include a provenance header and digest. Regenerate
@@ -480,10 +534,14 @@ cargo run -q -p vo-dev -- lint all
 cargo run -q -p vo-dev -- task plan pr
 cargo run -q -p vo-dev -- task run task:<task-name>
 cargo run -q -p vo-dev -- verify plan pr
+cargo run -q -p vo-dev -- task run contract
 ```
 
 Do not duplicate task policy in GitHub YAML, ad hoc shell snippets, or `d.py`.
 Add data to `eng/` and interpretation to `cmd/vo-dev`.
+For test-system completeness work, use
+`lang/docs/dev/test-system-completion-plan.md` as the acceptance contract and
+close with `contract`, `site`, and `release-verify`.
 
 ## Change Release Automation
 

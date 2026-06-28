@@ -5,14 +5,15 @@ use crate::command_lint::{
     validate_first_party_run_node_workspace,
 };
 use crate::config::{
-    load_artifacts, load_ci, load_project, load_tasks, load_toolchains, ProjectRepo, Task, TaskFile,
+    load_artifacts, load_ci, load_project, load_tasks, load_toolchains, ProjectRepo, Task,
+    TaskFile, TaskGroup,
 };
 use crate::lint_policy::{
     contains_glob_meta, declared_repo_names, validate_ascii_slug, validate_repo_path_like,
     validate_structured_input_reference, validate_unique_values,
 };
 use crate::release_system;
-use crate::task_graph::task_map;
+use crate::task_graph::{resolve_selector, task_map, task_tools_recursive};
 use crate::task_planner::git_lines;
 use crate::tool_lint::lint_toolchain_file;
 use anyhow::{anyhow, bail, Result};
@@ -22,13 +23,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
-    let target = args.first().map(String::as_str).unwrap_or("all");
-    if args.len() > 1 {
-        bail!("vo-dev lint accepts at most one target");
-    }
+    let opts = LintArgs::parse(args)?;
+    let target = opts.target.as_str();
     match target {
         "tasks" => {
-            lint_tasks(root)?;
+            lint_tasks(root, opts.strict)?;
             println!("vo-dev lint tasks: ok");
         }
         "artifacts" => {
@@ -60,7 +59,7 @@ pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
             println!("vo-dev lint release: ok");
         }
         "all" => {
-            lint_tasks(root)?;
+            lint_tasks(root, opts.strict)?;
             lint_artifacts(root)?;
             lint_repo_boundaries(root)?;
             lint_layout(root)?;
@@ -75,12 +74,47 @@ pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn lint_tasks(root: &Path) -> Result<()> {
+struct LintArgs {
+    target: String,
+    strict: bool,
+}
+
+impl LintArgs {
+    fn parse(args: Vec<String>) -> Result<Self> {
+        let mut target = "all".to_string();
+        let mut target_seen = false;
+        let mut strict = false;
+        for arg in args {
+            match arg.as_str() {
+                "--strict" => strict = true,
+                other if other.starts_with('-') => bail!("unknown lint argument: {other}"),
+                other => {
+                    if target_seen {
+                        bail!("vo-dev lint accepts at most one target");
+                    }
+                    target = other.to_string();
+                    target_seen = true;
+                }
+            }
+        }
+        Ok(Self { target, strict })
+    }
+}
+
+fn lint_tasks(root: &Path, strict: bool) -> Result<()> {
     let config = load_tasks(root)?;
-    lint_task_file(root, &config)
+    lint_task_file_with_options(root, &config, strict)
 }
 
 pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
+    lint_task_file_with_options(root, config, false)
+}
+
+pub(crate) fn lint_task_file_with_options(
+    root: &Path,
+    config: &TaskFile,
+    strict: bool,
+) -> Result<()> {
     if config.version != 1 {
         bail!("eng/tasks.toml version must be 1");
     }
@@ -95,7 +129,15 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
         .iter()
         .map(|workspace| workspace.name.clone())
         .collect();
-    let allowed_tiers = ["fast", "test", "site", "release", "manual"];
+    let allowed_tiers = [
+        "fast", "test", "contract", "stress", "site", "release", "manual", "legacy",
+    ];
+    let group_meta = group_metadata_map(config)?;
+    lint_stdlib_embedded_source_inputs(&task_map)?;
+    lint_vo_dev_source_contract_consumer_inputs(&task_map)?;
+    lint_vm_hardening_tasks_run_unfiltered_crate_tests(&task_map)?;
+    lint_vm_jit_manager_surface(root)?;
+    lint_playground_host_wake_task_filter(&task_map)?;
 
     for task in &config.tasks {
         if task.name.trim().is_empty() {
@@ -128,6 +170,43 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
         validate_unique_values("task", &task.name, "output", &task.outputs)?;
         validate_unique_values("task", &task.name, "dependency", &task.needs)?;
         validate_unique_values("task", &task.name, "platform", &task.platforms)?;
+        validate_unique_values("task", &task.name, "tag", &task.tags)?;
+        for tag in &task.tags {
+            validate_ascii_slug("task tag", tag, &['-', '_', '.'])?;
+        }
+        if let Some(owner) = &task.owner {
+            validate_ascii_slug("task owner", owner, &['-', '_', '.'])?;
+        }
+        if strict && task.owner.as_deref().unwrap_or_default().trim().is_empty() {
+            bail!(
+                "task {} missing owner; add owner = \"<subsystem>\" to eng/tasks.toml",
+                task.name
+            );
+        }
+        if strict && task.tags.is_empty() {
+            bail!(
+                "task {} missing tags; add tags = [\"<surface>\", \"<domain>\"]",
+                task.name
+            );
+        }
+        if strict && !task.tags.iter().any(|tag| is_surface_tag(tag)) {
+            bail!(
+                "task {} missing surface tag; add one of {}",
+                task.name,
+                SURFACE_TAGS.join(",")
+            );
+        }
+        if strict
+            && matches!(task.tier.as_str(), "contract" | "stress")
+            && !task.tags.iter().any(|tag| tag == &task.tier)
+        {
+            bail!(
+                "task {} tier {} must also carry tag {}",
+                task.name,
+                task.tier,
+                task.tier
+            );
+        }
         if task.inputs.is_empty() {
             bail!("task {} inputs cannot be empty", task.name);
         }
@@ -230,6 +309,18 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
                 bail!("group {group} references unknown task or group {item}");
             }
         }
+        if strict && !group_meta.contains_key(group.as_str()) {
+            bail!("group {group} missing [[group]] metadata in eng/tasks.toml");
+        }
+    }
+    for group in group_meta.values() {
+        lint_task_group_metadata(config, &task_map, group, strict)?;
+    }
+    if strict {
+        lint_group_included_in_reverse_links(config, &group_meta)?;
+        lint_required_groups(config)?;
+        lint_public_task_reachability(config, &task_map)?;
+        lint_selected_gate_tasks_have_timeouts(config, &task_map)?;
     }
     for task in task_map.keys() {
         detect_task_cycle(task, &task_map, &mut Vec::new(), &mut HashSet::new())?;
@@ -237,11 +328,354 @@ pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {
     for group in config.groups.keys() {
         detect_group_cycle(group, config, &mut Vec::new(), &mut HashSet::new())?;
     }
-    lint_ci_file(root, &task_map)?;
+    lint_vm_production_selects_vm_hardening_contract(config)?;
+    lint_vm_production_selects_codegen_contract(config)?;
+    lint_vm_production_selects_vo_dev_contract(config)?;
+    lint_vm_production_selects_runtime_surface_contract(config)?;
+    lint_vm_production_selects_ffi_contract(config)?;
+    lint_vm_production_selects_docs_contract(config)?;
+    lint_vm_production_selects_app_contract(config)?;
+    lint_ci_file(root, config, &task_map)?;
+    lint_ci_selected_tool_provisioning(root, config, &tools)?;
     Ok(())
 }
 
-fn lint_ci_file(root: &Path, task_map: &BTreeMap<String, Task>) -> Result<()> {
+fn lint_stdlib_embedded_source_inputs(task_map: &BTreeMap<String, Task>) -> Result<()> {
+    for task_name in ["cargo-test-stdlib", "cargo-test-web-runtime-wasm"] {
+        let Some(task) = task_map.get(task_name) else {
+            bail!("eng/tasks.toml missing required stdlib contract task {task_name}");
+        };
+        if !task.inputs.iter().any(|input| input == "lang/stdlib/**") {
+            bail!(
+                "task {task_name} must include input lang/stdlib/** because vo-stdlib embeds the source stdlib tree"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn lint_vo_dev_source_contract_consumer_inputs(task_map: &BTreeMap<String, Task>) -> Result<()> {
+    let Some(task) = task_map.get("cargo-test-vo-dev") else {
+        bail!("eng/tasks.toml missing required vo-dev contract task cargo-test-vo-dev");
+    };
+    if !task
+        .inputs
+        .iter()
+        .any(|input| input == "lang/crates/vo-source-contract/**")
+    {
+        bail!(
+            "task cargo-test-vo-dev must include input lang/crates/vo-source-contract/** because vo-dev source-contract proofs consume that helper crate"
+        );
+    }
+    Ok(())
+}
+
+const VM_HARDENING_UNFILTERED_CRATE_TESTS: &[(&str, &[&str])] = &[
+    (
+        "cargo-test-common-core-hardening",
+        &["cargo", "test", "-p", "vo-common-core"],
+    ),
+    (
+        "cargo-test-jit-hardening",
+        &["cargo", "test", "-p", "vo-jit"],
+    ),
+    (
+        "cargo-test-vo-source-contract",
+        &["cargo", "test", "-p", "vo-source-contract"],
+    ),
+    ("cargo-test-vm-hardening", &["cargo", "test", "-p", "vo-vm"]),
+    (
+        "cargo-test-vm-hardening-jit",
+        &["cargo", "test", "-p", "vo-vm", "--features", "jit"],
+    ),
+];
+
+fn lint_vm_production_selects_vm_hardening_contract(config: &TaskFile) -> Result<()> {
+    for group in ["contract", "vm-production", "pr"] {
+        let Some(items) = config.groups.get(group) else {
+            bail!("{group} group missing from task config");
+        };
+        if !items.iter().any(|item| item == "vm-hardening") {
+            bail!("{group} must include vm-hardening");
+        }
+    }
+    let selected = resolve_selector(config, "vm-hardening")?;
+    for (required, _) in VM_HARDENING_UNFILTERED_CRATE_TESTS {
+        if !selected.iter().any(|task| task == *required) {
+            bail!("vm-hardening must select {required}");
+        }
+    }
+    Ok(())
+}
+
+fn lint_vm_hardening_tasks_run_unfiltered_crate_tests(
+    task_map: &BTreeMap<String, Task>,
+) -> Result<()> {
+    for (task_name, expected_command) in VM_HARDENING_UNFILTERED_CRATE_TESTS {
+        let Some(task) = task_map.get(*task_name) else {
+            bail!("eng/tasks.toml missing required VM hardening task {task_name}");
+        };
+        let expected: Vec<String> = expected_command
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect();
+        if task.command != expected {
+            bail!(
+                "task {task_name} must run unfiltered crate tests {:?}; name filters can let blocker proofs drift out of vm-hardening",
+                expected
+            );
+        }
+    }
+    Ok(())
+}
+
+fn lint_vm_jit_manager_surface(root: &Path) -> Result<()> {
+    let source = fs::read_to_string(root.join("lang/crates/vo-vm/src/vm/mod.rs"))?;
+    lint_vm_jit_manager_surface_in_source(&source)
+}
+
+fn lint_vm_jit_manager_surface_in_source(source: &str) -> Result<()> {
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("pub mod jit_mgr") {
+            bail!(
+                "jit_mgr must remain a private VM module; re-export only semantic public JIT types"
+            );
+        }
+        if trimmed.starts_with("pub enum VmJitState") {
+            bail!("VmJitState must remain VM-owned, not part of the public API");
+        }
+        if trimmed.starts_with("pub use jit_mgr::") && trimmed.contains("JitManager") {
+            bail!("JitManager must remain VM-owned; expose JitConfig without re-exporting the manager");
+        }
+        if trimmed.starts_with("pub jit: VmJitState") {
+            bail!("Vm.jit must remain VM-owned so strict JIT module validation cannot be bypassed");
+        }
+        if trimmed.starts_with("pub fn replace_extern_registry_for_testing") {
+            bail!("Vm must not expose an extern registry replacement hook after module load");
+        }
+    }
+    Ok(())
+}
+
+fn lint_selected_gate_tasks_have_timeouts(
+    config: &TaskFile,
+    task_map: &BTreeMap<String, Task>,
+) -> Result<()> {
+    for selector in crate::task_runner::VM_PRODUCTION_FINAL_GATE_SELECTORS {
+        for task_name in resolve_selector(config, selector)? {
+            let Some(task) = task_map.get(&task_name) else {
+                continue;
+            };
+            if task.timeout_sec.is_none() {
+                bail!("{selector} selected task {} has no timeout_sec", task.name);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn lint_vm_production_selects_codegen_contract(config: &TaskFile) -> Result<()> {
+    for group in ["contract", "vm-production", "pr"] {
+        let Some(items) = config.groups.get(group) else {
+            bail!("{group} group missing from task config");
+        };
+        if !items.iter().any(|item| item == "codegen-contract") {
+            bail!("{group} must include codegen-contract");
+        }
+    }
+    let selected = resolve_selector(config, "codegen-contract")?;
+    if !selected.iter().any(|task| task == "cargo-test-codegen") {
+        bail!("codegen-contract must select cargo-test-codegen");
+    }
+    Ok(())
+}
+
+fn lint_vm_production_selects_vo_dev_contract(config: &TaskFile) -> Result<()> {
+    for group in ["contract", "vm-production", "pr"] {
+        let Some(items) = config.groups.get(group) else {
+            bail!("{group} group missing from task config");
+        };
+        if !items.iter().any(|item| item == "vo-dev-contract") {
+            bail!("{group} must include vo-dev-contract");
+        }
+    }
+    let selected = resolve_selector(config, "vo-dev-contract")?;
+    for required in ["eng-lint-tasks", "cargo-test-vo-dev", "cargo-test-vo-test"] {
+        if !selected.iter().any(|task| task == required) {
+            bail!("vo-dev-contract must select {required}");
+        }
+    }
+    Ok(())
+}
+
+fn lint_vm_production_selects_runtime_surface_contract(config: &TaskFile) -> Result<()> {
+    for group in ["contract", "vm-production", "pr"] {
+        let Some(items) = config.groups.get(group) else {
+            bail!("{group} group missing from task config");
+        };
+        if !items.iter().any(|item| item == "runtime-surface-contract") {
+            bail!("{group} must include runtime-surface-contract");
+        }
+    }
+    let selected = resolve_selector(config, "runtime-surface-contract")?;
+    for required in [
+        "cargo-check-vo-app-runtime",
+        "cargo-test-vo-app-runtime",
+        "cargo-test-vo-engine",
+        "cargo-test-vo-playground-host-wake",
+    ] {
+        if !selected.iter().any(|task| task == required) {
+            bail!("runtime-surface-contract must select {required}");
+        }
+    }
+    Ok(())
+}
+
+fn lint_vm_production_selects_ffi_contract(config: &TaskFile) -> Result<()> {
+    for group in ["contract", "vm-production", "pr"] {
+        let Some(items) = config.groups.get(group) else {
+            bail!("{group} group missing from task config");
+        };
+        if !items.iter().any(|item| item == "ffi-contract") {
+            bail!("{group} must include ffi-contract");
+        }
+    }
+    let selected = resolve_selector(config, "ffi-contract")?;
+    for required in [
+        "cargo-test-ffi-macro",
+        "cargo-test-vo-ext",
+        "cargo-check-vo-ext-wasm",
+    ] {
+        if !selected.iter().any(|task| task == required) {
+            bail!("ffi-contract must select {required}");
+        }
+    }
+    Ok(())
+}
+
+fn lint_vm_production_selects_docs_contract(config: &TaskFile) -> Result<()> {
+    for group in ["contract", "vm-production"] {
+        let Some(items) = config.groups.get(group) else {
+            bail!("{group} group missing from task config");
+        };
+        if !items.iter().any(|item| item == "docs-contract") {
+            bail!("{group} must include docs-contract");
+        }
+    }
+    let selected = resolve_selector(config, "docs-contract")?;
+    if !selected.iter().any(|task| task == "docs-lint") {
+        bail!("docs-contract must select docs-lint");
+    }
+    lint_docs_lint_shell_inputs(config)?;
+    Ok(())
+}
+
+fn lint_vm_production_selects_app_contract(config: &TaskFile) -> Result<()> {
+    for group in ["contract", "vm-production", "pr"] {
+        let Some(items) = config.groups.get(group) else {
+            bail!("{group} group missing from task config");
+        };
+        if !items.iter().any(|item| item == "app-contract") {
+            bail!("{group} must include app-contract");
+        }
+    }
+    let selected = resolve_selector(config, "app-contract")?;
+    for required in [
+        "wasm-check",
+        "cargo-test-web-hardening",
+        "cargo-test-studio-wasm-source-contract",
+        "cargo-test-web-runtime-wasm",
+        "vo-test-wasm",
+    ] {
+        if !selected.iter().any(|task| task == required) {
+            bail!("app-contract must select {required}");
+        }
+    }
+    lint_studio_wasm_source_contract_inputs(config)?;
+    Ok(())
+}
+
+fn lint_studio_wasm_source_contract_inputs(config: &TaskFile) -> Result<()> {
+    let Some(task) = config
+        .tasks
+        .iter()
+        .find(|task| task.name == "cargo-test-studio-wasm-source-contract")
+    else {
+        bail!("cargo-test-studio-wasm-source-contract task missing from task config");
+    };
+    for required in [
+        "apps/studio/wasm/src/lib.rs",
+        "apps/studio/src/lib/studio_wasm.ts",
+    ] {
+        if !task.inputs.iter().any(|input| input == required) {
+            bail!("cargo-test-studio-wasm-source-contract inputs must include {required}");
+        }
+    }
+    Ok(())
+}
+
+fn lint_docs_lint_shell_inputs(config: &TaskFile) -> Result<()> {
+    let Some(task) = config.tasks.iter().find(|task| task.name == "docs-lint") else {
+        bail!("docs-lint task missing from task config");
+    };
+    for required_tool in ["node", "rust", "vo-dev"] {
+        if !task.tools.iter().any(|tool| tool == required_tool) {
+            bail!("docs-lint tools must include {required_tool}");
+        }
+    }
+    for required in [
+        "cmd/vo-dev/**",
+        "eng/tasks.toml",
+        "scripts/ci/docs_lint.mjs",
+        "scripts/ci/docs_sync.mjs",
+        "lang/docs/spec/**",
+        "lang/docs/dev/**",
+        "lang/docs/dev-notes/**",
+        "lang/docs/vo-for-gophers.md",
+        "apps/playground-legacy/src/assets/docs/generated/**",
+        "apps/studio/docs/manifest.toml",
+        "apps/studio/docs/pages/**",
+    ] {
+        if !task.inputs.iter().any(|input| input == required) {
+            bail!("docs-lint inputs must include {required}");
+        }
+    }
+    Ok(())
+}
+
+fn lint_ci_selected_tool_provisioning(
+    root: &Path,
+    config: &TaskFile,
+    tools: &crate::config::ToolchainFile,
+) -> Result<()> {
+    let pr_tasks = resolve_selector(config, "pr")?;
+    let mut selected_tools = BTreeSet::new();
+    for task in pr_tasks {
+        selected_tools.extend(task_tools_recursive(root, &task)?);
+    }
+    for name in selected_tools {
+        let Some(tool) = tools.tools.get(&name) else {
+            bail!("CI-selected tool {name} is not declared in eng/toolchains.toml");
+        };
+        if tool.required == Some(false) || ci_workflow_provisions_tool(&name, tool) {
+            continue;
+        }
+        bail!(
+            "CI-selected required tool {name} has no provisioning path; add a bootstrap command in eng/toolchains.toml or teach the workflow/vo-dev policy to provision it"
+        );
+    }
+    Ok(())
+}
+
+fn ci_workflow_provisions_tool(name: &str, tool: &crate::config::Tool) -> bool {
+    matches!(
+        name,
+        "rust" | "python" | "node" | "npm" | "vo-dev" | "wasm-pack"
+    ) || tool.bootstrap.is_some()
+}
+
+fn lint_ci_file(root: &Path, config: &TaskFile, task_map: &BTreeMap<String, Task>) -> Result<()> {
     let ci = load_ci(root)?;
     if ci.version != 1 {
         bail!("eng/ci.toml version must be 1");
@@ -272,6 +706,218 @@ fn lint_ci_file(root: &Path, task_map: &BTreeMap<String, Task>) -> Result<()> {
             validate_ci_route_task(task_map, &format!("known_prefix {}", prefix.path), task)?;
         }
     }
+    lint_vm_readiness_changed_prefixes(&ci.known_prefix)?;
+    lint_vm_readiness_changed_prefix_scopes(&ci.known_prefix, config)?;
+    Ok(())
+}
+
+const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
+    (
+        "lang/crates/vo-vm/**",
+        &[
+            "vo-test-runtime-contract",
+            "vo-test-jit-contract",
+            "cargo-test-vm-hardening",
+            "cargo-test-vm-hardening-jit",
+        ],
+    ),
+    (
+        "lang/crates/vo-runtime/**",
+        &[
+            "cargo-test-runtime",
+            "cargo-test-gc-runtime",
+            "vo-test-runtime-contract",
+            "vo-test-gc",
+            "cargo-test-vm-hardening",
+            "cargo-test-vm-hardening-jit",
+        ],
+    ),
+    (
+        "lang/crates/vo-jit/**",
+        &[
+            "vo-test-runtime-contract",
+            "vo-test-jit-contract",
+            "cargo-test-jit-hardening",
+            "cargo-test-vm-hardening-jit",
+        ],
+    ),
+    (
+        "lang/crates/vo-source-contract/**",
+        &[
+            "cargo-test-vo-source-contract",
+            "cargo-test-vo-dev",
+            "cargo-test-runtime",
+            "cargo-test-jit-hardening",
+            "cargo-test-vm-hardening",
+            "cargo-test-vm-hardening-jit",
+        ],
+    ),
+    (
+        "lang/crates/vo-analysis/**",
+        &["cargo-test-analysis", "vo-test-compile"],
+    ),
+    (
+        "lang/crates/vo-codegen/**",
+        &[
+            "vo-test-runtime-contract",
+            "vo-test-jit-contract",
+            "vo-test-osr",
+            "cargo-test-codegen",
+            "vo-test-compile",
+        ],
+    ),
+    (
+        "tests/lang/**",
+        &[
+            "test-data-lint",
+            "vo-test-compile",
+            "vo-test",
+            "vo-test-osr",
+            "vo-test-nostd",
+            "vo-test-wasm",
+            "vo-test-gc",
+        ],
+    ),
+    (
+        "lang/stdlib/**",
+        &[
+            "cargo-test-stdlib",
+            "cargo-test-web-runtime-wasm",
+            "vo-test-runtime-contract",
+            "vo-test-wasm",
+        ],
+    ),
+    (
+        "lang/crates/vo-ffi-macro/**",
+        &[
+            "cargo-test-ffi-macro",
+            "cargo-test-vo-ext",
+            "cargo-check-vo-ext-wasm",
+        ],
+    ),
+    (
+        "lang/crates/vo-ext/**",
+        &[
+            "cargo-test-vo-ext",
+            "cargo-check-vo-ext-wasm",
+            "cargo-test-ffi-macro",
+        ],
+    ),
+    (
+        "lang/crates/vo-app-runtime/**",
+        &["cargo-check-vo-app-runtime", "cargo-test-vo-app-runtime"],
+    ),
+    ("lang/crates/vo-engine/**", &["cargo-test-vo-engine"]),
+    (
+        "lang/crates/vo-web/**",
+        &[
+            "wasm-check",
+            "vo-test-wasm",
+            "cargo-test-web-hardening",
+            "cargo-test-web-runtime-wasm",
+        ],
+    ),
+    (
+        "apps/playground-legacy/rust/**",
+        &["cargo-test-vo-playground-host-wake"],
+    ),
+    (
+        "apps/studio/**",
+        &[
+            "docs-lint",
+            "studio-build",
+            "cargo-test-studio-wasm-source-contract",
+        ],
+    ),
+    ("cmd/vo-dev/**", &["eng-lint-tasks", "cargo-test-vo-dev"]),
+    ("eng/tasks.toml", &["eng-lint-tasks", "cargo-test-vo-dev"]),
+    ("eng/ci.toml", &["eng-lint-tasks", "cargo-test-vo-dev"]),
+    (".github/workflows/**", &["docs-lint", "ci-self-check"]),
+    (
+        "scripts/ci/**",
+        &["docs-lint", "ci-self-check", "quickplay-validate"],
+    ),
+];
+
+const VM_PRODUCTION_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
+    (
+        "lang/crates/vo-analysis/**",
+        &["cargo-test-analysis", "vo-test-compile"],
+    ),
+    (
+        "tests/lang/**",
+        &[
+            "test-data-lint",
+            "vo-test-compile",
+            "vo-test",
+            "vo-test-osr",
+            "vo-test-nostd",
+            "vo-test-wasm",
+            "vo-test-gc",
+        ],
+    ),
+];
+
+fn lint_vm_readiness_changed_prefixes(prefixes: &[crate::config::KnownPrefix]) -> Result<()> {
+    for (path, required_tasks) in VM_READINESS_CHANGED_PREFIX_TASKS {
+        let Some(prefix) = prefixes.iter().find(|prefix| prefix.path == *path) else {
+            bail!("eng/ci.toml missing VM readiness changed-mode prefix {path}");
+        };
+        for required in *required_tasks {
+            if !prefix.tasks.iter().any(|task| task == required) {
+                bail!(
+                    "eng/ci.toml known_prefix {path} must select {required} for VM readiness changed-mode coverage"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn lint_vm_readiness_changed_prefix_scopes(
+    prefixes: &[crate::config::KnownPrefix],
+    config: &TaskFile,
+) -> Result<()> {
+    let pr_scope: BTreeSet<_> = resolve_selector(config, "pr")?.into_iter().collect();
+    for (path, required_tasks) in VM_READINESS_CHANGED_PREFIX_TASKS {
+        if !prefixes.iter().any(|prefix| prefix.path == *path) {
+            continue;
+        }
+        for required in *required_tasks {
+            if !pr_scope.contains(*required) {
+                bail!(
+                    "eng/tasks.toml pr scope must include {required} selected by VM readiness changed-mode prefix {path}"
+                );
+            }
+        }
+    }
+    let vm_production_scope: BTreeSet<_> = resolve_selector(config, "vm-production")?
+        .into_iter()
+        .collect();
+    for (path, required_tasks) in VM_PRODUCTION_READINESS_CHANGED_PREFIX_TASKS {
+        if !prefixes.iter().any(|prefix| prefix.path == *path) {
+            continue;
+        }
+        for required in *required_tasks {
+            if !vm_production_scope.contains(*required) {
+                bail!(
+                    "eng/tasks.toml vm-production scope must include {required} selected by VM readiness changed-mode prefix {path}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn lint_playground_host_wake_task_filter(task_map: &BTreeMap<String, Task>) -> Result<()> {
+    let Some(task) = task_map.get("cargo-test-vo-playground-host-wake") else {
+        bail!("cargo-test-vo-playground-host-wake task missing from task config");
+    };
+    if !task.command.iter().any(|arg| arg == "host_wake") {
+        bail!(
+            "cargo-test-vo-playground-host-wake must use host_wake filter so all host wake proofs run"
+        );
+    }
     Ok(())
 }
 
@@ -286,6 +932,245 @@ fn validate_ci_route_task(
     if entry.internal {
         bail!("eng/ci.toml {owner} references internal task {task}");
     }
+    Ok(())
+}
+
+const SURFACE_TAGS: &[&str] = &[
+    "manifest-lint",
+    "lang-case",
+    "crate-unit",
+    "crate-integration",
+    "contract",
+    "model",
+    "docs-policy",
+    "example-smoke",
+    "benchmark",
+    "app-build",
+    "app-smoke",
+    "release-verify",
+    "legacy-excluded",
+    "tooling",
+    "repo-policy",
+];
+
+const REQUIRED_GROUPS: &[&str] = &[
+    "quality",
+    "lang-main",
+    "lang-backends",
+    "compile-contract",
+    "gc-contract",
+    "jit-contract",
+    "runtime-contract",
+    "runtime-surface-contract",
+    "typechecker-contract",
+    "codegen-contract",
+    "module-contract",
+    "release-contract",
+    "docs-contract",
+    "app-contract",
+    "docs",
+    "examples",
+    "benchmarks",
+    "app-site",
+    "release-verify",
+    "legacy-excluded",
+    "contract",
+    "stress",
+    "vm-production",
+    "test",
+    "site",
+    "full",
+    "pr",
+];
+
+const TOP_LEVEL_GROUPS: &[&str] = &[
+    "pr",
+    "full",
+    "quality",
+    "test",
+    "contract",
+    "stress",
+    "vm-production",
+    "site",
+    "release-verify",
+    "legacy-excluded",
+];
+
+fn is_surface_tag(tag: &str) -> bool {
+    SURFACE_TAGS.contains(&tag)
+}
+
+fn group_metadata_map(config: &TaskFile) -> Result<BTreeMap<&str, &TaskGroup>> {
+    let mut out = BTreeMap::new();
+    for group in &config.group_meta {
+        validate_ascii_slug("group name", &group.name, &['-'])?;
+        if out.insert(group.name.as_str(), group).is_some() {
+            bail!("duplicate [[group]] metadata for {}", group.name);
+        }
+    }
+    Ok(out)
+}
+
+fn lint_task_group_metadata(
+    config: &TaskFile,
+    task_map: &BTreeMap<String, Task>,
+    group: &TaskGroup,
+    strict: bool,
+) -> Result<()> {
+    if group.title.trim().is_empty() {
+        bail!("group {} title cannot be empty", group.name);
+    }
+    if group.tier_intent.trim().is_empty() {
+        bail!("group {} tier_intent cannot be empty", group.name);
+    }
+    validate_ascii_slug("group owner", &group.owner, &['-', '_', '.'])?;
+    validate_unique_values("group metadata", &group.name, "tag", &group.tags)?;
+    validate_unique_values("group metadata", &group.name, "task", &group.tasks)?;
+    validate_unique_values(
+        "group metadata",
+        &group.name,
+        "included_in",
+        &group.included_in,
+    )?;
+    for tag in &group.tags {
+        validate_ascii_slug("group tag", tag, &['-', '_', '.'])?;
+    }
+    for item in &group.tasks {
+        if !task_map.contains_key(item) && !config.groups.contains_key(item) {
+            bail!(
+                "group metadata {} references unknown task or group {item}",
+                group.name
+            );
+        }
+    }
+    for parent in &group.included_in {
+        if !config.groups.contains_key(parent) {
+            bail!(
+                "group metadata {} included_in references unknown group {parent}",
+                group.name
+            );
+        }
+    }
+    if group.selection_policy.trim().is_empty() {
+        bail!("group {} selection_policy cannot be empty", group.name);
+    }
+    if strict {
+        if group.tags.is_empty() {
+            bail!("group {} missing tags", group.name);
+        }
+        let Some(items) = config.groups.get(&group.name) else {
+            bail!("group metadata {} has no [groups] entry", group.name);
+        };
+        if items != &group.tasks {
+            bail!(
+                "group metadata {} tasks must match [groups] entry",
+                group.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn lint_group_included_in_reverse_links(
+    config: &TaskFile,
+    group_meta: &BTreeMap<&str, &TaskGroup>,
+) -> Result<()> {
+    let mut expected_parents: BTreeMap<&str, BTreeSet<&str>> = config
+        .groups
+        .keys()
+        .map(|group| (group.as_str(), BTreeSet::new()))
+        .collect();
+    for (parent, items) in &config.groups {
+        for item in items {
+            if !config.groups.contains_key(item) {
+                continue;
+            }
+            if let Some(parents) = expected_parents.get_mut(item.as_str()) {
+                parents.insert(parent.as_str());
+            }
+        }
+    }
+    let mut errors = Vec::new();
+    for (group, metadata) in group_meta {
+        let expected = expected_parents
+            .get(group)
+            .cloned()
+            .unwrap_or_else(BTreeSet::new);
+        let actual: BTreeSet<&str> = metadata.included_in.iter().map(String::as_str).collect();
+        for parent in expected.difference(&actual) {
+            errors.push(format!(
+                "{group} included_in must include parent group {parent}"
+            ));
+        }
+        for parent in actual.difference(&expected) {
+            errors.push(format!(
+                "{group} included_in must not include non-parent group {parent}"
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        bail!(
+            "group metadata included_in must match direct [groups] parents: {}",
+            errors.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn lint_required_groups(config: &TaskFile) -> Result<()> {
+    for group in REQUIRED_GROUPS {
+        if !config.groups.contains_key(*group) {
+            bail!("required group {group} missing from eng/tasks.toml");
+        }
+    }
+    Ok(())
+}
+
+fn lint_public_task_reachability(
+    config: &TaskFile,
+    task_map: &BTreeMap<String, Task>,
+) -> Result<()> {
+    let mut reachable = HashSet::new();
+    for group in TOP_LEVEL_GROUPS {
+        if config.groups.contains_key(*group) {
+            collect_group_reachable(config, group, &mut reachable, &mut Vec::new())?;
+        }
+    }
+    for task in task_map.values() {
+        if !task.internal && !reachable.contains(&task.name) {
+            bail!(
+                "public task {} is not reachable from a top-level task group",
+                task.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn collect_group_reachable(
+    config: &TaskFile,
+    group: &str,
+    reachable: &mut HashSet<String>,
+    stack: &mut Vec<String>,
+) -> Result<()> {
+    if stack.iter().any(|item| item == group) {
+        stack.push(group.to_string());
+        bail!(
+            "group cycle while checking reachability: {}",
+            stack.join(" -> ")
+        );
+    }
+    stack.push(group.to_string());
+    if let Some(items) = config.groups.get(group) {
+        for item in items {
+            if config.groups.contains_key(item) {
+                collect_group_reachable(config, item, reachable, stack)?;
+            } else {
+                reachable.insert(item.clone());
+            }
+        }
+    }
+    stack.pop();
     Ok(())
 }
 
@@ -937,3 +1822,6 @@ fn first_file_with_extension(dir: &Path, extension: &str) -> Result<Option<PathB
 fn benchmark_file_stem(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).replace('-', "_")
 }
+
+#[cfg(test)]
+mod tests;

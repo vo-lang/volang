@@ -1,6 +1,6 @@
-use crate::test_config::load_test_config;
+use crate::test_config::{load_test_config, TestConfig};
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,23 +21,146 @@ pub(crate) struct ManifestCase {
     pub(crate) path: String,
     #[serde(default)]
     pub(crate) targets: Vec<String>,
+    pub(crate) matrix: Option<String>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    pub(crate) owner: Option<String>,
     #[serde(default)]
     pub(crate) skip: Vec<String>,
     #[serde(default)]
     pub(crate) timeout: BTreeMap<String, u64>,
-    reason: Option<String>,
-    zip_root: Option<String>,
+    pub(crate) reason: Option<String>,
+    pub(crate) zip_root: Option<String>,
     #[serde(default)]
-    blank: bool,
-    expect: Option<toml::Value>,
+    pub(crate) blank: bool,
+    pub(crate) expect: Option<toml::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CaseExpect {
     pub(crate) kind: String,
     pub(crate) patterns: Vec<String>,
     pub(crate) jit_regular_call_side_exits_min: Option<u64>,
+    pub(crate) jit_loop_entries_min: Option<u64>,
 }
+
+#[derive(Debug, Serialize)]
+struct TestCatalog {
+    schema: &'static str,
+    suite: String,
+    cases: Vec<TestCatalogCase>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestCatalogCase {
+    id: String,
+    kind: String,
+    path: String,
+    targets: Vec<String>,
+    matrix: Option<String>,
+    tags: Vec<String>,
+    owner: Option<String>,
+    skip: Vec<String>,
+    timeout: BTreeMap<String, u64>,
+    reason: Option<String>,
+    expect: CaseExpect,
+}
+
+#[derive(Debug, Serialize)]
+struct TestStats {
+    schema: &'static str,
+    suite: String,
+    cases: usize,
+    jobs: usize,
+    expected_fail_cases: usize,
+    skip_entries: usize,
+    cases_by_kind: BTreeMap<String, usize>,
+    cases_by_matrix: BTreeMap<String, usize>,
+    jobs_by_target: BTreeMap<String, usize>,
+    skips_by_target: BTreeMap<String, usize>,
+    cases_by_tag: BTreeMap<String, usize>,
+    cases_by_owner: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestCoverage {
+    schema: &'static str,
+    suite: String,
+    cases: usize,
+    missing_matrix: usize,
+    missing_tags: usize,
+    missing_owner: usize,
+    missing_expect: usize,
+    explicit_targets: usize,
+    explicit_targets_without_reason: usize,
+    compile_fail_without_compile_matrix: usize,
+    gc_filename_only: usize,
+    unowned_skips: usize,
+    unowned_failures: usize,
+    unowned_timeouts: usize,
+    unowned_target_overrides: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TestExplain {
+    schema: &'static str,
+    suite: String,
+    case: TestCatalogCase,
+    selected_targets: Vec<String>,
+    selected_jobs: Vec<String>,
+    reasons: Vec<String>,
+}
+
+const VM_READINESS_OSR_BLOCKER_CASES_061: &[&str] = &[
+    "dyn.dyn-set-from-get",
+    "dyn.dyn-set-index-map-key-validation",
+    "dyn.int-index-variants",
+];
+
+const VM_READINESS_OSR_BLOCKER_REQUIRED_TAGS_061: &[&str] = &["jit", "osr", "contract"];
+
+const VM_READINESS_OSR_LOOP_CONTRACT_CASES_061: &[&str] = &[
+    "bugs.2026-01-31-jit-http-server-client-osr",
+    "bugs.2026-06-15-osr-prepared-call-stack",
+    "dyn.osr-dynamic-set-from-get-contract",
+    "dyn.osr-dynamic-integer-key-contract",
+    "dyn.osr-dynamic-protocol-index-contract",
+];
+
+const VM_READINESS_JIT_TARGET_CONTRACT_CASES_061: &[&str] =
+    &["bugs.2026-01-31-jit-http-server-client"];
+
+struct RequiredVmReadinessCase062 {
+    id: &'static str,
+    path: &'static str,
+}
+
+const VM_READINESS_REQUIRED_CASES_062: &[RequiredVmReadinessCase062] = &[
+    RequiredVmReadinessCase062 {
+        id: "bugs.2026-01-31-jit-http-server-client",
+        path: "cases/bugs/2026_01_31_jit_http_server_client.vo",
+    },
+    RequiredVmReadinessCase062 {
+        id: "bugs.2026-01-31-jit-http-server-client-osr",
+        path: "cases/bugs/2026_01_31_jit_http_server_client.vo",
+    },
+    RequiredVmReadinessCase062 {
+        id: "bugs.2026-06-15-osr-prepared-call-stack",
+        path: "cases/bugs/2026_06_15_osr_prepared_call_stack.vo",
+    },
+    RequiredVmReadinessCase062 {
+        id: "dyn.osr-dynamic-set-from-get-contract",
+        path: "cases/dyn/osr_dynamic_set_from_get_contract.vo",
+    },
+    RequiredVmReadinessCase062 {
+        id: "dyn.osr-dynamic-integer-key-contract",
+        path: "cases/dyn/osr_dynamic_integer_key_contract.vo",
+    },
+    RequiredVmReadinessCase062 {
+        id: "dyn.osr-dynamic-protocol-index-contract",
+        path: "cases/dyn/osr_dynamic_protocol_index_contract.vo",
+    },
+];
 
 pub(crate) fn load_manifest(root: &Path) -> Result<ManifestFile> {
     let path = root.join("tests/lang/manifest.toml");
@@ -81,6 +204,7 @@ pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
             kind: "pass".to_string(),
             patterns: Vec::new(),
             jit_regular_call_side_exits_min: None,
+            jit_loop_entries_min: None,
         });
     };
     match value {
@@ -88,6 +212,7 @@ pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
             kind: "pass".to_string(),
             patterns: Vec::new(),
             jit_regular_call_side_exits_min: None,
+            jit_loop_entries_min: None,
         }),
         toml::Value::Table(table) => {
             if let Some(fail) = table.get("fail") {
@@ -110,6 +235,7 @@ pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
                     kind: "fail".to_string(),
                     patterns,
                     jit_regular_call_side_exits_min: None,
+                    jit_loop_entries_min: None,
                 });
             }
 
@@ -126,14 +252,39 @@ pub(crate) fn parse_case_expect(case: &ManifestCase) -> Result<CaseExpect> {
                 "jit_regular_call_side_exits_min",
                 Some("jit_regular_call_fallbacks_min"),
             )?;
+            let jit_loop_entries_min =
+                parse_u64_expect_min(case, table, "jit_loop_entries_min", None)?;
             Ok(CaseExpect {
                 kind: "pass".to_string(),
                 patterns: Vec::new(),
                 jit_regular_call_side_exits_min,
+                jit_loop_entries_min,
             })
         }
         other => bail!("case {} has invalid expect value {other:?}", case.id),
     }
+}
+
+pub(crate) fn resolved_case_targets(
+    case: &ManifestCase,
+    test_config: &TestConfig,
+) -> Result<Vec<String>> {
+    if let Some(matrix) = case.matrix.as_deref() {
+        if !test_config.matrices.contains_key(matrix) {
+            bail!("case {} references unknown matrix {}", case.id, matrix);
+        }
+    }
+    if !case.targets.is_empty() {
+        return Ok(case.targets.clone());
+    }
+    let Some(matrix) = case.matrix.as_deref() else {
+        return Ok(Vec::new());
+    };
+    test_config
+        .matrices
+        .get(matrix)
+        .cloned()
+        .ok_or_else(|| anyhow!("case {} references unknown matrix {}", case.id, matrix))
 }
 
 fn parse_u64_expect_min(
@@ -165,7 +316,7 @@ fn parse_u64_expect_min(
         .transpose()
 }
 
-pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
+pub(crate) fn lint_tests(root: &Path, suite: &str, strict: bool) -> Result<()> {
     let manifest = load_manifest(root)?;
     let test_config = load_test_config(root)?;
     let targets = &test_config.targets;
@@ -214,15 +365,17 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             bail!("duplicate test case id: {}", case.id);
         }
         validate_manifest_case_shape(case)?;
+        validate_manifest_case_metadata(case, &test_config, strict)?;
         if case.kind != "file" && case.kind != "project" && case.kind != "zip" {
             bail!("case {} has invalid kind {}", case.id, case.kind);
         }
         let expect = parse_case_expect(case)?;
-        if case.targets.is_empty() && expect.kind != "fail" {
-            bail!("case {} targets cannot be empty", case.id);
+        let resolved_targets = resolved_case_targets(case, &test_config)?;
+        if resolved_targets.is_empty() && expect.kind != "fail" {
+            bail!("case {} must declare matrix or targets", case.id);
         }
         let mut target_names = HashSet::new();
-        for target in &case.targets {
+        for target in &resolved_targets {
             if !target_names.insert(target) {
                 bail!("case {} has duplicate target {}", case.id, target);
             }
@@ -240,7 +393,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                 );
             }
         }
-        for target in case.targets.iter().chain(case.skip.iter()) {
+        for target in resolved_targets.iter().chain(case.skip.iter()) {
             if !targets.contains_key(target) {
                 bail!("case {} references unknown target {}", case.id, target);
             }
@@ -266,9 +419,8 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
         if !case.skip.is_empty() && !has_manifest_reason(case) {
             bail!("case {} has skips but no reason", case.id);
         }
-        if !case.targets.is_empty()
-            && case
-                .targets
+        if !resolved_targets.is_empty()
+            && resolved_targets
                 .iter()
                 .all(|target| has_target_name(&case.skip, target))
             && !case.blank
@@ -278,7 +430,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                 case.id
             );
         }
-        if case.targets.iter().any(|target| {
+        if resolved_targets.iter().any(|target| {
             targets
                 .get(target)
                 .is_some_and(|target| target.kind == "wasm")
@@ -296,7 +448,11 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             "zip" if !path.is_file() => bail!("case {} missing zip {}", case.id, case.path),
             _ => {}
         }
-        if expect.kind == "fail" && !case.targets.is_empty() {
+        if expect.kind == "fail"
+            && resolved_targets
+                .iter()
+                .any(|target| target.as_str() != "compile")
+        {
             bail!(
                 "case {} expected failure must not declare runtime targets",
                 case.id
@@ -323,10 +479,12 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             bail!("blank case {} must be explicitly skipped", case.id);
         }
         if case.kind == "file" && expect.kind == "pass" && !case.blank {
-            let missing_default_targets =
-                missing_required_targets(&case.targets, &test_config.required_file_pass_targets);
+            let missing_default_targets = missing_required_targets(
+                &resolved_targets,
+                &test_config.required_file_pass_targets,
+            );
             if !missing_default_targets.is_empty()
-                && !looks_like_gc_regression(case)
+                && !is_gc_regression_case(case)
                 && !has_manifest_reason(case)
             {
                 bail!(
@@ -335,9 +493,10 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                     missing_default_targets.join(",")
                 );
             }
-            if looks_like_gc_regression(case)
-                && !missing_required_targets(&case.targets, &test_config.gc_regression_targets)
+            if is_gc_regression_case(case)
+                && !missing_required_targets(&resolved_targets, &test_config.gc_regression_targets)
                     .is_empty()
+                && !has_manifest_reason(case)
             {
                 bail!(
                     "case {} looks like a GC regression but does not target {}",
@@ -358,7 +517,7 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
                 bail!("case {} sets blank = true but file is not blank", case.id);
             }
             if case.blank {
-                for target in &case.targets {
+                for target in &resolved_targets {
                     if !has_target_name(&case.skip, target) {
                         bail!(
                             "blank case {} must skip target {} or remove it from targets",
@@ -370,7 +529,418 @@ pub(crate) fn lint_tests(root: &Path, suite: &str) -> Result<()> {
             }
         }
     }
+    if strict {
+        validate_required_vm_readiness_cases_present_062(&manifest.cases)?;
+    }
     Ok(())
+}
+
+pub(crate) fn print_test_stats(root: &Path, suite: &str, format: &str) -> Result<()> {
+    let stats = collect_test_stats(root, suite)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        print_test_stats_text(&stats);
+    }
+    Ok(())
+}
+
+fn collect_test_stats(root: &Path, suite: &str) -> Result<TestStats> {
+    let manifest = load_manifest(root)?;
+    let test_config = load_test_config(root)?;
+    if manifest.suite != suite {
+        bail!(
+            "manifest suite {} does not match requested suite {}",
+            manifest.suite,
+            suite
+        );
+    }
+
+    let mut case_count = 0usize;
+    let mut job_count = 0usize;
+    let mut expected_fail_count = 0usize;
+    let mut skip_count = 0usize;
+    let mut by_kind = BTreeMap::new();
+    let mut by_matrix = BTreeMap::new();
+    let mut jobs_by_target = BTreeMap::new();
+    let mut skips_by_target = BTreeMap::new();
+    let mut by_tag = BTreeMap::new();
+    let mut by_owner = BTreeMap::new();
+
+    for case in &manifest.cases {
+        case_count += 1;
+        increment(&mut by_kind, &case.kind);
+        increment(
+            &mut by_matrix,
+            case.matrix
+                .as_deref()
+                .unwrap_or(if case.targets.is_empty() {
+                    "(none)"
+                } else {
+                    "(explicit-targets)"
+                }),
+        );
+        increment(&mut by_owner, case.owner.as_deref().unwrap_or("(missing)"));
+        if case.tags.is_empty() {
+            increment(&mut by_tag, "(missing)");
+        } else {
+            for tag in &case.tags {
+                increment(&mut by_tag, tag);
+            }
+        }
+
+        let expect = parse_case_expect(case)?;
+        let targets = resolved_case_targets(case, &test_config)?;
+        if expect.kind == "fail" {
+            expected_fail_count += 1;
+            if compile_fail_enabled_for_stats(&targets) {
+                job_count += 1;
+                increment(&mut jobs_by_target, "compile");
+            }
+        } else {
+            for target in &targets {
+                if has_target_name(&case.skip, target) {
+                    continue;
+                }
+                job_count += 1;
+                increment(&mut jobs_by_target, target);
+            }
+        }
+
+        skip_count += case.skip.len();
+        for target in &case.skip {
+            increment(&mut skips_by_target, target);
+        }
+    }
+
+    Ok(TestStats {
+        schema: "volang.test-stats.v1",
+        suite: manifest.suite,
+        cases: case_count,
+        jobs: job_count,
+        expected_fail_cases: expected_fail_count,
+        skip_entries: skip_count,
+        cases_by_kind: by_kind,
+        cases_by_matrix: by_matrix,
+        jobs_by_target,
+        skips_by_target,
+        cases_by_tag: by_tag,
+        cases_by_owner: by_owner,
+    })
+}
+
+fn print_test_stats_text(stats: &TestStats) {
+    println!("{} test stats:", stats.suite);
+    println!("  cases: {}", stats.cases);
+    println!("  jobs: {}", stats.jobs);
+    println!("  expected-fail cases: {}", stats.expected_fail_cases);
+    println!("  skip entries: {}", stats.skip_entries);
+    print_count_map("cases by kind", &stats.cases_by_kind);
+    print_count_map("cases by matrix", &stats.cases_by_matrix);
+    print_count_map("jobs by target", &stats.jobs_by_target);
+    print_count_map("skips by target", &stats.skips_by_target);
+    print_count_map("cases by tag", &stats.cases_by_tag);
+    print_count_map("cases by owner", &stats.cases_by_owner);
+}
+
+pub(crate) fn print_test_catalog(root: &Path, suite: &str, format: &str) -> Result<()> {
+    let manifest = load_manifest(root)?;
+    let test_config = load_test_config(root)?;
+    if manifest.suite != suite {
+        bail!(
+            "manifest suite {} does not match requested suite {}",
+            manifest.suite,
+            suite
+        );
+    }
+    if format != "text" && format != "json" {
+        bail!("--format must be text or json");
+    }
+
+    let mut cases = Vec::new();
+    for case in &manifest.cases {
+        cases.push(TestCatalogCase {
+            id: case.id.clone(),
+            kind: case.kind.clone(),
+            path: manifest_case_path(root, &manifest, case)?,
+            targets: resolved_case_targets(case, &test_config)?,
+            matrix: case.matrix.clone(),
+            tags: case.tags.clone(),
+            owner: case.owner.clone(),
+            skip: case.skip.clone(),
+            timeout: case.timeout.clone(),
+            reason: case.reason.clone(),
+            expect: parse_case_expect(case)?,
+        });
+    }
+
+    if format == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&TestCatalog {
+                schema: "volang.test-catalog.v1",
+                suite: manifest.suite,
+                cases,
+            })?
+        );
+    } else {
+        for case in cases {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                case.id,
+                case.kind,
+                case.matrix.as_deref().unwrap_or("(explicit-targets)"),
+                case.targets.join(","),
+                case.owner.as_deref().unwrap_or("(missing)"),
+                case.path
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn print_test_coverage(root: &Path, suite: &str, format: &str) -> Result<()> {
+    let coverage = collect_test_coverage(root, suite)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&coverage)?);
+    } else {
+        println!("{} test metadata coverage:", coverage.suite);
+        println!("  cases: {}", coverage.cases);
+        println!("  missing matrix: {}", coverage.missing_matrix);
+        println!("  missing tags: {}", coverage.missing_tags);
+        println!("  missing owner: {}", coverage.missing_owner);
+        println!("  missing expect: {}", coverage.missing_expect);
+        println!("  explicit targets: {}", coverage.explicit_targets);
+        println!(
+            "  explicit targets without reason: {}",
+            coverage.explicit_targets_without_reason
+        );
+        println!(
+            "  compile-fail without compile matrix: {}",
+            coverage.compile_fail_without_compile_matrix
+        );
+        println!("  filename-only GC metadata: {}", coverage.gc_filename_only);
+        println!("  unowned skips: {}", coverage.unowned_skips);
+        println!("  unowned failures: {}", coverage.unowned_failures);
+        println!("  unowned timeouts: {}", coverage.unowned_timeouts);
+        println!(
+            "  unowned target overrides: {}",
+            coverage.unowned_target_overrides
+        );
+    }
+    if coverage.missing_matrix != 0
+        || coverage.missing_tags != 0
+        || coverage.missing_owner != 0
+        || coverage.missing_expect != 0
+        || coverage.explicit_targets != 0
+        || coverage.explicit_targets_without_reason != 0
+        || coverage.compile_fail_without_compile_matrix != 0
+        || coverage.gc_filename_only != 0
+        || coverage.unowned_skips != 0
+        || coverage.unowned_failures != 0
+        || coverage.unowned_timeouts != 0
+        || coverage.unowned_target_overrides != 0
+    {
+        bail!("{} test metadata coverage is incomplete", coverage.suite);
+    }
+    Ok(())
+}
+
+pub(crate) fn explain_test_case(
+    root: &Path,
+    suite: &str,
+    case_id: &str,
+    format: &str,
+) -> Result<()> {
+    let manifest = load_manifest(root)?;
+    let test_config = load_test_config(root)?;
+    if manifest.suite != suite {
+        bail!(
+            "manifest suite {} does not match requested suite {}",
+            manifest.suite,
+            suite
+        );
+    }
+    let case = manifest
+        .cases
+        .iter()
+        .find(|case| case.id == case_id)
+        .ok_or_else(|| anyhow!("unknown test case: {case_id}"))?;
+    let selected_targets = resolved_case_targets(case, &test_config)?;
+    let expect = parse_case_expect(case)?;
+    let selected_jobs = selected_targets
+        .iter()
+        .filter(|target| !has_target_name(&case.skip, target))
+        .map(|target| {
+            if expect.kind == "fail" {
+                format!("{}::{target}-compile", case.id)
+            } else {
+                format!("{}::{target}", case.id)
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut reasons = Vec::new();
+    if let Some(matrix) = &case.matrix {
+        reasons.push(format!(
+            "matrix {matrix} expands to {}",
+            selected_targets.join(",")
+        ));
+    }
+    if !case.targets.is_empty() {
+        reasons.push(format!(
+            "explicit target override {}",
+            case.targets.join(",")
+        ));
+    }
+    if !case.tags.is_empty() {
+        reasons.push(format!("tags {}", case.tags.join(",")));
+    }
+    if let Some(owner) = &case.owner {
+        reasons.push(format!("owner {owner}"));
+    }
+    if !case.skip.is_empty() {
+        reasons.push(format!(
+            "skips {} because {}",
+            case.skip.join(","),
+            case.reason.as_deref().unwrap_or("(missing reason)")
+        ));
+    }
+    if !case.timeout.is_empty() {
+        reasons.push(format!("target timeouts {:?}", case.timeout));
+    }
+    if expect.kind == "fail" {
+        reasons.push(format!(
+            "expected compile failure because {}",
+            case.reason.as_deref().unwrap_or("(missing reason)")
+        ));
+    }
+    let explanation = TestExplain {
+        schema: "volang.test-explain.v1",
+        suite: manifest.suite.clone(),
+        case: TestCatalogCase {
+            id: case.id.clone(),
+            kind: case.kind.clone(),
+            path: manifest_case_path(root, &manifest, case)?,
+            targets: selected_targets.clone(),
+            matrix: case.matrix.clone(),
+            tags: case.tags.clone(),
+            owner: case.owner.clone(),
+            skip: case.skip.clone(),
+            timeout: case.timeout.clone(),
+            reason: case.reason.clone(),
+            expect,
+        },
+        selected_targets,
+        selected_jobs,
+        reasons,
+    };
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&explanation)?);
+    } else {
+        println!("test case {}", explanation.case.id);
+        println!("  path: {}", explanation.case.path);
+        println!(
+            "  matrix: {}",
+            explanation.case.matrix.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "  owner: {}",
+            explanation.case.owner.as_deref().unwrap_or("(missing)")
+        );
+        println!("  tags: {}", explanation.case.tags.join(","));
+        println!("  targets: {}", explanation.selected_targets.join(","));
+        println!("  jobs: {}", explanation.selected_jobs.join(","));
+        println!("  reasons:");
+        for reason in &explanation.reasons {
+            println!("    - {reason}");
+        }
+    }
+    Ok(())
+}
+
+fn collect_test_coverage(root: &Path, suite: &str) -> Result<TestCoverage> {
+    let manifest = load_manifest(root)?;
+    if manifest.suite != suite {
+        bail!(
+            "manifest suite {} does not match requested suite {}",
+            manifest.suite,
+            suite
+        );
+    }
+    let mut missing_matrix = 0usize;
+    let mut missing_tags = 0usize;
+    let mut missing_owner = 0usize;
+    let mut missing_expect = 0usize;
+    let mut explicit_targets = 0usize;
+    let mut explicit_targets_without_reason = 0usize;
+    let mut compile_fail_without_compile_matrix = 0usize;
+    let mut gc_filename_only = 0usize;
+    let mut unowned_skips = 0usize;
+    let mut unowned_failures = 0usize;
+    let mut unowned_timeouts = 0usize;
+    let mut unowned_target_overrides = 0usize;
+    for case in &manifest.cases {
+        let has_owner = !case.owner.as_deref().unwrap_or_default().trim().is_empty();
+        if case.matrix.is_none() {
+            missing_matrix += 1;
+        }
+        if case.tags.is_empty() {
+            missing_tags += 1;
+        }
+        if !has_owner {
+            missing_owner += 1;
+        }
+        if case.expect.is_none() {
+            missing_expect += 1;
+        }
+        if !case.targets.is_empty() {
+            explicit_targets += 1;
+            if !has_manifest_reason(case) {
+                explicit_targets_without_reason += 1;
+            }
+            if !has_owner {
+                unowned_target_overrides += 1;
+            }
+        }
+        let expect = parse_case_expect(case)?;
+        if expect.kind == "fail" {
+            if case.matrix.as_deref() != Some("compile") {
+                compile_fail_without_compile_matrix += 1;
+            }
+            if !has_owner {
+                unowned_failures += 1;
+            }
+        }
+        if looks_like_gc_regression(case)
+            && case.matrix.as_deref() != Some("gc")
+            && !case.tags.iter().any(|tag| tag == "gc")
+        {
+            gc_filename_only += 1;
+        }
+        if !case.skip.is_empty() && !has_owner {
+            unowned_skips += 1;
+        }
+        if !case.timeout.is_empty() && !has_owner {
+            unowned_timeouts += 1;
+        }
+    }
+    Ok(TestCoverage {
+        schema: "volang.test-coverage.v1",
+        suite: manifest.suite,
+        cases: manifest.cases.len(),
+        missing_matrix,
+        missing_tags,
+        missing_owner,
+        missing_expect,
+        explicit_targets,
+        explicit_targets_without_reason,
+        compile_fail_without_compile_matrix,
+        gc_filename_only,
+        unowned_skips,
+        unowned_failures,
+        unowned_timeouts,
+        unowned_target_overrides,
+    })
 }
 
 fn validate_manifest_case_shape(case: &ManifestCase) -> Result<()> {
@@ -391,6 +961,19 @@ fn validate_manifest_case_shape(case: &ManifestCase) -> Result<()> {
         );
     }
     validate_manifest_relative_path(&case.id, "path", &case.path, true)?;
+    if let Some(matrix) = &case.matrix {
+        validate_manifest_label(&case.id, "matrix", matrix)?;
+    }
+    let mut seen_tags = BTreeSet::new();
+    for tag in &case.tags {
+        validate_manifest_label(&case.id, "tag", tag)?;
+        if !seen_tags.insert(tag) {
+            bail!("case {} has duplicate tag {}", case.id, tag);
+        }
+    }
+    if let Some(owner) = &case.owner {
+        validate_manifest_label(&case.id, "owner", owner)?;
+    }
     match case.kind.as_str() {
         "file" | "zip" if case.path.ends_with('/') => {
             bail!("case {} {} path cannot end with /", case.id, case.kind)
@@ -407,6 +990,225 @@ fn validate_manifest_case_shape(case: &ManifestCase) -> Result<()> {
         ("zip", None) => {}
         (_, Some(_)) => bail!("case {} zip_root is only valid for zip cases", case.id),
         (_, None) => {}
+    }
+    Ok(())
+}
+
+fn validate_manifest_case_metadata(
+    case: &ManifestCase,
+    test_config: &TestConfig,
+    strict: bool,
+) -> Result<()> {
+    if !strict {
+        if !case.targets.is_empty() {
+            for (matrix, targets) in &test_config.matrices {
+                if targets == &case.targets {
+                    eprintln!(
+                        "warning: case {} explicit targets match matrix {}; prefer matrix = {:?}",
+                        case.id, matrix, matrix
+                    );
+                    break;
+                }
+            }
+        }
+        return Ok(());
+    }
+    if case.matrix.as_deref().unwrap_or_default().trim().is_empty() {
+        bail!(
+            "case {} missing matrix; add matrix = \"default\", \"native\", \"gc\", or \"compile\"",
+            case.id
+        );
+    }
+    if case.tags.is_empty() {
+        bail!(
+            "case {} missing tags; add tags = [\"<domain>\", \"regression\"]",
+            case.id
+        );
+    }
+    if case.owner.as_deref().unwrap_or_default().trim().is_empty() {
+        bail!(
+            "case {} missing owner; add owner = \"<subsystem>\"",
+            case.id
+        );
+    }
+    if case.expect.is_none() {
+        bail!(
+            "case {} missing expect; add expect = \"pass\" or expect = {{ fail = [...] }}",
+            case.id
+        );
+    }
+    if !case.targets.is_empty() {
+        bail!(
+            "case {} uses explicit targets; completion requires a named matrix in eng/tests.toml",
+            case.id
+        );
+    }
+    if case.kind == "file" && is_root_language_case_path(&case.path) {
+        bail!(
+            "case {} path {} is a loose root-level language case; move it into a domain directory",
+            case.id,
+            case.path
+        );
+    }
+    if !case.timeout.is_empty() && !has_manifest_reason(case) {
+        bail!("case {} has timeout but no reason", case.id);
+    }
+    let expect = parse_case_expect(case)?;
+    if expect.kind == "fail" && case.matrix.as_deref() != Some("compile") {
+        bail!(
+            "case {} expected failure must use matrix = \"compile\"",
+            case.id
+        );
+    }
+    if expect.kind == "fail" && !case.tags.iter().any(|tag| tag == "compile-fail") {
+        bail!(
+            "case {} expected failure must include tag compile-fail",
+            case.id
+        );
+    }
+    if case.blank
+        && !matches!(
+            case.owner.as_deref(),
+            Some("eng") | Some("runtime") | Some("stdlib") | Some("module") | Some("typechecker")
+        )
+    {
+        bail!(
+            "blank case {} must be owned by eng or the relevant subsystem",
+            case.id
+        );
+    }
+    if looks_like_gc_regression(case)
+        && case.matrix.as_deref() != Some("gc")
+        && !case.tags.iter().any(|tag| tag == "gc")
+    {
+        bail!(
+            "case {} looks like a GC regression but is not selected by matrix/tag metadata",
+            case.id
+        );
+    }
+    validate_vm_readiness_osr_blocker_tags_061(case)?;
+    validate_vm_readiness_osr_loop_contract_061(case, &expect)?;
+    validate_vm_readiness_jit_target_contract_061(case, test_config)?;
+    for (matrix, targets) in &test_config.matrices {
+        if targets == &case.targets {
+            bail!(
+                "case {} explicit targets match matrix {}; use matrix = {:?}",
+                case.id,
+                matrix,
+                matrix
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_vm_readiness_jit_target_contract_061(
+    case: &ManifestCase,
+    test_config: &TestConfig,
+) -> Result<()> {
+    if !VM_READINESS_JIT_TARGET_CONTRACT_CASES_061.contains(&case.id.as_str()) {
+        return Ok(());
+    }
+    if !case.tags.iter().any(|tag| tag == "jit") {
+        bail!(
+            "case {} is a VM readiness JIT contract and must include tag jit for jit-contract coverage",
+            case.id
+        );
+    }
+    if case.skip.iter().any(|target| target == "jit") {
+        bail!(
+            "case {} is a VM readiness JIT contract and must not skip target jit",
+            case.id
+        );
+    }
+    if !resolved_case_targets(case, test_config)?
+        .iter()
+        .any(|target| target == "jit")
+    {
+        bail!(
+            "case {} is a VM readiness JIT contract and must select target jit",
+            case.id
+        );
+    }
+    Ok(())
+}
+
+fn validate_required_vm_readiness_cases_present_062(cases: &[ManifestCase]) -> Result<()> {
+    for required in VM_READINESS_REQUIRED_CASES_062 {
+        let Some(case) = cases.iter().find(|case| case.id == required.id) else {
+            bail!(
+                "VM readiness manifest is missing required case {}",
+                required.id
+            );
+        };
+        if case.path != required.path {
+            bail!(
+                "VM readiness required case {} must use path {}",
+                required.id,
+                required.path
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_vm_readiness_osr_loop_contract_061(
+    case: &ManifestCase,
+    expect: &CaseExpect,
+) -> Result<()> {
+    if !VM_READINESS_OSR_LOOP_CONTRACT_CASES_061.contains(&case.id.as_str()) {
+        return Ok(());
+    }
+    validate_vm_readiness_osr_required_tags_061(case)?;
+    if case.matrix.as_deref() != Some("osr-only") {
+        bail!(
+            "case {} is a VM readiness OSR loop contract and must use matrix = \"osr-only\"",
+            case.id
+        );
+    }
+    if expect.jit_loop_entries_min.unwrap_or(0) == 0 {
+        bail!(
+            "case {} is a VM readiness OSR loop contract and must require jit_loop_entries_min >= 1",
+            case.id
+        );
+    }
+    Ok(())
+}
+
+fn validate_vm_readiness_osr_blocker_tags_061(case: &ManifestCase) -> Result<()> {
+    if !VM_READINESS_OSR_BLOCKER_CASES_061.contains(&case.id.as_str()) {
+        return Ok(());
+    }
+    validate_vm_readiness_osr_required_tags_061(case)
+}
+
+fn validate_vm_readiness_osr_required_tags_061(case: &ManifestCase) -> Result<()> {
+    for required in VM_READINESS_OSR_BLOCKER_REQUIRED_TAGS_061 {
+        if !case.tags.iter().any(|tag| tag == required) {
+            bail!(
+                "case {} is a VM readiness OSR blocker and must include tag {} for filtered jit/osr contract coverage",
+                case.id,
+                required
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_manifest_label(case_id: &str, field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("case {case_id} {field} cannot be empty");
+    }
+    if value.trim() != value {
+        bail!("case {case_id} {field} cannot contain surrounding whitespace");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+    {
+        bail!(
+            "case {case_id} {field} {value} must use lowercase ASCII letters, digits, dot, hyphen, or underscore"
+        );
     }
     Ok(())
 }
@@ -469,6 +1271,31 @@ fn missing_required_targets(targets: &[String], required: &[String]) -> Vec<Stri
         .collect()
 }
 
+fn compile_fail_enabled_for_stats(targets: &[String]) -> bool {
+    targets.is_empty() || targets.iter().any(|target| target == "compile")
+}
+
+fn increment(counts: &mut BTreeMap<String, usize>, key: &str) {
+    *counts.entry(key.to_string()).or_default() += 1;
+}
+
+fn print_count_map(title: &str, counts: &BTreeMap<String, usize>) {
+    println!("  {title}:");
+    if counts.is_empty() {
+        println!("    (none): 0");
+        return;
+    }
+    for (key, count) in counts {
+        println!("    {key}: {count}");
+    }
+}
+
+fn is_gc_regression_case(case: &ManifestCase) -> bool {
+    case.matrix.as_deref() == Some("gc")
+        || case.tags.iter().any(|tag| tag == "gc")
+        || looks_like_gc_regression(case)
+}
+
 fn looks_like_gc_regression(case: &ManifestCase) -> bool {
     let id = case.id.as_str();
     let path = case.path.as_str();
@@ -479,6 +1306,13 @@ fn looks_like_gc_regression(case: &ManifestCase) -> bool {
         || path.starts_with("gc_")
         || path.contains("/gc_")
         || path.contains("_gc")
+}
+
+fn is_root_language_case_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("cases/") else {
+        return false;
+    };
+    rest.ends_with(".vo") && !rest.contains('/')
 }
 
 fn discover_manifest_case_keys(root: &Path) -> Result<BTreeSet<(String, String)>> {
@@ -585,4 +1419,283 @@ fn rel_to_test_data(root: &Path, path: &Path) -> Result<String> {
         .to_string_lossy()
         .trim_start_matches('/')
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stats_json_schema_is_stable() {
+        let stats = TestStats {
+            schema: "volang.test-stats.v1",
+            suite: "lang".to_string(),
+            cases: 1,
+            jobs: 1,
+            expected_fail_cases: 0,
+            skip_entries: 0,
+            cases_by_kind: BTreeMap::new(),
+            cases_by_matrix: BTreeMap::new(),
+            jobs_by_target: BTreeMap::new(),
+            skips_by_target: BTreeMap::new(),
+            cases_by_tag: BTreeMap::new(),
+            cases_by_owner: BTreeMap::new(),
+        };
+        let value = serde_json::to_value(stats).unwrap();
+        assert_eq!(value["schema"], "volang.test-stats.v1");
+        assert!(value.get("cases_by_matrix").is_some());
+        assert!(value.get("jobs_by_target").is_some());
+    }
+
+    #[test]
+    fn root_language_case_path_detects_only_loose_cases() {
+        assert!(is_root_language_case_path("cases/foo.vo"));
+        assert!(!is_root_language_case_path("cases/gc/foo.vo"));
+        assert!(!is_root_language_case_path("cases/proj_foo/"));
+        assert!(!is_root_language_case_path("archives/foo.zip"));
+    }
+
+    #[test]
+    fn vm_readiness_osr_blocker_cases_require_filtered_contract_tags_061() {
+        let mut case = ManifestCase {
+            id: "dyn.dyn-set-from-get".to_string(),
+            kind: "file".to_string(),
+            path: "cases/dyn/dyn_set_from_get.vo".to_string(),
+            targets: Vec::new(),
+            matrix: Some("default".to_string()),
+            tags: vec!["dyn".to_string(), "jit".to_string(), "contract".to_string()],
+            owner: Some("runtime".to_string()),
+            skip: Vec::new(),
+            timeout: BTreeMap::new(),
+            reason: None,
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::String("pass".to_string())),
+        };
+
+        let err = validate_vm_readiness_osr_blocker_tags_061(&case).unwrap_err();
+        assert!(format!("{err:#}").contains("must include tag osr"));
+
+        case.tags.push("osr".to_string());
+        validate_vm_readiness_osr_blocker_tags_061(&case).unwrap();
+    }
+
+    #[test]
+    fn vm_readiness_osr_expect_parses_loop_entry_contract_061() {
+        let mut expect = toml::map::Map::new();
+        expect.insert("kind".to_string(), toml::Value::String("pass".to_string()));
+        expect.insert("jit_loop_entries_min".to_string(), toml::Value::Integer(1));
+        let case = ManifestCase {
+            id: "dyn.osr-dynamic-contract".to_string(),
+            kind: "file".to_string(),
+            path: "cases/dyn/osr_dynamic_contract.vo".to_string(),
+            targets: Vec::new(),
+            matrix: Some("osr-only".to_string()),
+            tags: vec!["dyn".to_string(), "jit".to_string(), "osr".to_string()],
+            owner: Some("runtime".to_string()),
+            skip: Vec::new(),
+            timeout: BTreeMap::new(),
+            reason: None,
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::Table(expect)),
+        };
+
+        let parsed = parse_case_expect(&case).unwrap();
+
+        assert_eq!(parsed.kind, "pass");
+        assert_eq!(parsed.jit_loop_entries_min, Some(1));
+    }
+
+    #[test]
+    fn vm_readiness_osr_loop_contract_cases_require_loop_entry_min_061() {
+        let case = ManifestCase {
+            id: "dyn.osr-dynamic-set-from-get-contract".to_string(),
+            kind: "file".to_string(),
+            path: "cases/dyn/osr_dynamic_set_from_get_contract.vo".to_string(),
+            targets: Vec::new(),
+            matrix: Some("osr-only".to_string()),
+            tags: vec![
+                "dyn".to_string(),
+                "jit".to_string(),
+                "osr".to_string(),
+                "contract".to_string(),
+            ],
+            owner: Some("runtime".to_string()),
+            skip: Vec::new(),
+            timeout: BTreeMap::new(),
+            reason: None,
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::String("pass".to_string())),
+        };
+        let expect = parse_case_expect(&case).unwrap();
+
+        let err = validate_vm_readiness_osr_loop_contract_061(&case, &expect).unwrap_err();
+
+        assert!(format!("{err:#}").contains("jit_loop_entries_min"));
+    }
+
+    #[test]
+    fn vm_readiness_osr_loop_contract_cases_require_osr_only_matrix_061() {
+        let mut expect = toml::map::Map::new();
+        expect.insert("kind".to_string(), toml::Value::String("pass".to_string()));
+        expect.insert("jit_loop_entries_min".to_string(), toml::Value::Integer(1));
+        let case = ManifestCase {
+            id: "dyn.osr-dynamic-integer-key-contract".to_string(),
+            kind: "file".to_string(),
+            path: "cases/dyn/osr_dynamic_integer_key_contract.vo".to_string(),
+            targets: Vec::new(),
+            matrix: Some("default".to_string()),
+            tags: vec![
+                "dyn".to_string(),
+                "jit".to_string(),
+                "osr".to_string(),
+                "contract".to_string(),
+            ],
+            owner: Some("runtime".to_string()),
+            skip: Vec::new(),
+            timeout: BTreeMap::new(),
+            reason: None,
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::Table(expect)),
+        };
+        let parsed = parse_case_expect(&case).unwrap();
+
+        let err = validate_vm_readiness_osr_loop_contract_061(&case, &parsed).unwrap_err();
+
+        assert!(format!("{err:#}").contains("matrix = \"osr-only\""));
+    }
+
+    #[test]
+    fn vm_readiness_required_cases_must_be_present_062() {
+        let mut cases = Vec::new();
+
+        let err = validate_required_vm_readiness_cases_present_062(&cases).unwrap_err();
+
+        assert!(format!("{err:#}").contains("bugs.2026-01-31-jit-http-server-client"));
+        cases.push(vm_readiness_required_case_062(
+            "bugs.2026-01-31-jit-http-server-client",
+            "cases/bugs/2026_01_31_jit_http_server_client.vo",
+        ));
+
+        let err = validate_required_vm_readiness_cases_present_062(&cases).unwrap_err();
+
+        assert!(format!("{err:#}").contains("bugs.2026-01-31-jit-http-server-client-osr"));
+    }
+
+    #[test]
+    fn vm_readiness_required_cases_include_osr_loop_contract_set_062() {
+        let cases: Vec<_> = VM_READINESS_REQUIRED_CASES_062
+            .iter()
+            .filter(|required| required.id != "dyn.osr-dynamic-integer-key-contract")
+            .map(|required| vm_readiness_required_case_062(required.id, required.path))
+            .collect();
+
+        let err = validate_required_vm_readiness_cases_present_062(&cases).unwrap_err();
+
+        assert!(format!("{err:#}").contains("dyn.osr-dynamic-integer-key-contract"));
+    }
+
+    #[test]
+    fn vm_readiness_required_cases_must_use_expected_paths_062() {
+        let cases = vec![
+            vm_readiness_required_case_062(
+                "bugs.2026-01-31-jit-http-server-client",
+                "cases/bugs/2026_01_31_jit_http_server_client.vo",
+            ),
+            vm_readiness_required_case_062(
+                "bugs.2026-01-31-jit-http-server-client-osr",
+                "cases/dyn/osr_dynamic_integer_key_contract.vo",
+            ),
+        ];
+
+        let err = validate_required_vm_readiness_cases_present_062(&cases).unwrap_err();
+
+        assert!(format!("{err:#}").contains("must use path"));
+        assert!(format!("{err:#}").contains("2026_01_31_jit_http_server_client.vo"));
+    }
+
+    #[test]
+    fn vm_readiness_jit_contract_cases_must_not_skip_jit_061() {
+        let case = ManifestCase {
+            id: "bugs.2026-01-31-jit-http-server-client".to_string(),
+            kind: "file".to_string(),
+            path: "cases/bugs/2026_01_31_jit_http_server_client.vo".to_string(),
+            targets: Vec::new(),
+            matrix: Some("default".to_string()),
+            tags: vec!["jit".to_string(), "regression".to_string()],
+            owner: Some("jit".to_string()),
+            skip: vec!["jit".to_string(), "osr".to_string()],
+            timeout: BTreeMap::new(),
+            reason: Some("native network JIT readiness proof".to_string()),
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::String("pass".to_string())),
+        };
+        let config = vm_readiness_jit_test_config_061();
+
+        let err = validate_vm_readiness_jit_target_contract_061(&case, &config).unwrap_err();
+
+        assert!(format!("{err:#}").contains("must not skip target jit"));
+    }
+
+    #[test]
+    fn vm_readiness_jit_contract_cases_select_jit_target_061() {
+        let case = ManifestCase {
+            id: "bugs.2026-01-31-jit-http-server-client".to_string(),
+            kind: "file".to_string(),
+            path: "cases/bugs/2026_01_31_jit_http_server_client.vo".to_string(),
+            targets: Vec::new(),
+            matrix: Some("default".to_string()),
+            tags: vec![
+                "jit".to_string(),
+                "regression".to_string(),
+                "contract".to_string(),
+            ],
+            owner: Some("jit".to_string()),
+            skip: vec!["osr".to_string(), "nostd".to_string(), "wasm".to_string()],
+            timeout: BTreeMap::new(),
+            reason: Some("native network JIT readiness proof".to_string()),
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::String("pass".to_string())),
+        };
+        let config = vm_readiness_jit_test_config_061();
+
+        validate_vm_readiness_jit_target_contract_061(&case, &config).unwrap();
+    }
+
+    fn vm_readiness_jit_test_config_061() -> TestConfig {
+        TestConfig {
+            targets: std::collections::HashMap::new(),
+            aliases: std::collections::HashMap::new(),
+            matrices: std::collections::HashMap::from([(
+                "default".to_string(),
+                vec!["vm".to_string(), "jit".to_string(), "osr".to_string()],
+            )]),
+            default_targets: Vec::new(),
+            required_file_pass_targets: Vec::new(),
+            gc_regression_targets: Vec::new(),
+        }
+    }
+
+    fn vm_readiness_required_case_062(id: &str, path: &str) -> ManifestCase {
+        ManifestCase {
+            id: id.to_string(),
+            kind: "file".to_string(),
+            path: path.to_string(),
+            targets: Vec::new(),
+            matrix: Some("default".to_string()),
+            tags: vec!["jit".to_string(), "contract".to_string()],
+            owner: Some("jit".to_string()),
+            skip: Vec::new(),
+            timeout: BTreeMap::new(),
+            reason: None,
+            zip_root: None,
+            blank: false,
+            expect: Some(toml::Value::String("pass".to_string())),
+        }
+    }
 }

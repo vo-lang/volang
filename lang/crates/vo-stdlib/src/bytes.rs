@@ -7,7 +7,7 @@
 //! - Replace: Complex byte manipulation
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use vo_ffi_macro::vostd_fn;
 
@@ -65,6 +65,20 @@ fn to_upper(s: &[u8]) -> Vec<u8> {
     s.to_ascii_uppercase()
 }
 
+#[vostd_fn("bytes", "ToTitle")]
+fn to_title(s: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(s)
+        .chars()
+        .flat_map(|c| c.to_uppercase())
+        .collect::<String>()
+        .into_bytes()
+}
+
+#[vostd_fn("bytes", "EqualFold")]
+fn equal_fold(s: &[u8], t: &[u8]) -> bool {
+    String::from_utf8_lossy(s).to_lowercase() == String::from_utf8_lossy(t).to_lowercase()
+}
+
 // ==================== Replace ====================
 
 #[vostd_fn("bytes", "Replace")]
@@ -95,4 +109,8 @@ fn replace(s: &[u8], old: &[u8], new: &[u8], n: i64) -> Vec<u8> {
     result
 }
 
-vo_runtime::stdlib_register!(bytes: Index, LastIndex, Count, ToLower, ToUpper, Replace);
+vo_runtime::stdlib_register!(bytes:
+    Index, LastIndex, Count,
+    ToLower, ToUpper, ToTitle,
+    EqualFold, Replace,
+);

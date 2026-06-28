@@ -27,12 +27,17 @@ pub fn compile_index(
         let (key_type, val_type) = info.map_key_val_types(container_type);
         let key_slot_types = info.type_slot_types(key_type);
         let val_slot_types = info.type_slot_types(val_type);
-        let key_slots = key_slot_types.len() as u16;
-        let val_slots = val_slot_types.len() as u16;
+        let key_slots = info
+            .checked_slot_count(key_slot_types.len())
+            .map_err(CodegenError::Internal)?;
+        let val_slots = info
+            .checked_slot_count(val_slot_types.len())
+            .map_err(CodegenError::Internal)?;
         let key_reg = compile_map_key_expr(&idx.index, key_type, ctx, func, info)?;
         let result_type = info.expr_type(expr.id);
         let is_comma_ok = info.is_tuple(result_type);
-        let meta = crate::type_info::encode_map_get_meta(key_slots, val_slots, is_comma_ok);
+        let meta = crate::type_info::try_encode_map_get_meta(key_slots, val_slots, is_comma_ok)
+            .map_err(CodegenError::Internal)?;
         let mut map_get_slot_types = vec![SlotType::Value]; // meta
         map_get_slot_types.extend(key_slot_types.iter().copied()); // key
         let meta_reg = func.alloc_slots(&map_get_slot_types);
@@ -49,7 +54,7 @@ pub fn compile_index(
         );
     } else {
         let lv = crate::lvalue::resolve_lvalue(expr, ctx, func, info)?;
-        crate::lvalue::emit_lvalue_load(&lv, dst, ctx, func);
+        crate::lvalue::emit_lvalue_load(&lv, dst, ctx, func)?;
     }
     Ok(())
 }

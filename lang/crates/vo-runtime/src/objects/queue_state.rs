@@ -11,11 +11,24 @@ use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 #[cfg(feature = "std")]
 use std::{boxed::Box, collections::VecDeque, vec::Vec};
 
+use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashSet;
 
 use crate::gc::GcRef;
 use crate::slot::{slot_to_usize, Slot, SLOT_BYTES};
 use vo_common_core::types::{ValueKind, ValueMeta, ValueRttid};
+
+static QUEUE_WAIT_REGISTRATION_COUNTER: AtomicUsize = AtomicUsize::new(1);
+
+fn next_queue_wait_registration_id() -> u64 {
+    let id = QUEUE_WAIT_REGISTRATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        QUEUE_WAIT_REGISTRATION_COUNTER.store(1, Ordering::Relaxed);
+        1
+    } else {
+        id as u64
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -151,47 +164,142 @@ pub type QueueMessage = Box<[u64]>;
 pub struct SelectInfo {
     pub case_index: u16,
     pub select_id: u64,
+    pub queue_ref: u64,
+    pub kind: SelectWaitKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectWaitKind {
+    Send,
+    Recv,
+}
+
+impl SelectWaitKind {
+    #[inline]
+    pub fn to_raw(self) -> u8 {
+        match self {
+            Self::Send => 1,
+            Self::Recv => 2,
+        }
+    }
+
+    #[inline]
+    pub fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Send),
+            2 => Some(Self::Recv),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueWaiter {
     pub island_id: u32,
-    pub fiber_id: u64,
+    pub fiber_key: u64,
+    pub registration_id: u64,
+    pub endpoint_wait_id: u64,
+    pub queue_ref: u64,
+    pub kind: Option<SelectWaitKind>,
     pub select: Option<SelectInfo>,
 }
 
 impl QueueWaiter {
     #[inline]
-    pub fn fiber_id(&self) -> u64 {
-        self.fiber_id
+    pub fn fiber_key(&self) -> u64 {
+        self.fiber_key
     }
 
     #[inline]
-    pub fn simple(island_id: u32, fiber_id: u64) -> Self {
+    pub fn endpoint_wait_id(&self) -> u64 {
+        self.endpoint_wait_id
+    }
+
+    #[inline]
+    pub fn simple(island_id: u32, fiber_key: u64) -> Self {
         Self {
             island_id,
-            fiber_id,
+            fiber_key,
+            registration_id: 0,
+            endpoint_wait_id: 0,
+            queue_ref: 0,
+            kind: None,
             select: None,
         }
     }
 
     #[inline]
-    pub fn selecting(island_id: u32, fiber_id: u64, case_index: u16, select_id: u64) -> Self {
+    pub fn simple_queue(
+        island_id: u32,
+        fiber_key: u64,
+        queue_ref: u64,
+        kind: SelectWaitKind,
+    ) -> Self {
         Self {
             island_id,
-            fiber_id,
+            fiber_key,
+            registration_id: next_queue_wait_registration_id(),
+            endpoint_wait_id: 0,
+            queue_ref,
+            kind: Some(kind),
+            select: None,
+        }
+    }
+
+    #[inline]
+    pub fn endpoint(island_id: u32, fiber_key: u64, endpoint_wait_id: u64) -> Self {
+        Self {
+            island_id,
+            fiber_key,
+            registration_id: 0,
+            endpoint_wait_id,
+            queue_ref: 0,
+            kind: None,
+            select: None,
+        }
+    }
+
+    #[inline]
+    pub fn selecting(
+        island_id: u32,
+        fiber_key: u64,
+        case_index: u16,
+        select_id: u64,
+        queue_ref: u64,
+        kind: SelectWaitKind,
+    ) -> Self {
+        Self {
+            island_id,
+            fiber_key,
+            registration_id: next_queue_wait_registration_id(),
+            endpoint_wait_id: 0,
+            queue_ref,
+            kind: Some(kind),
             select: Some(SelectInfo {
                 case_index,
                 select_id,
+                queue_ref,
+                kind,
             }),
         }
     }
 
     #[inline]
-    pub fn is_select_with_id(&self, select_id: u64) -> bool {
-        self.select
-            .as_ref()
-            .is_some_and(|info| info.select_id == select_id)
+    pub fn is_select_for(&self, fiber_key: u64, select_id: u64) -> bool {
+        self.fiber_key == fiber_key
+            && self
+                .select
+                .as_ref()
+                .is_some_and(|info| info.select_id == select_id)
+    }
+
+    #[inline]
+    pub fn is_local_select_recv(&self, local_island: u32) -> bool {
+        self.island_id == local_island
+            && self
+                .select
+                .as_ref()
+                .is_some_and(|info| info.kind == SelectWaitKind::Recv)
     }
 }
 
@@ -242,7 +350,7 @@ pub enum SendResult<W, M> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedSendResult<W, M> {
-    Wake(W),
+    Wake { receiver: W, payload: Option<M> },
     RemoteDirect { receiver: W, payload: M },
     Buffered,
     Blocked,
@@ -267,6 +375,7 @@ pub enum RecvResult<W> {
 /// Type parameters:
 /// - `W`: Waiter identifier type
 /// - `M`: Message type (e.g., `Box<[u64]>` for Channel)
+#[derive(Debug, Clone)]
 pub struct QueueState<W, M> {
     pub buffer: VecDeque<M>,
     pub closed: bool,
@@ -406,6 +515,25 @@ impl<W, M> QueueState<W, M> {
 // =============================================================================
 
 impl<M> QueueState<QueueWaiter, M> {
+    pub fn cancel_simple_waiter(&mut self, fiber_key: u64, kind: SelectWaitKind) {
+        match kind {
+            SelectWaitKind::Send => {
+                self.waiting_senders.retain(|(waiter, _)| {
+                    waiter.fiber_key != fiber_key
+                        || waiter.kind != Some(SelectWaitKind::Send)
+                        || waiter.select.is_some()
+                });
+            }
+            SelectWaitKind::Recv => {
+                self.waiting_receivers.retain(|waiter| {
+                    waiter.fiber_key != fiber_key
+                        || waiter.kind != Some(SelectWaitKind::Recv)
+                        || waiter.select.is_some()
+                });
+            }
+        }
+    }
+
     pub fn send_or_block_resolved(
         &mut self,
         value: M,
@@ -415,8 +543,13 @@ impl<M> QueueState<QueueWaiter, M> {
     ) -> ResolvedSendResult<QueueWaiter, M> {
         match self.send_impl(value, cap, Some(waiter)) {
             SendResult::DirectSend(receiver) => {
-                if receiver.island_id == local_island {
-                    ResolvedSendResult::Wake(receiver)
+                if receiver.endpoint_wait_id() == 0 && receiver.island_id == local_island {
+                    let payload = receiver
+                        .select
+                        .as_ref()
+                        .filter(|select| select.kind == SelectWaitKind::Recv)
+                        .map(|_| self.take_direct_send_payload());
+                    ResolvedSendResult::Wake { receiver, payload }
                 } else {
                     ResolvedSendResult::RemoteDirect {
                         receiver,
@@ -434,11 +567,11 @@ impl<M> QueueState<QueueWaiter, M> {
     /// Cancel all select waiters with the given select_id.
     /// Called when a select completes (one case became ready) to remove
     /// this fiber from all other channels it was waiting on.
-    pub fn cancel_select_waiters(&mut self, select_id: u64) {
+    pub fn cancel_select_waiters(&mut self, fiber_key: u64, select_id: u64) {
         self.waiting_receivers
-            .retain(|w| !w.is_select_with_id(select_id));
+            .retain(|w| !w.is_select_for(fiber_key, select_id));
         self.waiting_senders
-            .retain(|(w, _)| !w.is_select_with_id(select_id));
+            .retain(|(w, _)| !w.is_select_for(fiber_key, select_id));
     }
 }
 
@@ -627,11 +760,66 @@ mod tests {
         ) {
             ResolvedSendResult::RemoteDirect { receiver, payload } => {
                 assert_eq!(receiver.island_id, 9);
-                assert_eq!(receiver.fiber_id, 99);
+                assert_eq!(receiver.fiber_key, 99);
                 assert_eq!(payload.as_ref(), &[42u64]);
                 assert_eq!(q.buffer.len(), 0);
             }
             other => panic!("expected RemoteDirect, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn same_island_endpoint_receiver_uses_endpoint_response_path() {
+        let mut q = LocalQueueState::new(0);
+        q.register_receiver(QueueWaiter::endpoint(7, 99, 11));
+
+        match q.send_or_block_resolved(
+            vec![42u64].into_boxed_slice(),
+            0,
+            QueueWaiter::simple(7, 1),
+            7,
+        ) {
+            ResolvedSendResult::RemoteDirect { receiver, payload } => {
+                assert_eq!(receiver.island_id, 7);
+                assert_eq!(receiver.fiber_key, 99);
+                assert_eq!(receiver.endpoint_wait_id(), 11);
+                assert_eq!(payload.as_ref(), &[42u64]);
+                assert_eq!(q.buffer.len(), 0);
+            }
+            other => panic!(
+                "same-island endpoint receiver must use endpoint response path, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn vm_wake_registration_002_select_cancel_keeps_other_fiber_same_select_id_waiters() {
+        let mut q = LocalQueueState::new(0);
+        let queue_ref = 0xfeed_u64;
+        let select_id = 1;
+        let first_fiber_key = 0x0000_0001_0000_0001;
+        let second_fiber_key = 0x0000_0002_0000_0001;
+
+        q.register_receiver(QueueWaiter::selecting(
+            0,
+            first_fiber_key,
+            0,
+            select_id,
+            queue_ref,
+            SelectWaitKind::Recv,
+        ));
+        q.register_receiver(QueueWaiter::selecting(
+            0,
+            second_fiber_key,
+            0,
+            select_id,
+            queue_ref,
+            SelectWaitKind::Recv,
+        ));
+
+        q.cancel_select_waiters(first_fiber_key, select_id);
+
+        assert_eq!(q.waiting_receivers.len(), 1);
+        assert_eq!(q.waiting_receivers[0].fiber_key(), second_fiber_key);
     }
 }

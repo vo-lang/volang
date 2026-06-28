@@ -1,0 +1,38 @@
+package main
+
+type Big [40000]int
+
+type Fn func(Big, Big)
+
+type I interface {
+	M(Big, Big)
+}
+
+func callClosure(f Fn, a Big, b Big) {
+	f(a, b)
+}
+
+func callIface(i I, a Big, b Big) {
+	i.M(a, b)
+}
+
+func methodValue(i I, a Big, b Big) {
+	mv := i.M
+	mv(a, b)
+}
+
+func methodExpr(i I, a Big, b Big) {
+	me := I.M
+	me(i, a, b)
+}
+
+func deferred(i I, a Big, b Big) {
+	defer i.M(a, b)
+}
+
+func launched(i I, a Big, b Big) {
+	go i.M(a, b)
+}
+
+func main() {
+}

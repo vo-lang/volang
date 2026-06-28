@@ -7,8 +7,8 @@ use crate::translator::IrEmitter;
 
 use super::{
     emit_call_depth_enter, emit_call_depth_leave, emit_non_ok_slow_path, emit_stack_capacity_check,
-    import_jit_func_sig, CallViaVmConfig, JitCallWithVmMaterializationConfig, NonOkSlowPathParams,
-    JIT_RESULT_CALL, JIT_RESULT_OK,
+    import_jit_func_sig, load_current_func_id, restore_caller_execution_context, CallViaVmConfig,
+    JitCallWithVmMaterializationConfig, NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
 };
 
 /// Emit a call by materializing a VM-owned call request.
@@ -93,6 +93,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
     let caller_bp = emitter.call_caller_bp();
     let old_fiber_sp = emitter.call_old_fiber_sp();
+    let caller_func_id = load_current_func_id(emitter, ctx);
 
     let mut arg_values = Vec::with_capacity(config.arg_slots);
     for i in 0..config.arg_slots {
@@ -170,7 +171,6 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(capacity_ok_block);
     emitter.builder().seal_block(capacity_ok_block);
-    let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
     emitter
         .builder()
         .ins()
@@ -185,6 +185,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     let merge_block = emitter.builder().create_block();
 
     let jit_result = if let Some(func_ref) = config.callee_func_ref {
+        let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
         let call =
             crate::translator::emit_funcref_call_raw(emitter, func_ref, &[ctx, args_ptr, ret_ptr]);
         let result = emitter.builder().inst_results(call)[0];
@@ -226,6 +227,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
         emitter.builder().switch_to_block(jit_call_block);
         emitter.builder().seal_block(jit_call_block);
 
+        let old_call_depth = emit_call_depth_enter(emitter, ctx)?;
         let sig = import_jit_func_sig(emitter);
         let jit_call =
             emitter
@@ -262,6 +264,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
                 ctx,
                 caller_bp,
                 old_fiber_sp,
+                caller_func_id,
                 callee_func_id_val: func_id_val,
                 local_slots_val,
                 ret_reg_val,
@@ -273,37 +276,14 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
         emitter.builder().switch_to_block(jit_ok_block);
         emitter.builder().seal_block(jit_ok_block);
-        emitter.builder().ins().store(
-            MemFlags::trusted(),
-            caller_bp,
-            ctx,
-            JitContext::OFFSET_JIT_BP,
-        );
-        emitter.builder().ins().store(
-            MemFlags::trusted(),
-            old_fiber_sp,
-            ctx,
-            JitContext::OFFSET_FIBER_SP,
-        );
+        restore_caller_execution_context(emitter, ctx, caller_bp, old_fiber_sp, caller_func_id);
         emitter.refresh_stack_base_after_reallocation();
         emitter.builder().ins().jump(merge_block, &[]);
 
         emitter.builder().switch_to_block(vm_call_block);
         emitter.builder().seal_block(vm_call_block);
 
-        emitter.builder().ins().store(
-            MemFlags::trusted(),
-            caller_bp,
-            ctx,
-            JitContext::OFFSET_JIT_BP,
-        );
-        emitter.builder().ins().store(
-            MemFlags::trusted(),
-            old_fiber_sp,
-            ctx,
-            JitContext::OFFSET_FIBER_SP,
-        );
-        emit_call_depth_leave(emitter, ctx, old_call_depth);
+        restore_caller_execution_context(emitter, ctx, caller_bp, old_fiber_sp, caller_func_id);
 
         emitter.spill_all_vars();
 
@@ -379,6 +359,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
             ctx,
             caller_bp,
             old_fiber_sp,
+            caller_func_id,
             callee_func_id_val: func_id_val,
             local_slots_val,
             ret_reg_val,
@@ -390,18 +371,7 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
 
     emitter.builder().switch_to_block(jit_ok_block);
     emitter.builder().seal_block(jit_ok_block);
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        caller_bp,
-        ctx,
-        JitContext::OFFSET_JIT_BP,
-    );
-    emitter.builder().ins().store(
-        MemFlags::trusted(),
-        old_fiber_sp,
-        ctx,
-        JitContext::OFFSET_FIBER_SP,
-    );
+    restore_caller_execution_context(emitter, ctx, caller_bp, old_fiber_sp, caller_func_id);
     emitter.refresh_stack_base_after_reallocation();
 
     for i in 0..config.call_ret_slots {
@@ -413,3 +383,6 @@ pub fn emit_jit_call_with_vm_materialization<'a, E: IrEmitter<'a>>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

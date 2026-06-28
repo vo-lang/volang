@@ -13,7 +13,6 @@ use crate::verifier::JitMetadataError;
 pub struct FunctionAnalysis {
     pub memory_only_start: u16,
     pub reg_const_facts: Vec<HashMap<u16, i64>>,
-    pub effects: Vec<InstructionEffects>,
 }
 
 impl FunctionAnalysis {
@@ -63,7 +62,6 @@ impl FunctionAnalysis {
         Ok(Self {
             memory_only_start,
             reg_const_facts,
-            effects,
         })
     }
 }
@@ -86,7 +84,7 @@ pub fn compute_memory_only_start_from_effects(effects: &[InstructionEffects]) ->
 mod tests {
     use super::*;
     use vo_runtime::bytecode::{
-        ExternDef, FunctionDef, JitInstructionMetadata, Module as VoModule,
+        ExternDef, FunctionDef, JitInstructionMetadata, Module as VoModule, ParamShape, ReturnShape,
     };
     use vo_runtime::instruction::Opcode;
     use vo_runtime::{instruction::Instruction, SlotType};
@@ -140,17 +138,33 @@ mod tests {
         let mut module = VoModule::new("analysis".to_string());
         module.externs.push(ExternDef {
             name: "multi".to_string(),
-            param_slots: 1,
-            ret_slots: 2,
-            is_blocking: false,
+            params: ParamShape::Exact { slots: 1 },
+            returns: ReturnShape::slots(2),
+            allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
             param_kinds: Vec::new(),
         });
         module.functions.push(make_func(code, metadata));
 
         let analysis =
             FunctionAnalysis::for_function(&module.functions[0], &module).expect("valid analysis");
+        assert_eq!(analysis.memory_only_start, u16::MAX);
 
-        assert_eq!(analysis.effects[0].writes, vec![10, 11, 12, 13]);
-        assert_eq!(analysis.effects[1].writes, vec![20, 21]);
+        let map_get_effects = effects::try_instruction_effects_with_module_context(
+            &module.functions[0].code[0],
+            EffectFacts::from_instruction(module.functions[0].jit_metadata.first()),
+            &module.externs,
+            &module.functions,
+        )
+        .expect("valid map get effects");
+        let call_extern_effects = effects::try_instruction_effects_with_module_context(
+            &module.functions[0].code[1],
+            EffectFacts::from_instruction(module.functions[0].jit_metadata.get(1)),
+            &module.externs,
+            &module.functions,
+        )
+        .expect("valid call extern effects");
+
+        assert_eq!(map_get_effects.writes, vec![10, 11, 12, 13]);
+        assert_eq!(call_extern_effects.writes, vec![20, 21]);
     }
 }

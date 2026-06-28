@@ -1,5 +1,5 @@
 use crate::config::{load_toolchains, Tool, ToolchainFile};
-use crate::task_graph::task_tools_recursive;
+use crate::task_graph::selector_tools_recursive;
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -42,7 +42,7 @@ pub(crate) fn cmd_tool(root: &Path, mut args: Vec<String>) -> Result<()> {
     let tools = load_toolchains(root)?;
     let task_scoped = task_name.is_some();
     let names = if let Some(task_name) = task_name {
-        task_tools_recursive(root, &task_name)?
+        selector_tools_recursive(root, &task_name)?
             .into_iter()
             .collect()
     } else {
@@ -171,6 +171,16 @@ fn bootstrap_step(status: &ToolStatus, tool: &Tool) -> BootstrapStep {
         };
     }
     match status.name.as_str() {
+        _ if tool.bootstrap.is_some() => BootstrapStep {
+            tool: status.name.clone(),
+            current: status.message.clone(),
+            ready: false,
+            action: format!(
+                "run bootstrap command for {} from eng/toolchains.toml",
+                status.name
+            ),
+            command: tool.bootstrap.clone(),
+        },
         "wasm-pack" => BootstrapStep {
             tool: status.name.clone(),
             current: status.message.clone(),
@@ -345,6 +355,9 @@ fn with_tool_repair_hint(name: &str, tool: &Tool, mut status: ToolStatus) -> Too
 }
 
 fn tool_repair_hint(name: &str, tool: &Tool) -> Option<String> {
+    if let Some(command) = &tool.bootstrap {
+        return Some(format!("run {}", command.join(" ")));
+    }
     match name {
         "node" => Some(format!(
             "install or activate Node {}; examples: fnm install {}, volta install node@{}, mise use node@{}",

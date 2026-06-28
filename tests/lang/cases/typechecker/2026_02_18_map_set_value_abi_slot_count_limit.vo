@@ -1,0 +1,9 @@
+package main
+
+type Big [256]int
+
+func main() {
+	var m map[int]Big
+	var v Big
+	m[0] = v
+}

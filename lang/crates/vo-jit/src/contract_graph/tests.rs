@@ -3,7 +3,7 @@ use super::*;
 use crate::call_helpers::{jit_context_callback_callsites, JitContextCallbackCallKind};
 use crate::metadata_contract::JitMetadataKind;
 use crate::semantics::{
-    opcode_semantic_matrix, FailFastCondition, HelperReturnPolicy, RuntimeDependency,
+    opcode_semantic_matrix, FailFastCondition, HelperReturnPolicy, PackedOperand, RuntimeDependency,
 };
 use std::collections::BTreeSet;
 use vo_runtime::instruction::Opcode;
@@ -129,8 +129,99 @@ fn packed_operand_contracts_cover_semantic_matrix_and_have_widths() {
                 edge.subject,
                 field.name
             );
+            let bit_limit = if field.bits >= u16::BITS as u8 {
+                u16::MAX
+            } else {
+                (1u16 << field.bits) - 1
+            };
+            match field.domain {
+                FieldDomain::Any => {}
+                FieldDomain::AllowedMask(mask) => {
+                    assert!(
+                        mask <= bit_limit,
+                        "{:?} field {} domain mask {mask:#x} exceeds {} bits",
+                        edge.subject,
+                        field.name,
+                        field.bits
+                    );
+                    if let Some(max) = field.max {
+                        assert!(
+                            mask <= max,
+                            "{:?} field {} domain mask {mask:#x} exceeds max {max:#x}",
+                            edge.subject,
+                            field.name
+                        );
+                    }
+                }
+                FieldDomain::AllowedValues(values) => {
+                    assert!(
+                        !values.is_empty(),
+                        "{:?} field {} has an empty allowed-value domain",
+                        edge.subject,
+                        field.name
+                    );
+                    for value in values {
+                        assert!(
+                            *value <= bit_limit,
+                            "{:?} field {} value {value:#x} exceeds {} bits",
+                            edge.subject,
+                            field.name,
+                            field.bits
+                        );
+                        if let Some(max) = field.max {
+                            assert!(
+                                *value <= max,
+                                "{:?} field {} value {value:#x} exceeds max {max:#x}",
+                                edge.subject,
+                                field.name
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+#[test]
+fn packed_operand_contracts_describe_reserved_domains_029() {
+    fn field_for(operand: PackedOperand, name: &str) -> FieldWidth {
+        let edge = packed_operand_contract_edges()
+            .iter()
+            .find(|edge| edge.subject == ContractSubject::PackedOperand(operand))
+            .unwrap_or_else(|| panic!("missing packed operand edge for {operand:?}"));
+        let WidthPolicy::PackedFields(fields) = edge.width else {
+            panic!("{operand:?} does not expose packed fields");
+        };
+        *fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("{operand:?} missing field {name}"))
+    }
+
+    assert_eq!(
+        field_for(PackedOperand::TruncFlags, "flags.bytes").domain,
+        FieldDomain::AllowedValues(&[1, 2, 4])
+    );
+    assert_eq!(
+        field_for(PackedOperand::HintLoopShape, "flags.kind").domain,
+        FieldDomain::AllowedValues(&[
+            vo_runtime::instruction::HINT_NOP as u16,
+            vo_runtime::instruction::HINT_LOOP as u16,
+        ])
+    );
+    assert_eq!(
+        field_for(PackedOperand::HintLoopShape, "a.loop_flags").domain,
+        FieldDomain::AllowedMask(
+            (vo_runtime::instruction::LOOP_FLAG_HAS_DEFER
+                | vo_runtime::instruction::LOOP_FLAG_HAS_LABELED_BREAK
+                | vo_runtime::instruction::LOOP_FLAG_HAS_LABELED_CONTINUE) as u16
+        )
+    );
+    assert_eq!(
+        field_for(PackedOperand::ReturnFlags, "flags.allowed_mask").domain,
+        FieldDomain::AllowedMask(vo_runtime::bytecode::ReturnFlags::ALLOWED_BITS as u16)
+    );
 }
 
 #[test]
@@ -153,19 +244,6 @@ fn metadata_contracts_cover_all_current_lowering_kinds() {
         JitMetadataKind::STRICT_CURRENT.len(),
         jit_metadata_contract_edges().len(),
         "strict metadata graph must mirror metadata_contract::STRICT_CURRENT"
-    );
-    assert_eq!(
-        JitMetadataKind::LEGACY_COMPAT.len(),
-        legacy_jit_metadata_compat_edges().len(),
-        "legacy metadata compat graph must mirror metadata_contract::LEGACY_COMPAT"
-    );
-    let legacy_kinds: BTreeSet<_> = JitMetadataKind::LEGACY_COMPAT
-        .iter()
-        .map(|kind| *kind as u8)
-        .collect();
-    assert!(
-        kinds.is_disjoint(&legacy_kinds),
-        "strict metadata graph must not include legacy compat-only kinds"
     );
     for edge in jit_metadata_contract_edges() {
         if edge.subject != ContractSubject::JitMetadata(JitMetadataKind::None) {
@@ -210,52 +288,6 @@ fn metadata_contracts_cover_all_current_lowering_kinds() {
                 other => panic!("{:?} has unexpected metadata width {other:?}", edge.subject),
             }
         }
-    }
-}
-
-#[test]
-fn strict_jit_metadata_contract_edges_exclude_legacy_schema() {
-    for edge in jit_metadata_contract_edges() {
-        assert!(
-            !matches!(
-                edge.subject,
-                ContractSubject::JitMetadata(
-                    JitMetadataKind::LegacyMapGet
-                        | JitMetadataKind::LegacyMapSet
-                        | JitMetadataKind::LegacyMapDelete
-                )
-            ),
-            "legacy metadata must stay out of the strict JIT metadata contract graph"
-        );
-    }
-}
-
-#[test]
-fn legacy_jit_metadata_schema_is_explicit_compat_only() {
-    let subjects: BTreeSet<_> = legacy_jit_metadata_compat_edges()
-        .iter()
-        .map(|edge| match edge.subject {
-            ContractSubject::JitMetadata(kind) => kind as u8,
-            other => panic!("unexpected legacy metadata compat subject {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        subjects,
-        JitMetadataKind::LEGACY_COMPAT
-            .iter()
-            .map(|kind| *kind as u8)
-            .collect()
-    );
-    for edge in legacy_jit_metadata_compat_edges() {
-        assert_eq!(edge.layout_authority, LayoutAuthority::None);
-        assert_eq!(
-            edge.producer,
-            ContractEndpoint::CommonCore("legacy bytecode deserializer compatibility")
-        );
-        assert_eq!(
-            edge.consumer,
-            ContractEndpoint::JitVerifier("strict verifier rejects before lowering")
-        );
     }
 }
 

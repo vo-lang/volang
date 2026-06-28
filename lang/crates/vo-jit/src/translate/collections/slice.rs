@@ -7,7 +7,7 @@ use crate::translate::{emit_runtime_trap_if, require_helper};
 use crate::translator::{emit_funcref_call, CollectionEmitter};
 use crate::JitError;
 
-use super::array::{emit_array_write_barrier, emit_array_write_barrier_multi};
+use super::array::{emit_array_typed_write_barrier_single, emit_array_write_barrier_multi};
 use super::element::{
     emit_elem_bytes_i32, emit_return_if_u64_jit_error, load_element, resolve_elem_bytes,
     store_element,
@@ -143,30 +143,28 @@ pub(in crate::translate) fn slice_set<'a>(
     if elem_bytes <= 8 {
         let val = e.read_var(inst.c);
         let addr = e.builder().ins().iadd(data_ptr, off);
-        store_element(e, addr, val, elem_bytes);
-        // Write barrier for 8-byte elements that may be GcRefs.
-        // Load backing array from SliceData.array (offset 0) and use it as barrier parent.
         if elem_bytes == 8 {
             let arr = e
                 .builder()
                 .ins()
                 .load(types::I64, MemFlags::trusted(), s, 0);
-            emit_array_write_barrier(e, arr, val)?;
+            emit_array_typed_write_barrier_single(e, arr, val)?;
         }
+        store_element(e, addr, val, elem_bytes);
     } else {
         let elem_slots = elem_bytes.div_ceil(8);
-        for i in 0..elem_slots {
-            let v = e.read_var(inst.c + i as u16);
-            let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
-            let addr = e.builder().ins().iadd(data_ptr, slot_off);
-            e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
-        }
         // Write barrier for multi-slot elements: load backing array for barrier parent.
         let arr = e
             .builder()
             .ins()
             .load(types::I64, MemFlags::trusted(), s, 0);
         emit_array_write_barrier_multi(e, arr, inst.c, elem_slots)?;
+        for i in 0..elem_slots {
+            let v = e.read_var(inst.c + i as u16);
+            let slot_off = e.builder().ins().iadd_imm(off, (i * 8) as i64);
+            let addr = e.builder().ins().iadd(data_ptr, slot_off);
+            e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
+        }
     }
     Ok(())
 }

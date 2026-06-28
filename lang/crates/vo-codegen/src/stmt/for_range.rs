@@ -4,6 +4,7 @@
 //! Handles compilation of for-range loops over arrays, slices, strings, maps, channels, and integers.
 
 use vo_analysis::objects::TypeKey;
+use vo_common_core::bytecode::MAP_ITER_SLOT_TYPES;
 use vo_common_core::instruction::{pack_map_iter_next_flags, pack_queue_recv_flags};
 use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
@@ -322,6 +323,8 @@ pub(crate) fn compile_for_range(
             // Stack array uses elem_slots, heap array uses elem_bytes
             if stk {
                 let elem_slot_types = sc.info.type_slot_types(et);
+                sc.func
+                    .emit_stack_array_index_check(lp.idx_slot(), len as u16);
                 sc.func.emit_slot_get_with_slot_types(
                     val_info.slot,
                     base,
@@ -449,7 +452,6 @@ pub(crate) fn compile_for_range(
         // Map iteration using stateful iterator
 
         let map_reg = crate::expr::compile_expr(expr, sc.ctx, sc.func, sc.info)?;
-        let (kn, vn) = sc.info.map_key_val_slots(range_type);
         let (kt, vt) = sc.info.map_key_val_types(range_type);
         let key_info = range_var_info(&mut sc, key.as_ref(), kt, define)?;
         let val_info = range_var_info(&mut sc, value.as_ref(), vt, define)?;
@@ -459,13 +461,19 @@ pub(crate) fn compile_for_range(
         // must have correct slot_types for BOTH key and value portions.
         let key_layout = sc.info.type_slot_types(kt);
         let val_layout = sc.info.type_slot_types(vt);
+        let kn = sc
+            .info
+            .checked_slot_count(key_layout.len())
+            .map_err(CodegenError::Internal)?;
+        let vn = sc
+            .info
+            .checked_slot_count(val_layout.len())
+            .map_err(CodegenError::Internal)?;
         let mut iter_kv_types = key_layout.clone();
         iter_kv_types.extend(val_layout.iter().copied());
         let iter_kv_slot = sc.func.alloc_slots(&iter_kv_types);
 
-        let iter_slot = sc
-            .func
-            .alloc_slots(&vo_runtime::objects::map::MAP_ITER_SLOT_TYPES);
+        let iter_slot = sc.func.alloc_slots(&MAP_ITER_SLOT_TYPES);
         let ok_slot = sc.func.alloc_slots(&[SlotType::Value]);
 
         // MapIterInit: a=iter_slot, b=map_reg

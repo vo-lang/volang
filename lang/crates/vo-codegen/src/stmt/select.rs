@@ -18,6 +18,24 @@ struct RecvCaseInfo {
     queue_type: TypeKey,
 }
 
+enum SelectCasePlan {
+    Default,
+    Send {
+        queue_reg: u16,
+        val_reg: u16,
+        source_index: u16,
+        flags: u8,
+        elem_layout: Vec<SlotType>,
+    },
+    Recv {
+        dst_reg: u16,
+        queue_reg: u16,
+        source_index: u16,
+        flags: u8,
+        elem_layout: Vec<SlotType>,
+    },
+}
+
 /// Compile select statement
 pub(crate) fn compile_select(
     select_stmt: &vo_syntax::ast::SelectStmt,
@@ -29,26 +47,34 @@ pub(crate) fn compile_select(
     use vo_syntax::ast::CommClause;
 
     let case_count = select_stmt.cases.len();
+    let comm_case_count = select_stmt
+        .cases
+        .iter()
+        .filter(|case| case.comm.is_some())
+        .count();
+    let comm_case_count = u16::try_from(comm_case_count).map_err(|_| {
+        CodegenError::Internal(format!(
+            "select communication case count exceeds u16 operand width: {comm_case_count}"
+        ))
+    })?;
     let has_default = select_stmt.cases.iter().any(|c| c.comm.is_none());
 
-    // SelectBegin: a=case_count, flags=has_default
-    func.emit_with_flags(
-        Opcode::SelectBegin,
-        has_default as u8,
-        case_count as u16,
-        0,
-        0,
-    );
-
-    // Enter breakable context for break support
-    func.enter_breakable(label);
-
-    // Phase 1: Emit SelectSend/SelectRecv for each case
+    // Phase 1: Evaluate all case operands in source order before the select
+    // state exists. Calls inside operands may execute nested selects on the
+    // same fiber, so SelectBegin must not be emitted until operand evaluation
+    // has completed.
+    let mut case_plans: Vec<SelectCasePlan> = Vec::with_capacity(case_count);
     let mut recv_infos: Vec<Option<RecvCaseInfo>> = Vec::with_capacity(case_count);
 
     for (case_idx, case) in select_stmt.cases.iter().enumerate() {
+        let source_index = u16::try_from(case_idx).map_err(|_| {
+            CodegenError::Internal(format!(
+                "select source case index exceeds u16 operand width: {case_idx}"
+            ))
+        })?;
         match &case.comm {
             None => {
+                case_plans.push(SelectCasePlan::Default);
                 recv_infos.push(None);
             }
             Some(CommClause::Send(send)) => {
@@ -57,10 +83,18 @@ pub(crate) fn compile_select(
                 let elem_type = info.queue_elem_type(queue_type);
                 let val_reg =
                     crate::expr::compile_expr_to_type(&send.value, elem_type, ctx, func, info)?;
-                let elem_slots = info.queue_send_elem_slots(queue_type);
+                let send_flags = info
+                    .queue_send_flags(queue_type)
+                    .map_err(CodegenError::Internal)?;
                 let elem_layout = info.type_slot_types(elem_type);
-                debug_assert_eq!(elem_layout.len(), elem_slots as usize);
-                func.emit_select_send(queue_reg, val_reg, case_idx as u16, &elem_layout);
+                debug_assert_eq!(elem_layout.len(), send_flags as usize);
+                case_plans.push(SelectCasePlan::Send {
+                    queue_reg,
+                    val_reg,
+                    source_index,
+                    flags: send_flags,
+                    elem_layout,
+                });
                 recv_infos.push(None);
             }
             Some(CommClause::Recv(recv)) => {
@@ -78,11 +112,19 @@ pub(crate) fn compile_select(
                 }
                 let dst_reg = func.alloc_slots(&recv_types);
 
-                let flags = pack_queue_recv_flags(elem_slots, has_ok).unwrap_or_else(|| {
-                    panic!("SelectRecv ABI supports at most 127 element slots, got {elem_slots}")
-                });
+                let flags = pack_queue_recv_flags(elem_slots, has_ok).ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "SelectRecv ABI supports at most 127 element slots, got {elem_slots}"
+                    ))
+                })?;
                 debug_assert_eq!(elem_layout.len(), elem_slots as usize);
-                func.emit_select_recv(dst_reg, queue_reg, case_idx as u16, flags, &elem_layout);
+                case_plans.push(SelectCasePlan::Recv {
+                    dst_reg,
+                    queue_reg,
+                    source_index,
+                    flags,
+                    elem_layout,
+                });
                 recv_infos.push(Some(RecvCaseInfo {
                     dst_reg,
                     elem_slots,
@@ -93,11 +135,44 @@ pub(crate) fn compile_select(
         }
     }
 
+    // SelectBegin: a=communication case count, flags=has_default
+    func.emit_with_flags(
+        Opcode::SelectBegin,
+        has_default as u8,
+        comm_case_count,
+        0,
+        0,
+    );
+
+    // Enter breakable context for break support
+    func.enter_breakable(label);
+
+    // Phase 2: Register select cases from the already-evaluated operands.
+    for plan in &case_plans {
+        match plan {
+            SelectCasePlan::Default => {}
+            SelectCasePlan::Send {
+                queue_reg,
+                val_reg,
+                source_index,
+                flags,
+                elem_layout,
+            } => func.emit_select_send(*queue_reg, *val_reg, *source_index, *flags, elem_layout),
+            SelectCasePlan::Recv {
+                dst_reg,
+                queue_reg,
+                source_index,
+                flags,
+                elem_layout,
+            } => func.emit_select_recv(*dst_reg, *queue_reg, *source_index, *flags, elem_layout),
+        }
+    }
+
     // SelectExec: returns chosen case index (-1 for default)
     let result_reg = func.alloc_slots(&[SlotType::Value]);
     func.emit_op(Opcode::SelectExec, result_reg, 0, 0);
 
-    // Phase 2: Generate dispatch jumps
+    // Phase 3: Generate dispatch jumps
     let mut case_jumps: Vec<usize> = Vec::with_capacity(case_count);
     let cmp_tmp = func.alloc_slots(&[SlotType::Value]);
 
@@ -115,7 +190,7 @@ pub(crate) fn compile_select(
 
     let fallthrough_jump = func.emit_jump(Opcode::Jump, 0);
 
-    // Phase 3: Compile case bodies
+    // Phase 4: Compile case bodies
     let mut end_jumps: Vec<usize> = Vec::with_capacity(case_count);
 
     for (case_idx, case) in select_stmt.cases.iter().enumerate() {
@@ -180,7 +255,7 @@ fn store_recv_ident(
             info.type_slot_count(lhs_type)
         };
         let storage = StorageKind::Global {
-            index: global_idx as u16,
+            index: global_idx,
             slots,
         };
         return crate::assign::emit_store_to_storage(

@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn rejects_param_transfer_slot_drift_before_jit_load() {
     let mut module = VoModule::new("verify".to_string());
+    module.runtime_types = vec![vo_runtime::RuntimeType::Basic(vo_runtime::ValueKind::Int)];
     let mut func = make_func_with_shape(
         vec![Instruction::new(Opcode::Return, 0, 0, 0)],
         vec![JitInstructionMetadata::None],
@@ -89,24 +90,4 @@ fn rejects_function_def_derived_flag_drift() {
         matches!(err, JitMetadataError::FunctionInvariant { .. }),
         "unexpected error: {err:?}"
     );
-}
-
-#[test]
-fn verifier_slot_contract_dispatches_from_supplied_semantics_row() {
-    let mut module = VoModule::new("verify".to_string());
-    module.functions.push(make_func_with_slot_types(
-        vec![Instruction::new(Opcode::AddI, 0, 1, 2)],
-        vec![JitInstructionMetadata::None],
-        vec![SlotType::Value, SlotType::Value, SlotType::Value],
-        0,
-    ));
-    let ctx =
-        crate::verifier::instruction_contracts::VerifierCtx::new(&module.functions[0], &module, 0);
-    let mut row = crate::semantics::opcode_semantics(Opcode::AddI);
-    row.verifier_domain = crate::semantics::VerifierDomain::Invalid;
-
-    assert!(matches!(
-        crate::verifier::instruction_contracts::verify_slot_contract_with_row(ctx, &row),
-        Err(JitMetadataError::InvalidOpcode { raw, .. }) if raw == Opcode::AddI as u8
-    ));
 }

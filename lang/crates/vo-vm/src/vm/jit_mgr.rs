@@ -14,7 +14,7 @@ use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 use std::collections::HashMap;
 
 use vo_jit::loop_analysis::try_analyze_loops_with_module;
-use vo_jit::{JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
+use vo_jit::{JitCompileEnv, JitCompiler, JitError, JitFunc, LoopFunc, LoopInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -31,10 +31,11 @@ pub enum JitSideExitReason {
     WaitQueue = 6,
     Replay = 7,
     LoopNotHot = 8,
+    HostEvent = 9,
 }
 
 impl JitSideExitReason {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
 
     #[inline]
     const fn index(self) -> usize {
@@ -321,12 +322,14 @@ impl JitManager {
 
     /// Resolve which version to use for a function call.
     /// Returns Some(jit_func) if JIT version available, None for explicit cold interpreter handoff.
-    /// Also handles hot tracking and triggers compilation when threshold reached.
+    /// Also handles hot tracking and triggers compilation when threshold reached. Callers that
+    /// commit a JIT-to-VM handoff own the matching side-exit statistics.
     pub fn resolve_call(
         &mut self,
         func_id: u32,
         func_def: &FunctionDef,
         module: &VoModule,
+        env: JitCompileEnv<'_>,
     ) -> Result<Option<JitFunc>, JitError> {
         // 1. Already have JIT version?
         if let Some(jit_func) = self.get_entry(func_id) {
@@ -347,7 +350,7 @@ impl JitManager {
 
         // 2. Record call, compile if hot
         if self.record_call(func_id)? {
-            match self.compile_full(func_id, func_def, module) {
+            match self.compile_full(func_id, func_def, module, env) {
                 Ok(()) => {
                     if let Some(entry) = self.get_entry(func_id) {
                         return Ok(Some(entry));
@@ -358,7 +361,6 @@ impl JitManager {
         }
 
         // 3. Fall back to VM only because the function is not hot yet.
-        self.record_side_exit(JitSideExitReason::InterpretedCold);
         Ok(None)
     }
 
@@ -440,13 +442,6 @@ impl JitManager {
         Ok(loops.iter().find(|l| l.begin_pc == begin_pc).cloned())
     }
 
-    /// Return the last explicit loop-analysis failure recorded for a function.
-    pub fn last_loop_analysis_error(&self, func_id: u32) -> Option<&str> {
-        self.funcs
-            .get(func_id as usize)
-            .and_then(|info| info.loop_analysis_error.as_deref())
-    }
-
     // =========================================================================
     // Compilation API
     // =========================================================================
@@ -457,6 +452,7 @@ impl JitManager {
         func_id: u32,
         func_def: &FunctionDef,
         module: &VoModule,
+        env: JitCompileEnv<'_>,
     ) -> Result<(), JitError> {
         let idx = func_id as usize;
         let current_state = match self.funcs.get(idx) {
@@ -477,7 +473,7 @@ impl JitManager {
         // Compile
         let compile_result =
             self.compiler
-                .compile(func_id, func_def, module, &available_direct_callees);
+                .compile(func_id, func_def, module, env, &available_direct_callees);
         self.available_direct_callees_buf = available_direct_callees;
         if let Err(e) = compile_result {
             if let Some(info) = self.funcs.get_mut(idx) {
@@ -526,7 +522,8 @@ impl JitManager {
     }
 
     /// Mark function as unsupported.
-    pub fn mark_unsupported(&mut self, func_id: u32) -> Result<(), JitError> {
+    #[cfg(test)]
+    fn mark_unsupported(&mut self, func_id: u32) -> Result<(), JitError> {
         let info = self
             .funcs
             .get_mut(func_id as usize)
@@ -534,16 +531,6 @@ impl JitManager {
         info.state = CompileState::Unsupported;
         info.compile_error = Some("function marked unsupported".to_string());
         Ok(())
-    }
-
-    /// Compile function (alias for compile_full).
-    pub fn compile_function(
-        &mut self,
-        func_id: u32,
-        func_def: &FunctionDef,
-        module: &VoModule,
-    ) -> Result<(), JitError> {
-        self.compile_full(func_id, func_def, module)
     }
 
     /// Check if a loop has failed compilation.
@@ -570,6 +557,7 @@ impl JitManager {
         func_id: u32,
         func_def: &FunctionDef,
         module: &VoModule,
+        env: JitCompileEnv<'_>,
         loop_info: &LoopInfo,
     ) -> Result<(), JitError> {
         if self.funcs.get(func_id as usize).is_none() {
@@ -581,6 +569,7 @@ impl JitManager {
             func_id,
             func_def,
             module,
+            env,
             loop_info,
             &available_direct_callees,
         );
@@ -659,9 +648,14 @@ mod tests {
         let mut manager = JitManager::new().expect("jit manager");
         manager.init(1);
         manager.mark_unsupported(0).expect("mark unsupported");
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let env = JitCompileEnv {
+            externs: &externs,
+            backend_caps: Default::default(),
+        };
 
         let err = manager
-            .resolve_call(0, &func, &module)
+            .resolve_call(0, &func, &module, env)
             .expect_err("unsupported function must fail fast");
 
         assert!(
@@ -678,9 +672,14 @@ mod tests {
         module.functions.push(func.clone());
         let mut manager = JitManager::new().expect("jit manager");
         manager.init(1);
+        let externs = vo_runtime::bytecode::ResolvedExternTable::empty();
+        let env = JitCompileEnv {
+            externs: &externs,
+            backend_caps: Default::default(),
+        };
 
         assert!(matches!(
-            manager.resolve_call(7, &func, &module),
+            manager.resolve_call(7, &func, &module, env),
             Err(JitError::FunctionNotFound(7))
         ));
         assert!(matches!(

@@ -82,6 +82,12 @@ const C_QUEUE_FRAME: EffectContract = EffectContract {
     needs_slot_metadata: true,
     ..EffectContract::PURE
 };
+const C_QUEUE_GET_FRAME: EffectContract = EffectContract {
+    may_panic: true,
+    may_observe_frame: true,
+    needs_frame: true,
+    ..EffectContract::PURE
+};
 const C_GO_FRAME: EffectContract = EffectContract {
     may_gc: true,
     may_panic: true,
@@ -427,7 +433,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateMemory,
         metadata: JitMetadataRequirement::SlotLayout,
-        verifier_requirements: REQ_METADATA_LOCAL,
+        verifier_requirements: REQ_STACK_SLOT_INDEX,
         register_effects: REG_SLOT_GET,
         runtime_dependencies: DEP_NONE,
         helper_return: HelperReturnPolicy::None,
@@ -449,7 +455,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateMemory,
         metadata: JitMetadataRequirement::SlotLayout,
-        verifier_requirements: REQ_METADATA_LOCAL,
+        verifier_requirements: REQ_STACK_SLOT_INDEX,
         register_effects: REG_SLOT_SET,
         runtime_dependencies: DEP_NONE,
         helper_return: HelperReturnPolicy::None,
@@ -471,7 +477,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateMemory,
         metadata: JitMetadataRequirement::SlotLayout,
-        verifier_requirements: REQ_METADATA_LOCAL,
+        verifier_requirements: REQ_STACK_SLOT_INDEX,
         register_effects: REG_SLOT_GET_N,
         runtime_dependencies: DEP_NONE,
         helper_return: HelperReturnPolicy::None,
@@ -493,7 +499,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateMemory,
         metadata: JitMetadataRequirement::SlotLayout,
-        verifier_requirements: REQ_METADATA_LOCAL,
+        verifier_requirements: REQ_STACK_SLOT_INDEX,
         register_effects: REG_SLOT_SET_N,
         runtime_dependencies: DEP_NONE,
         helper_return: HelperReturnPolicy::None,
@@ -610,14 +616,14 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         packed_operands: NO_PACKED,
         vm_source: VmSemanticSource::VmExec("exec/heap.rs"),
         lowering_owner: LoweringOwner::TranslateRuntimeOps,
-        metadata: JitMetadataRequirement::None,
-        verifier_requirements: REQ_LOCAL_LAYOUT,
+        metadata: JitMetadataRequirement::PtrLayout,
+        verifier_requirements: REQ_METADATA_LOCAL,
         register_effects: REG_READ_B_WRITE_A,
         runtime_dependencies: DEP_PTR_NEW,
         helper_return: HelperReturnPolicy::RawValue,
         frame_policy: FramePolicy::SpillBeforeHelper,
         trap_policy: TrapPolicy::None,
-        fail_fast: FF_HELPER,
+        fail_fast: FF_META_HELPER,
         capability: {
             family: OpcodeFamily::Pointer,
             full_jit: BackendStatus::RuntimeHelper,
@@ -625,7 +631,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
             runtime_path: RuntimePathPolicy::RuntimeHelper,
             reason: "GC allocation",
         },
-        contract: C_ALLOC_TYPED,
+        contract: C_ALLOC_TYPED_SLOT,
     },
     semantic_row! {
         opcode: Opcode::PtrGet,
@@ -1671,7 +1677,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     },
     semantic_row! {
         opcode: Opcode::CallExtern,
-        packed_operands: NO_PACKED,
+        packed_operands: CALL_EXTERN,
         vm_source: VmSemanticSource::VmExec("exec/call.rs"),
         lowering_owner: LoweringOwner::CallHelpers,
         metadata: JitMetadataRequirement::CallExternLayout,
@@ -1702,7 +1708,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         runtime_dependencies: DEP_CALL_CLOSURE,
         helper_return: HelperReturnPolicy::DirectJitCall,
         frame_policy: FramePolicy::MaterializedFrameRequired,
-        trap_policy: TrapPolicy::VmSideExit,
+        trap_policy: TrapPolicy::VmSideExitOrRuntimeTrap,
         fail_fast: FF_CALL_METADATA,
         capability: {
             family: OpcodeFamily::Call,
@@ -1715,16 +1721,16 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     },
     semantic_row! {
         opcode: Opcode::CallIface,
-        packed_operands: DYNAMIC_CALL,
+        packed_operands: CALL_IFACE,
         vm_source: VmSemanticSource::VmExec("exec/call.rs"),
         lowering_owner: LoweringOwner::CallHelpers,
-        metadata: JitMetadataRequirement::CallLayout,
+        metadata: JitMetadataRequirement::CallIfaceLayout,
         verifier_requirements: REQ_DYNAMIC_CALL,
         register_effects: REG_CALL_IFACE,
         runtime_dependencies: DEP_CALL_IFACE,
         helper_return: HelperReturnPolicy::DirectJitCall,
         frame_policy: FramePolicy::MaterializedFrameRequired,
-        trap_policy: TrapPolicy::VmSideExit,
+        trap_policy: TrapPolicy::VmSideExitOrRuntimeTrap,
         fail_fast: FF_CALL_METADATA,
         capability: {
             family: OpcodeFamily::Call,
@@ -1737,7 +1743,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     },
     semantic_row! {
         opcode: Opcode::Return,
-        packed_operands: NO_PACKED,
+        packed_operands: RETURN,
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::FunctionCompiler,
         metadata: JitMetadataRequirement::None,
@@ -1892,8 +1898,8 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         verifier_requirements: REQ_LOCAL_LAYOUT,
         register_effects: REG_READ_B_C_WRITE_A,
         runtime_dependencies: DEP_STR_EQ,
-        helper_return: HelperReturnPolicy::RawValue,
-        frame_policy: FramePolicy::NoSpill,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::SpillBeforeHelper,
         trap_policy: TrapPolicy::None,
         fail_fast: FF_HELPER,
         capability: {
@@ -1914,8 +1920,8 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         verifier_requirements: REQ_LOCAL_LAYOUT,
         register_effects: REG_READ_B_C_WRITE_A,
         runtime_dependencies: DEP_STR_EQ,
-        helper_return: HelperReturnPolicy::RawValue,
-        frame_policy: FramePolicy::NoSpill,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::SpillBeforeHelper,
         trap_policy: TrapPolicy::None,
         fail_fast: FF_HELPER,
         capability: {
@@ -2330,7 +2336,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         packed_operands: MAP_NEW,
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateCollections,
-        metadata: JitMetadataRequirement::None,
+        metadata: JitMetadataRequirement::MapNew,
         verifier_requirements: REQ_LOCAL_LAYOUT,
         register_effects: reg_effects(
             R_MAP_NEW,
@@ -2345,7 +2351,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         helper_return: HelperReturnPolicy::RawValue,
         frame_policy: FramePolicy::SpillBeforeHelper,
         trap_policy: TrapPolicy::None,
-        fail_fast: FF_HELPER,
+        fail_fast: FF_META_HELPER,
         capability: {
             family: OpcodeFamily::Map,
             full_jit: BackendStatus::RuntimeHelper,
@@ -2430,8 +2436,8 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         verifier_requirements: REQ_LOCAL_LAYOUT,
         register_effects: REG_READ_B_WRITE_A,
         runtime_dependencies: DEP_MAP_LEN,
-        helper_return: HelperReturnPolicy::RawValue,
-        frame_policy: FramePolicy::NoSpill,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::SpillBeforeHelper,
         trap_policy: TrapPolicy::None,
         fail_fast: FF_HELPER,
         capability: {
@@ -2460,8 +2466,8 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
             false,
         ),
         runtime_dependencies: DEP_MAP_ITER_INIT,
-        helper_return: HelperReturnPolicy::RawValue,
-        frame_policy: FramePolicy::NoSpill,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
+        frame_policy: FramePolicy::SpillBeforeHelper,
         trap_policy: TrapPolicy::None,
         fail_fast: FF_HELPER,
         capability: {
@@ -2479,7 +2485,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateCollections,
         metadata: JitMetadataRequirement::MapIterNext,
-        verifier_requirements: REQ_METADATA_LOCAL,
+        verifier_requirements: REQ_MAP_ITER_NEXT,
         register_effects: reg_effects(
             R_MAP_ITER,
             None,
@@ -2508,14 +2514,14 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         packed_operands: QUEUE_NEW,
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateRuntimeOps,
-        metadata: JitMetadataRequirement::None,
+        metadata: JitMetadataRequirement::QueueLayout,
         verifier_requirements: REQ_LOCAL_LAYOUT,
         register_effects: REG_READ_B_C_WRITE_A,
         runtime_dependencies: DEP_QUEUE_NEW,
         helper_return: HelperReturnPolicy::RuntimeTrapReturn,
         frame_policy: FramePolicy::SpillBeforeHelper,
         trap_policy: TrapPolicy::RuntimeTrap,
-        fail_fast: FF_HELPER,
+        fail_fast: FF_META_HELPER,
         capability: {
             family: OpcodeFamily::Queue,
             full_jit: BackendStatus::RuntimeHelper,
@@ -2527,7 +2533,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     },
     semantic_row! {
         opcode: Opcode::QueueSend,
-        packed_operands: NO_PACKED,
+        packed_operands: QUEUE_SEND,
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateRuntimeOps,
         metadata: JitMetadataRequirement::QueueLayout,
@@ -2608,18 +2614,18 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         verifier_requirements: REQ_LOCAL_LAYOUT,
         register_effects: REG_READ_B_WRITE_A,
         runtime_dependencies: DEP_QUEUE_LEN,
-        helper_return: HelperReturnPolicy::RawValue,
-        frame_policy: FramePolicy::NoSpill,
-        trap_policy: TrapPolicy::None,
-        fail_fast: FF_HELPER,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_CALLBACK_FRAME,
         capability: {
             family: OpcodeFamily::Queue,
             full_jit: BackendStatus::RuntimeHelper,
             osr: BackendStatus::RuntimeHelper,
             runtime_path: RuntimePathPolicy::RuntimeHelper,
-            reason: "non-blocking queue helper",
+            reason: "checked queue get helper",
         },
-        contract: C_PURE,
+        contract: C_QUEUE_GET_FRAME,
     },
     semantic_row! {
         opcode: Opcode::QueueCap,
@@ -2630,18 +2636,18 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         verifier_requirements: REQ_LOCAL_LAYOUT,
         register_effects: REG_READ_B_WRITE_A,
         runtime_dependencies: DEP_QUEUE_CAP,
-        helper_return: HelperReturnPolicy::RawValue,
-        frame_policy: FramePolicy::NoSpill,
-        trap_policy: TrapPolicy::None,
-        fail_fast: FF_HELPER,
+        helper_return: HelperReturnPolicy::JitResultChecked,
+        frame_policy: FramePolicy::MaterializedFrameRequired,
+        trap_policy: TrapPolicy::CallbackJitResult,
+        fail_fast: FF_CALLBACK_FRAME,
         capability: {
             family: OpcodeFamily::Queue,
             full_jit: BackendStatus::RuntimeHelper,
             osr: BackendStatus::RuntimeHelper,
             runtime_path: RuntimePathPolicy::RuntimeHelper,
-            reason: "non-blocking queue helper",
+            reason: "checked queue get helper",
         },
-        contract: C_PURE,
+        contract: C_QUEUE_GET_FRAME,
     },
     semantic_row! {
         opcode: Opcode::SelectBegin,
@@ -2667,7 +2673,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     },
     semantic_row! {
         opcode: Opcode::SelectSend,
-        packed_operands: NO_PACKED,
+        packed_operands: QUEUE_SEND,
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateRuntimeOps,
         metadata: JitMetadataRequirement::QueueLayout,
@@ -2796,7 +2802,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
         packed_operands: SHARED_CALL,
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateRuntimeOps,
-        metadata: JitMetadataRequirement::CallLayoutWhenClosureShape,
+        metadata: JitMetadataRequirement::CallLayout,
         verifier_requirements: REQ_SHARED_STATIC_CALL,
         register_effects: reg_effects(
             R_GO_SHARED,
@@ -2959,7 +2965,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
             false,
         ),
         runtime_dependencies: DEP_IFACE_ASSIGN,
-        helper_return: HelperReturnPolicy::RawValue,
+        helper_return: HelperReturnPolicy::U64JitErrorSentinel,
         frame_policy: FramePolicy::SpillBeforeHelper,
         trap_policy: TrapPolicy::None,
         fail_fast: FF_CONSTANT_HELPER,
@@ -2974,7 +2980,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     },
     semantic_row! {
         opcode: Opcode::IfaceAssert,
-        packed_operands: NO_PACKED,
+        packed_operands: IFACE_ASSERT,
         vm_source: VmSemanticSource::VmExec("exec/iface.rs"),
         lowering_owner: LoweringOwner::TranslateRuntimeOps,
         metadata: JitMetadataRequirement::IfaceAssertLayout,
@@ -3122,7 +3128,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     },
     semantic_row! {
         opcode: Opcode::Trunc,
-        packed_operands: NO_PACKED,
+        packed_operands: TRUNC,
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateConversions,
         metadata: JitMetadataRequirement::None,
@@ -3196,7 +3202,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
     },
     semantic_row! {
         opcode: Opcode::GoIsland,
-        packed_operands: SHARED_CALL,
+        packed_operands: GO_ISLAND,
         vm_source: VmSemanticSource::VmDispatch,
         lowering_owner: LoweringOwner::TranslateRuntimeOps,
         metadata: JitMetadataRequirement::CallLayout,
@@ -3306,31 +3312,6 @@ pub(crate) fn opcode_effect_contract(opcode: Opcode) -> EffectContract {
 
 pub fn opcode_register_effects(opcode: Opcode) -> OpcodeRegisterEffects {
     opcode_semantics_row(opcode).register_effects
-}
-
-#[allow(dead_code)]
-pub fn opcode_runtime_dependencies(opcode: Opcode) -> &'static [RuntimeDependency] {
-    opcode_semantics_row(opcode).runtime_dependencies
-}
-
-#[allow(dead_code)]
-pub fn opcode_helper_return_policy(opcode: Opcode) -> HelperReturnPolicy {
-    opcode_semantics_row(opcode).helper_return
-}
-
-#[allow(dead_code)]
-pub fn opcode_frame_policy(opcode: Opcode) -> FramePolicy {
-    opcode_semantics_row(opcode).frame_policy
-}
-
-#[allow(dead_code)]
-pub fn opcode_trap_policy(opcode: Opcode) -> TrapPolicy {
-    opcode_semantics_row(opcode).trap_policy
-}
-
-#[allow(dead_code)]
-pub fn opcode_fail_fast_conditions(opcode: Opcode) -> &'static [FailFastCondition] {
-    opcode_semantics_row(opcode).fail_fast
 }
 
 pub(crate) fn opcode_metadata_requirement_from_semantics(opcode: Opcode) -> JitMetadataRequirement {

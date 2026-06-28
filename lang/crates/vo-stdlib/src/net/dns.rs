@@ -212,7 +212,7 @@ fn alloc_string_slice(call: &mut ExternCallContext, strings: &[String]) -> GcRef
 
     for (i, s) in strings.iter().enumerate() {
         let str_ref = call.alloc_str(s);
-        slice::set(slice_ref, i, str_ref as u64, elem_bytes);
+        unsafe { slice::set(slice_ref, i, str_ref as u64, elem_bytes) };
     }
 
     call.gc()
@@ -229,7 +229,7 @@ fn alloc_ip_slice(call: &mut ExternCallContext, ips: &[Vec<u8>]) -> GcRef {
 
     for (i, ip_bytes) in ips.iter().enumerate() {
         let ip_slice = alloc_bytes(call.gc(), ip_bytes);
-        slice::set(slice_ref, i, ip_slice as u64, elem_bytes);
+        unsafe { slice::set(slice_ref, i, ip_slice as u64, elem_bytes) };
     }
 
     call.gc()

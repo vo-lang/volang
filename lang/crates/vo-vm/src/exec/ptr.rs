@@ -50,11 +50,11 @@ pub fn exec_ptr_set(stack: *const Slot, bp: usize, inst: &Instruction, gc: &mut 
     }
     let offset = inst.b as usize;
     let val = stack_get(stack, bp + inst.c as usize);
-    unsafe { Gc::write_slot(ptr, offset, val) };
     // Write barrier if val may be GcRef
     if (inst.flags & 1) != 0 {
         gc.write_barrier(ptr, val as GcRef);
     }
+    unsafe { Gc::write_slot(ptr, offset, val) };
     true
 }
 
@@ -96,4 +96,25 @@ pub fn exec_ptr_set_n(stack: *const Slot, bp: usize, inst: &Instruction) -> bool
         unsafe { Gc::write_slot(ptr, offset + i, val) };
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ptr_set_write_barrier_precedes_heap_mutation_053() {
+        let src = include_str!("ptr.rs");
+        let start = src.find("pub fn exec_ptr_set(").expect("exec_ptr_set");
+        let end = src[start..]
+            .find("pub fn exec_ptr_get_n(")
+            .map(|offset| start + offset)
+            .expect("exec_ptr_get_n marker");
+        let body = &src[start..end];
+        let barrier = body.find("gc.write_barrier").expect("write barrier");
+        let mutation = body.find("Gc::write_slot").expect("heap mutation");
+
+        assert!(
+            barrier < mutation,
+            "PtrSet must execute the write barrier before publishing a GC ref into heap storage"
+        );
+    }
 }

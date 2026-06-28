@@ -1,8 +1,8 @@
 <!--
 Generated from lang/docs/spec/language.md
 Generator: node scripts/ci/docs_sync.mjs
-Source-Digest: sha256:e00b3333775d458082d248678196669999319bd12778ad1b39f23052f5f9575e
-Generated-At: 2026-05-27T11:17:51+08:00
+Source-Digest: sha256:9decc556b8bc922658086300022097383d0d08498384c60d9e230bf2d0ebfc99
+Generated-At: 2026-06-07T18:45:34+08:00
 -->
 # Vo Language Specification
 
@@ -1407,7 +1407,7 @@ Labels are scoped to the function body and may be used by labeled `break` and
 
 Current implementation status: the parser recognizes `goto`, but the checker
 rejects it with `goto is not supported, use labeled break instead`. The
-language regression manifest currently records `cases/goto_stmt.vo` as an
+language regression manifest currently records `cases/typechecker/goto_stmt.vo` as an
 expected failure for that diagnostic.
 
 ```vo

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_analysis::typ::Type;
 use vo_runtime::{ChanDir, InterfaceMethod, RuntimeType, StructField, ValueKind, ValueRttid};
-use vo_vm::bytecode::{InterfaceMeta, InterfaceMethodMeta};
+use vo_vm::bytecode::{InterfaceMeta, InterfaceMethodMeta, StructMeta};
 
 /// A type interner that assigns unique runtime type IDs to types.
 ///
@@ -97,6 +97,36 @@ pub struct InternContext<'a> {
     pub struct_metas: &'a mut Vec<vo_common_core::bytecode::StructMeta>,
     pub interface_meta_ids: &'a mut std::collections::HashMap<vo_analysis::objects::TypeKey, u32>,
     pub interface_metas: &'a mut Vec<vo_common_core::bytecode::InterfaceMeta>,
+    pub layout_errors: &'a mut Vec<String>,
+}
+
+fn field_meta_equivalent(
+    left: &vo_common_core::bytecode::FieldMeta,
+    right: &vo_common_core::bytecode::FieldMeta,
+) -> bool {
+    left.name == right.name
+        && left.offset == right.offset
+        && left.slot_count == right.slot_count
+        && left.type_info == right.type_info
+        && left.embedded == right.embedded
+        && left.tag == right.tag
+}
+
+fn struct_meta_equivalent(left: &StructMeta, right: &StructMeta) -> bool {
+    left.slot_types == right.slot_types
+        && left.fields.len() == right.fields.len()
+        && left
+            .fields
+            .iter()
+            .zip(right.fields.iter())
+            .all(|(left, right)| field_meta_equivalent(left, right))
+}
+
+fn find_equivalent_struct_meta(struct_metas: &[StructMeta], candidate: &StructMeta) -> Option<u32> {
+    struct_metas
+        .iter()
+        .position(|existing| struct_meta_equivalent(existing, candidate))
+        .map(|idx| idx as u32)
 }
 
 /// Converts a type-checked TypeKey to a RuntimeType and interns it, returning ValueRttid.
@@ -111,6 +141,15 @@ pub fn intern_type_key(
 ) -> ValueRttid {
     let (rt, vk) = type_key_to_runtime_type(interner, type_key, tc_objs, str_interner, ctx);
     let rttid = interner.intern(rt);
+    match interner.types().get(rttid as usize) {
+        Some(RuntimeType::Struct { meta_id, .. }) => {
+            ctx.struct_meta_ids.insert(type_key, *meta_id);
+        }
+        Some(RuntimeType::Interface { meta_id, .. }) => {
+            ctx.interface_meta_ids.insert(type_key, *meta_id);
+        }
+        _ => {}
+    }
     ValueRttid::new(rttid, vk)
 }
 
@@ -313,8 +352,26 @@ fn type_key_to_runtime_type(
                     let (rt, vk) =
                         type_key_to_runtime_type(interner, field_type, tc_objs, str_interner, ctx);
                     let rttid = interner.intern(rt);
-                    let slot_count =
-                        vo_analysis::check::type_info::type_slot_count(field_type, tc_objs);
+                    let slot_count = match vo_analysis::check::type_info::type_slot_count_usize(
+                        field_type, tc_objs,
+                    ) {
+                        Some(slots) => match u16::try_from(slots) {
+                            Ok(slots) => slots,
+                            Err(_) => {
+                                ctx.layout_errors.push(format!(
+                                    "type slot count exceeds u16::MAX: {slots} slots"
+                                ));
+                                u16::MAX
+                            }
+                        },
+                        None => {
+                            ctx.layout_errors.push(format!(
+                                "type slot count overflow for type {:?}",
+                                field_type
+                            ));
+                            u16::MAX
+                        }
+                    };
 
                     if needs_registration {
                         let field_slot_types =
@@ -336,6 +393,16 @@ fn type_key_to_runtime_type(
                 ));
 
                 if needs_registration {
+                    let next_offset = match offset.checked_add(field_slot_count) {
+                        Some(next) => next,
+                        None => {
+                            ctx.layout_errors.push(format!(
+                                "type slot count exceeds u16::MAX: {} slots",
+                                offset as usize + field_slot_count as usize
+                            ));
+                            u16::MAX
+                        }
+                    };
                     field_metas.push(vo_common_core::bytecode::FieldMeta {
                         name,
                         offset,
@@ -344,7 +411,7 @@ fn type_key_to_runtime_type(
                         embedded,
                         tag,
                     });
-                    offset += field_slot_count;
+                    offset = next_offset;
                 }
             }
 
@@ -365,8 +432,13 @@ fn type_key_to_runtime_type(
                     fields: field_metas,
                     field_index,
                 };
-                let id = ctx.struct_metas.len() as u32;
-                ctx.struct_metas.push(meta);
+                let id = if let Some(id) = find_equivalent_struct_meta(ctx.struct_metas, &meta) {
+                    id
+                } else {
+                    let id = ctx.struct_metas.len() as u32;
+                    ctx.struct_metas.push(meta);
+                    id
+                };
                 ctx.struct_meta_ids.insert(type_key, id);
                 id
             };

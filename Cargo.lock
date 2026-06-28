@@ -1774,6 +1774,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vo"
 version = "0.1.1"
 dependencies = [
+ "vo-common-core",
  "vo-engine",
  "vo-module",
  "vo-release",
@@ -1810,6 +1811,7 @@ dependencies = [
  "vo-common",
  "vo-common-core",
  "vo-runtime",
+ "vo-stdlib",
  "vo-syntax",
  "vo-vm",
 ]
@@ -1845,7 +1847,9 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
+ "vo-source-contract",
 ]
 
 [[package]]
@@ -1910,6 +1914,7 @@ dependencies = [
  "target-lexicon 0.12.16",
  "vo-common-core",
  "vo-runtime",
+ "vo-source-contract",
 ]
 
 [[package]]
@@ -1973,7 +1978,12 @@ dependencies = [
  "regex",
  "vo-common-core",
  "vo-ffi-macro",
+ "vo-source-contract",
 ]
+
+[[package]]
+name = "vo-source-contract"
+version = "0.1.1"
 
 [[package]]
 name = "vo-stdlib"
@@ -2035,6 +2045,7 @@ dependencies = [
  "vo-common-core",
  "vo-jit",
  "vo-runtime",
+ "vo-source-contract",
  "vo-stdlib",
 ]
 
@@ -2071,6 +2082,7 @@ version = "0.1.1"
 dependencies = [
  "js-sys",
  "vo-runtime",
+ "vo-stdlib",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

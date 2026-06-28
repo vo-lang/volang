@@ -269,6 +269,9 @@ pub(super) fn try_load_cache(
 
     let bytes = fs::read(&slot.module_file).ok()?;
     let module = Module::deserialize(&bytes).ok()?;
+    if vo_common_core::verifier::verify_module(&module).is_err() {
+        return None;
+    }
     let extensions = load_extensions(&slot.extensions_file)?;
     if !cached_extensions_have_usable_host_artifacts(&extensions) {
         return None;
@@ -302,6 +305,9 @@ pub(super) fn save_compile_cache(
     fingerprint: &str,
     output: &CompileOutput,
 ) {
+    if vo_common_core::verifier::verify_module(&output.module).is_err() {
+        return;
+    }
     let ok = fs::create_dir_all(&slot.dir).is_ok()
         && fs::write(&slot.module_file, output.module.serialize()).is_ok()
         && save_extensions(&slot.extensions_file, &output.extensions)
@@ -355,9 +361,25 @@ fn load_locked_modules(path: &Path) -> Option<Vec<LockedModule>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn native_spec(native_path: PathBuf) -> NativeExtensionSpec {
         NativeExtensionSpec::new("demo".to_string(), native_path, PathBuf::from("vo.mod"))
+    }
+
+    fn temp_cache_slot(name: &str) -> CompileCacheSlot {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("vo-engine-cache-test-{name}-{nonce}"));
+        CompileCacheSlot {
+            fingerprint_file: dir.join("fingerprint"),
+            module_file: dir.join("module.voc"),
+            extensions_file: dir.join("extensions"),
+            locked_modules_file: dir.join("locked_modules"),
+            dir,
+        }
     }
 
     #[test]
@@ -374,5 +396,24 @@ mod tests {
         ));
 
         assert!(!cached_extensions_have_usable_host_artifacts(&[spec]));
+    }
+
+    #[test]
+    fn invalid_cached_module_is_ignored() {
+        let slot = temp_cache_slot("invalid-module");
+        fs::create_dir_all(&slot.dir).expect("create cache dir");
+        fs::write(&slot.fingerprint_file, "fingerprint\n").expect("write fingerprint");
+        fs::write(
+            &slot.module_file,
+            Module::new("invalid-cache".to_string()).serialize(),
+        )
+        .expect("write module");
+
+        assert!(
+            try_load_cache(&slot, Path::new("."), "fingerprint").is_none(),
+            "invalid cached bytecode must not be returned"
+        );
+
+        let _ = fs::remove_dir_all(&slot.dir);
     }
 }

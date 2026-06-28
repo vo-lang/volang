@@ -9,6 +9,10 @@ path = "skills/**"
 tasks = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test"]
 
 [[known_prefix]]
+path = "cmd/vo-dev/**"
+tasks = ["eng-lint-tasks", "cargo-test-vo-dev"]
+
+[[known_prefix]]
 path = "docs/**"
 tasks = ["docs-lint"]
 
@@ -25,12 +29,125 @@ path = "apps/playground-legacy/src/assets/docs/generated/**"
 tasks = ["docs-lint"]
 
 [[known_prefix]]
+path = ".github/workflows/**"
+tasks = ["docs-lint", "ci-self-check"]
+
+[[known_prefix]]
+path = "scripts/ci/**"
+tasks = ["docs-lint", "ci-self-check", "quickplay-validate"]
+
+[[known_prefix]]
+path = "lang/crates/vo-runtime/**"
+tasks = ["cargo-test-runtime", "cargo-test-gc-runtime", "vo-test-runtime-contract", "vo-test-gc", "cargo-test-vm-hardening", "cargo-test-vm-hardening-jit"]
+
+[[known_prefix]]
+path = "lang/crates/vo-app-runtime/**"
+tasks = ["cargo-check-vo-app-runtime", "cargo-test-vo-app-runtime"]
+
+[[known_prefix]]
+path = "lang/crates/vo-engine/**"
+tasks = ["cargo-test-vo-engine"]
+
+[[known_prefix]]
+path = "lang/crates/vo-stdlib/**"
+tasks = ["cargo-test-stdlib", "cargo-test-codegen", "cargo-test-web-runtime-wasm"]
+
+[[known_prefix]]
+path = "lang/crates/vo-ffi-macro/**"
+tasks = ["cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm"]
+
+[[known_prefix]]
+path = "lang/crates/vo-ext/**"
+tasks = ["cargo-test-vo-ext", "cargo-check-vo-ext-wasm", "cargo-test-ffi-macro"]
+
+[[known_prefix]]
+path = "lang/stdlib/**"
+tasks = ["cargo-test-stdlib", "cargo-test-web-runtime-wasm", "vo-test-runtime-contract", "vo-test-wasm"]
+
+[[known_prefix]]
+path = "lang/crates/vo-common-core/**"
+tasks = ["cargo-test-common-core", "cargo-test-vm", "cargo-test-jit", "vo-test-osr", "vo-test-nostd", "vo-test-wasm"]
+
+[[known_prefix]]
+path = "lang/crates/vo-vm/**"
+tasks = [
+  "cargo-test-vm",
+  "cargo-test-gc-vm",
+  "cargo-test-gc-vm-jit",
+  "vo-test-runtime-contract",
+  "vo-test-jit-contract",
+  "vo-test-gc",
+  "cargo-test-vm-hardening",
+  "cargo-test-vm-hardening-jit",
+]
+
+[[known_prefix]]
+path = "lang/crates/vo-jit/**"
+tasks = [
+  "cargo-test-jit",
+  "cargo-test-gc-jit",
+  "cargo-test-gc-vm-jit",
+  "vo-test-runtime-contract",
+  "vo-test-jit-contract",
+  "vo-test-osr",
+  "cargo-test-jit-hardening",
+  "cargo-test-vm-hardening-jit",
+]
+
+[[known_prefix]]
+path = "lang/crates/vo-source-contract/**"
+tasks = [
+  "cargo-test-vo-source-contract",
+  "cargo-test-vo-dev",
+  "cargo-test-runtime",
+  "cargo-test-jit-hardening",
+  "cargo-test-vm-hardening",
+  "cargo-test-vm-hardening-jit",
+]
+
+[[known_prefix]]
+path = "lang/crates/vo-analysis/**"
+tasks = ["cargo-test-analysis", "vo-test-compile"]
+
+[[known_prefix]]
+path = "lang/crates/vo-codegen/**"
+tasks = ["cargo-test-codegen", "vo-test-compile", "vo-test", "vo-test-runtime-contract", "vo-test-jit-contract", "vo-test-osr"]
+
+[[known_prefix]]
+path = "tests/lang/**"
+tasks = ["test-data-lint", "vo-test-compile", "vo-test", "vo-test-osr", "vo-test-nostd", "vo-test-wasm", "vo-test-gc"]
+
+[[known_prefix]]
+path = "lang/crates/vo-module/**"
+tasks = ["cargo-test-module", "test-data-lint"]
+
+[[known_prefix]]
+path = "lang/crates/vo-web/**"
+tasks = ["wasm-check", "vo-test-wasm", "vo-web-wasm-build", "cargo-test-web-hardening", "cargo-test-web-runtime-wasm"]
+
+[[known_prefix]]
+path = "apps/studio/**"
+tasks = ["docs-lint", "studio-build", "cargo-test-studio-wasm-source-contract", "quickplay-validate", "blockkart-smoke-static"]
+
+[[known_prefix]]
+path = "apps/playground-legacy/rust/**"
+tasks = ["cargo-test-vo-playground-host-wake"]
+
+[[known_prefix]]
 path = "examples/**"
 tasks = ["eng-lint-examples", "examples-smoke"]
 
 [[known_prefix]]
 path = "benchmarks/**"
 tasks = ["eng-lint-benchmarks"]
+
+[[known_prefix]]
+path = "eng/tasks.toml"
+tasks = ["eng-lint-tasks", "cargo-test-vo-dev"]
+
+[[known_prefix]]
+path = "eng/ci.toml"
+tasks = ["eng-lint-tasks", "cargo-test-vo-dev"]
 
 [[known_prefix]]
 path = "eng/toolchains.toml"

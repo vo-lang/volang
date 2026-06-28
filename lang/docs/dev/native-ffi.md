@@ -88,7 +88,7 @@ Manual functions return `ExternResult`:
 ```rust
 use vo_ext::prelude::*;
 
-#[vo_fn("host", "ReadLater")]
+#[vo_fn("host", "ReadLater", effects(MAY_HOST_REPLAY))]
 fn read_later(ctx: &mut ExternCallContext) -> ExternResult {
     if let Some(token) = ctx.take_resume_host_event_token() {
         ctx.ret_i64(slots::RET_0, token as i64);
@@ -102,6 +102,20 @@ fn read_later(ctx: &mut ExternCallContext) -> ExternResult {
 The native extension trampoline maps `ExternResult` variants to
 `vo_runtime::ffi::ext_abi::RESULT_*` codes. Panic messages, host-event tokens,
 and closure callback payloads are stored on `ExternCallContext`.
+
+Effectful manual functions must declare their provider effects in the macro:
+
+| Result variant | Required effect |
+|---|---|
+| `Yield` | `MAY_YIELD` |
+| `Block` | `MAY_QUEUE_BLOCK` |
+| `WaitIo { .. }` | `MAY_WAIT_IO_REPLAY` |
+| `HostEventWait { .. }` | `MAY_HOST_WAIT` |
+| `HostEventWaitAndReplay { .. }` | `MAY_HOST_REPLAY` |
+| `CallClosure { .. }` | `MAY_CALL_CLOSURE_REPLAY` |
+
+`effects(UNKNOWN_CONTROL)` is allowed only as the sole effect. Combining
+`UNKNOWN_CONTROL` with precise `MAY_*` bits is rejected.
 
 ## Container Helpers
 

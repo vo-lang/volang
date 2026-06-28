@@ -28,7 +28,8 @@ pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef {
 #[inline]
 fn alloc_string(gc: &mut Gc, arr: GcRef, data_ptr: *mut u8, len: usize) -> GcRef {
     let s = gc.alloc(ValueMeta::new(0, ValueKind::String), slice::DATA_SLOTS);
-    let data = SliceData::as_mut(s);
+    // Safety: `s` is freshly allocated and will be marked for scanning before collection.
+    let data = unsafe { SliceData::as_mut(s) };
     data.array = ptr_to_slot(arr);
     data.data_ptr = ptr_to_slot(data_ptr);
     data.len = len as Slot;

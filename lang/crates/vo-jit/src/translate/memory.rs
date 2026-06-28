@@ -67,7 +67,6 @@ pub(super) fn ptr_set<'a>(
     emit_nil_ptr_check_for_slot(e, inst.a, ptr);
     let v = e.read_var(inst.c);
     let offset = (inst.b as i32) * 8;
-    e.builder().ins().store(MemFlags::trusted(), v, ptr, offset);
 
     // Write barrier if val may be GcRef (flags & 1)
     if (inst.flags & 1) != 0 {
@@ -76,6 +75,7 @@ pub(super) fn ptr_set<'a>(
         let offset_val = e.builder().ins().iconst(types::I32, inst.b as i64);
         emit_funcref_call(e, wb_ref, &[gc, ptr, offset_val, v]);
     }
+    e.builder().ins().store(MemFlags::trusted(), v, ptr, offset);
     Ok(())
 }
 
@@ -158,5 +158,30 @@ pub(super) fn slot_set_n<'a>(e: &mut impl MemoryEmitter<'a>, inst: &Instruction)
         let v = e.read_var(inst.c + i as u16);
         let addr = e.builder().ins().iadd_imm(start, (i * 8) as i64);
         e.builder().ins().store(MemFlags::trusted(), v, addr, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ptr_set_write_barrier_lowering_precedes_store_053() {
+        let src = include_str!("memory.rs");
+        let start = src.find("pub(super) fn ptr_set").expect("ptr_set lowering");
+        let end = src[start..]
+            .find("pub(super) fn ptr_get_n")
+            .map(|offset| start + offset)
+            .expect("ptr_get_n marker");
+        let body = &src[start..end];
+        let barrier = body
+            .find("emit_funcref_call(e, wb_ref")
+            .expect("write barrier helper call");
+        let mutation = body
+            .find(".store(MemFlags::trusted(), v, ptr, offset)")
+            .expect("heap store");
+
+        assert!(
+            barrier < mutation,
+            "JIT PtrSet lowering must emit the write barrier before the heap store"
+        );
     }
 }

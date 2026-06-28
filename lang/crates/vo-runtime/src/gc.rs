@@ -51,6 +51,7 @@ const WHITE0_BIT: u8 = 1 << 3; // bit 3
 const WHITE1_BIT: u8 = 1 << 4; // bit 4
 const BLACK_BIT: u8 = 1 << 5; // bit 5
 const WHITE_BITS: u8 = WHITE0_BIT | WHITE1_BIT;
+const VALUE_SLOTS_OBJECT_BIT: u8 = 1 << 0;
 
 // Age values (for generational GC)
 pub const G_YOUNG: u8 = 0;
@@ -258,6 +259,16 @@ impl GcHeader {
     pub fn value_meta(&self) -> ValueMeta {
         self.value_meta
     }
+
+    #[inline]
+    pub fn is_value_slots_object(&self) -> bool {
+        (self._reserved & VALUE_SLOTS_OBJECT_BIT) != 0
+    }
+
+    #[inline]
+    pub fn set_value_slots_object(&mut self) {
+        self._reserved |= VALUE_SLOTS_OBJECT_BIT;
+    }
 }
 
 /// GC reference - pointer to GcObject data (after header).
@@ -276,6 +287,7 @@ struct RangeEntry {
 pub struct Gc {
     // ========== Object Storage ==========
     all_objects: Vec<GcRef>,
+    all_object_data_sizes: Vec<usize>,
     base_index: Vec<usize>,
     base_index_items: Cell<usize>,
     base_index_tombstones: Cell<usize>,
@@ -340,6 +352,7 @@ impl Gc {
     pub fn new() -> Self {
         Self {
             all_objects: Vec::new(),
+            all_object_data_sizes: Vec::new(),
             base_index: Vec::new(),
             base_index_items: Cell::new(0),
             base_index_tombstones: Cell::new(0),
@@ -391,10 +404,9 @@ impl Gc {
         self.current_white ^ WHITE_BITS
     }
 
-    /// Check if object is dead (has the "other" white color).
+    /// Check if object is dead-white for the current cycle.
     #[inline]
-    #[allow(dead_code)]
-    fn is_dead(&self, obj: GcRef) -> bool {
+    pub fn is_dead_white(&self, obj: GcRef) -> bool {
         let header = Self::header(obj);
         (header.marked & WHITE_BITS) == self.other_white()
     }
@@ -402,6 +414,18 @@ impl Gc {
     /// Allocate a new GC object.
     pub fn alloc(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
         self.alloc_inner(value_meta, slots, slots as usize)
+    }
+
+    /// Allocate a heap object whose payload is a bare value-slot sequence.
+    ///
+    /// The header `ValueMeta` describes the payload slots directly, not a
+    /// runtime object layout such as ArrayHeader or MapData.
+    pub fn alloc_value_slots(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
+        let obj = self.alloc(value_meta, slots);
+        if !obj.is_null() {
+            Self::header_mut(obj).set_value_slots_object();
+        }
+        obj
     }
 
     /// Allocate a large array. For arrays with total_slots > u16::MAX,
@@ -467,6 +491,7 @@ impl Gc {
         let data_ptr = unsafe { ptr.add(header_size) as GcRef };
 
         self.all_objects.push(data_ptr);
+        self.all_object_data_sizes.push(data_size);
         self.insert_base_index(data_ptr);
         self.insert_range_index(data_ptr, data_size);
         self.object_index_dirty.set(true);
@@ -517,7 +542,9 @@ impl Gc {
     fn object_size_bytes(obj: GcRef) -> usize {
         use crate::objects::array;
         let header = Self::header(obj);
-        let slots = if header.slots == 0 && header.kind() == ValueKind::Array {
+        let slots = if header.is_value_slots_object() {
+            header.slots as usize
+        } else if header.slots == 0 && header.kind() == ValueKind::Array {
             array::total_slots(obj)
         } else {
             header.slots as usize
@@ -525,12 +552,37 @@ impl Gc {
         GcHeader::SIZE + slots * SLOT_BYTES
     }
 
-    #[inline]
-    fn object_data_size_bytes(obj: GcRef) -> usize {
-        Self::object_size_bytes(obj) - GcHeader::SIZE
+    fn allocated_data_size_bytes_for_base(&self, obj: GcRef) -> Option<usize> {
+        self.all_objects
+            .iter()
+            .zip(self.all_object_data_sizes.iter())
+            .find_map(|(&candidate, &data_size)| (candidate == obj).then_some(data_size))
     }
 
-    #[cfg(debug_assertions)]
+    pub fn allocated_data_size_bytes(&self, obj: GcRef) -> Option<usize> {
+        if obj.is_null() {
+            return Some(0);
+        }
+        let base = self.canonicalize_ref(obj)?;
+        if base != obj {
+            return None;
+        }
+        self.allocated_data_size_bytes_for_base(base)
+    }
+
+    pub fn ref_data_range(&self, obj: GcRef) -> Option<(GcRef, usize, usize)> {
+        if obj.is_null() {
+            return Some((obj, 0, 0));
+        }
+        let base = self.canonicalize_ref(obj)?;
+        let data_size = self.allocated_data_size_bytes_for_base(base)?;
+        let offset = (obj as usize).checked_sub(base as usize)?;
+        if offset > data_size {
+            return None;
+        }
+        Some((base, offset, data_size))
+    }
+
     fn refresh_object_index(&self) {
         if !self.object_index_dirty.get() {
             return;
@@ -747,8 +799,7 @@ impl Gc {
         }
     }
 
-    fn remove_range_index(&mut self, obj: GcRef) {
-        let data_size = Self::object_data_size_bytes(obj);
+    fn remove_range_index(&mut self, obj: GcRef, data_size: usize) {
         if data_size <= SLOT_BYTES {
             return;
         }
@@ -805,7 +856,7 @@ impl Gc {
             if entry.page == page && entry.base != 0 {
                 let base = entry.base as GcRef;
                 let base_addr = entry.base;
-                let data_end = base_addr + Self::object_data_size_bytes(base);
+                let data_end = base_addr + self.allocated_data_size_bytes_for_base(base)?;
                 if addr >= base_addr && addr < data_end {
                     return Some(base);
                 }
@@ -823,7 +874,7 @@ impl Gc {
         while candidate >= lower_bound {
             if self.base_index_contains(candidate) {
                 let base = candidate as GcRef;
-                let data_end = candidate + Self::object_data_size_bytes(base);
+                let data_end = candidate + self.allocated_data_size_bytes_for_base(base)?;
                 return (addr < data_end).then_some(base);
             }
             if candidate < SLOT_BYTES {
@@ -855,7 +906,6 @@ impl Gc {
         self.range_index_lookup(addr)
     }
 
-    #[cfg(debug_assertions)]
     pub fn debug_ref_membership(&self, obj: GcRef) -> (bool, bool, usize) {
         let in_all_objects = self.base_index_contains(obj as usize);
         self.refresh_object_index();
@@ -1043,18 +1093,31 @@ impl Gc {
 
     /// Incremental GC step. Returns work done (bytes processed).
     /// Call this when should_step() is true, passing scan_roots and scan_object callbacks.
-    pub fn step<R, S, F>(&mut self, scan_roots: R, scan_object: S, finalize_object: F) -> usize
+    ///
+    /// # Safety
+    ///
+    /// The caller must own a VM or test boundary where all precise roots are
+    /// stable and the supplied scanner covers every live root for the duration
+    /// of the step.
+    pub unsafe fn step<R, S, F>(
+        &mut self,
+        scan_roots: R,
+        scan_object: S,
+        finalize_object: F,
+    ) -> usize
     where
         R: FnMut(&mut Gc),
         S: FnMut(&mut Gc, GcRef),
         F: FnMut(GcRef),
     {
-        self.step_with_root_state(
-            GcRootState::MayHaveChanged,
-            scan_roots,
-            scan_object,
-            finalize_object,
-        )
+        unsafe {
+            self.step_with_root_state(
+                GcRootState::MayHaveChanged,
+                scan_roots,
+                scan_object,
+                finalize_object,
+            )
+        }
     }
 
     /// Incremental GC step with an explicit root-set freshness contract.
@@ -1062,7 +1125,12 @@ impl Gc {
     /// The safe default is `GcRootState::MayHaveChanged`. Passing
     /// `StableSinceLastScan` is correct only when the caller controls all roots
     /// and can prove none changed since this collector last ran `scan_roots`.
-    pub fn step_with_root_state<R, S, F>(
+    /// # Safety
+    ///
+    /// The caller must control the root-set freshness described by
+    /// `root_state`, and the supplied callbacks must cover every live root and
+    /// object layout reachable at this VM/test boundary.
+    pub unsafe fn step_with_root_state<R, S, F>(
         &mut self,
         root_state: GcRootState,
         mut scan_roots: R,
@@ -1074,15 +1142,17 @@ impl Gc {
         S: FnMut(&mut Gc, GcRef),
         F: FnMut(GcRef),
     {
-        self.step_with_root_scanner(
-            root_state,
-            |gc, _kind, _limit| {
-                scan_roots(gc);
-                GcRootScanChunk::complete(0)
-            },
-            &mut scan_object,
-            &mut finalize_object,
-        )
+        unsafe {
+            self.step_with_root_scanner(
+                root_state,
+                |gc, _kind, _limit| {
+                    scan_roots(gc);
+                    GcRootScanChunk::complete(0)
+                },
+                &mut scan_object,
+                &mut finalize_object,
+            )
+        }
     }
 
     /// Incremental GC step with a bounded root scanner.
@@ -1096,7 +1166,12 @@ impl Gc {
     /// protocol so roots changed behind the cursor are not lost. `Gc::step` and
     /// `step_with_root_state` remain the conservative default for callers that
     /// cannot provide that proof.
-    pub fn step_with_root_scanner<R, S, F>(
+    /// # Safety
+    ///
+    /// The caller must prove root-set stability or dirty-restart ownership for
+    /// pending chunked scans, and the callbacks must remain valid while the
+    /// collector advances through mark/sweep work.
+    pub unsafe fn step_with_root_scanner<R, S, F>(
         &mut self,
         root_state: GcRootState,
         mut scan_roots: R,
@@ -1362,6 +1437,7 @@ impl Gc {
             let obj = self.all_objects[self.sweep_pos];
             let header = Self::header(obj);
             let obj_white = header.marked & WHITE_BITS;
+            let data_size = self.all_object_data_sizes[self.sweep_pos];
 
             // Gray objects should never exist during sweep — atomic phase processes all of them.
             // If one leaks here, it would be silently dropped (memory leak). Catch it early.
@@ -1372,12 +1448,13 @@ impl Gc {
             );
 
             // Compute size once — both alive and dead branches need it for work accounting.
-            let size_bytes = Self::object_size_bytes(obj);
+            let size_bytes = GcHeader::SIZE + data_size;
 
             if header.is_black() || obj_white == self.current_white {
                 // Alive: reset to current white
                 Self::header_mut(obj).set_white(self.current_white);
                 self.all_objects[self.sweep_write_pos] = obj;
+                self.all_object_data_sizes[self.sweep_write_pos] = data_size;
                 self.sweep_write_pos += 1;
                 // Count alive objects toward work budget. Without this, a mostly-alive
                 // heap (e.g. 99% alive) would have work ≈ 0 and the loop would process
@@ -1392,8 +1469,9 @@ impl Gc {
                 stats.finalized_objects += 1;
                 stats.sweep_freed_bytes += size_bytes;
                 self.remove_base_index(obj);
-                self.remove_range_index(obj);
+                self.remove_range_index(obj, data_size);
                 self.all_objects[self.sweep_pos] = core::ptr::null_mut();
+                self.all_object_data_sizes[self.sweep_pos] = 0;
                 self.object_index_dirty.set(true);
                 self.total_bytes -= size_bytes;
                 work += size_bytes;
@@ -1409,6 +1487,7 @@ impl Gc {
         // If sweep complete, truncate the vector
         if self.sweep_pos >= self.all_objects.len() {
             self.all_objects.truncate(self.sweep_write_pos);
+            self.all_object_data_sizes.truncate(self.sweep_write_pos);
             self.object_index_dirty.set(true);
         }
 
@@ -1439,6 +1518,13 @@ impl Gc {
         self.all_objects.iter().filter(|obj| !obj.is_null()).count()
     }
 
+    pub fn objects(&self) -> impl Iterator<Item = GcRef> + '_ {
+        self.all_objects
+            .iter()
+            .copied()
+            .filter(|obj| !obj.is_null())
+    }
+
     pub fn debt(&self) -> i64 {
         self.debt
     }
@@ -1461,8 +1547,11 @@ impl Gc {
         let header = Self::header(src);
         let value_meta = header.value_meta;
 
-        // For large arrays, slots == 0, read actual size from ArrayHeader
-        let actual_slots = if header.slots == 0 {
+        // For large arrays, slots == 0, read actual size from ArrayHeader.
+        // Value-slot objects with zero slots are not ArrayHeader-backed arrays.
+        let actual_slots = if header.is_value_slots_object() {
+            header.slots as usize
+        } else if header.slots == 0 {
             if value_meta.value_kind() != ValueKind::Array {
                 panic!("slots == 0 but value_kind is not Array");
             }
@@ -1472,6 +1561,9 @@ impl Gc {
         };
 
         let dst = self.alloc_inner(value_meta, header.slots, actual_slots);
+        if header.is_value_slots_object() && !dst.is_null() {
+            Self::header_mut(dst).set_value_slots_object();
+        }
 
         for i in 0..actual_slots {
             let val = unsafe { Self::read_slot(src, i) };
@@ -1490,793 +1582,7 @@ impl Default for Gc {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn empty_closure_scan_layout(_: u32) -> crate::gc_types::ClosureScanLayout<'static> {
-        crate::gc_types::ClosureScanLayout::default()
-    }
-
-    #[test]
-    fn test_canonicalize_ref_base_uses_base_index() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let obj = gc.alloc(meta, 2);
-
-        assert!(gc.object_index_dirty.get());
-        assert_eq!(gc.canonicalize_ref(obj), Some(obj));
-        assert!(gc.object_index_dirty.get());
-    }
-
-    #[test]
-    fn test_canonicalize_ref_interior_pointer_uses_range_index() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let obj = gc.alloc(meta, 2);
-        let interior = unsafe { obj.add(1) };
-
-        assert!(gc.object_index_dirty.get());
-        assert_eq!(gc.canonicalize_ref(interior), Some(obj));
-        assert!(gc.object_index_dirty.get());
-    }
-
-    #[test]
-    fn test_canonicalize_ref_large_array_far_interior_pointer() {
-        let mut gc = Gc::new();
-        let len = u16::MAX as usize + 32;
-        let arr =
-            crate::objects::array::create(&mut gc, ValueMeta::new(0, ValueKind::Uint64), 8, len);
-        assert!(!arr.is_null());
-        assert_eq!(Gc::header(arr).slots, 0);
-
-        let far_interior =
-            unsafe { crate::objects::array::data_ptr_bytes(arr).add((len - 1) * 8) as GcRef };
-        assert_eq!(gc.canonicalize_ref(far_interior), Some(arr));
-    }
-
-    #[test]
-    fn test_canonicalize_ref_nearby_interior_pointer_uses_base_fast_path() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let obj = gc.alloc(meta, 8);
-        let interior = unsafe { obj.add(7) };
-
-        assert_eq!(gc.canonicalize_ref(interior), Some(obj));
-        assert!(gc.object_index_dirty.get());
-    }
-
-    #[test]
-    fn test_canonicalize_ref_forgets_freed_object_during_partial_sweep() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let dead = gc.alloc(meta, 2);
-        let live = gc.alloc(meta, 2);
-        let dead_interior = unsafe { dead.add(1) };
-        let mut finalized = Vec::new();
-
-        assert_eq!(gc.canonicalize_ref(dead_interior), Some(dead));
-        assert!(gc.object_index_dirty.get());
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        Gc::header_mut(live).set_black();
-
-        let dead_size = Gc::object_size_bytes(dead);
-        let work = gc.sweep_step(&mut |dead| finalized.push(dead), dead_size);
-
-        assert!(work >= dead_size);
-        assert_eq!(finalized, vec![dead]);
-        assert_eq!(gc.state(), GcState::Sweep);
-        assert_eq!(gc.canonicalize_ref(dead_interior), None);
-    }
-
-    #[test]
-    fn test_sweep_removes_dead_object_from_live_index() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let obj = gc.alloc(meta, 2);
-        let mut finalized = Vec::new();
-
-        assert_eq!(gc.canonicalize_ref(obj), Some(obj));
-        assert_eq!(gc.object_count(), 1);
-
-        let mut work = 0;
-        for _ in 0..8 {
-            work += gc.step(|_| {}, |_, _| {}, |dead| finalized.push(dead));
-            if gc.state() == GcState::Pause {
-                break;
-            }
-        }
-
-        assert!(work > 0);
-        assert_eq!(finalized, vec![obj]);
-        assert_eq!(gc.state(), GcState::Pause);
-        assert_eq!(gc.object_count(), 0);
-        assert_eq!(gc.canonicalize_ref(obj), None);
-    }
-
-    #[test]
-    fn test_zero_slot_struct_sweeps_as_header_only_object() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let obj = gc.alloc(meta, 0);
-        let mut finalized = Vec::new();
-
-        assert_eq!(Gc::object_size_bytes(obj), GcHeader::SIZE);
-
-        for _ in 0..8 {
-            gc.step(|_| {}, |_, _| {}, |dead| finalized.push(dead));
-            if gc.state() == GcState::Pause {
-                break;
-            }
-        }
-
-        assert_eq!(finalized, vec![obj]);
-        assert_eq!(gc.total_bytes(), 0);
-        assert_eq!(gc.object_count(), 0);
-    }
-
-    #[test]
-    fn test_atomic_rescans_roots_added_after_cycle_start() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let keeper = gc.alloc(meta, 0);
-        let late_root = gc.alloc(meta, 0);
-        let late_root_slot = Cell::new(core::ptr::null_mut::<Slot>());
-        let mut finalized = Vec::new();
-
-        let mut work = 0;
-        for _ in 0..8 {
-            work += gc.step(
-                |gc| {
-                    gc.mark_gray(keeper);
-                    let late = late_root_slot.get();
-                    if !late.is_null() {
-                        gc.mark_gray(late);
-                    }
-                },
-                |_, obj| {
-                    if obj == keeper {
-                        late_root_slot.set(late_root);
-                    }
-                },
-                |dead| finalized.push(dead),
-            );
-            if gc.state() == GcState::Pause {
-                break;
-            }
-        }
-
-        assert!(work > 0);
-        assert!(
-            !finalized.contains(&late_root),
-            "object that became a root during mark must survive the same GC cycle"
-        );
-        assert_eq!(gc.state(), GcState::Pause);
-        assert_eq!(gc.object_count(), 2);
-        assert_eq!(gc.canonicalize_ref(late_root), Some(late_root));
-    }
-
-    #[test]
-    fn test_new_object_allocated_during_mark_scans_old_child() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let keeper = gc.alloc(meta, 0);
-        let child = gc.alloc(meta, 0);
-        let parent_slot = Cell::new(core::ptr::null_mut::<Slot>());
-        let mut finalized = Vec::new();
-
-        let mut work = 0;
-        for _ in 0..8 {
-            work += gc.step(
-                |gc| {
-                    gc.mark_gray(keeper);
-                },
-                |gc, obj| {
-                    if obj == keeper && parent_slot.get().is_null() {
-                        let parent = gc.alloc(meta, 1);
-                        unsafe {
-                            Gc::write_slot(parent, 0, child as u64);
-                        }
-                        gc.write_barrier(parent, child);
-                        parent_slot.set(parent);
-                    }
-                    if obj == parent_slot.get() {
-                        let raw_child = unsafe { Gc::read_slot(obj, 0) };
-                        if raw_child != 0 {
-                            gc.mark_gray(raw_child as GcRef);
-                        }
-                    }
-                },
-                |dead| finalized.push(dead),
-            );
-            if gc.state() == GcState::Pause {
-                break;
-            }
-        }
-
-        assert!(work > 0);
-        assert!(
-            !finalized.contains(&child),
-            "old child stored in a new object allocated during mark must be scanned"
-        );
-        assert_eq!(gc.state(), GcState::Pause);
-        assert_eq!(gc.object_count(), 3);
-        assert_eq!(gc.canonicalize_ref(child), Some(child));
-    }
-
-    #[test]
-    fn test_sweep_write_barrier_rescues_old_white_child() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let parent = gc.alloc(meta, 1);
-        let child = gc.alloc(meta, 0);
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        unsafe {
-            Gc::write_slot(parent, 0, child as u64);
-        }
-        Gc::header_mut(parent).set_black();
-
-        assert_eq!(Gc::header(child).marked & WHITE_BITS, gc.other_white());
-        gc.write_barrier(parent, child);
-        assert!(Gc::header(child).is_gray());
-
-        gc.atomic_phase(&mut |_, _| {});
-        assert!(Gc::header(child).is_black());
-
-        let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
-
-        assert!(work > 0);
-        assert!(
-            !finalized.contains(&child),
-            "old child written during sweep must be rescued before sweep reaches it"
-        );
-        assert_eq!(gc.object_count(), 2);
-        assert_eq!(gc.canonicalize_ref(child), Some(child));
-    }
-
-    #[test]
-    fn test_active_gc_cycle_keeps_stepping_without_new_debt() {
-        let mut gc = Gc::new();
-
-        assert!(!gc.should_step());
-
-        gc.state = GcState::Propagate;
-        gc.debt = 0;
-        assert!(gc.should_step());
-
-        gc.state = GcState::Sweep;
-        assert!(gc.should_step());
-    }
-
-    #[test]
-    fn test_stress_every_step_starts_cycle_without_debt() {
-        let mut gc = Gc::new();
-
-        assert!(!gc.should_step());
-        assert!(!gc.stress_every_step());
-
-        gc.set_stress_every_step(true);
-
-        assert!(gc.stress_every_step());
-        assert!(gc.should_step());
-
-        let work = gc.step(|_| {}, |_, _| {}, |_| {});
-        assert_eq!(work, 0);
-        assert_eq!(gc.state(), GcState::Atomic);
-        assert!(gc.should_step());
-
-        let work = gc.step(|_| {}, |_, _| {}, |_| {});
-        assert_eq!(work, 0);
-        assert_eq!(gc.state(), GcState::Sweep);
-        assert!(gc.should_step());
-
-        let work = gc.step(|_| {}, |_, _| {}, |_| {});
-        assert_eq!(work, 0);
-        assert_eq!(gc.state(), GcState::Pause);
-        assert!(gc.should_step());
-    }
-
-    #[test]
-    fn test_finish_cycle_resets_excess_negative_debt_to_live_heap_threshold() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let root = gc.alloc(meta, 4);
-
-        gc.mark_gray(root);
-        gc.debt = -1_000_000_000;
-        gc.finish_cycle();
-
-        let expected_threshold =
-            ((gc.total_bytes() as u64 * gc.pause as u64 / 100) as i64).max(1024);
-        assert_eq!(gc.debt(), -expected_threshold);
-        assert!(gc.debt() > -1_000_000_000);
-        assert_eq!(gc.state(), GcState::Pause);
-    }
-
-    #[test]
-    fn test_step_stats_record_mark_work() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let root = gc.alloc(meta, 0);
-
-        let work = gc.step(|gc| gc.mark_gray(root), |_, _| {}, |_| {});
-        let stats = gc.last_step_stats();
-
-        assert_eq!(stats.phase_before, GcState::Pause);
-        assert_eq!(stats.phase_after, GcState::Atomic);
-        assert_eq!(stats.root_state, GcRootState::MayHaveChanged);
-        assert!(stats.cycle_started);
-        assert_eq!(stats.root_scan_calls, 1);
-        assert_eq!(stats.object_scans, 1);
-        assert_eq!(stats.propagate_work_bytes, work);
-        assert_eq!(stats.total_work_bytes, work);
-        assert_eq!(stats.heap_bytes_before, GcHeader::SIZE);
-        assert_eq!(stats.heap_bytes_after, GcHeader::SIZE);
-    }
-
-    #[test]
-    fn test_step_stats_record_sweep_frees() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let dead = gc.alloc(meta, 0);
-        let mut finalized = Vec::new();
-
-        gc.step(|_| {}, |_, _| {}, |_| {});
-        gc.step(|_| {}, |_, _| {}, |_| {});
-        assert_eq!(gc.state(), GcState::Sweep);
-
-        let work = gc.step(|_| {}, |_, _| {}, |obj| finalized.push(obj));
-        let stats = gc.last_step_stats();
-
-        assert_eq!(finalized, vec![dead]);
-        assert_eq!(stats.phase_before, GcState::Sweep);
-        assert_eq!(stats.phase_after, GcState::Pause);
-        assert!(stats.cycle_finished);
-        assert_eq!(stats.root_scan_calls, 1);
-        assert_eq!(stats.finalized_objects, 1);
-        assert_eq!(stats.sweep_freed_bytes, GcHeader::SIZE);
-        assert_eq!(stats.sweep_work_bytes, work);
-        assert_eq!(stats.total_work_bytes, work);
-        assert_eq!(stats.heap_bytes_after, 0);
-    }
-
-    #[test]
-    fn test_stable_root_state_skips_redundant_sweep_root_scans() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let root = gc.alloc(meta, 0);
-        let mut root_scans = 0usize;
-
-        for _ in 0..8 {
-            gc.step_with_root_state(
-                GcRootState::StableSinceLastScan,
-                |gc| {
-                    root_scans += 1;
-                    gc.mark_gray(root);
-                },
-                |_, _| {},
-                |_| {},
-            );
-            if gc.state() == GcState::Pause {
-                break;
-            }
-        }
-
-        assert_eq!(gc.state(), GcState::Pause);
-        assert_eq!(
-            root_scans, 2,
-            "stable roots should be scanned only at cycle start and atomic"
-        );
-        assert_eq!(gc.object_count(), 1);
-    }
-
-    #[test]
-    fn test_conservative_root_state_rescues_late_sweep_root() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let root = gc.alloc(meta, 0);
-        let mut root_scans = 0usize;
-        let mut finalized = Vec::new();
-
-        gc.step(|_| {}, |_, _| {}, |_| {});
-        gc.step(
-            |_| {
-                root_scans += 1;
-            },
-            |_, _| {},
-            |_| {},
-        );
-        assert_eq!(gc.state(), GcState::Sweep);
-
-        gc.step(
-            |gc| {
-                root_scans += 1;
-                gc.mark_gray(root);
-            },
-            |_, _| {},
-            |dead| finalized.push(dead),
-        );
-
-        assert!(
-            !finalized.contains(&root),
-            "default conservative step must rescan roots during sweep"
-        );
-        assert!(root_scans >= 2);
-        assert_eq!(gc.canonicalize_ref(root), Some(root));
-    }
-
-    #[test]
-    fn test_sweep_write_barrier_rescues_old_white_parent() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let parent = gc.alloc(meta, 1);
-        let child = gc.alloc(meta, 0);
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        unsafe {
-            Gc::write_slot(parent, 0, child as u64);
-        }
-
-        assert_eq!(Gc::header(parent).marked & WHITE_BITS, gc.other_white());
-        gc.write_barrier(parent, child);
-        assert!(Gc::header(parent).is_gray());
-
-        gc.atomic_phase(&mut |gc, obj| {
-            let raw_child = unsafe { Gc::read_slot(obj, 0) };
-            if raw_child != 0 {
-                gc.mark_gray(raw_child as GcRef);
-            }
-        });
-        assert!(Gc::header(parent).is_black());
-
-        let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
-
-        assert!(work > 0);
-        assert!(
-            !finalized.contains(&parent),
-            "old parent written during sweep must be rescued before sweep reaches it"
-        );
-        assert_eq!(gc.canonicalize_ref(parent), Some(parent));
-    }
-
-    #[test]
-    fn test_sweep_write_barrier_rescans_rescued_string_child() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let parent = gc.alloc(meta, 1);
-        let child = crate::objects::string::create(&mut gc, b"hello");
-        let child_array = crate::objects::slice::array_ref(child);
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        unsafe {
-            Gc::write_slot(parent, 0, child as u64);
-        }
-        Gc::header_mut(parent).set_black();
-
-        gc.write_barrier(parent, child);
-        assert!(Gc::header(child).is_gray());
-
-        gc.atomic_phase(&mut |gc, obj| {
-            crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout);
-        });
-
-        let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
-
-        assert!(work > 0);
-        assert!(!finalized.contains(&child));
-        assert!(
-            !finalized.contains(&child_array),
-            "rescued string child must trace and rescue its backing array"
-        );
-        assert_eq!(gc.canonicalize_ref(child), Some(child));
-        assert_eq!(gc.canonicalize_ref(child_array), Some(child_array));
-    }
-
-    #[test]
-    fn test_sweep_rescans_roots_added_after_atomic() {
-        let mut gc = Gc::new();
-        let late_root = crate::objects::string::create(&mut gc, b"late");
-        let late_root_array = crate::objects::slice::array_ref(late_root);
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        gc.sweep_budget = usize::MAX;
-
-        let work = gc.step(
-            |gc| gc.mark_gray(late_root),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
-            |dead| finalized.push(dead),
-        );
-
-        assert!(work > 0);
-        assert!(!finalized.contains(&late_root));
-        assert!(
-            !finalized.contains(&late_root_array),
-            "root rescued during sweep must be rescanned before sweeping"
-        );
-        assert_eq!(gc.state(), GcState::Pause);
-        assert_eq!(gc.canonicalize_ref(late_root), Some(late_root));
-        assert_eq!(gc.canonicalize_ref(late_root_array), Some(late_root_array));
-    }
-
-    #[test]
-    fn test_sweep_allocated_clone_scans_copied_old_child() {
-        let mut gc = Gc::new();
-        let struct_metas = vec![vo_common_core::bytecode::StructMeta {
-            slot_types: vec![vo_common_core::types::SlotType::GcRef],
-            fields: vec![],
-            field_index: std::collections::HashMap::new(),
-        }];
-        let meta = ValueMeta::new(0, ValueKind::Struct);
-        let source = gc.alloc(meta, 1);
-        let child = crate::objects::string::create(&mut gc, b"child");
-        let child_array = crate::objects::slice::array_ref(child);
-        let cloned_root = Cell::new(core::ptr::null_mut::<Slot>());
-        let mut finalized = Vec::new();
-
-        unsafe {
-            Gc::write_slot(source, 0, child as u64);
-        }
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        gc.sweep_budget = usize::MAX;
-
-        let clone = unsafe { gc.ptr_clone(source) };
-        cloned_root.set(clone);
-        assert!(Gc::header(clone).is_gray());
-
-        let work = gc.step(
-            |gc| gc.mark_gray(cloned_root.get()),
-            |gc, obj| {
-                crate::gc_types::scan_object(gc, obj, &struct_metas, &empty_closure_scan_layout);
-            },
-            |dead| finalized.push(dead),
-        );
-
-        assert!(work > 0);
-        assert!(!finalized.contains(&clone));
-        assert!(!finalized.contains(&child));
-        assert!(
-            !finalized.contains(&child_array),
-            "object allocated during sweep must scan copied references"
-        );
-        assert_eq!(gc.canonicalize_ref(clone), Some(clone));
-        assert_eq!(gc.canonicalize_ref(child), Some(child));
-        assert_eq!(gc.canonicalize_ref(child_array), Some(child_array));
-    }
-
-    #[test]
-    fn test_sweep_range_barrier_rescues_copied_string_refs() {
-        let mut gc = Gc::new();
-        let elem_meta = ValueMeta::new(0, ValueKind::String);
-        let arr = crate::objects::array::create(&mut gc, elem_meta, SLOT_BYTES, 1);
-        let child = crate::objects::string::create(&mut gc, b"child");
-        let child_array = crate::objects::slice::array_ref(child);
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        gc.sweep_budget = usize::MAX;
-        Gc::header_mut(arr).set_black();
-
-        crate::objects::array::set(arr, 0, child as u64, SLOT_BYTES);
-        crate::gc_types::typed_write_barrier_range_by_meta(
-            &mut gc,
-            arr,
-            crate::objects::array::data_ptr_bytes(arr),
-            1,
-            SLOT_BYTES,
-            elem_meta,
-            None,
-        );
-        assert!(Gc::header(child).is_gray());
-
-        let work = gc.step(
-            |gc| gc.mark_gray(arr),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
-            |dead| finalized.push(dead),
-        );
-
-        assert!(work > 0);
-        assert!(!finalized.contains(&child));
-        assert!(!finalized.contains(&child_array));
-        assert_eq!(gc.canonicalize_ref(child), Some(child));
-        assert_eq!(gc.canonicalize_ref(child_array), Some(child_array));
-    }
-
-    #[test]
-    #[should_panic(expected = "typed_write_barrier_by_meta: missing module metadata")]
-    fn test_struct_barrier_without_module_fails_fast() {
-        let mut gc = Gc::new();
-        let parent_meta = ValueMeta::new(1, ValueKind::Struct);
-        let struct_meta = ValueMeta::new(123, ValueKind::Struct);
-        let parent = gc.alloc(parent_meta, 1);
-        let child = crate::objects::string::create(&mut gc, b"struct-child");
-
-        unsafe {
-            Gc::write_slot(parent, 0, child as u64);
-        }
-        crate::gc_types::typed_write_barrier_by_meta(
-            &mut gc,
-            parent,
-            &[child as u64],
-            struct_meta,
-            None,
-        );
-    }
-
-    #[test]
-    fn test_sweep_initialized_array_scans_copied_old_child() {
-        let mut gc = Gc::new();
-        let elem_meta = ValueMeta::new(0, ValueKind::String);
-        let child = crate::objects::string::create(&mut gc, b"child");
-        let child_array = crate::objects::slice::array_ref(child);
-        let new_arr_root = Cell::new(core::ptr::null_mut::<Slot>());
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        gc.sweep_budget = usize::MAX;
-
-        let new_arr = crate::objects::array::create(&mut gc, elem_meta, SLOT_BYTES, 1);
-        crate::objects::array::set(new_arr, 0, child as u64, SLOT_BYTES);
-        gc.mark_allocated_for_scan(new_arr);
-        new_arr_root.set(new_arr);
-        assert!(Gc::header(new_arr).is_gray());
-
-        let work = gc.step(
-            |gc| gc.mark_gray(new_arr_root.get()),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
-            |dead| finalized.push(dead),
-        );
-
-        assert!(work > 0);
-        assert!(!finalized.contains(&new_arr));
-        assert!(!finalized.contains(&child));
-        assert!(!finalized.contains(&child_array));
-        assert_eq!(gc.canonicalize_ref(new_arr), Some(new_arr));
-        assert_eq!(gc.canonicalize_ref(child), Some(child));
-        assert_eq!(gc.canonicalize_ref(child_array), Some(child_array));
-    }
-
-    #[test]
-    fn test_sweep_initialized_map_scans_copied_old_child() {
-        let mut gc = Gc::new();
-        let str_meta = ValueMeta::new(0, ValueKind::String);
-        let key = crate::objects::string::create(&mut gc, b"key");
-        let key_array = crate::objects::slice::array_ref(key);
-        let child = crate::objects::string::create(&mut gc, b"child");
-        let child_array = crate::objects::slice::array_ref(child);
-        let new_map_root = Cell::new(core::ptr::null_mut::<Slot>());
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        gc.sweep_budget = usize::MAX;
-
-        let new_map = crate::objects::map::create(&mut gc, str_meta, str_meta, 1, 1, 0);
-        crate::objects::map::set(new_map, &[key as u64], &[child as u64], None);
-        gc.mark_allocated_for_scan(new_map);
-        new_map_root.set(new_map);
-        assert!(Gc::header(new_map).is_gray());
-
-        let work = gc.step(
-            |gc| gc.mark_gray(new_map_root.get()),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
-            |dead| finalized.push(dead),
-        );
-
-        assert!(work > 0);
-        assert!(!finalized.contains(&new_map));
-        assert!(!finalized.contains(&key));
-        assert!(!finalized.contains(&key_array));
-        assert!(!finalized.contains(&child));
-        assert!(!finalized.contains(&child_array));
-        assert_eq!(gc.canonicalize_ref(new_map), Some(new_map));
-        assert_eq!(gc.canonicalize_ref(key), Some(key));
-        assert_eq!(gc.canonicalize_ref(child), Some(child));
-    }
-
-    #[test]
-    fn test_object_allocated_after_partial_sweep_survives_as_late_root() {
-        let mut gc = Gc::new();
-        let meta = ValueMeta::new(1, ValueKind::Struct);
-        let _dead_a = gc.alloc(meta, 0);
-        let _dead_b = gc.alloc(meta, 0);
-        let _dead_c = gc.alloc(meta, 0);
-        let mut finalized = Vec::new();
-
-        gc.current_white ^= WHITE_BITS;
-        gc.state = GcState::Sweep;
-        gc.sweep_pos = 0;
-        gc.sweep_write_pos = 0;
-        gc.sweep_budget = usize::MAX;
-
-        let partial_work = gc.sweep_step(&mut |dead| finalized.push(dead), GcHeader::SIZE);
-        assert!(partial_work > 0);
-        assert_eq!(gc.state(), GcState::Sweep);
-        assert!(gc.sweep_pos > 0);
-
-        let late_root =
-            crate::objects::slice::create(&mut gc, ValueMeta::new(0, ValueKind::Uint8), 1, 16, 16);
-        assert_eq!(gc.canonicalize_ref(late_root), Some(late_root));
-
-        let work = gc.step(
-            |gc| gc.mark_gray(late_root),
-            |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
-            |dead| finalized.push(dead),
-        );
-
-        assert!(work > 0);
-        assert!(
-            !finalized.contains(&late_root),
-            "object allocated after a partial sweep and then rooted must not be freed"
-        );
-        assert_eq!(gc.state(), GcState::Pause);
-        assert_eq!(gc.canonicalize_ref(late_root), Some(late_root));
-    }
-
-    #[test]
-    #[should_panic(expected = "scan_slots_by_types: slots length 1 != slot_types length 2")]
-    fn scan_slots_by_types_rejects_non_exact_width() {
-        let mut gc = Gc::new();
-        scan_slots_by_types(
-            &mut gc,
-            &[0],
-            &[crate::SlotType::GcRef, crate::SlotType::Value],
-        );
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "scan_slots_by_types: Interface0 at slot 0 missing Interface1 data slot"
-    )]
-    fn scan_slots_by_types_rejects_truncated_interface_pair() {
-        let mut gc = Gc::new();
-        scan_slots_by_types(&mut gc, &[0], &[crate::SlotType::Interface0]);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "scan_slots_by_types: Interface0 at slot 0 must be followed by Interface1"
-    )]
-    fn scan_slots_by_types_rejects_malformed_interface_pair() {
-        let mut gc = Gc::new();
-        scan_slots_by_types(
-            &mut gc,
-            &[0, 0],
-            &[crate::SlotType::Interface0, crate::SlotType::Value],
-        );
-    }
-}
+mod tests;
 
 /// Scan a slice of values using SlotTypes for GC marking.
 ///
@@ -2284,6 +1590,15 @@ mod tests {
 /// and heap object scanning.
 #[inline]
 pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::SlotType]) {
+    trace_slots_by_types(slots, slot_types, |child| gc.mark_gray(child));
+}
+
+/// Visit all GC references in a slot slice using precise SlotType metadata.
+#[inline]
+pub fn trace_slots_by_types<F>(slots: &[u64], slot_types: &[crate::SlotType], mut visit: F)
+where
+    F: FnMut(GcRef),
+{
     use crate::objects::interface;
     use crate::SlotType;
 
@@ -2300,7 +1615,7 @@ pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::Slot
         match slot_types[i] {
             SlotType::GcRef => {
                 if slots[i] != 0 {
-                    gc.mark_gray(slots[i] as GcRef);
+                    visit(slots[i] as GcRef);
                 }
             }
             SlotType::Interface0 => {
@@ -2314,9 +1629,9 @@ pub fn scan_slots_by_types(gc: &mut Gc, slots: &[u64], slot_types: &[crate::Slot
                 );
                 // Interface header slot - check if data slot contains GcRef
                 if interface::data_is_gc_ref(slots[i]) && slots[i + 1] != 0 {
-                    gc.mark_gray(slots[i + 1] as GcRef);
+                    visit(slots[i + 1] as GcRef);
                 }
-                i += 1; // Skip data slot (Interface1)
+                i += 1;
             }
             _ => {}
         }

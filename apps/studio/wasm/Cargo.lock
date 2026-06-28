@@ -1188,6 +1188,7 @@ dependencies = [
  "vo-common",
  "vo-common-core",
  "vo-runtime",
+ "vo-stdlib",
  "vo-syntax",
  "vo-vm",
 ]

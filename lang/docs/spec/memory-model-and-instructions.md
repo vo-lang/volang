@@ -496,7 +496,7 @@ For stack-allocated arrays with dynamic indices.
 
 | Opcode | Operands | Description |
 |--------|----------|-------------|
-| `PtrNew` | a, b, flags | `slots[a] = alloc(slots[b])`, b=meta_reg containing ValueMeta, flags=slots |
+| `PtrNew` | a, b, c, flags | `slots[a] = alloc(slots[b])`, b=meta_reg containing ValueMeta, c=slots, flags=reserved |
 | `PtrClone` | a, b | `slots[a] = clone(slots[b])` - allocate + memcpy |
 | `PtrGet` | a, b, c | `slots[a] = heap[slots[b]].offset[c]` (single slot) |
 | `PtrSet` | a, b, c | `heap[slots[a]].offset[b] = slots[c]` (single slot) |
@@ -965,4 +965,3 @@ pub struct ClosureHeader {
 }
 // Followed by capture_count GcRef slots (direct pointers to escaped variables on heap)
 ```
-

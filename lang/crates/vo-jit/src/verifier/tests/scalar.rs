@@ -187,7 +187,7 @@ fn rejects_conversion_slot_contract_mismatches() {
         0,
     ));
     module.functions.push(make_func_with_slot_types(
-        vec![Instruction::new(Opcode::Trunc, 0, 1, 0)],
+        vec![Instruction::with_flags(Opcode::Trunc, 1, 0, 1, 0)],
         vec![JitInstructionMetadata::None],
         vec![SlotType::Float, SlotType::Value],
         0,

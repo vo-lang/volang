@@ -17,8 +17,6 @@ mod types;
 pub use entry_policy::entry_policy_edges;
 pub use gc::gc_contract_edges;
 pub use metadata::jit_metadata_contract_edges;
-#[cfg(test)]
-pub use metadata::legacy_jit_metadata_compat_edges;
 pub use opcode::{
     codegen_decoder_pair_edges, opcode_contract_edges, packed_operand_contract_edges,
 };

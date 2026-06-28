@@ -1401,7 +1401,7 @@ Labels are scoped to the function body and may be used by labeled `break` and
 
 Current implementation status: the parser recognizes `goto`, but the checker
 rejects it with `goto is not supported, use labeled break instead`. The
-language regression manifest currently records `cases/goto_stmt.vo` as an
+language regression manifest currently records `cases/typechecker/goto_stmt.vo` as an
 expected failure for that diagnostic.
 
 ```vo

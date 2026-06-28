@@ -1,0 +1,9 @@
+package main
+
+type Wide struct {
+	a [128]int
+}
+
+func main() {
+	_ = make(chan Wide)
+}

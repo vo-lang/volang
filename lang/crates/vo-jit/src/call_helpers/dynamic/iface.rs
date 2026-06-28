@@ -43,11 +43,11 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
 
     let lowering = DynamicCallLowering::new(emitter, inst, ctx);
 
-    let itab_id = emitter.builder().ins().ushr_imm(slot0, 32);
-    let ic_key_val = DynamicCallLowering::iface_ic_key(emitter, itab_id, method_idx);
+    let (ic_key_val, ic_key_extra_val) =
+        DynamicCallLowering::iface_ic_key(emitter, slot0, method_idx);
 
     let (ic_jit_ptr, ic_hit_block, ic_miss_block, merge_block) =
-        lowering.branch_on_keyed_ic_hit(emitter, ic_key_val, zero);
+        lowering.branch_on_keyed_ic_hit(emitter, ic_key_val, ic_key_extra_val, zero);
 
     emitter.builder().switch_to_block(ic_hit_block);
     emitter.builder().seal_block(ic_hit_block);
@@ -75,7 +75,7 @@ pub fn emit_call_iface<'a, E: IrEmitter<'a>>(
         &miss,
     )?;
 
-    lowering.finish_miss(emitter, miss, merge_block, ic_key_val)?;
+    lowering.finish_miss(emitter, miss, merge_block, ic_key_val, ic_key_extra_val)?;
 
     lowering.copy_returns(emitter);
     Ok(())

@@ -16,6 +16,8 @@ struct TestsFile {
     gc_regression_alias: Option<String>,
     #[serde(default, rename = "alias")]
     aliases: Vec<TestAlias>,
+    #[serde(default)]
+    matrices: BTreeMap<String, TestMatrix>,
     #[serde(default, rename = "target")]
     targets: Vec<TestTarget>,
 }
@@ -23,6 +25,11 @@ struct TestsFile {
 #[derive(Debug, Clone, Deserialize)]
 struct TestAlias {
     name: String,
+    targets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TestMatrix {
     targets: Vec<String>,
 }
 
@@ -45,6 +52,7 @@ pub(crate) struct TestTarget {
 pub(crate) struct TestConfig {
     pub(crate) targets: HashMap<String, TestTarget>,
     pub(crate) aliases: HashMap<String, Vec<String>>,
+    pub(crate) matrices: HashMap<String, Vec<String>>,
     pub(crate) default_targets: Vec<String>,
     pub(crate) required_file_pass_targets: Vec<String>,
     pub(crate) gc_regression_targets: Vec<String>,
@@ -200,6 +208,29 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
             bail!("duplicate test alias in eng/tests.toml");
         }
     }
+    let mut matrices = HashMap::new();
+    for (name, matrix) in parsed.matrices {
+        validate_test_selector_name("matrix", &name)?;
+        if targets.contains_key(&name)
+            && !(matrix.targets.len() == 1 && matrix.targets.first() == Some(&name))
+        {
+            bail!("eng/tests.toml matrix {name} conflicts with a target name");
+        }
+        if matrix.targets.is_empty() {
+            bail!("eng/tests.toml matrix {name} targets cannot be empty");
+        }
+        validate_target_refs(&format!("matrix {name} targets"), &matrix.targets, &targets)?;
+        if let Some(alias_targets) = aliases.get(&name) {
+            if alias_targets != &matrix.targets {
+                bail!(
+                    "eng/tests.toml matrix {name} conflicts with alias {name}; matching compatibility aliases are allowed"
+                );
+            }
+        }
+        if matrices.insert(name, matrix.targets).is_some() {
+            bail!("duplicate test matrix in eng/tests.toml");
+        }
+    }
     if parsed.default_targets.is_empty() {
         bail!("eng/tests.toml default_targets cannot be empty");
     }
@@ -223,6 +254,7 @@ pub(crate) fn load_test_config(root: &Path) -> Result<TestConfig> {
     Ok(TestConfig {
         targets,
         aliases,
+        matrices,
         default_targets: parsed.default_targets,
         required_file_pass_targets: parsed.required_file_pass_targets,
         gc_regression_targets,
@@ -309,10 +341,12 @@ pub(crate) fn resolve_target_specs(config: &TestConfig, specs: Vec<String>) -> R
     for spec in specs {
         let expanded = if let Some(targets) = config.aliases.get(&spec) {
             targets.clone()
+        } else if let Some(targets) = config.matrices.get(&spec) {
+            targets.clone()
         } else if config.targets.contains_key(&spec) {
             vec![spec.clone()]
         } else {
-            bail!("unknown test target or alias: {spec}");
+            bail!("unknown test target, alias, or matrix: {spec}");
         };
         for target in expanded {
             if seen.insert(target.clone()) {

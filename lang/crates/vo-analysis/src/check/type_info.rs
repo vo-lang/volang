@@ -253,10 +253,10 @@ impl TypeInfo {
 use crate::typ::{self, BasicType, Type};
 use vo_common_core::types::{SlotType, ValueKind};
 
-/// Compute the number of slots a type occupies.
-pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
+/// Compute the number of slots a type occupies without narrowing to VM operand width.
+pub fn type_slot_count_usize(type_key: TypeKey, tc_objs: &TCObjects) -> Option<usize> {
     let underlying = typ::underlying_type(type_key, tc_objs);
-    match &tc_objs.types[underlying] {
+    Some(match &tc_objs.types[underlying] {
         Type::Basic(_) => 1,
         Type::Pointer(_) => 1,
         Type::Slice(_) => 1,
@@ -266,32 +266,43 @@ pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
         Type::Signature(_) => 1, // closure is GcRef
         Type::Interface(_) => 2,
         Type::Struct(s) => {
-            let mut total = 0u16;
+            let mut total = 0usize;
             for &field_obj in s.fields() {
                 if let Some(field_type) = tc_objs.lobjs[field_obj].typ() {
-                    total += type_slot_count(field_type, tc_objs);
+                    total = total.checked_add(type_slot_count_usize(field_type, tc_objs)?)?;
                 }
             }
             // Empty struct still needs 1 slot (zero-size types not supported)
             total.max(1)
         }
         Type::Array(a) => {
-            let elem_slots = type_slot_count(a.elem(), tc_objs);
-            let len = a.len().unwrap_or(0) as u16;
-            elem_slots * len
+            let elem_slots = type_slot_count_usize(a.elem(), tc_objs)?;
+            let len = usize::try_from(a.len().unwrap_or(0)).ok()?;
+            elem_slots.checked_mul(len)?
         }
         Type::Island => 1, // island is GcRef
-        Type::Named(n) => type_slot_count(n.underlying(), tc_objs),
+        Type::Named(n) => type_slot_count_usize(n.underlying(), tc_objs)?,
         Type::Tuple(t) => {
-            let mut total = 0u16;
+            let mut total = 0usize;
             for &var in t.vars() {
                 if let Some(var_type) = tc_objs.lobjs[var].typ() {
-                    total += type_slot_count(var_type, tc_objs);
+                    total = total.checked_add(type_slot_count_usize(var_type, tc_objs)?)?;
                 }
             }
             total
         }
-    }
+    })
+}
+
+/// Compute the VM slot count for a type.
+///
+/// VM frame and metadata widths are u16. Heap sequence byte sizing can use the
+/// wider `type_slot_count_usize` fact source directly.
+pub fn type_slot_count(type_key: TypeKey, tc_objs: &TCObjects) -> u16 {
+    let slots = type_slot_count_usize(type_key, tc_objs)
+        .unwrap_or_else(|| panic!("type slot count overflow for type {:?}", type_key));
+    u16::try_from(slots)
+        .unwrap_or_else(|_| panic!("type slot count exceeds u16::MAX: {slots} slots"))
 }
 
 /// Compute the slot types for a type.
@@ -367,7 +378,9 @@ pub fn elem_bytes_for_heap(elem_type: TypeKey, tc_objs: &TCObjects) -> usize {
         // Struct: compute actual field bytes (empty struct = 0, not 1 slot)
         ValueKind::Struct => struct_actual_bytes(elem_type, tc_objs),
         // Slot-based: all other types
-        _ => type_slot_count(elem_type, tc_objs) as usize * 8,
+        _ => type_slot_count_usize(elem_type, tc_objs)
+            .and_then(|slots| slots.checked_mul(8))
+            .expect("elem byte width overflow"),
     }
 }
 
@@ -378,13 +391,20 @@ fn struct_actual_bytes(type_key: TypeKey, tc_objs: &TCObjects) -> usize {
         let mut total = 0usize;
         for &field_obj in s.fields() {
             if let Some(field_type) = tc_objs.lobjs[field_obj].typ() {
-                total += type_slot_count(field_type, tc_objs) as usize * 8;
+                let field_bytes = type_slot_count_usize(field_type, tc_objs)
+                    .and_then(|slots| slots.checked_mul(8))
+                    .expect("struct byte width overflow");
+                total = total
+                    .checked_add(field_bytes)
+                    .expect("struct byte width overflow");
             }
         }
         total
     } else {
         // Fallback (shouldn't happen)
-        type_slot_count(type_key, tc_objs) as usize * 8
+        type_slot_count_usize(type_key, tc_objs)
+            .and_then(|slots| slots.checked_mul(8))
+            .expect("type byte width overflow")
     }
 }
 

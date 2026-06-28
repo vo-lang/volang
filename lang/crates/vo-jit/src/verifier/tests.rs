@@ -61,6 +61,10 @@ fn jump(offset: i32) -> Instruction {
     Instruction::new(Opcode::Jump, 0, encoded as u16, (encoded >> 16) as u16)
 }
 
+fn load_int32(dst: u16, value: u32) -> Instruction {
+    Instruction::new(Opcode::LoadInt, dst, value as u16, (value >> 16) as u16)
+}
+
 fn refresh_function_metadata(func: &mut FunctionDef) {
     crate::test_fixtures::refresh_derived_function_fields(func);
 }

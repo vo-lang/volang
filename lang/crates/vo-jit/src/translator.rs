@@ -2,7 +2,7 @@
 
 use cranelift_codegen::ir::{FuncRef, Value};
 use cranelift_frontend::FunctionBuilder;
-use vo_runtime::bytecode::{JitInstructionMetadata, Module as VoModule};
+use vo_runtime::bytecode::{JitInstructionMetadata, Module as VoModule, ResolvedExtern};
 use vo_runtime::instruction::Instruction;
 
 use crate::JitError;
@@ -32,6 +32,7 @@ pub struct HelperFuncs {
     pub gc_alloc: Option<FuncRef>,
     pub write_barrier: Option<FuncRef>,
     pub typed_write_barrier_by_meta: Option<FuncRef>,
+    pub gc_safepoint: Option<FuncRef>,
     pub panic: Option<FuncRef>,
     pub runtime_trap: Option<FuncRef>,
     pub call_extern: Option<FuncRef>,
@@ -65,10 +66,12 @@ pub struct HelperFuncs {
     pub map_delete: Option<FuncRef>,
     pub map_iter_init: Option<FuncRef>,
     pub map_iter_next: Option<FuncRef>,
+    pub iface_pack_slot0: Option<FuncRef>,
     pub iface_assert: Option<FuncRef>,
     pub iface_to_iface: Option<FuncRef>,
     pub iface_eq: Option<FuncRef>,
     pub set_call_request: Option<FuncRef>,
+    pub copy_frame_slots: Option<FuncRef>,
     pub island_new: Option<FuncRef>,
     pub queue_close: Option<FuncRef>,
     pub queue_send: Option<FuncRef>,
@@ -89,6 +92,7 @@ pub struct HelperFuncs {
 pub enum SelectSyncCase {
     Send,
     Recv {
+        case_idx: u16,
         dst_reg: u16,
         elem_slots: u8,
         has_ok: bool,
@@ -153,6 +157,8 @@ pub trait MetadataAccess {
     /// Get Vo module
     fn vo_module(&self) -> &VoModule;
 
+    fn resolved_extern(&self, extern_id: u32) -> Result<&ResolvedExtern, JitError>;
+
     /// Get current PC
     fn current_pc(&self) -> usize;
 
@@ -170,12 +176,9 @@ pub trait MetadataAccess {
         flags: u8,
         _dynamic_bytes_slot: u16,
     ) -> Option<crate::metadata::ElemLayout> {
-        if flags == 0 {
-            self.current_jit_metadata()
-                .and_then(crate::metadata::elem_layout_from_instruction)
-        } else {
-            Some(crate::metadata::elem_layout_from_flags(flags))
-        }
+        self.current_jit_metadata()
+            .and_then(crate::metadata::elem_layout_from_instruction)
+            .or_else(|| (flags != 0).then(|| crate::metadata::elem_layout_from_flags(flags)))
     }
 
     /// Resolve typed map-get metadata for JIT lowering.
@@ -197,6 +200,36 @@ pub trait MetadataAccess {
         let _ = inst;
         self.current_jit_metadata()
             .and_then(crate::metadata::map_delete_key_slots_from_instruction)
+    }
+
+    /// Resolve typed map-iterator-next metadata for JIT lowering.
+    fn map_iter_next_layout(
+        &self,
+        inst: &Instruction,
+    ) -> Option<crate::metadata::MapIterNextLayout> {
+        crate::metadata::map_iter_next_layout(
+            inst,
+            crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
+        )
+    }
+
+    /// Resolve typed interface-assert result metadata for JIT lowering.
+    fn iface_assert_layout(
+        &self,
+        inst: &Instruction,
+    ) -> Option<crate::metadata::IfaceAssertLayout> {
+        crate::metadata::iface_assert_layout(
+            inst,
+            crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
+        )
+    }
+
+    /// Resolve queue/select element width from QueueLayout metadata.
+    fn queue_elem_slots(&self, inst: &Instruction) -> Option<u16> {
+        crate::metadata::queue_elem_slots(
+            inst,
+            crate::metadata::MetadataFacts::from_instruction(self.current_jit_metadata()),
+        )
     }
 }
 
@@ -237,11 +270,18 @@ pub trait SelectSync<'a>: SlotAccess<'a> {
     /// Begin tracking compile-time SelectSend/SelectRecv metadata for a SelectExec.
     fn begin_select_tracking(&mut self) {}
 
-    /// Record a SelectSend case in source order.
-    fn record_select_send_case(&mut self) {}
+    /// Record a SelectSend case by source case index.
+    fn record_select_send_case(&mut self, _case_idx: u16) {}
 
-    /// Record a SelectRecv case in source order.
-    fn record_select_recv_case(&mut self, _dst_reg: u16, _elem_slots: u8, _has_ok: bool) {}
+    /// Record a SelectRecv case by source case index.
+    fn record_select_recv_case(
+        &mut self,
+        _case_idx: u16,
+        _dst_reg: u16,
+        _elem_slots: u8,
+        _has_ok: bool,
+    ) {
+    }
 
     /// Synchronize only the slots that SelectExec may have written.
     fn sync_select_exec_state(&mut self, _result_reg: u16) -> Result<(), JitError> {
@@ -364,4 +404,34 @@ pub trait RuntimeOpsEmitter<'a>:
 impl<'a, T> RuntimeOpsEmitter<'a> for T where
     T: TrapEmitter<'a> + SlotAccess<'a> + SelectSync<'a> + StackRefresh
 {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SelectSyncCase;
+
+    #[test]
+    fn vm_select_source_case_sync_contract_017_recv_carries_source_case_index() {
+        let case = SelectSyncCase::Recv {
+            case_idx: 2,
+            dst_reg: 8,
+            elem_slots: 1,
+            has_ok: true,
+        };
+
+        match case {
+            SelectSyncCase::Recv {
+                case_idx,
+                dst_reg,
+                elem_slots,
+                has_ok,
+            } => {
+                assert_eq!(case_idx, 2);
+                assert_eq!(dst_reg, 8);
+                assert_eq!(elem_slots, 1);
+                assert!(has_ok);
+            }
+            SelectSyncCase::Send => panic!("expected recv case"),
+        }
+    }
 }

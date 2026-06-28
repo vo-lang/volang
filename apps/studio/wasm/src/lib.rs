@@ -10,11 +10,14 @@ use js_sys::{Object, Reflect};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use vo_app_runtime::{GuestRuntime, RenderBuffer, RenderIslandRuntime, SessionError, StepResult};
+use vo_app_runtime::{
+    GuestRuntime, PendingHostEvent, RenderBuffer, RenderIslandRuntime, SessionError, StepResult,
+};
 use vo_common::stable_hash::StableHasher;
 use vo_common::vfs::{FileSystem, MemoryFs};
 use vo_module::project::ProjectContextOptions;
 use vo_module::workspace::WorkspaceDiscovery;
+use vo_vm::scheduler::HostWaitKey;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 
@@ -26,6 +29,36 @@ fn ensure_panic_hook() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| console_error_panic_hook::set_once());
+}
+
+fn pending_host_event_to_js(event: &PendingHostEvent) -> Object {
+    let obj = Object::new();
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("key"),
+        &JsValue::from_str(&event.key.encode()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("source"),
+        &JsValue::from_str(event.source.as_str()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("token"),
+        &JsValue::from_str(&event.token.to_string()),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("delayMs"),
+        &JsValue::from_f64(event.delay_ms as f64),
+    );
+    let _ = Reflect::set(
+        &obj,
+        &JsValue::from_str("replay"),
+        &JsValue::from_bool(event.replay),
+    );
+    obj
 }
 
 include!(concat!(env!("OUT_DIR"), "/term_embedded.rs"));
@@ -243,8 +276,8 @@ impl StudioVoVm {
     #[wasm_bindgen(js_name = "withExterns")]
     pub fn with_externs(bytecode: &[u8]) -> Result<StudioVoVm, JsValue> {
         ensure_panic_hook();
-        let module = vo_vm::bytecode::Module::deserialize(bytecode)
-            .map_err(|e| JsValue::from_str(&format!("Failed to load bytecode: {:?}", e)))?;
+        let module =
+            decode_verified_module(bytecode, "Studio VM").map_err(|e| JsValue::from_str(&e))?;
         let mut vm = vo_web::create_loaded_vm_from_module(module, |reg, exts| {
             vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
         })
@@ -303,39 +336,23 @@ impl StudioVoVm {
     }
 
     /// Drain pending host events (timers) that JS must schedule.
-    /// Each element is { token: string, delayMs: number, replay: boolean }.
+    /// Each element is { key: string, source: string, token: string, delayMs: number, replay: boolean }.
     #[wasm_bindgen(js_name = "takePendingHostEvents")]
     pub fn take_pending_host_events(&mut self) -> js_sys::Array {
         let arr = js_sys::Array::new();
         for event in self.runtime.take_pending_host_events() {
-            let obj = Object::new();
-            let _ = Reflect::set(
-                &obj,
-                &JsValue::from_str("token"),
-                &JsValue::from_str(&event.token.to_string()),
-            );
-            let _ = Reflect::set(
-                &obj,
-                &JsValue::from_str("delayMs"),
-                &JsValue::from_f64(event.delay_ms as f64),
-            );
-            let _ = Reflect::set(
-                &obj,
-                &JsValue::from_str("replay"),
-                &JsValue::from_bool(false),
-            );
-            arr.push(&obj);
+            arr.push(&pending_host_event_to_js(&event));
         }
         arr
     }
 
     /// Wake a suspended host event fiber and run scheduled work.
     #[wasm_bindgen(js_name = "wakeHostEvent")]
-    pub fn wake_host_event_vm(&mut self, token: &str) -> Result<(), JsValue> {
-        let token = token
-            .parse::<u64>()
-            .map_err(|e| JsValue::from_str(&format!("invalid token: {}", e)))?;
-        self.runtime.wake_host_event(token);
+    pub fn wake_host_event_vm(&mut self, key: &str) -> Result<(), JsValue> {
+        let key = HostWaitKey::decode(key).map_err(|e| JsValue::from_str(&e))?;
+        self.runtime
+            .wake_host_event(key)
+            .map_err(session_error_to_js)?;
         Ok(())
     }
 
@@ -367,7 +384,7 @@ pub fn init_vfs() -> js_sys::Promise {
 // =============================================================================
 
 const VFS_MOD_ROOT: &str = "";
-const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "2";
+const STUDIO_VFS_COMPILE_CACHE_SCHEMA_VERSION: &str = "3";
 const STUDIO_VFS_COMPILE_CACHE_SLOT_NAMESPACE: &str = "studio-vfs-compile-cache-slot";
 const STUDIO_VFS_COMPILE_CACHE_NAMESPACE: &str = "studio-vfs-compile-cache";
 
@@ -1044,7 +1061,11 @@ fn try_load_vfs_compile_cache(
     if read_vfs_text(&slot.fingerprint_path)?.trim() != fingerprint {
         return Ok(None);
     }
-    Ok(Some(read_vfs_bytes(&slot.module_path)?))
+    let bytecode = read_vfs_bytes(&slot.module_path)?;
+    if decode_verified_module(&bytecode, "Studio compile cache").is_err() {
+        return Ok(None);
+    }
+    Ok(Some(bytecode))
 }
 
 fn save_vfs_compile_cache(
@@ -1052,8 +1073,17 @@ fn save_vfs_compile_cache(
     fingerprint: &str,
     bytecode: &[u8],
 ) -> Result<(), String> {
+    decode_verified_module(bytecode, "Studio compile cache")?;
     write_vfs_bytes(&slot.module_path, bytecode)?;
     write_vfs_text(&slot.fingerprint_path, &format!("{fingerprint}\n"))
+}
+
+fn decode_verified_module(bytecode: &[u8], label: &str) -> Result<vo_vm::bytecode::Module, String> {
+    let module = vo_vm::bytecode::Module::deserialize(bytecode)
+        .map_err(|e| format!("failed to decode {label} bytecode: {e:?}"))?;
+    vo_common_core::verifier::verify_module(&module)
+        .map_err(|err| format!("invalid {label} bytecode: {err}"))?;
+    Ok(module)
 }
 
 fn vfs_exists(path: &str) -> bool {
@@ -1505,8 +1535,8 @@ pub fn dump_entry(entry_path: &str, workspace_discovery: &str) -> Result<String,
     let options = project_context_options_from_workspace_discovery(workspace_discovery)
         .map_err(|e| JsValue::from_str(&e))?;
     let bytecode = compile_from_vfs(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
-    let module = vo_vm::bytecode::Module::deserialize(&bytecode)
-        .map_err(|e| JsValue::from_str(&format!("failed to decode bytecode: {e:?}")))?;
+    let module =
+        decode_verified_module(&bytecode, "Studio dump").map_err(|e| JsValue::from_str(&e))?;
     Ok(bytecode_text_format::format_text(&module))
 }
 
@@ -1688,28 +1718,15 @@ pub fn poll_pending_host_event() -> JsValue {
         let Some(event) = guest.poll_pending_host_event() else {
             return JsValue::NULL;
         };
-        let obj = Object::new();
-        let _ = Reflect::set(
-            &obj,
-            &JsValue::from_str("token"),
-            &JsValue::from_str(&event.token.to_string()),
-        );
-        let _ = Reflect::set(
-            &obj,
-            &JsValue::from_str("delayMs"),
-            &JsValue::from_f64(event.delay_ms as f64),
-        );
-        obj.into()
+        pending_host_event_to_js(&event).into()
     })
 }
 
 #[wasm_bindgen(js_name = "wakeHostEvent")]
-pub fn wake_host_event(token: &str) -> Result<(), JsValue> {
-    let token = token
-        .parse::<u64>()
-        .map_err(|e| JsValue::from_str(&format!("invalid host event token '{}': {}", token, e)))?;
+pub fn wake_host_event(key: &str) -> Result<(), JsValue> {
+    let key = HostWaitKey::decode(key).map_err(|e| JsValue::from_str(&e))?;
     with_guest_mut(|guest| {
-        guest.wake_host_event(token);
+        guest.wake_host_event(key).map_err(session_error_to_js)?;
         let step = guest.run_scheduled().map_err(session_error_to_js)?;
         run_gc_stress_guest_step(guest);
         flush_stdout("guest", step.stdout.as_deref());
@@ -1869,6 +1886,9 @@ pub fn load_cached_term_handler(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
     }
+    if decode_verified_module(bytes, "term handler cache").is_err() {
+        return false;
+    }
     TERM_HANDLER_BYTECODE.with(|cell| {
         *cell.borrow_mut() = Some(bytes.to_vec());
     });
@@ -2024,5 +2044,58 @@ pub fn vo_host_run_bytecode_capture(bytecode: &[u8]) -> Result<String, JsValue> 
                 )))
             }
         }
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use vo_common_core::bytecode::{FunctionDef, JitInstructionMetadata, Module};
+    use vo_common_core::instruction::{Instruction, Opcode};
+    use vo_common_core::types::SlotType;
+
+    fn empty_return_module(name: &str) -> Module {
+        let slot_types = Vec::<SlotType>::new();
+        let code = vec![Instruction::new(Opcode::Return, 0, 0, 0)];
+        let mut module = Module::new(name.to_string());
+        module.functions.push(FunctionDef {
+            name: "main".to_string(),
+            param_count: 0,
+            param_slots: 0,
+            local_slots: 0,
+            gc_scan_slots: 0,
+            ret_slots: 0,
+            ret_slot_types: Vec::new(),
+            recv_slots: 0,
+            heap_ret_gcref_count: 0,
+            heap_ret_gcref_start: 0,
+            heap_ret_slots: Vec::new(),
+            is_closure: false,
+            error_ret_slot: -1,
+            has_defer: false,
+            has_calls: false,
+            has_call_extern: false,
+            code,
+            jit_metadata: vec![JitInstructionMetadata::None],
+            borrowed_scan_slots_prefix: FunctionDef::compute_borrowed_scan_slots_prefix(
+                &slot_types,
+            ),
+            capture_types: Vec::new(),
+            capture_slot_types: Vec::new(),
+            param_types: Vec::new(),
+            slot_types,
+        });
+        module
+    }
+
+    #[test]
+    fn studio_serialized_module_gate_rejects_invalid_bytecode() {
+        let invalid = Module::new("invalid-cache".to_string()).serialize();
+        let err = decode_verified_module(&invalid, "Studio compile cache").unwrap_err();
+        assert!(err.contains("invalid Studio compile cache bytecode"));
+
+        let valid = empty_return_module("valid-cache").serialize();
+        decode_verified_module(&valid, "Studio compile cache")
+            .expect("valid serialized module verifies");
     }
 }

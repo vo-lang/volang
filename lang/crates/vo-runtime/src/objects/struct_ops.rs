@@ -37,9 +37,14 @@ pub fn get_field(obj: GcRef, idx: usize) -> u64 {
     unsafe { Gc::read_slot(obj, idx) }
 }
 
-/// Set field value (safe for FFI use).
+/// Set field value.
+///
+/// # Safety
+/// Caller must ensure `obj` is a valid struct object and either apply the
+/// required write barrier before publishing a GC-visible field, or only use
+/// this during fresh object initialization before the object is scanned.
 #[inline]
-pub fn set_field(obj: GcRef, idx: usize, val: u64) {
+pub unsafe fn set_field(obj: GcRef, idx: usize, val: u64) {
     unsafe { Gc::write_slot(obj, idx, val) }
 }
 
@@ -58,5 +63,23 @@ pub unsafe fn get_fields(obj: GcRef, start: usize, dest: &mut [u64]) {
 pub unsafe fn set_fields(obj: GcRef, start: usize, src: &[u64]) {
     for (i, &s) in src.iter().enumerate() {
         Gc::write_slot(obj, start + i, s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn raw_struct_set_field_is_unsafe_public_primitive_058() {
+        let source = vo_source_contract::production_source_without_test_modules(include_str!(
+            "struct_ops.rs"
+        ));
+        assert!(
+            source.contains("pub unsafe fn set_field("),
+            "raw struct field mutation must stay behind an unsafe contract"
+        );
+        assert!(
+            source.contains("required write barrier"),
+            "set_field safety docs must name the write-barrier obligation"
+        );
     }
 }

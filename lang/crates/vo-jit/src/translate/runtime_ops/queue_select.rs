@@ -5,17 +5,26 @@ use vo_runtime::jit_api::JitRuntimeTrapKind;
 
 use crate::call_helpers::emit_checked_jit_result_helper_call;
 use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc, require_helper};
-use crate::translator::{
-    emit_funcref_call, emit_funcref_call_with_effect, HelperCallEffect, RuntimeOpsEmitter,
-};
+use crate::translator::{emit_funcref_call, RuntimeOpsEmitter};
 use crate::JitError;
+
+fn queue_elem_slots<'a>(
+    e: &impl RuntimeOpsEmitter<'a>,
+    inst: &Instruction,
+) -> Result<u16, JitError> {
+    e.queue_elem_slots(inst).ok_or(JitError::MissingJitLayout {
+        pc: e.current_pc(),
+        opcode: inst.opcode(),
+        layout: "QueueLayout",
+    })
+}
 
 pub(in crate::translate) fn queue_new<'a>(
     e: &mut impl RuntimeOpsEmitter<'a>,
     inst: &Instruction,
 ) -> Result<(), JitError> {
     let func = require_helper(e.helpers().queue_new_checked, "queue_new_checked")?;
-    let gc_ptr = e.gc_ptr();
+    let ctx = e.ctx_param();
     let queue_kind = e
         .builder()
         .ins()
@@ -35,7 +44,7 @@ pub(in crate::translate) fn queue_new<'a>(
     let call = emit_funcref_call(
         e,
         func,
-        &[gc_ptr, queue_kind, elem_type, elem_slots_i32, cap, out_ptr],
+        &[ctx, queue_kind, elem_type, elem_slots_i32, cap, out_ptr],
     );
     let error_code = e.builder().inst_results(call)[0];
 
@@ -59,9 +68,15 @@ pub(in crate::translate) fn queue_len<'a>(
     inst: &Instruction,
 ) -> Result<(), JitError> {
     let func = require_helper(e.helpers().queue_len, "queue_len")?;
+    let ctx = e.ctx_param();
     let ch = e.read_var(inst.b);
-    let call = emit_funcref_call_with_effect(e, func, &[ch], HelperCallEffect::FrameIndependent);
-    let result = e.builder().inst_results(call)[0];
+    let out_slot =
+        e.builder()
+            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
+
+    emit_checked_jit_result_helper_call(e, func, &[ctx, ch, out_ptr], true);
+    let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
     e.write_var(inst.a, result);
     Ok(())
 }
@@ -71,9 +86,15 @@ pub(in crate::translate) fn queue_cap<'a>(
     inst: &Instruction,
 ) -> Result<(), JitError> {
     let func = require_helper(e.helpers().queue_cap, "queue_cap")?;
+    let ctx = e.ctx_param();
     let ch = e.read_var(inst.b);
-    let call = emit_funcref_call_with_effect(e, func, &[ch], HelperCallEffect::FrameIndependent);
-    let result = e.builder().inst_results(call)[0];
+    let out_slot =
+        e.builder()
+            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 8));
+    let out_ptr = e.builder().ins().stack_addr(types::I64, out_slot, 0);
+
+    emit_checked_jit_result_helper_call(e, func, &[ctx, ch, out_ptr], true);
+    let result = e.builder().ins().stack_load(types::I64, out_slot, 0);
     e.write_var(inst.a, result);
     Ok(())
 }
@@ -126,7 +147,7 @@ pub(in crate::translate) fn emit_queue_send<'a>(
     mark_runtime_trap_pc(e);
 
     let queue = e.read_var(inst.a);
-    let val_slots = inst.flags as u32;
+    let val_slots = u32::from(queue_elem_slots(e, inst)?);
     let val_ptr = e.var_addr(inst.b);
     let val_slots_val = e.builder().ins().iconst(types::I32, val_slots as i64);
 
@@ -154,7 +175,7 @@ pub(in crate::translate) fn emit_queue_recv<'a>(
 
     let queue = e.read_var(inst.b);
     let dst_ptr = e.var_addr(inst.a);
-    let elem_slots = inst.recv_elem_slots() as u32;
+    let elem_slots = u32::from(queue_elem_slots(e, inst)?);
     let has_ok = u32::from(inst.recv_has_ok());
     let written_slots = elem_slots + has_ok;
     let elem_slots_val = e.builder().ins().iconst(types::I32, elem_slots as i64);
@@ -194,9 +215,14 @@ pub(in crate::translate) fn select_send<'a>(
     let ctx = e.ctx_param();
     let queue_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
     let val_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
-    let elem_slots = e.builder().ins().iconst(types::I32, inst.flags as i64);
+    let elem_slot_count = queue_elem_slots(e, inst)?;
+    let elem_slots = e
+        .builder()
+        .ins()
+        .iconst(types::I32, i64::from(elem_slot_count));
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
-    e.record_select_send_case();
+    e.record_select_send_case(inst.c);
+    mark_runtime_trap_pc(e);
     emit_checked_jit_result_helper_call(
         e,
         func,
@@ -215,12 +241,13 @@ pub(in crate::translate) fn select_recv<'a>(
 
     let dst_reg = e.builder().ins().iconst(types::I32, inst.a as i64);
     let queue_reg = e.builder().ins().iconst(types::I32, inst.b as i64);
-    let elem_slots_u32 = inst.recv_elem_slots() as u32;
+    let elem_slots_u32 = u32::from(queue_elem_slots(e, inst)?);
     let has_ok_u32 = u32::from(inst.recv_has_ok());
     let elem_slots = e.builder().ins().iconst(types::I32, elem_slots_u32 as i64);
     let has_ok = e.builder().ins().iconst(types::I32, has_ok_u32 as i64);
     let case_idx = e.builder().ins().iconst(types::I32, inst.c as i64);
-    e.record_select_recv_case(inst.a, elem_slots_u32 as u8, has_ok_u32 != 0);
+    e.record_select_recv_case(inst.c, inst.a, elem_slots_u32 as u8, has_ok_u32 != 0);
+    mark_runtime_trap_pc(e);
 
     emit_checked_jit_result_helper_call(
         e,
@@ -257,4 +284,61 @@ pub(in crate::translate) fn select_exec<'a>(
     e.sync_select_exec_state(inst.a)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vm_queue_handle_validation_002_jit_queue_len_cap_use_checked_callbacks() {
+        let src = vo_source_contract::production_source_without_test_modules(include_str!(
+            "queue_select.rs"
+        ));
+        let len_body = src
+            .split("pub(in crate::translate) fn queue_len")
+            .nth(1)
+            .expect("queue_len lowering should exist")
+            .split("pub(in crate::translate) fn queue_cap")
+            .next()
+            .expect("queue_len should precede queue_cap");
+        let cap_body = src
+            .split("pub(in crate::translate) fn queue_cap")
+            .nth(1)
+            .expect("queue_cap lowering should exist")
+            .split("pub(in crate::translate) fn queue_close")
+            .next()
+            .expect("queue_cap should precede queue_close");
+
+        for (name, body) in [("QueueLen", len_body), ("QueueCap", cap_body)] {
+            assert!(
+                body.contains("emit_checked_jit_result_helper_call"),
+                "{name} must use checked JitResult helper routing"
+            );
+            assert!(
+                body.contains("ctx_param()"),
+                "{name} must pass JitContext into the VM-owned queue callback wrapper"
+            );
+            assert!(
+                !body.contains("FrameIndependent"),
+                "{name} must not use the raw frame-independent runtime helper path"
+            );
+        }
+    }
+
+    #[test]
+    fn jit_queue_select_lowering_uses_metadata_layout_061() {
+        let src = vo_source_contract::production_source_without_test_modules(include_str!(
+            "queue_select.rs"
+        ));
+
+        assert!(
+            src.matches("queue_elem_slots(e, inst)?").count() >= 4,
+            "QueueSend/QueueRecv/SelectSend/SelectRecv lowering must derive helper ABI width from QueueLayout metadata"
+        );
+        assert!(
+            !src.contains("let val_slots = inst.flags as u32")
+                && !src.contains("let elem_slots_u32 = inst.recv_elem_slots() as u32")
+                && !src.contains("inst.flags as i64"),
+            "Queue/Select lowering must not derive helper ABI width from encoded flags"
+        );
+    }
 }

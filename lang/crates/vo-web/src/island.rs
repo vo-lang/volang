@@ -70,18 +70,16 @@ impl VoVm {
     /// The frame is decoded and queued for processing.
     #[wasm_bindgen(js_name = "pushIslandCommand")]
     pub fn push_island_command(&mut self, frame: &[u8]) -> Result<(), JsValue> {
-        let (target_island_id, cmd) = decode_island_transport_frame(frame)
+        let (target_island_id, source_island_id, cmd) = decode_island_transport_frame(frame)
             .map_err(|e| JsValue::from_str(&format!("invalid island transport frame: {:?}", e)))?;
-        let current_island_id = self.inner.current_island_id();
-        if current_island_id == 0 {
-            self.inner.set_island_id(target_island_id);
-        } else if current_island_id != target_island_id {
-            return Err(JsValue::from_str(&format!(
-                "render island id mismatch: have {}, got {}",
-                current_island_id, target_island_id
-            )));
-        }
-        self.inner.push_island_command(cmd);
+        self.inner
+            .push_targeted_island_command_from(source_island_id, target_island_id, cmd)
+            .map_err(|mismatch| {
+                JsValue::from_str(&format!(
+                    "render island id mismatch: have {}, got {}",
+                    mismatch.have, mismatch.got
+                ))
+            })?;
         Ok(())
     }
 
@@ -91,8 +89,12 @@ impl VoVm {
     pub fn take_outbound_commands(&mut self) -> js_sys::Array {
         let commands = self.inner.take_outbound_commands();
         let arr = js_sys::Array::new();
-        for (target_island_id, cmd) in commands {
-            let bytes = encode_island_transport_frame(target_island_id, &cmd);
+        for (target_island_id, envelope) in commands {
+            let bytes = encode_island_transport_frame(
+                target_island_id,
+                envelope.source_island_id,
+                &envelope.command,
+            );
             let uint8 = js_sys::Uint8Array::from(bytes.as_slice());
             arr.push(&uint8);
         }
@@ -108,17 +110,19 @@ impl VoVm {
     /// Check if VM has pending outbound commands.
     #[wasm_bindgen(js_name = "hasOutboundCommands")]
     pub fn has_outbound_commands(&self) -> bool {
-        !self.inner.state.outbound_commands.is_empty()
+        self.inner.has_outbound_commands()
     }
 
     /// Take pending host events (timers, async callbacks).
-    /// Returns array of {token, delayMs, replay} objects.
+    /// Returns array of {key, source, token, delayMs, replay} objects.
     #[wasm_bindgen(js_name = "takePendingHostEvents")]
     pub fn take_pending_host_events(&mut self) -> js_sys::Array {
-        let events = self.inner.scheduler.take_pending_host_events();
+        let events = self.inner.take_pending_host_events();
         let arr = js_sys::Array::new();
         for ev in events {
             let obj = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&obj, &"key".into(), &ev.key.encode().into());
+            let _ = js_sys::Reflect::set(&obj, &"source".into(), &ev.source.as_str().into());
             let _ = js_sys::Reflect::set(&obj, &"token".into(), &ev.token.to_string().into());
             let _ = js_sys::Reflect::set(&obj, &"delayMs".into(), &(ev.delay_ms as f64).into());
             let _ = js_sys::Reflect::set(&obj, &"replay".into(), &ev.replay.into());
@@ -129,9 +133,42 @@ impl VoVm {
 
     /// Wake a fiber blocked on host event.
     #[wasm_bindgen(js_name = "wakeHostEvent")]
-    pub fn wake_host_event(&mut self, token: &str) {
-        if let Ok(t) = token.parse::<u64>() {
-            self.inner.wake_host_event(t);
-        }
+    pub fn wake_host_event(&mut self, key: &str) -> bool {
+        let Ok(key) = vo_vm::scheduler::HostWaitKey::decode(key) else {
+            return false;
+        };
+        self.inner.wake_host_event(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vm_web_island_frame_source_envelope_061_source_contract() {
+        let src = include_str!("island.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source before tests");
+
+        assert!(
+            src.contains(
+                "let (target_island_id, source_island_id, cmd) = decode_island_transport_frame(frame)"
+            ),
+            "pushIslandCommand must decode the transport-owned source island id"
+        );
+        assert!(
+            src.contains(
+                ".push_targeted_island_command_from(source_island_id, target_island_id, cmd)"
+            ),
+            "pushIslandCommand must forward the decoded source into the VM envelope"
+        );
+        assert!(
+            src.contains("for (target_island_id, envelope) in commands"),
+            "takeOutboundCommands must consume VM-owned outbound envelopes"
+        );
+        assert!(
+            src.contains("target_island_id,\n                envelope.source_island_id,\n                &envelope.command"),
+            "takeOutboundCommands must encode the envelope source, not a local substitute"
+        );
     }
 }

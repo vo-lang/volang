@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -149,6 +149,216 @@ function validatePackagedWebManifest(mod) {
   }
 }
 
+function requireModuleFile(mod, path) {
+  const file = mod.files.find((file) => file.path === path);
+  assert(file, `${mod.module} must include ${path}`);
+  return moduleFileBytes(file).toString('utf8');
+}
+
+function requireProjectFile(project, path) {
+  const file = project.files.find((file) => file.path === path);
+  assert(file, `project package must include ${path}`);
+  return moduleFileBytes(file).toString('utf8');
+}
+
+function parseVoModRequires(source) {
+  const requires = new Map();
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    const require = line.match(/^require\s+(\S+)\s+(\S+)$/);
+    if (require) {
+      requires.set(require[1], require[2]);
+    }
+  }
+  return requires;
+}
+
+function parseVoLockValue(value) {
+  if (value.startsWith('"') || value.startsWith('[')) {
+    try {
+      return JSON.parse(value);
+    } catch (error) {
+      fail(`invalid vo.lock value ${value}: ${error.message}`);
+    }
+  }
+  if (/^\d+$/.test(value)) {
+    return Number(value);
+  }
+  return value;
+}
+
+function parseVoLockResolved(source) {
+  const resolved = [];
+  let current = null;
+  let artifact = null;
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    if (line === '[[resolved]]') {
+      current = { artifacts: [] };
+      artifact = null;
+      resolved.push(current);
+      continue;
+    }
+    if (line === '[[resolved.artifact]]') {
+      assert(current, 'vo.lock artifact block must follow a resolved module');
+      artifact = {};
+      current.artifacts.push(artifact);
+      continue;
+    }
+
+    const pair = line.match(/^([A-Za-z0-9_]+)\s*=\s*(.+)$/);
+    if (!pair || current == null) continue;
+    const target = artifact ?? current;
+    target[pair[1]] = parseVoLockValue(pair[2]);
+  }
+  return new Map(resolved.map((entry) => [entry.path, entry]));
+}
+
+function parseVoWebManifest(mod) {
+  const manifestSource = requireModuleFile(mod, 'vo.web.json');
+  try {
+    return JSON.parse(manifestSource);
+  } catch (error) {
+    fail(`${mod.module} vo.web.json is invalid JSON: ${error.message}`);
+  }
+}
+
+function sha256Field(value) {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
+function artifactKey(artifact) {
+  return `${artifact.kind}\u0000${artifact.target}\u0000${artifact.name}`;
+}
+
+function validateProjectDependencyContracts(project, deps) {
+  const directRequires = parseVoModRequires(requireProjectFile(project, 'vo.mod'));
+  const locked = parseVoLockResolved(requireProjectFile(project, 'vo.lock'));
+
+  for (const moduleName of expected.requiredModules) {
+    const requiredVersion = directRequires.get(moduleName);
+    assert(requiredVersion, `project vo.mod must directly require ${moduleName}`);
+    const mod = moduleByName(new Map(deps.modules.map((entry) => [entry.module, entry])), moduleName);
+    assert(
+      requiredVersion === mod.version,
+      `project vo.mod requires ${moduleName} ${requiredVersion}, but deps package embeds ${mod.version}`,
+    );
+  }
+
+  for (const mod of deps.modules) {
+    const lockedModule = locked.get(mod.module);
+    assert(lockedModule, `project vo.lock must resolve packaged dependency ${mod.module}`);
+    assert(
+      lockedModule.version === mod.version,
+      `project vo.lock resolves ${mod.module} ${lockedModule.version}, but deps package embeds ${mod.version}`,
+    );
+    assert(sha256Field(lockedModule.source), `project vo.lock must bind ${mod.module} source digest`);
+    assert(sha256Field(lockedModule.release_manifest), `project vo.lock must bind ${mod.module} release manifest digest`);
+
+    const webManifest = parseVoWebManifest(mod);
+    assert(webManifest.module === mod.module, `${mod.module} vo.web.json module mismatch`);
+    assert(webManifest.version === mod.version, `${mod.module} vo.web.json version mismatch`);
+    assert(webManifest.commit === lockedModule.commit, `${mod.module} vo.web.json commit must match project vo.lock`);
+
+    const webArtifacts = new Map((webManifest.artifacts ?? []).map((artifact) => [artifactKey(artifact), artifact]));
+    for (const lockedArtifact of lockedModule.artifacts ?? []) {
+      const webArtifact = webArtifacts.get(artifactKey(lockedArtifact));
+      assert(webArtifact, `${mod.module} vo.web.json missing locked artifact ${lockedArtifact.name}`);
+      assert(
+        webArtifact.size === lockedArtifact.size,
+        `${mod.module} artifact size mismatch for ${lockedArtifact.name}`,
+      );
+      assert(
+        webArtifact.digest === lockedArtifact.digest,
+        `${mod.module} artifact digest mismatch for ${lockedArtifact.name}`,
+      );
+    }
+  }
+}
+
+function moduleFileMap(mod) {
+  return new Map(mod.files.map((file) => [file.path, file]));
+}
+
+function localJsImportSpecifiers(source) {
+  const specs = [];
+  const staticImport = /\b(?:import|export)\s+(?:[^'"]*?\s+from\s+)?["']([^"']+)["']/g;
+  const dynamicImport = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+  for (const match of source.matchAll(staticImport)) {
+    if (match[1].startsWith('.')) specs.push(match[1]);
+  }
+  for (const match of source.matchAll(dynamicImport)) {
+    if (match[1].startsWith('.')) specs.push(match[1]);
+  }
+  return specs;
+}
+
+function resolveLocalJsImport(files, fromPath, specifier) {
+  const base = posix.normalize(posix.join(posix.dirname(fromPath), specifier));
+  const candidates = posix.extname(base)
+    ? [base]
+    : [`${base}.js`, `${base}/index.js`, base];
+  const resolved = candidates.find((candidate) => files.has(candidate));
+  assert(resolved, `cannot resolve local JS import ${specifier} from ${fromPath}`);
+  return resolved;
+}
+
+function collectLocalJsImportGraph(mod, entryPath) {
+  const files = moduleFileMap(mod);
+  assert(files.has(entryPath), `${mod.module} renderer entry missing from package: ${entryPath}`);
+  const seen = new Set();
+  const queue = [entryPath];
+  const sources = [];
+  while (queue.length > 0) {
+    const path = queue.shift();
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const source = moduleFileBytes(files.get(path)).toString('utf8');
+    sources.push({ path, source });
+    for (const specifier of localJsImportSpecifiers(source)) {
+      const resolved = resolveLocalJsImport(files, path, specifier);
+      if (!seen.has(resolved)) queue.push(resolved);
+    }
+  }
+  return sources;
+}
+
+function validateVoplayHostWakeKeyContract(voplay) {
+  const manifest = parseVoWebManifest(voplay);
+  const rendererEntry = manifest.extension?.web?.js_modules?.renderer;
+  assert(typeof rendererEntry === 'string' && rendererEntry.length > 0, 'voplay vo.web.json must declare a renderer JS module');
+  const graph = collectLocalJsImportGraph(voplay, rendererEntry);
+  const graphSource = graph.map((file) => file.source).join('\n');
+  const dts = requireModuleFile(voplay, 'js/dist/render_bootstrap.d.ts');
+  assert(
+    graph.some((file) => file.path === 'js/dist/render_bootstrap.js'),
+    'voplay renderer import graph must reach render_bootstrap.js host wake bridge',
+  );
+  assert(dts.includes('key: string;'), 'voplay render bootstrap pending host events must expose HostWaitKey');
+  assert(dts.includes('wakeHostEvent(key: string): void;'), 'voplay render bootstrap wake API must accept HostWaitKey');
+  for (const stale of [
+    'hostTimers.has(ev.token)',
+    'displayPulseWaiters.set(ev.token',
+    'hostTimers.set(ev.token',
+    'wakeHostEvent(token',
+    'wakeHostEvent(ev.token',
+    'this.vm.wakeHostEvent(token)',
+  ]) {
+    assert(!graphSource.includes(stale), `voplay renderer graph must not use token-only host wake path: ${stale}`);
+  }
+  for (const current of [
+    'hostTimers.has(ev.key)',
+    'displayPulseWaiters.set(ev.key',
+    'hostTimers.set(ev.key',
+    'wakeHostEvent(ev.key',
+    'this.vm.wakeHostEvent(key)',
+  ]) {
+    assert(graphSource.includes(current), `voplay renderer graph must use HostWaitKey path: ${current}`);
+  }
+}
+
 function validateProvenance(project, deps) {
   const provenance = readJson(provenancePath);
   assert(provenance.schemaVersion === 1, 'provenance schemaVersion must be 1');
@@ -220,6 +430,7 @@ const modules = new Map(deps.modules.map((mod) => [mod.module, mod]));
 for (const moduleName of expected.requiredModules) {
   moduleByName(modules, moduleName);
 }
+validateProjectDependencyContracts(project, deps);
 validateProvenance(project, deps);
 
 for (const mod of deps.modules) {
@@ -250,6 +461,7 @@ for (const mod of deps.modules) {
   }
 }
 const voplay = moduleByName(modules, 'github.com/vo-lang/voplay');
+validateVoplayHostWakeKeyContract(voplay);
 for (const artifact of requiredVoplayArtifacts(voplay)) {
   assert(declaredArtifactUrls.has(artifact.url), `voplay artifact is not declared: ${artifact.url}`);
 }

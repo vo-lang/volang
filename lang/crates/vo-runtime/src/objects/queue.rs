@@ -16,6 +16,7 @@ use std::{boxed::Box, vec::Vec};
 
 use crate::gc::{Gc, GcRef};
 use crate::slot::{ptr_to_slot, slot_to_ptr, Slot};
+use crate::Module;
 use vo_common_core::types::{ValueMeta, ValueRttid};
 
 use super::queue_state::{
@@ -24,6 +25,13 @@ use super::queue_state::{
 };
 
 pub use super::queue_state::{RecvResult, ResolvedSendResult, SendResult};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeInfoSnapshot {
+    pub endpoint_id: u64,
+    pub home_island: u32,
+    pub peers: Vec<u32>,
+}
 
 impl LocalQueueState {
     pub fn iter_buffer(&self) -> impl Iterator<Item = &[u64]> {
@@ -45,7 +53,8 @@ pub fn create(
 ) -> GcRef {
     let chan = gc.alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS);
     let state = Box::new(LocalQueueState::new(cap));
-    let data = QueueData::as_mut(chan);
+    // Safety: `chan` is freshly allocated and not visible to the collector yet.
+    let data = unsafe { QueueData::as_mut(chan) };
     data.state = ptr_to_slot(Box::into_raw(state));
     data.cap = cap as Slot;
     data.elem_meta = elem_meta;
@@ -105,7 +114,8 @@ pub fn create_remote_proxy_with_closed(
         home_island,
         closed,
     });
-    let data = QueueData::as_mut(chan);
+    // Safety: `chan` is freshly allocated and not visible to the collector yet.
+    let data = unsafe { QueueData::as_mut(chan) };
     data.state = 0; // no ChannelState for REMOTE
     data.cap = cap;
     data.elem_meta = elem_meta;
@@ -147,6 +157,64 @@ pub fn create_checked(
         elem_slots,
         cap as usize,
     ))
+}
+
+/// Create a new channel with module-backed element metadata validation.
+pub fn create_checked_with_module(
+    gc: &mut Gc,
+    kind: QueueKind,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
+    elem_slots: u16,
+    cap: i64,
+    module: &Module,
+) -> Result<GcRef, i32> {
+    use super::alloc_error;
+    if cap < 0 {
+        return Err(alloc_error::NEGATIVE_CAP);
+    }
+    if kind == QueueKind::Port && cap == 0 {
+        return Err(alloc_error::NEGATIVE_CAP);
+    }
+    validate_element_layout(module, elem_meta, elem_rttid, elem_slots)
+        .map_err(|_| alloc_error::OVERFLOW)?;
+    Ok(create(
+        gc,
+        kind,
+        elem_meta,
+        elem_rttid,
+        elem_slots,
+        cap as usize,
+    ))
+}
+
+pub fn validate_element_layout(
+    module: &Module,
+    elem_meta: ValueMeta,
+    elem_rttid: ValueRttid,
+    elem_slots: u16,
+) -> Result<(), QueueElementLayoutError> {
+    let canonical_meta = module
+        .canonical_value_meta_for_value_rttid(elem_rttid)
+        .ok_or(QueueElementLayoutError::UnresolvedMeta)?;
+    if elem_meta != canonical_meta {
+        return Err(QueueElementLayoutError::MetaMismatch);
+    }
+    let expected_slots = module
+        .slot_count_for_value_rttid(elem_rttid)
+        .ok_or(QueueElementLayoutError::UnresolvedSlotWidth)?;
+    if expected_slots > u16::MAX as usize || elem_slots as usize != expected_slots {
+        return Err(QueueElementLayoutError::SlotMismatch);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueElementLayoutError {
+    UnresolvedMeta,
+    MetaMismatch,
+    UnresolvedSlotWidth,
+    SlotMismatch,
 }
 
 #[inline]
@@ -212,6 +280,48 @@ pub fn home_info_mut(chan: GcRef) -> Option<&'static mut HomeInfo> {
     Some(unsafe { &mut *(data.endpoint_ptr as *mut HomeInfo) })
 }
 
+pub fn home_info_snapshot(chan: GcRef) -> Option<HomeInfoSnapshot> {
+    home_info(chan).map(|info| {
+        let mut peers: Vec<u32> = info.peers.iter().copied().collect();
+        peers.sort_unstable();
+        HomeInfoSnapshot {
+            endpoint_id: info.endpoint_id,
+            home_island: info.home_island,
+            peers,
+        }
+    })
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn restore_home_info_snapshot(chan: GcRef, snapshot: Option<HomeInfoSnapshot>) {
+    // Safety: callers restore an already-live local queue object as part of a
+    // VM transaction rollback. The pointer being replaced is non-GC metadata.
+    let data = unsafe { QueueData::as_mut(chan) };
+    debug_assert!(
+        super::queue_state::backing(chan) == QueueBacking::Local,
+        "restore_home_info_snapshot on non-LOCAL channel"
+    );
+    if data.endpoint_ptr != 0 {
+        // Safety: LOCAL endpoint_ptr always stores a Box<HomeInfo>.
+        unsafe {
+            drop(Box::from_raw(data.endpoint_ptr as *mut HomeInfo));
+        }
+        data.endpoint_ptr = 0;
+    }
+    if let Some(snapshot) = snapshot {
+        assert!(
+            kind(chan) == QueueKind::Port,
+            "restore_home_info_snapshot: chan cannot cross islands"
+        );
+        let info = Box::new(HomeInfo {
+            endpoint_id: snapshot.endpoint_id,
+            home_island: snapshot.home_island,
+            peers: snapshot.peers.into_iter().collect(),
+        });
+        data.endpoint_ptr = ptr_to_slot(Box::into_raw(info) as *mut u8);
+    }
+}
+
 pub fn add_home_peer(chan: GcRef, peer_island: u32) -> u64 {
     let info = home_info_mut(chan).expect("add_home_peer: LOCAL port endpoint must have HomeInfo");
     info.peers.insert(peer_island);
@@ -219,8 +329,11 @@ pub fn add_home_peer(chan: GcRef, peer_island: u32) -> u64 {
 }
 
 /// Install HomeInfo on a LOCAL channel for first-time cross-island transfer.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32) {
-    let data = QueueData::as_mut(chan);
+    // Safety: `chan` is a live local queue object. The mutation installs a
+    // non-GC HomeInfo pointer and does not publish GC-visible references.
+    let data = unsafe { QueueData::as_mut(chan) };
     debug_assert!(
         super::queue_state::backing(chan) == QueueBacking::Local,
         "install_home_info on non-LOCAL channel"
@@ -254,6 +367,68 @@ pub fn get_metadata(chan: GcRef) -> (QueueKind, u64, ValueMeta, ValueRttid, u16)
 #[inline]
 pub fn with_local_state<T, F: FnOnce(&mut LocalQueueState) -> T>(chan: GcRef, f: F) -> T {
     f(local_state(chan))
+}
+
+#[inline]
+pub fn next_remote_direct_receiver(chan: GcRef, local_island: u32) -> Option<QueueWaiter> {
+    if is_remote(chan) {
+        return None;
+    }
+    local_state(chan)
+        .waiting_receivers
+        .front()
+        .filter(|receiver| receiver.island_id != local_island || receiver.endpoint_wait_id() != 0)
+        .cloned()
+}
+
+#[inline]
+pub fn next_local_select_recv_receiver(chan: GcRef, local_island: u32) -> Option<QueueWaiter> {
+    if is_remote(chan) {
+        return None;
+    }
+    let state = local_state(chan);
+    if state.is_closed() {
+        return None;
+    }
+    state
+        .waiting_receivers
+        .front()
+        .filter(|receiver| receiver.is_local_select_recv(local_island))
+        .cloned()
+}
+
+#[inline]
+pub fn next_send_would_remote_direct(chan: GcRef, local_island: u32) -> bool {
+    next_remote_direct_receiver(chan, local_island).is_some()
+}
+
+#[inline]
+pub fn next_recv_endpoint_sender(chan: GcRef) -> Option<QueueWaiter> {
+    if is_remote(chan) {
+        return None;
+    }
+    local_state(chan)
+        .waiting_senders
+        .front()
+        .map(|(sender, _)| sender)
+        .filter(|sender| sender.endpoint_wait_id() != 0)
+        .cloned()
+}
+
+#[inline]
+pub fn has_endpoint_waiters(chan: GcRef) -> bool {
+    if is_remote(chan) {
+        return false;
+    }
+    let state = local_state(chan);
+    state
+        .waiting_receivers
+        .iter()
+        .any(|waiter| waiter.endpoint_wait_id() != 0)
+        || state
+            .waiting_senders
+            .iter()
+            .any(|(waiter, _)| waiter.endpoint_wait_id() != 0)
 }
 
 #[inline]
@@ -312,8 +487,17 @@ pub fn register_receiver(chan: GcRef, waiter: QueueWaiter) {
 }
 
 #[inline]
-pub fn cancel_select_waiters(chan: GcRef, select_id: u64) {
-    with_local_state(chan, |s| s.cancel_select_waiters(select_id))
+pub fn cancel_select_waiters(chan: GcRef, fiber_key: u64, select_id: u64) {
+    with_local_state(chan, |s| s.cancel_select_waiters(fiber_key, select_id))
+}
+
+#[inline]
+pub fn cancel_simple_waiter(
+    chan: GcRef,
+    fiber_key: u64,
+    kind: crate::objects::queue_state::SelectWaitKind,
+) {
+    with_local_state(chan, |s| s.cancel_simple_waiter(fiber_key, kind))
 }
 
 /// Atomic send: try to send, if would block, register waiter in same operation.
@@ -360,7 +544,8 @@ pub fn take_waiting_senders(chan: GcRef) -> Vec<(QueueWaiter, QueueMessage)> {
 /// # Safety
 /// chan must be a valid Channel GcRef.
 pub unsafe fn drop_inner(chan: GcRef) {
-    let data = QueueData::as_mut(chan);
+    // Safety: `chan` is a valid queue object owned by the GC finalization path.
+    let data = unsafe { QueueData::as_mut(chan) };
     match QueueBacking::from_raw(data.backing) {
         QueueBacking::Local => {
             if data.state != 0 {
@@ -386,7 +571,7 @@ pub unsafe fn drop_inner(chan: GcRef) {
 mod tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use vo_common_core::ValueKind;
+    use vo_common_core::{RuntimeType, SlotType, StructMeta, ValueKind};
 
     #[test]
     fn create_remote_proxy_rejects_chan() {
@@ -440,5 +625,64 @@ mod tests {
             0,
         );
         assert_eq!(result, Err(crate::objects::alloc_error::NEGATIVE_CAP));
+    }
+
+    #[test]
+    fn vm_queue_new_type_layout_009_rejects_meta_rttid_drift_before_create() {
+        let mut module = Module::new("queue-new-meta-rttid-drift".to_string());
+        module.struct_metas.push(StructMeta {
+            slot_types: vec![SlotType::Value],
+            fields: Vec::new(),
+            field_index: Default::default(),
+        });
+        module.struct_metas.push(StructMeta {
+            slot_types: vec![SlotType::Value, SlotType::GcRef],
+            fields: Vec::new(),
+            field_index: Default::default(),
+        });
+        module.runtime_types.push(RuntimeType::Struct {
+            fields: Vec::new(),
+            meta_id: 1,
+        });
+        let mut gc = Gc::new();
+
+        let result = create_checked_with_module(
+            &mut gc,
+            QueueKind::Chan,
+            ValueMeta::new(0, ValueKind::Struct),
+            ValueRttid::new(0, ValueKind::Struct),
+            2,
+            1,
+            &module,
+        );
+
+        assert_eq!(result, Err(crate::objects::alloc_error::OVERFLOW));
+    }
+
+    #[test]
+    fn vm_queue_new_type_layout_009_rejects_elem_slot_drift_before_create() {
+        let mut module = Module::new("queue-new-slot-drift".to_string());
+        module.struct_metas.push(StructMeta {
+            slot_types: vec![SlotType::Value, SlotType::GcRef],
+            fields: Vec::new(),
+            field_index: Default::default(),
+        });
+        module.runtime_types.push(RuntimeType::Struct {
+            fields: Vec::new(),
+            meta_id: 0,
+        });
+        let mut gc = Gc::new();
+
+        let result = create_checked_with_module(
+            &mut gc,
+            QueueKind::Chan,
+            ValueMeta::new(0, ValueKind::Struct),
+            ValueRttid::new(0, ValueKind::Struct),
+            1,
+            1,
+            &module,
+        );
+
+        assert_eq!(result, Err(crate::objects::alloc_error::OVERFLOW));
     }
 }

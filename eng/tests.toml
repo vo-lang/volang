@@ -3,6 +3,33 @@ default_targets = ["vm", "jit"]
 required_file_pass_targets = ["vm", "jit", "osr", "nostd", "wasm"]
 gc_regression_alias = "gc"
 
+[matrices.default]
+targets = ["vm", "jit", "osr", "nostd", "wasm"]
+
+[matrices.osr-only]
+targets = ["osr"]
+
+[matrices.native]
+targets = ["vm", "jit", "osr"]
+
+[matrices.gc]
+targets = ["gc-vm", "gc-jit"]
+
+[matrices.compile]
+targets = ["compile"]
+
+[matrices.default-gc]
+targets = ["vm", "jit", "osr", "gc-vm", "gc-jit", "nostd", "wasm"]
+
+[matrices.gc-wasm]
+targets = ["gc-vm", "gc-jit", "wasm"]
+
+[matrices.default-no-osr]
+targets = ["vm", "jit", "nostd", "wasm"]
+
+[matrices.default-gc-jit-only]
+targets = ["vm", "jit", "osr", "gc-jit", "nostd", "wasm"]
+
 [[alias]]
 name = "both"
 targets = ["vm", "jit"]
@@ -40,14 +67,14 @@ default_timeout_sec = 60
 name = "gc-vm"
 kind = "native"
 backend = "vm"
-env = { VOWORK = "off", VO_GC_DEBUG = "1" }
+env = { VOWORK = "off", VO_GC_STRESS = "1", VO_GC_VERIFY = "1" }
 default_timeout_sec = 60
 
 [[target]]
 name = "gc-jit"
 kind = "native"
 backend = "jit"
-env = { VOWORK = "off", VO_GC_DEBUG = "1", VO_JIT_CALL_THRESHOLD = "1" }
+env = { VOWORK = "off", VO_GC_STRESS = "1", VO_GC_VERIFY = "1", VO_JIT_CALL_THRESHOLD = "1" }
 default_timeout_sec = 90
 
 [[target]]
@@ -64,7 +91,6 @@ backend = "vo-web"
 env = { VOWORK = "off" }
 default_timeout_sec = 60
 build_command = ["wasm-pack", "build", "lang/crates/vo-web", "--target", "web", "--features", "compiler"]
-release_build_args = ["--release"]
 runner_command = ["node", "lang/crates/vo-web/test_runner.mjs"]
 
 [[target]]

@@ -18,8 +18,8 @@ Use `vo-dev` or the `d.py` compatibility wrapper for normal workflows:
 ```sh
 cargo run -q -p vo-dev -- test lint --suite lang
 cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit
-cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit --path tests/lang/cases/foo.vo
-./d.py test both tests/lang/cases/foo.vo
+cargo run -q -p vo-dev -- test run --suite lang --targets vm,jit --path tests/lang/cases/runtime/slice/append_self_slice.vo
+./d.py test both tests/lang/cases/runtime/slice/append_self_slice.vo
 ```
 
 ## Execution Interface
@@ -47,13 +47,15 @@ The plan schema is `volang.test-plan.v1`. A job contains:
 - `path`: repo-relative path to compile.
 - `target`: logical target from `eng/tests.toml`.
 - `backend`: execution backend, such as `vm`, `jit`, `compile`, or `vo-embed`.
+- `matrix`, `tags`, `owner`: optional manifest metadata from `vo-dev`.
 - `env`: per-target environment.
 - `timeout_sec`: job timeout, resolved from the target default plus any
   target-specific `timeout = { ... }` manifest override.
 - `expect`: pass/fail expectation and diagnostic patterns.
 
 `--format json` emits one `volang.test-result.v1` object with aggregate counts
-and per-job status records.
+and per-job status records, including any `matrix`, `tags`, and `owner`
+metadata carried by the plan.
 
 ## Unsupported Interface
 

@@ -185,10 +185,12 @@ pub fn compile_addr_of(
     if let ExprKind::CompositeLit(lit) = &operand.kind {
         let type_key = info.expr_type(operand.id);
         let slots = info.type_slot_count(type_key);
-        let meta_idx = ctx.get_or_create_value_meta(type_key, info);
+        let slot_types = info.type_slot_types(type_key);
+        let meta_idx = ctx.get_boxing_meta(type_key, info);
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        func.emit_ptr_new(dst, meta_reg, slots);
+        assert_eq!(slots as usize, slot_types.len());
+        func.emit_ptr_new(dst, meta_reg, &slot_types);
 
         for (i, elem) in lit.elems.iter().enumerate() {
             let (offset, field_slots, field_type) = if let Some(key) = &elem.key {

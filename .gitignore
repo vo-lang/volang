@@ -27,7 +27,13 @@ target/
 *.a
 *.so
 *.dylib
+*.rmeta
 /main.vob
+
+# Local red-team/source-contract probe build outputs
+/vo_*_probe
+/vo_scheduler_*
+/vo_macro_hardcoded_raw_wake
 
 # Test and coverage
 *.profraw

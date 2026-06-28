@@ -21,7 +21,10 @@ pub const QUEUE_SEND_MAX_ELEM_SLOTS: u16 = 0xFF;
 pub const QUEUE_RECV_MAX_ELEM_SLOTS: u16 = 0x7F;
 pub const CALL_SHAPE_MAX_ARG_RET_SLOTS: u16 = 0xFF;
 pub const MAP_NEW_MAX_KEY_VAL_SLOTS: u16 = 0xFF;
+pub const MAP_SET_MAX_KEY_VAL_SLOTS: u16 = 0xFF;
+pub const MAP_GET_MAX_VALUE_SLOTS: u16 = 0x7FFF;
 pub const MAP_ITER_MAX_KEY_VAL_SLOTS: u16 = 0x0F;
+pub const IFACE_ASSERT_MAX_ASSERT_KIND: u8 = 0x01;
 pub const IFACE_ASSERT_MAX_TARGET_SLOTS: u16 = 0x1F;
 
 #[inline]
@@ -102,6 +105,24 @@ pub const fn pack_map_new_slots(key_slots: u16, val_slots: u16) -> Option<u16> {
 }
 
 #[inline]
+pub const fn pack_map_set_meta(key_slots: u16, val_slots: u16) -> Option<u32> {
+    if key_slots <= MAP_SET_MAX_KEY_VAL_SLOTS && val_slots <= MAP_SET_MAX_KEY_VAL_SLOTS {
+        Some(((key_slots as u32) << 8) | (val_slots as u32))
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub const fn pack_map_get_meta(key_slots: u16, val_slots: u16, has_ok: bool) -> Option<u32> {
+    if val_slots <= MAP_GET_MAX_VALUE_SLOTS {
+        Some(((key_slots as u32) << 16) | ((val_slots as u32) << 1) | (has_ok as u32))
+    } else {
+        None
+    }
+}
+
+#[inline]
 pub const fn pack_call_shape(arg_slots: u16, ret_slots: u16) -> Option<u16> {
     if arg_slots <= CALL_SHAPE_MAX_ARG_RET_SLOTS && ret_slots <= CALL_SHAPE_MAX_ARG_RET_SLOTS {
         Some((arg_slots << 8) | ret_slots)
@@ -116,10 +137,40 @@ pub const fn pack_iface_assert_flags(
     has_ok: bool,
     target_slots: u16,
 ) -> Option<u8> {
-    if assert_kind <= 0x03 && target_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS {
+    if assert_kind <= IFACE_ASSERT_MAX_ASSERT_KIND && target_slots <= IFACE_ASSERT_MAX_TARGET_SLOTS
+    {
+        if assert_kind == 1 && target_slots != 2 {
+            return None;
+        }
         Some(assert_kind | ((has_ok as u8) << 2) | ((target_slots as u8) << 3))
     } else {
         None
+    }
+}
+
+#[inline]
+pub const fn iface_assert_result_slots_from_flags(flags: u16) -> Option<u16> {
+    let assert_kind = flags & 0x3;
+    let target_slots = flags >> 3;
+    if target_slots > IFACE_ASSERT_MAX_TARGET_SLOTS {
+        return None;
+    }
+    match assert_kind {
+        0 => {
+            if target_slots == 0 {
+                Some(1)
+            } else {
+                Some(target_slots)
+            }
+        }
+        1 => {
+            if target_slots == 2 {
+                Some(2)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -619,15 +670,27 @@ mod tests {
         assert_eq!(pack_map_new_slots(255, 255), Some(0xFFFF));
         assert_eq!(pack_map_new_slots(256, 1), None);
         assert_eq!(pack_map_new_slots(1, 256), None);
+        assert_eq!(pack_map_set_meta(255, 255), Some(0xFFFF));
+        assert_eq!(pack_map_set_meta(256, 1), None);
+        assert_eq!(pack_map_set_meta(1, 256), None);
+        assert_eq!(pack_map_get_meta(u16::MAX, 0x7FFF, true), Some(u32::MAX));
+        assert_eq!(pack_map_get_meta(1, 0x8000, false), None);
         assert_eq!(pack_map_iter_next_flags(15, 15), Some(0xFF));
         assert_eq!(pack_map_iter_next_flags(16, 1), None);
         assert_eq!(pack_map_iter_next_flags(1, 16), None);
         assert_eq!(
-            pack_iface_assert_flags(1, true, 31),
-            Some(1 | (1 << 2) | (31 << 3))
+            pack_iface_assert_flags(1, true, 2),
+            Some(1 | (1 << 2) | (2 << 3))
         );
+        assert_eq!(pack_iface_assert_flags(1, false, 1), None);
+        assert_eq!(pack_iface_assert_flags(1, false, 31), None);
+        assert_eq!(pack_iface_assert_flags(2, false, 1), None);
+        assert_eq!(pack_iface_assert_flags(3, false, 1), None);
         assert_eq!(pack_iface_assert_flags(4, false, 1), None);
         assert_eq!(pack_iface_assert_flags(1, false, 32), None);
+        assert_eq!(iface_assert_result_slots_from_flags(2 << 3), Some(2));
+        assert_eq!(iface_assert_result_slots_from_flags(1 | (1 << 3)), None);
+        assert_eq!(iface_assert_result_slots_from_flags(1 | (2 << 3)), Some(2));
         assert_eq!(pack_u8_slot_count(255), Some(255));
         assert_eq!(pack_u8_slot_count(256), None);
         assert_eq!(copy_n_mirror_flags(255), 255);

@@ -1,6 +1,6 @@
 //! os package WASM implementation backed by JS VirtualFS.
 
-use vo_runtime::builtins::error_helper::{write_error_to, write_nil_error};
+use vo_runtime::builtins::error_helper::{create_error, write_error_to, write_nil_error};
 use vo_runtime::bytecode::ExternDef;
 use vo_runtime::core_types::{ValueKind, ValueMeta};
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
@@ -10,6 +10,16 @@ use vo_runtime::slot::SLOT_BYTES;
 use crate::vfs;
 
 const ERR_NOT_SUPPORTED: &str = "operation not supported on wasm";
+const OS_ERROR_MESSAGES: [&str; 8] = [
+    "file does not exist",
+    "file already exists",
+    "permission denied",
+    "invalid argument",
+    "i/o timeout",
+    "file already closed",
+    "not a directory",
+    "is a directory",
+];
 
 // Thread-local args injected by run_with_args() before running the VM.
 thread_local! {
@@ -28,23 +38,27 @@ const MODE_DIR: u32 = 1 << 31;
 // =============================================================================
 
 fn os_get_errors(call: &mut ExternCallContext) -> ExternResult {
-    let errors = [
-        "file does not exist",
-        "file already exists",
-        "permission denied",
-        "invalid argument",
-        "i/o timeout",
-        "file already closed",
-        "not a directory",
-        "is a directory",
-    ];
-
-    for (i, msg) in errors.iter().enumerate() {
-        let str_ref = string::from_rust_str(call.gc(), msg);
-        call.ret_u64((i * 2) as u16, ValueKind::String as u64);
-        call.ret_ref((i * 2 + 1) as u16, str_ref);
+    init_os_errors(call);
+    let errors = call
+        .sentinel_errors()
+        .get("os")
+        .expect("os sentinel error init failed")
+        .to_vec();
+    for (i, pair) in errors.into_iter().enumerate() {
+        call.ret_interface_pair((i * 2) as u16, pair);
     }
     ExternResult::Ok
+}
+
+fn init_os_errors(call: &mut ExternCallContext) {
+    if call.sentinel_errors().contains("os") {
+        return;
+    }
+    let errors = OS_ERROR_MESSAGES
+        .iter()
+        .map(|msg| create_error(call, msg))
+        .collect();
+    call.sentinel_errors_mut().insert("os", errors);
 }
 
 fn os_get_consts(call: &mut ExternCallContext) -> ExternResult {
@@ -372,9 +386,11 @@ fn native_read_dir(call: &mut ExternCallContext) -> ExternResult {
                 mode_val |= MODE_DIR;
             }
             let base = i * elem_slots;
-            slice::set(result, base, name_ref as u64, SLOT_BYTES);
-            slice::set(result, base + 1, if *is_dir { 1 } else { 0 }, SLOT_BYTES);
-            slice::set(result, base + 2, mode_val as u64, SLOT_BYTES);
+            unsafe {
+                slice::set(result, base, name_ref as u64, SLOT_BYTES);
+                slice::set(result, base + 1, if *is_dir { 1 } else { 0 }, SLOT_BYTES);
+                slice::set(result, base + 2, mode_val as u64, SLOT_BYTES);
+            }
         }
         call.ret_ref(0, result);
         write_nil_error(call, 1);
@@ -610,10 +626,15 @@ fn native_get_args(call: &mut ExternCallContext) -> ExternResult {
     let arr = array::create(gc, elem_meta, 8, args.len());
     for (i, arg) in args.iter().enumerate() {
         let s = string::from_rust_str(gc, arg);
-        array::set(arr, i, s as u64, 8);
+        unsafe { array::set(arr, i, s as u64, 8) };
     }
     let slice_ref = slice::from_array(gc, arr);
     call.ret_ref(0, slice_ref);
+    ExternResult::Ok
+}
+
+fn native_is_terminal(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_i64(0, 0);
     ExternResult::Ok
 }
 
@@ -689,6 +710,28 @@ fn native_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+fn native_pipe(call: &mut ExternCallContext) -> ExternResult {
+    call.ret_i64(0, -1);
+    call.ret_i64(1, -1);
+    write_not_supported_error(call, 2);
+    ExternResult::Ok
+}
+
+fn native_chtimes(call: &mut ExternCallContext) -> ExternResult {
+    write_not_supported_error(call, 0);
+    ExternResult::Ok
+}
+
+fn native_find_process(call: &mut ExternCallContext) -> ExternResult {
+    write_not_supported_error(call, 0);
+    ExternResult::Ok
+}
+
+fn native_kill_process(call: &mut ExternCallContext) -> ExternResult {
+    write_not_supported_error(call, 0);
+    ExternResult::Ok
+}
+
 // =============================================================================
 // Registration
 // =============================================================================
@@ -696,64 +739,188 @@ fn native_mkdir_temp(call: &mut ExternCallContext) -> ExternResult {
 pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
     for (id, def) in externs.iter().enumerate() {
         match def.name.as_str() {
-            "os_getOsErrors" => registry.register(id as u32, os_get_errors),
-            "os_getOsConsts" => registry.register(id as u32, os_get_consts),
-            "os_fileRead" | "os_blocking_fileRead" => registry.register(id as u32, file_read),
-            "os_fileWrite" | "os_blocking_fileWrite" => registry.register(id as u32, file_write),
+            "os_getOsErrors" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, os_get_errors)
+            }
+            "os_getOsConsts" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, os_get_consts)
+            }
+            "os_fileRead" | "os_blocking_fileRead" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, file_read)
+            }
+            "os_fileWrite" | "os_blocking_fileWrite" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, file_write)
+            }
             "os_fileReadAt" | "os_blocking_fileReadAt" => {
-                registry.register(id as u32, file_read_at)
+                crate::register_wasm_host(registry, id as u32, &def.name, file_read_at)
             }
             "os_fileWriteAt" | "os_blocking_fileWriteAt" => {
-                registry.register(id as u32, file_write_at)
+                crate::register_wasm_host(registry, id as u32, &def.name, file_write_at)
             }
-            "os_fileSeek" => registry.register(id as u32, file_seek),
-            "os_fileClose" => registry.register(id as u32, file_close),
-            "os_fileSync" => registry.register(id as u32, file_sync),
-            "os_fileStat" => registry.register(id as u32, file_stat),
-            "os_fileTruncate" => registry.register(id as u32, file_truncate),
-            "os_openFile" => registry.register(id as u32, open_file),
-            "os_nativeMkdir" => registry.register(id as u32, native_mkdir),
-            "os_nativeMkdirAll" => registry.register(id as u32, native_mkdir_all),
-            "os_nativeRemove" => registry.register(id as u32, native_remove),
-            "os_nativeRemoveAll" => registry.register(id as u32, native_remove_all),
-            "os_nativeRename" => registry.register(id as u32, native_rename),
-            "os_nativeStat" => registry.register(id as u32, native_stat),
-            "os_nativeLstat" => registry.register(id as u32, native_lstat),
-            "os_nativeReadDir" => registry.register(id as u32, native_read_dir),
-            "os_nativeChmod" => registry.register(id as u32, native_chmod),
-            "os_nativeChown" => registry.register(id as u32, native_chown),
-            "os_nativeSymlink" => registry.register(id as u32, native_symlink),
-            "os_nativeReadlink" => registry.register(id as u32, native_readlink),
-            "os_nativeLink" => registry.register(id as u32, native_link),
-            "os_nativeTruncate" => registry.register(id as u32, native_truncate),
-            "os_nativeReadFile" => registry.register(id as u32, native_read_file),
-            "os_nativeWriteFile" => registry.register(id as u32, native_write_file),
-            "os_nativeGetenv" => registry.register(id as u32, native_getenv),
-            "os_nativeSetenv" => registry.register(id as u32, native_setenv),
-            "os_nativeUnsetenv" => registry.register(id as u32, native_unsetenv),
-            "os_nativeEnviron" => registry.register(id as u32, native_environ),
-            "os_nativeLookupEnv" => registry.register(id as u32, native_lookup_env),
-            "os_nativeClearenv" => registry.register(id as u32, native_clearenv),
-            "os_nativeExpandEnv" => registry.register(id as u32, native_expand_env),
-            "os_nativeGetwd" => registry.register(id as u32, native_getwd),
-            "os_nativeChdir" => registry.register(id as u32, native_chdir),
-            "os_nativeUserHomeDir" => registry.register(id as u32, native_user_home_dir),
-            "os_nativeUserCacheDir" => registry.register(id as u32, native_user_cache_dir),
-            "os_nativeUserConfigDir" => registry.register(id as u32, native_user_config_dir),
-            "os_nativeTempDir" => registry.register(id as u32, native_temp_dir),
-            "os_nativeGetpid" => registry.register(id as u32, native_getpid),
-            "os_nativeGetppid" => registry.register(id as u32, native_getppid),
-            "os_nativeGetuid" => registry.register(id as u32, native_getuid),
-            "os_nativeGeteuid" => registry.register(id as u32, native_geteuid),
-            "os_nativeGetgid" => registry.register(id as u32, native_getgid),
-            "os_nativeGetegid" => registry.register(id as u32, native_getegid),
-            "os_nativeExit" => registry.register(id as u32, native_exit),
-            "os_nativeGetArgs" => registry.register(id as u32, native_get_args),
-            "os_nativeHostname" => registry.register(id as u32, native_hostname),
-            "os_nativeExecutable" => registry.register(id as u32, native_executable),
-            "os_nativeCreateTemp" => registry.register(id as u32, native_create_temp),
-            "os_nativeMkdirTemp" => registry.register(id as u32, native_mkdir_temp),
+            "os_fileSeek" => crate::register_wasm_host(registry, id as u32, &def.name, file_seek),
+            "os_fileClose" => crate::register_wasm_host(registry, id as u32, &def.name, file_close),
+            "os_fileSync" => crate::register_wasm_host(registry, id as u32, &def.name, file_sync),
+            "os_fileStat" => crate::register_wasm_host(registry, id as u32, &def.name, file_stat),
+            "os_fileTruncate" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, file_truncate)
+            }
+            "os_openFile" => crate::register_wasm_host(registry, id as u32, &def.name, open_file),
+            "os_nativeMkdir" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_mkdir)
+            }
+            "os_nativeMkdirAll" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_mkdir_all)
+            }
+            "os_nativeRemove" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_remove)
+            }
+            "os_nativeRemoveAll" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_remove_all)
+            }
+            "os_nativeRename" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_rename)
+            }
+            "os_nativeStat" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_stat)
+            }
+            "os_nativeLstat" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_lstat)
+            }
+            "os_nativeReadDir" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_read_dir)
+            }
+            "os_nativeChmod" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_chmod)
+            }
+            "os_nativeChown" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_chown)
+            }
+            "os_nativeSymlink" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_symlink)
+            }
+            "os_nativeReadlink" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_readlink)
+            }
+            "os_nativeLink" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_link)
+            }
+            "os_nativeTruncate" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_truncate)
+            }
+            "os_nativeReadFile" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_read_file)
+            }
+            "os_nativeWriteFile" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_write_file)
+            }
+            "os_nativeGetenv" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_getenv)
+            }
+            "os_nativeSetenv" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_setenv)
+            }
+            "os_nativeUnsetenv" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_unsetenv)
+            }
+            "os_nativeEnviron" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_environ)
+            }
+            "os_nativeLookupEnv" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_lookup_env)
+            }
+            "os_nativeClearenv" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_clearenv)
+            }
+            "os_nativeExpandEnv" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_expand_env)
+            }
+            "os_nativeGetwd" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_getwd)
+            }
+            "os_nativeChdir" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_chdir)
+            }
+            "os_nativeUserHomeDir" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_user_home_dir)
+            }
+            "os_nativeUserCacheDir" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_user_cache_dir)
+            }
+            "os_nativeUserConfigDir" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_user_config_dir)
+            }
+            "os_nativeTempDir" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_temp_dir)
+            }
+            "os_nativeGetpid" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_getpid)
+            }
+            "os_nativeGetppid" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_getppid)
+            }
+            "os_nativeGetuid" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_getuid)
+            }
+            "os_nativeGeteuid" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_geteuid)
+            }
+            "os_nativeGetgid" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_getgid)
+            }
+            "os_nativeGetegid" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_getegid)
+            }
+            "os_nativeExit" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_exit)
+            }
+            "os_nativeGetArgs" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_get_args)
+            }
+            "os_nativeIsTerminal" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_is_terminal)
+            }
+            "os_nativeHostname" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_hostname)
+            }
+            "os_nativeExecutable" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_executable)
+            }
+            "os_nativeCreateTemp" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_create_temp)
+            }
+            "os_nativeMkdirTemp" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_mkdir_temp)
+            }
+            "os_nativePipe" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_pipe)
+            }
+            "os_nativeChtimes" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_chtimes)
+            }
+            "os_nativeFindProcess" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_find_process)
+            }
+            "os_nativeKillProcess" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, native_kill_process)
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wasm_os_error_interfaces_use_runtime_boxing_contract_061() {
+        let source = include_str!("os.rs");
+        assert!(
+            source.contains("create_error(call, msg)")
+                && source.contains("sentinel_errors_mut().insert(\"os\", errors)"),
+            "WASM os error constants must use runtime sentinel error construction"
+        );
+        assert!(
+            !source.contains(concat!("ValueKind::", "String as u64")),
+            "WASM host shims must not hand-write string interface slot0 metadata"
+        );
     }
 }

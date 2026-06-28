@@ -1,8 +1,8 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, StackSlotData, StackSlotKind};
-use vo_runtime::bytecode::Constant;
+use vo_runtime::bytecode::{Constant, IFACE_ASSIGN_NO_ITAB};
 use vo_runtime::instruction::Instruction;
-use vo_runtime::jit_api::JitRuntimeTrapKind;
+use vo_runtime::jit_api::{JitResult, JitRuntimeTrapKind, JIT_HELPER_U64_ERROR};
 
 use crate::call_helpers::emit_checked_jit_result_helper_call;
 use crate::translate::{emit_runtime_trap_if, mark_runtime_trap_pc, require_helper};
@@ -37,12 +37,18 @@ pub(in crate::translate) fn iface_assign<'a>(
             let call =
                 emit_funcref_call(e, iface_to_iface_func, &[ctx, src_slot0, iface_meta_id_val]);
             let new_slot0 = e.builder().inst_results(call)[0];
+            emit_return_if_u64_jit_error(e, new_slot0);
             (new_slot0, src_slot1)
         }
     } else {
         let packed = iface_assign_metadata_constant(e, inst)?;
         let rttid = (packed >> 32) as u32;
-        let itab_id = (packed & 0xFFFFFFFF) as u32;
+        let raw_itab_id = (packed & 0xFFFFFFFF) as u32;
+        let itab_id = if raw_itab_id == IFACE_ASSIGN_NO_ITAB {
+            0
+        } else {
+            raw_itab_id
+        };
         let itab_shifted = (itab_id as u64) << 32;
         let rttid_shifted = (rttid as u64) << 8;
         let slot0_val = itab_shifted | rttid_shifted | (vk as u64);
@@ -62,6 +68,34 @@ pub(in crate::translate) fn iface_assign<'a>(
     e.write_var(inst.a, slot0);
     e.write_var(inst.a + 1, slot1);
     Ok(())
+}
+
+fn emit_return_if_u64_jit_error<'a>(
+    e: &mut impl RuntimeOpsEmitter<'a>,
+    result: cranelift_codegen::ir::Value,
+) {
+    let sentinel = e
+        .builder()
+        .ins()
+        .iconst(types::I64, JIT_HELPER_U64_ERROR as i64);
+    let is_error = e.builder().ins().icmp(IntCC::Equal, result, sentinel);
+    let error_block = e.builder().create_block();
+    let ok_block = e.builder().create_block();
+    e.builder()
+        .ins()
+        .brif(is_error, error_block, &[], ok_block, &[]);
+
+    e.builder().switch_to_block(error_block);
+    e.builder().seal_block(error_block);
+    e.spill_all_vars();
+    let jit_error = e
+        .builder()
+        .ins()
+        .iconst(types::I32, JitResult::JitError as i64);
+    e.builder().ins().return_(&[jit_error]);
+
+    e.builder().switch_to_block(ok_block);
+    e.builder().seal_block(ok_block);
 }
 
 fn iface_assign_metadata_constant<'a>(
@@ -93,13 +127,15 @@ pub(in crate::translate) fn iface_assert<'a>(
     let target_id_i32 = e.builder().ins().iconst(types::I32, inst.c as i64);
     let flags_i16 = e.builder().ins().iconst(types::I16, inst.flags as i64);
     let has_ok = ((inst.flags >> 2) & 0x1) != 0;
-    let assert_kind = inst.flags & 0x3;
-    let target_slots = (inst.flags >> 3) as usize;
-    let result_slots = if assert_kind == 1 {
-        3
-    } else {
-        target_slots.max(1) + 1
-    };
+    let layout = e
+        .iface_assert_layout(inst)
+        .ok_or(JitError::MissingJitLayout {
+            pc: e.current_pc(),
+            opcode: inst.opcode(),
+            layout: "IfaceAssertLayout",
+        })?;
+    let dst_slots = layout.result_slots as usize;
+    let result_slots = dst_slots + usize::from(has_ok);
     let result_slot = e.builder().create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (result_slots * 8) as u32,
@@ -113,11 +149,6 @@ pub(in crate::translate) fn iface_assert<'a>(
         &[ctx, slot0, slot1, target_id_i32, flags_i16, dst_ptr],
         true,
     );
-    let dst_slots = if assert_kind == 1 {
-        2
-    } else {
-        target_slots.max(1)
-    };
     for i in 0..dst_slots {
         let val = e
             .builder()
@@ -126,11 +157,7 @@ pub(in crate::translate) fn iface_assert<'a>(
         e.write_var(inst.a + i as u16, val);
     }
     if has_ok {
-        let ok_offset = if assert_kind == 1 {
-            2
-        } else {
-            target_slots.max(1)
-        };
+        let ok_offset = dst_slots;
         let ok_val = e
             .builder()
             .ins()
@@ -168,4 +195,30 @@ pub(in crate::translate) fn iface_eq<'a>(
     let masked = e.builder().ins().band(result, one);
     e.write_var(inst.a, masked);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn jit_iface_assert_lowering_uses_metadata_layout_061() {
+        let src = include_str!("interface.rs");
+        let body = src
+            .split("pub(in crate::translate) fn iface_assert")
+            .nth(1)
+            .expect("iface_assert lowering")
+            .split("pub(in crate::translate) fn iface_eq")
+            .next()
+            .expect("iface_assert body");
+
+        assert!(
+            body.contains(".iface_assert_layout(inst)")
+                && body.contains("JitError::MissingJitLayout")
+                && body.contains("layout: \"IfaceAssertLayout\""),
+            "IfaceAssert lowering must use per-PC metadata as the result ABI slot source"
+        );
+        assert!(
+            !body.contains("inst.flags >> 3"),
+            "IfaceAssert lowering must not derive result ABI width from encoded flags"
+        );
+    }
 }

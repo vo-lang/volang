@@ -1,0 +1,64 @@
+// OSR contract: dynamic get results copied into dynamic writes preserve value pairs.
+package main
+
+import "fmt"
+
+type Inner struct {
+	x int
+}
+
+type Outer struct {
+	inner Inner
+}
+
+type Packed struct {
+	a8 [2]int8
+}
+
+func main() {
+	nums1 := []int{0, 1, 2}
+	nums2 := []int{0, 0, 0}
+	var n1 any = nums1
+	var n2 any = nums2
+
+	m1 := map[string]int{"a": 0}
+	m2 := map[string]int{"a": 0}
+	var map1 any = m1
+	var map2 any = m2
+
+	o1 := &Outer{inner: Inner{x: 0}}
+	o2 := &Outer{inner: Inner{x: 0}}
+	var obj1 any = o1
+	var obj2 any = o2
+
+	packedDst := &Packed{}
+	var packedObj any = packedDst
+	packedSlice := []int16{int16(-300), int16(-301)}
+	var packedSliceAny any = packedSlice
+
+	for i := 0; i < 150; i++ {
+		nums1[1] = i + 10
+		v := n1~>[1]?
+		n2~>[1] = v
+		assert(nums2[1] == i+10, "slice dynamic get-to-set should preserve int value")
+
+		m1["a"] = i + 100
+		mv := map1~>["a"]?
+		map2~>["a"] = mv
+		assert(m2["a"] == i+100, "map dynamic get-to-set should preserve int value")
+
+		o1.inner.x = i + 1000
+		inner := obj1~>inner?
+		obj2~>inner = inner
+		assert(o2.inner.x == i+1000, "struct dynamic get-to-set should unbox aggregate value")
+
+		packedSrc := [2]int8{int8(-1), int8(-2)}
+		var packedAny any = packedSrc
+		assert(packedAny~>[0]?.(int8) == int8(-1), "OSR dynamic packed int8 array read must sign extend")
+		assert(packedSliceAny~>[0]?.(int16) == int16(-300), "OSR dynamic packed int16 slice read must sign extend")
+		packedObj~>a8 = packedAny
+		assert(packedDst.a8[0] == int8(-1), "OSR dynamic aggregate array copy must sign extend packed int8")
+	}
+
+	fmt.Println("osr_dynamic_set_from_get_contract: ok")
+}

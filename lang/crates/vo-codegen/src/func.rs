@@ -66,7 +66,7 @@ pub enum StorageKind {
     HeapArray {
         gcref_slot: u16,
         elem_slots: u16,
-        elem_bytes: u16,
+        elem_bytes: usize,
         elem_vk: vo_common_core::ValueKind,
     },
 
@@ -201,6 +201,7 @@ pub struct FuncBuilder {
     // Each entry: (ValueMeta raw, slot_count) for one parameter.
     param_types: Vec<TransferType>,
     temp_checkpoint_stack: Vec<u16>,
+    layout_error: Option<String>,
 }
 
 impl FuncBuilder {
@@ -231,6 +232,22 @@ impl FuncBuilder {
             capture_slot_types: Vec::new(),
             param_types: Vec::new(),
             temp_checkpoint_stack: Vec::new(),
+            layout_error: None,
+        }
+    }
+
+    fn record_slot_count_error(&mut self, slots: usize) -> u16 {
+        if self.layout_error.is_none() {
+            self.layout_error = Some(format!("type slot count exceeds u16::MAX: {slots} slots"));
+        }
+        0
+    }
+
+    pub fn check_layout_error(&self) -> Result<(), String> {
+        if let Some(error) = &self.layout_error {
+            Err(error.clone())
+        } else {
+            Ok(())
         }
     }
 
@@ -288,14 +305,25 @@ impl FuncBuilder {
         }
         let len = types.len();
         let slot = self.next_slot as usize;
-        let end_slot = slot + len;
+        let Some(end_slot) = slot.checked_add(len) else {
+            return self.record_slot_count_error(usize::MAX);
+        };
+        if end_slot > u16::MAX as usize {
+            return self.record_slot_count_error(end_slot);
+        }
 
         // Helper: allocate fresh slots at the end of slot_types
         let alloc_fresh = |this: &mut Self| -> u16 {
-            let fresh = this.slot_types.len() as u16;
+            let fresh = this.slot_types.len();
+            let Some(end) = fresh.checked_add(len) else {
+                return this.record_slot_count_error(usize::MAX);
+            };
+            if end > u16::MAX as usize {
+                return this.record_slot_count_error(end);
+            }
             this.slot_types.extend_from_slice(types);
-            this.next_slot = fresh + len as u16;
-            fresh
+            this.next_slot = end as u16;
+            fresh as u16
         };
 
         // Case 1: Fully within existing slot_types (reuse region)
@@ -344,8 +372,32 @@ impl FuncBuilder {
     // === Parameter definition ===
 
     /// Define a parameter. If `sym` is None, allocates slots without name binding (anonymous parameter).
-    pub fn define_param(&mut self, sym: Option<Symbol>, slots: u16, types: &[SlotType]) -> u16 {
+    pub fn try_define_param(
+        &mut self,
+        sym: Option<Symbol>,
+        slots: u16,
+        types: &[SlotType],
+    ) -> Result<u16, String> {
+        if types.len() != slots as usize {
+            return Err(format!(
+                "parameter slot layout length {} does not match declared slots {}",
+                types.len(),
+                slots
+            ));
+        }
         let slot = self.next_slot;
+        let next_slot = self.next_slot.checked_add(slots).ok_or_else(|| {
+            format!(
+                "type slot count exceeds u16::MAX: {} slots",
+                self.next_slot as usize + slots as usize
+            )
+        })?;
+        let param_slots = self.param_slots.checked_add(slots).ok_or_else(|| {
+            format!(
+                "type slot count exceeds u16::MAX: {} slots",
+                self.param_slots as usize + slots as usize
+            )
+        })?;
         if let Some(s) = sym {
             self.locals.insert(
                 s,
@@ -356,10 +408,17 @@ impl FuncBuilder {
             );
         }
         self.slot_types.extend_from_slice(types);
-        self.next_slot += slots;
+        self.next_slot = next_slot;
         self.param_count += 1;
-        self.param_slots += slots;
-        slot
+        self.param_slots = param_slots;
+        Ok(slot)
+    }
+
+    /// Define a parameter, panicking only for internal synthetic paths that
+    /// cannot surface `CodegenError` directly.
+    pub fn define_param(&mut self, sym: Option<Symbol>, slots: u16, types: &[SlotType]) -> u16 {
+        self.try_define_param(sym, slots, types)
+            .unwrap_or_else(|err| panic!("{err}"))
     }
 
     /// Box an escaped parameter: allocate heap storage and copy the stack param value into it.
@@ -400,8 +459,8 @@ impl FuncBuilder {
         use vo_vm::instruction::Opcode;
         let meta_reg = self.alloc_slots(&[SlotType::Value]);
         self.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
-        self.emit_ptr_new(gcref_slot, meta_reg, value_slots);
         assert_eq!(value_slots as usize, slot_types.len());
+        self.emit_ptr_new(gcref_slot, meta_reg, slot_types);
         self.emit_ptr_set_with_slot_types(gcref_slot, 0, param_slot, slot_types);
     }
 
@@ -509,7 +568,7 @@ impl FuncBuilder {
         &mut self,
         sym: Symbol,
         elem_slots: u16,
-        elem_bytes: u16,
+        elem_bytes: usize,
         elem_vk: vo_common_core::ValueKind,
     ) -> u16 {
         let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
@@ -684,11 +743,26 @@ impl FuncBuilder {
         self.emit_op(Opcode::Return, ret_start, self.ret_slots, 0);
     }
 
-    fn checked_u8_count(slots: usize, context: &str) -> u8 {
+    fn checked_u8_count_or_record(&mut self, slots: usize, context: &str) -> u8 {
         if slots <= u8::MAX as usize {
             return slots as u8;
         }
-        panic!("{context} exceeds u8 packed operand width: {slots} slots")
+        if self.layout_error.is_none() {
+            self.layout_error = Some(format!(
+                "{context} exceeds u8 packed operand width: {slots} slots"
+            ));
+        }
+        0
+    }
+
+    fn checked_u16_operand_or_record(&mut self, value: u32, context: &str) -> u16 {
+        if let Ok(value) = u16::try_from(value) {
+            return value;
+        }
+        if self.layout_error.is_none() {
+            self.layout_error = Some(format!("{context} exceeds u16 operand: {value}"));
+        }
+        0
     }
 
     fn checked_u16_count(slots: usize, context: &str) -> u16 {
@@ -696,14 +770,14 @@ impl FuncBuilder {
             .unwrap_or_else(|_| panic!("{context} exceeds u16 operand width: {slots} slots"))
     }
 
-    fn checked_u8_slot_count(slots: u16, context: &str) -> u8 {
-        pack_u8_slot_count(slots)
-            .unwrap_or_else(|| panic!("{context} exceeds u8 packed operand width: {slots} slots"))
-    }
-
-    pub(crate) fn checked_call_iface_method_idx(method_idx: u32) -> u8 {
-        u8::try_from(method_idx).unwrap_or_else(|_| {
-            panic!("CallIface method index exceeds u8 operand width: {method_idx}")
+    fn checked_u8_slot_count_or_record(&mut self, slots: u16, context: &str) -> u8 {
+        pack_u8_slot_count(slots).unwrap_or_else(|| {
+            if self.layout_error.is_none() {
+                self.layout_error = Some(format!(
+                    "{context} exceeds u8 packed operand width: {slots} slots"
+                ));
+            }
+            0
         })
     }
 
@@ -735,13 +809,8 @@ impl FuncBuilder {
         if slots == 1 {
             self.emit_op(Opcode::GlobalGet, dst, index, 0);
         } else {
-            self.emit_with_flags(
-                Opcode::GlobalGetN,
-                Self::checked_u8_slot_count(slots, "GlobalGetN slot count"),
-                dst,
-                index,
-                0,
-            );
+            let flags = self.checked_u8_slot_count_or_record(slots, "GlobalGetN slot count");
+            self.emit_with_flags(Opcode::GlobalGetN, flags, dst, index, 0);
         }
     }
 
@@ -749,13 +818,8 @@ impl FuncBuilder {
         if slots == 1 {
             self.emit_op(Opcode::GlobalSet, index, src, 0);
         } else {
-            self.emit_with_flags(
-                Opcode::GlobalSetN,
-                Self::checked_u8_slot_count(slots, "GlobalSetN slot count"),
-                index,
-                src,
-                0,
-            );
+            let flags = self.checked_u8_slot_count_or_record(slots, "GlobalSetN slot count");
+            self.emit_with_flags(Opcode::GlobalSetN, flags, index, src, 0);
         }
     }
 
@@ -767,12 +831,12 @@ impl FuncBuilder {
         arg_slots: usize,
         ret_slot_types: &[SlotType],
     ) {
-        let extern_id = u16::try_from(extern_id)
-            .unwrap_or_else(|_| panic!("CallExtern extern id exceeds u16 operand: {extern_id}"));
+        let extern_id = self.checked_u16_operand_or_record(extern_id, "CallExtern extern id");
         let arg_layout = self.get_slot_types(args_start, arg_slots);
+        let arg_flags = self.checked_u8_count_or_record(arg_slots, "CallExtern arg slot count");
         self.emit_with_flags_and_metadata(
             Opcode::CallExtern,
-            Self::checked_u8_count(arg_slots, "CallExtern arg slot count"),
+            arg_flags,
             dst,
             extern_id,
             args_start,
@@ -818,9 +882,11 @@ impl FuncBuilder {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn emit_call_iface(
         &mut self,
-        method_idx: u32,
+        iface_meta_id: u32,
+        method_idx: u8,
         iface_slot: u16,
         args_start: u16,
         packed_shape: u16,
@@ -829,11 +895,12 @@ impl FuncBuilder {
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::CallIface,
-            Self::checked_call_iface_method_idx(method_idx),
+            method_idx,
             iface_slot,
             args_start,
             packed_shape,
-            JitInstructionMetadata::CallLayout {
+            JitInstructionMetadata::CallIfaceLayout {
+                iface_meta_id,
                 arg_layout: arg_layout.to_vec(),
                 ret_layout: ret_layout.to_vec(),
             },
@@ -847,9 +914,11 @@ impl FuncBuilder {
         args_start: u16,
         arg_layout: &[SlotType],
     ) {
+        let arg_flags =
+            self.checked_u8_count_or_record(arg_layout.len(), "GoIsland arg slot count");
         self.emit_with_flags_and_metadata(
             Opcode::GoIsland,
-            Self::checked_u8_count(arg_layout.len(), "GoIsland arg slot count"),
+            arg_flags,
             island_reg,
             closure_reg,
             args_start,
@@ -887,10 +956,26 @@ impl FuncBuilder {
         );
     }
 
-    pub fn emit_queue_send(&mut self, queue: u16, value: u16, elem_layout: &[SlotType]) {
+    pub fn emit_go_start_static(&mut self, func_id: u32, args_start: u16, arg_slots: u16) {
+        let (func_id_low, func_id_high) = crate::type_info::encode_func_id(func_id);
+        let arg_layout = self.get_slot_types(args_start, arg_slots as usize);
+        self.emit_with_flags_and_metadata(
+            Opcode::GoStart,
+            func_id_high << 1,
+            func_id_low,
+            args_start,
+            arg_slots,
+            JitInstructionMetadata::CallLayout {
+                arg_layout,
+                ret_layout: Vec::new(),
+            },
+        );
+    }
+
+    pub fn emit_queue_send(&mut self, queue: u16, value: u16, flags: u8, elem_layout: &[SlotType]) {
         self.emit_with_flags_and_metadata(
             Opcode::QueueSend,
-            Self::checked_u8_count(elem_layout.len(), "QueueSend element slot count"),
+            flags,
             queue,
             value,
             0,
@@ -913,16 +998,37 @@ impl FuncBuilder {
         );
     }
 
+    pub fn emit_queue_new(
+        &mut self,
+        dst: u16,
+        packed_type: u16,
+        cap: u16,
+        flags: u8,
+        elem_layout: &[SlotType],
+    ) {
+        self.emit_with_flags_and_metadata(
+            Opcode::QueueNew,
+            flags,
+            dst,
+            packed_type,
+            cap,
+            JitInstructionMetadata::QueueLayout {
+                elem_layout: elem_layout.to_vec(),
+            },
+        );
+    }
+
     pub fn emit_select_send(
         &mut self,
         queue: u16,
         value: u16,
         case_idx: u16,
+        flags: u8,
         elem_layout: &[SlotType],
     ) {
         self.emit_with_flags_and_metadata(
             Opcode::SelectSend,
-            Self::checked_u8_count(elem_layout.len(), "SelectSend element slot count"),
+            flags,
             queue,
             value,
             case_idx,
@@ -1024,11 +1130,6 @@ impl FuncBuilder {
     fn elem_metadata(elem: ElemLayoutSpec<'_>) -> JitInstructionMetadata {
         let elem_bytes =
             u32::try_from(elem.bytes).expect("element byte width exceeds JIT metadata encoding");
-        let slot_layout = if elem_bytes == 0 {
-            &[]
-        } else {
-            elem.slot_types
-        };
         JitInstructionMetadata::ElemLayout {
             elem_bytes,
             needs_sign_extend: matches!(
@@ -1037,13 +1138,19 @@ impl FuncBuilder {
                     | vo_common_core::ValueKind::Int16
                     | vo_common_core::ValueKind::Int32
             ),
-            slot_layout: slot_layout.to_vec(),
+            slot_layout: elem.slot_types.to_vec(),
         }
     }
 
     /// Emit PtrNew: a=dst, b=meta register, c=heap slot count.
-    pub fn emit_ptr_new(&mut self, dst: u16, meta_reg: u16, slots: u16) {
-        self.emit_op(Opcode::PtrNew, dst, meta_reg, slots);
+    pub fn emit_ptr_new(&mut self, dst: u16, meta_reg: u16, slot_types: &[SlotType]) {
+        let slots = u16::try_from(slot_types.len()).expect("PtrNew slot layout exceeds u16::MAX");
+        self.emit_with_metadata(
+            Instruction::new(Opcode::PtrNew, dst, meta_reg, slots),
+            JitInstructionMetadata::PtrLayout {
+                value_layout: slot_types.to_vec(),
+            },
+        );
     }
 
     /// Emit ClosureNew with proper func_id encoding (handles func_id > 65535)
@@ -1242,6 +1349,7 @@ impl FuncBuilder {
                 for i in 0..len {
                     let idx_reg = self.alloc_slots(&[SlotType::Value]);
                     self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
+                    self.emit_stack_array_index_check(idx_reg, len);
                     self.emit_slot_get_with_slot_types(
                         dst + i * elem_slots,
                         base_slot,
@@ -1291,6 +1399,7 @@ impl FuncBuilder {
                 for i in 0..len {
                     let idx_reg = self.alloc_slots(&[SlotType::Value]);
                     self.emit_op(Opcode::LoadInt, idx_reg, i, 0);
+                    self.emit_stack_array_index_check(idx_reg, len);
                     self.emit_slot_set_with_slot_types(
                         base_slot,
                         idx_reg,
@@ -1319,6 +1428,12 @@ impl FuncBuilder {
 
     // === Stack array slot access helpers ===
 
+    pub fn emit_stack_array_index_check(&mut self, index: u16, len: u16) {
+        let len_reg = self.alloc_slots(&[SlotType::Value]);
+        self.emit_op(Opcode::LoadInt, len_reg, len, 0);
+        self.emit_op(Opcode::IndexCheck, index, len_reg, 0);
+    }
+
     /// Emit SlotGet/SlotGetN for stack array element access.
     pub fn emit_slot_get_with_slot_types(
         &mut self,
@@ -1336,9 +1451,11 @@ impl FuncBuilder {
                 metadata,
             );
         } else {
+            let elem_flags =
+                self.checked_u8_slot_count_or_record(elem_slots, "SlotGetN element slot count");
             self.emit_with_flags_and_metadata(
                 Opcode::SlotGetN,
-                Self::checked_u8_slot_count(elem_slots, "SlotGetN element slot count"),
+                elem_flags,
                 dst,
                 base,
                 index,
@@ -1364,9 +1481,11 @@ impl FuncBuilder {
                 metadata,
             );
         } else {
+            let elem_flags =
+                self.checked_u8_slot_count_or_record(elem_slots, "SlotSetN element slot count");
             self.emit_with_flags_and_metadata(
                 Opcode::SlotSetN,
-                Self::checked_u8_slot_count(elem_slots, "SlotSetN element slot count"),
+                elem_flags,
                 base,
                 index,
                 src,
@@ -1658,6 +1777,23 @@ impl FuncBuilder {
                 key_layout: key_layout.to_vec(),
                 val_layout: val_layout.to_vec(),
                 has_ok,
+            },
+        );
+    }
+
+    pub fn emit_map_new(
+        &mut self,
+        dst: u16,
+        packed_meta: u16,
+        slots_arg: u16,
+        key_layout: &[SlotType],
+        val_layout: &[SlotType],
+    ) {
+        self.emit_with_metadata(
+            Instruction::new(Opcode::MapNew, dst, packed_meta, slots_arg),
+            JitInstructionMetadata::MapNew {
+                key_layout: key_layout.to_vec(),
+                val_layout: val_layout.to_vec(),
             },
         );
     }
@@ -2048,9 +2184,20 @@ impl FuncBuilder {
         self.ret_slot_types.clear();
     }
 
-    pub fn set_ret_slot_types(&mut self, slot_types: Vec<SlotType>) {
-        self.ret_slots = slot_types.len() as u16;
+    pub fn try_set_ret_slot_types(&mut self, slot_types: Vec<SlotType>) -> Result<(), String> {
+        self.ret_slots = u16::try_from(slot_types.len()).map_err(|_| {
+            format!(
+                "type slot count exceeds u16::MAX: {} slots",
+                slot_types.len()
+            )
+        })?;
         self.ret_slot_types = slot_types;
+        Ok(())
+    }
+
+    pub fn set_ret_slot_types(&mut self, slot_types: Vec<SlotType>) {
+        self.try_set_ret_slot_types(slot_types)
+            .unwrap_or_else(|err| panic!("{err}"));
     }
 
     /// Set param slots directly (for wrapper functions that don't use define_param)
@@ -2118,7 +2265,9 @@ impl FuncBuilder {
         }
 
         // Use slot_types.len() as high-water mark (not next_slot which gets restored by end_temp_region)
-        let local_slots = (self.slot_types.len() as u16).max(self.ret_slots);
+        let local_slots = u16::try_from(self.slot_types.len())
+            .unwrap_or(u16::MAX)
+            .max(self.ret_slots);
 
         // Count heap-allocated named returns (escaped = true)
         // Used by panic recovery to return named return values after recover()
@@ -2282,6 +2431,24 @@ mod tests {
     }
 
     #[test]
+    fn zero_byte_elem_metadata_preserves_logical_slot_layout() {
+        let metadata = FuncBuilder::elem_metadata(ElemLayoutSpec::new(
+            0,
+            ValueKind::Struct,
+            &[SlotType::Value],
+        ));
+
+        assert!(matches!(
+            metadata,
+            JitInstructionMetadata::ElemLayout {
+                elem_bytes: 0,
+                needs_sign_extend: false,
+                slot_layout,
+            } if slot_layout == [SlotType::Value]
+        ));
+    }
+
+    #[test]
     #[should_panic(expected = "element byte width exceeds JIT metadata encoding")]
     fn elem_layout_metadata_overflow_is_not_silently_dropped() {
         let _ = FuncBuilder::elem_metadata(ElemLayoutSpec::new(
@@ -2344,5 +2511,151 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn jump_conditions_are_canonicalized_to_scalar_value_slots_061() {
+        let mut builder = FuncBuilder::new("jump-condition-contract");
+        let iface_slot = builder.alloc_slots(&[SlotType::Interface0]);
+
+        builder.emit_jump(Opcode::JumpIfNot, iface_slot);
+
+        let jump = builder
+            .code
+            .iter()
+            .find(|inst| inst.opcode() == Opcode::JumpIfNot)
+            .expect("jump should be emitted");
+        assert_ne!(
+            jump.a, iface_slot,
+            "non-scalar branch conditions must be lowered through a generated scalar condition"
+        );
+        assert_eq!(
+            builder.slot_types[jump.a as usize],
+            SlotType::Value,
+            "branch condition entering bytecode must satisfy verifier/JIT scalar branch contract"
+        );
+    }
+
+    fn production_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start_index = source
+            .find(start)
+            .expect("source region start should exist");
+        let after_start = &source[start_index..];
+        let end_index = after_start
+            .find(end)
+            .expect("source region end should exist");
+        &after_start[..end_index]
+    }
+
+    #[test]
+    fn vm_queue_send_abi_owner_025_emitters_receive_prepacked_flags() {
+        let source = include_str!("func.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("func source should contain tests section");
+
+        for signature in [
+            "pub fn emit_queue_send(&mut self, queue: u16, value: u16, flags: u8, elem_layout: &[SlotType])",
+            "pub fn emit_select_send(\n        &mut self,\n        queue: u16,\n        value: u16,\n        case_idx: u16,\n        flags: u8,\n        elem_layout: &[SlotType],\n    )",
+        ] {
+            assert!(
+                source.contains(signature),
+                "QueueSend/SelectSend emitters must consume TypeInfo-owned packed flags: {signature}"
+            );
+        }
+
+        for (name, region) in [
+            (
+                "emit_queue_send",
+                production_source_between(
+                    source,
+                    "pub fn emit_queue_send",
+                    "pub fn emit_queue_recv",
+                ),
+            ),
+            (
+                "emit_select_send",
+                production_source_between(
+                    source,
+                    "pub fn emit_select_send",
+                    "pub fn emit_select_recv",
+                ),
+            ),
+        ] {
+            assert!(
+                !region.contains("checked_u8_count_or_record"),
+                "{name} must not recompute QueueSend packed width after TypeInfo has already validated it"
+            );
+        }
+    }
+
+    #[test]
+    fn call_extern_records_u8_arg_width_overflow() {
+        let mut func = FuncBuilder::new("call_extern_arg_width");
+        let arg_layout = vec![SlotType::Value; 256];
+        let args_start = func.alloc_slots(&arg_layout);
+
+        func.emit_call_extern(0, 0, args_start, arg_layout.len(), &[]);
+
+        let err = func
+            .check_layout_error()
+            .expect_err("wide CallExtern arg layout should be recorded");
+        assert_eq!(
+            err,
+            "CallExtern arg slot count exceeds u8 packed operand width: 256 slots"
+        );
+    }
+
+    #[test]
+    fn call_extern_records_extern_id_width_overflow() {
+        let mut func = FuncBuilder::new("call_extern_extern_id_width");
+
+        func.emit_call_extern(0, u32::from(u16::MAX) + 1, 0, 0, &[]);
+
+        let err = func
+            .check_layout_error()
+            .expect_err("wide CallExtern extern id should be recorded");
+        assert_eq!(err, "CallExtern extern id exceeds u16 operand: 65536");
+    }
+
+    #[test]
+    fn go_island_records_u8_arg_width_overflow() {
+        let mut func = FuncBuilder::new("go_island_arg_width");
+        let arg_layout = vec![SlotType::Value; 256];
+        let args_start = func.alloc_slots(&arg_layout);
+
+        func.emit_go_island(0, 1, args_start, &arg_layout);
+
+        let err = func
+            .check_layout_error()
+            .expect_err("wide GoIsland arg layout should be recorded");
+        assert_eq!(
+            err,
+            "GoIsland arg slot count exceeds u8 packed operand width: 256 slots"
+        );
+    }
+
+    #[test]
+    fn vm_queue_send_abi_width_024_consumes_prepacked_flags() {
+        let mut func = FuncBuilder::new("queue_send_arg_width");
+        let elem_layout = vec![SlotType::Value; 4];
+        let value = func.alloc_slots(&elem_layout);
+
+        func.emit_queue_send(0, value, 4, &elem_layout);
+
+        func.check_layout_error()
+            .expect("QueueSend packed flags are owned by TypeInfo");
+    }
+
+    #[test]
+    fn vm_select_send_abi_width_024_consumes_prepacked_flags() {
+        let mut func = FuncBuilder::new("select_send_arg_width");
+        let elem_layout = vec![SlotType::Value; 4];
+        let value = func.alloc_slots(&elem_layout);
+
+        func.emit_select_send(0, value, 0, 4, &elem_layout);
+
+        func.check_layout_error()
+            .expect("SelectSend packed flags are owned by TypeInfo");
     }
 }

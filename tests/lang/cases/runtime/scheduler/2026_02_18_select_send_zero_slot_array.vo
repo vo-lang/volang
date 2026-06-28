@@ -1,0 +1,17 @@
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan [0]int, 1)
+	var z [0]int
+	sent := false
+	select {
+	case ch <- z:
+		sent = true
+	default:
+		panic("zero-slot select send should be ready")
+	}
+	assert(sent, "sent")
+	fmt.Println("select send zero-slot array ok")
+}

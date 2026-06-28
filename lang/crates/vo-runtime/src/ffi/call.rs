@@ -14,6 +14,7 @@ use crate::io::{IoRuntime, IoToken};
 use crate::itab::ItabCache;
 use crate::output::OutputSink;
 use vo_common_core::bytecode::Module;
+use vo_common_core::types::SlotType;
 
 use super::SentinelErrorCache;
 
@@ -76,9 +77,27 @@ pub struct ExternWorld<'env> {
 // ExternFiberInputs: one-shot fiber-derived inputs
 // =============================================================================
 
+/// One typed cached closure result used while replaying an extern call.
+///
+/// The values are exposed to extern code through `resume_closure_result()`;
+/// the slot metadata travels with the payload so VM-owned replay logs remain
+/// precise GC roots while the extern is re-executed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternReplayResult {
+    pub values: Vec<u64>,
+    pub slot_types: Vec<SlotType>,
+}
+
+impl ExternReplayResult {
+    #[inline]
+    pub fn new(values: Vec<u64>, slot_types: Vec<SlotType>) -> Self {
+        Self { values, slot_types }
+    }
+}
+
 /// One-shot inputs derived from the active fiber immediately before calling
-/// an extern function. These are moved out of the fiber for this single
-/// extern execution.
+/// an extern function. Replay results are snapshots; the VM keeps the
+/// authoritative typed replay log on the fiber until the extern terminates.
 pub struct ExternFiberInputs {
     /// Opaque pointer to the current fiber.
     pub fiber_opaque: *mut core::ffi::c_void,
@@ -99,7 +118,7 @@ pub struct ExternFiberInputs {
 
     /// Cached closure results from previous `CallClosure` round-trips.
     /// Consumed in order via `ExternCallContext.replay_index`.
-    pub replay_results: Vec<Vec<u64>>,
+    pub replay_results: Vec<ExternReplayResult>,
 
     /// Original panic message captured when the replayed closure unwound.
     /// `is_some()` also serves as the "panicked" flag.

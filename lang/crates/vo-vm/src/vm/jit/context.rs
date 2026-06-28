@@ -40,7 +40,7 @@ impl JitContextWrapper {
         self.ctx.call_func_id
     }
 
-    pub fn call_arg_start(&self) -> u16 {
+    pub fn call_arg_start(&self) -> u32 {
         self.ctx.call_arg_start
     }
 
@@ -87,6 +87,7 @@ pub fn build_jit_context(
     fiber.jit_panic_flag = false;
     fiber.jit_is_user_panic = false;
     fiber.jit_panic_msg = InterfaceSlot::default();
+    fiber.jit_infra_error_message.clear();
 
     let ctx = JitContext {
         gc: &mut vm.state.gc as *mut _,
@@ -100,6 +101,8 @@ pub fn build_jit_context(
         runtime_trap_arg0: 0,
         runtime_trap_arg1: 0,
         runtime_trap_pc: u32::MAX,
+        current_func_id: u32::MAX,
+        infra_error_message: &mut fiber.jit_infra_error_message as *mut String,
         vm: vm as *mut Vm as *mut core::ffi::c_void,
         fiber: fiber as *mut Fiber as *mut core::ffi::c_void,
         itab_cache: &mut vm.state.itab_cache as *mut _,
@@ -142,6 +145,8 @@ pub fn build_jit_context(
         push_resume_point_fn: Some(jit_push_resume_point),
         // Callbacks
         create_island_fn: Some(callbacks::jit_create_island),
+        queue_len_fn: Some(callbacks::jit_queue_len),
+        queue_cap_fn: Some(callbacks::jit_queue_cap),
         queue_close_fn: Some(callbacks::jit_queue_close),
         queue_send_fn: Some(callbacks::jit_queue_send),
         queue_recv_fn: Some(callbacks::jit_queue_recv),
@@ -175,7 +180,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_jit_context_without_manager_is_jit_error() {
+    fn vm_build_jit_context_without_manager_is_jit_error() {
         let mut vm = Vm::new();
         let mut module = Module::new("jit-context-missing-manager-test".to_string());
         module.functions.push(function(1, 0));

@@ -14,6 +14,7 @@ default = ["jit"]
 jit = ["vo-engine/jit"]
 
 [dependencies]
+vo-common-core = { path = "../../lang/crates/vo-common-core" }
 vo-engine = { path = "../../lang/crates/vo-engine" }
 vo-module = { path = "../../lang/crates/vo-module" }
 vo-release = { path = "../../lang/crates/vo-release" }

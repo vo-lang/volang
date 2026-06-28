@@ -261,12 +261,14 @@ fn compile_stmt_inner(
             let target_reg = crate::expr::compile_expr(&send_stmt.chan, ctx, func, info)?;
             let target_type = info.expr_type(send_stmt.chan.id);
             let elem_type = info.queue_elem_type(target_type);
-            let elem_slots = info.queue_send_elem_slots(target_type);
+            let send_flags = info
+                .queue_send_flags(target_type)
+                .map_err(CodegenError::Internal)?;
             let elem_layout = info.type_slot_types(elem_type);
             let val_reg =
                 crate::expr::compile_expr_to_type(&send_stmt.value, elem_type, ctx, func, info)?;
-            debug_assert_eq!(elem_layout.len(), elem_slots as usize);
-            func.emit_queue_send(target_reg, val_reg, &elem_layout);
+            debug_assert_eq!(elem_layout.len(), send_flags as usize);
+            func.emit_queue_send(target_reg, val_reg, send_flags, &elem_layout);
         }
 
         // === Select ===
@@ -293,7 +295,7 @@ fn compile_stmt_inner(
 
             let lv = crate::lvalue::resolve_lvalue(&inc_dec.expr, ctx, func, info)?;
             let tmp = func.alloc_slots(&[SlotType::Value]);
-            emit_lvalue_load(&lv, tmp, ctx, func);
+            emit_lvalue_load(&lv, tmp, ctx, func)?;
 
             let one = func.alloc_slots(&[SlotType::Value]);
             func.emit_op(Opcode::LoadInt, one, 1, 0);
@@ -309,7 +311,7 @@ fn compile_stmt_inner(
             crate::expr::emit_int_trunc(tmp, expr_type, func, info);
 
             // Inc/dec on integers - no GC refs
-            emit_lvalue_store(&lv, tmp, ctx, func, &[vo_runtime::SlotType::Value]);
+            emit_lvalue_store(&lv, tmp, ctx, func, &[vo_runtime::SlotType::Value])?;
         }
 
         // === TypeSwitch ===

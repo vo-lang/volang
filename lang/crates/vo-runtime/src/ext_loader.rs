@@ -3,11 +3,12 @@
 //! Extensions are discovered from `vo.mod` extension metadata and loaded
 //! at runtime via dlopen. Uses `ExtensionTable` at the dylib boundary.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use libloading::{Library, Symbol};
 
+use crate::bytecode::ExternEffects;
 use crate::ffi::{
     ExtensionTable, ExternEntry, ExternFnPtr, EXTENSION_ABI_FINGERPRINT, EXTENSION_ABI_VERSION,
 };
@@ -52,6 +53,8 @@ pub enum ExtError {
     MissingAbiFingerprint,
     /// ABI fingerprint mismatch.
     FingerprintMismatch { expected: u64, found: u64 },
+    /// Invalid extension entry table.
+    InvalidEntryTable { extension: String, message: String },
     /// IO error.
     Io(std::io::Error),
 }
@@ -89,6 +92,13 @@ impl std::fmt::Display for ExtError {
                     expected, found
                 )
             }
+            ExtError::InvalidEntryTable { extension, message } => {
+                write!(
+                    f,
+                    "invalid entry table for extension '{}': {}",
+                    extension, message
+                )
+            }
             ExtError::Io(e) => write!(f, "IO error: {}", e),
         }
     }
@@ -102,9 +112,110 @@ impl From<std::io::Error> for ExtError {
     }
 }
 
+fn invalid_entry_table(extension: &str, message: impl Into<String>) -> ExtError {
+    ExtError::InvalidEntryTable {
+        extension: extension.to_string(),
+        message: message.into(),
+    }
+}
+
+fn validate_extension_table_pointer(
+    extension: &str,
+    table: &ExtensionTable,
+) -> Result<(), ExtError> {
+    if table.entry_count > 0 && table.entries.is_null() {
+        return Err(invalid_entry_table(
+            extension,
+            "non-empty extension table has a null entries pointer",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_extension_abi_version(found: u32) -> Result<(), ExtError> {
+    if found != ABI_VERSION {
+        return Err(ExtError::VersionMismatch {
+            expected: ABI_VERSION,
+            found,
+        });
+    }
+    Ok(())
+}
+
+fn validate_extension_abi_fingerprint(found: u64) -> Result<(), ExtError> {
+    if found != ABI_FINGERPRINT {
+        return Err(ExtError::FingerprintMismatch {
+            expected: ABI_FINGERPRINT,
+            found,
+        });
+    }
+    Ok(())
+}
+
+fn extern_entry_name<'a>(
+    extension: &str,
+    index: usize,
+    entry: &'a ExternEntry,
+) -> Result<&'a str, ExtError> {
+    if entry.name_len == 0 {
+        return Err(invalid_entry_table(
+            extension,
+            format!("entry {} has an empty extern name", index),
+        ));
+    }
+    if entry.name_ptr.is_null() {
+        return Err(invalid_entry_table(
+            extension,
+            format!("entry {} has a null extern name pointer", index),
+        ));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(entry.name_ptr, entry.name_len as usize) };
+    std::str::from_utf8(bytes).map_err(|err| {
+        invalid_entry_table(
+            extension,
+            format!("entry {} extern name is not UTF-8: {}", index, err),
+        )
+    })
+}
+
+fn validate_extension_entries(
+    extension: &str,
+    entries: &[ExternEntry],
+    mut is_already_registered: impl FnMut(&str) -> bool,
+) -> Result<(), ExtError> {
+    let mut seen = HashSet::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let extern_name = extern_entry_name(extension, index, entry)?;
+        if !seen.insert(extern_name) {
+            return Err(invalid_entry_table(
+                extension,
+                format!("duplicate extern name '{}'", extern_name),
+            ));
+        }
+        if is_already_registered(extern_name) {
+            return Err(invalid_entry_table(
+                extension,
+                format!("extern name '{}' is already registered", extern_name),
+            ));
+        }
+        if ExternEffects::from_bits(entry.effects_bits).is_none() {
+            return Err(invalid_entry_table(
+                extension,
+                format!(
+                    "entry {} extern '{}' has invalid effects bits 0x{:x}",
+                    index, extern_name, entry.effects_bits
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A loaded extension entry.
-struct LoadedEntry {
-    func: ExternFnPtr,
+#[derive(Clone, Copy)]
+pub struct LoadedEntry {
+    pub func: ExternFnPtr,
+    pub effects: ExternEffects,
 }
 
 /// A loaded extension.
@@ -182,35 +293,35 @@ impl ExtensionLoader {
         };
 
         let table = get_entries();
-
-        if table.version != ABI_VERSION {
-            return Err(ExtError::VersionMismatch {
-                expected: ABI_VERSION,
-                found: table.version,
-            });
-        }
+        validate_extension_abi_version(table.version)?;
 
         let get_abi_fingerprint: Symbol<extern "C" fn() -> u64> = unsafe {
             lib.get(b"vo_ext_get_abi_fingerprint")
                 .map_err(|_| ExtError::MissingAbiFingerprint)?
         };
         let found_fingerprint = get_abi_fingerprint();
-        if found_fingerprint != ABI_FINGERPRINT {
-            return Err(ExtError::FingerprintMismatch {
-                expected: ABI_FINGERPRINT,
-                found: found_fingerprint,
-            });
-        }
+        validate_extension_abi_fingerprint(found_fingerprint)?;
 
-        let c_entries: &[ExternEntry] =
-            unsafe { std::slice::from_raw_parts(table.entries, table.entry_count as usize) };
+        validate_extension_table_pointer(name, &table)?;
+        let c_entries: &[ExternEntry] = if table.entry_count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(table.entries, table.entry_count as usize) }
+        };
+        validate_extension_entries(name, c_entries, |extern_name| {
+            self.cache.contains_key(extern_name)
+        })?;
 
         let ext_idx = self.loaded.len();
         let mut entries = Vec::with_capacity(c_entries.len());
 
         for (i, c_entry) in c_entries.iter().enumerate() {
-            self.cache.insert(c_entry.name().to_string(), (ext_idx, i));
-            entries.push(LoadedEntry { func: c_entry.func });
+            let extern_name = extern_entry_name(name, i, c_entry)?;
+            self.cache.insert(extern_name.to_string(), (ext_idx, i));
+            entries.push(LoadedEntry {
+                func: c_entry.func,
+                effects: c_entry.effects().unwrap_or(ExternEffects::UNKNOWN_CONTROL),
+            });
         }
 
         self.loaded.push(LoadedExtension {
@@ -228,9 +339,9 @@ impl ExtensionLoader {
     }
 
     /// Lookup an extension function by name.
-    pub fn lookup(&self, name: &str) -> Option<ExternFnPtr> {
+    pub fn lookup(&self, name: &str) -> Option<LoadedEntry> {
         let (ext_idx, entry_idx) = self.cache.get(name)?;
-        Some(self.loaded[*ext_idx].entries[*entry_idx].func)
+        Some(self.loaded[*ext_idx].entries[*entry_idx])
     }
 
     /// Get list of loaded extension names.
@@ -310,5 +421,112 @@ impl ExtensionLoader {
 impl Default for ExtensionLoader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" fn dummy_ext(_ctx: *mut crate::ffi::ExternCallContext<'_>) -> u32 {
+        crate::ffi::ext_abi::RESULT_OK
+    }
+
+    fn entry(name: &'static [u8]) -> ExternEntry {
+        ExternEntry {
+            name_ptr: name.as_ptr(),
+            name_len: name.len() as u32,
+            func: dummy_ext,
+            effects_bits: ExternEffects::NONE.bits(),
+        }
+    }
+
+    #[test]
+    fn extension_table_allows_empty_table_with_null_entries() {
+        let table = ExtensionTable {
+            version: ABI_VERSION,
+            entry_count: 0,
+            entries: std::ptr::null(),
+        };
+
+        validate_extension_table_pointer("empty", &table).expect("empty table is valid");
+    }
+
+    #[test]
+    fn extension_table_rejects_non_empty_null_entries() {
+        let table = ExtensionTable {
+            version: ABI_VERSION,
+            entry_count: 1,
+            entries: std::ptr::null(),
+        };
+
+        let err = validate_extension_table_pointer("bad", &table).expect_err("null entries");
+        assert!(err.to_string().contains("null entries pointer"));
+    }
+
+    #[test]
+    fn extension_table_rejects_invalid_effect_bits() {
+        let mut entries = [entry(b"pkg_bad_effects")];
+        entries[0].effects_bits = ExternEffects::ALLOWED_BITS << 1;
+        let err =
+            validate_extension_entries("bad", &entries, |_| false).expect_err("invalid effects");
+        assert!(err.to_string().contains("invalid effects bits"));
+    }
+
+    #[test]
+    fn extension_abi_contract_rejects_version_mismatch() {
+        let found = ABI_VERSION.wrapping_add(1);
+
+        let err = validate_extension_abi_version(found).expect_err("version mismatch");
+        assert!(matches!(
+            err,
+            ExtError::VersionMismatch {
+                expected: ABI_VERSION,
+                found: actual
+            } if actual == found
+        ));
+
+        validate_extension_abi_version(ABI_VERSION).expect("matching ABI version");
+    }
+
+    #[test]
+    fn extension_abi_contract_rejects_fingerprint_mismatch() {
+        let found = ABI_FINGERPRINT ^ 0x1;
+
+        let err = validate_extension_abi_fingerprint(found).expect_err("fingerprint mismatch");
+        assert!(matches!(
+            err,
+            ExtError::FingerprintMismatch {
+                expected: ABI_FINGERPRINT,
+                found: actual
+            } if actual == found
+        ));
+
+        validate_extension_abi_fingerprint(ABI_FINGERPRINT).expect("matching ABI fingerprint");
+    }
+
+    #[test]
+    fn extension_entries_reject_duplicate_extern_names() {
+        let entries = [entry(b"dup"), entry(b"dup")];
+
+        let err =
+            validate_extension_entries("dups", &entries, |_| false).expect_err("duplicate name");
+        assert!(err.to_string().contains("duplicate extern name 'dup'"));
+    }
+
+    #[test]
+    fn extension_entries_reject_already_registered_extern_names() {
+        let entries = [entry(b"existing")];
+
+        let err = validate_extension_entries("dups", &entries, |name| name == "existing")
+            .expect_err("already registered name");
+        assert!(err.to_string().contains("already registered"));
+    }
+
+    #[test]
+    fn extension_entries_accept_unique_extern_names() {
+        let entries = [entry(b"one"), entry(b"two")];
+
+        validate_extension_entries("ok", &entries, |_| false).expect("unique names");
     }
 }

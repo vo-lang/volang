@@ -81,11 +81,15 @@ fn print_usage() {
         r#"usage:
   vo-dev task list
   vo-dev task show <task>
-  vo-dev task plan <selector> [--changed] [--base <sha>] [--head <sha>] [--format text|json]
+  vo-dev task final-selectors [--format text|json]
+  vo-dev task stats [--format text|json]
+  vo-dev task coverage [--format text|json]
+  vo-dev task plan <selector> [--changed] [--base <sha>] [--head <sha>] [--format text|json] [--explain]
   vo-dev task run <selector> [--changed] [--base <sha>] [--head <sha>]
   vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]
   vo-dev ci metadata <selector> [--github-output]
-  vo-dev lint tasks|artifacts|repo-boundaries|layout|docs|examples|benchmarks|release|all
+  vo-dev ci final-matrix [--github-output]
+  vo-dev lint tasks|artifacts|repo-boundaries|layout|docs|examples|benchmarks|release|all [--strict]
   vo-dev tool check [--task <task>] [--json]
   vo-dev tool bootstrap [--task <task>] [--apply] [--json]
   vo-dev tool version <tool>
@@ -100,8 +104,7 @@ fn print_usage() {
   vo-dev release notes --tag <tag> --out <path>
   vo-dev release publish --tag <tag> --artifacts <dir> --notes <file>
   vo-dev release update-homebrew --repo <path> --artifacts <dir> --version <version>
-  vo-dev test plan|run [--suite lang] [--targets <list>] [--path <file-or-dir>] [--jobs <n>] [--format text|json] [--verbose] [--release]
-  vo-dev test run --format json is native-target only; wasm runs are text output
+  vo-dev test plan|run [--suite lang] [--targets <list>] [--matrix <name>] [--tags <list>] [--owner <name>] [--path <file-or-dir>] [--jobs <n>] [--repeat <n>] [--format text|json] [--verbose] [--release] [--explain]
   vo-dev dpy <d.py-compatible command...>
   vo-dev first-party path <repo> [subdir]
   vo-dev first-party ci-checkout <repo> [--github-output]
@@ -109,7 +112,11 @@ fn print_usage() {
   vo-dev first-party run-workspace <repo> <workspace> -- <command...>
   vo-dev first-party release-verify <repo>
   vo-dev studio-install-local-vogui
-  vo-dev test lint --suite lang
+  vo-dev test lint --suite lang [--strict]
+  vo-dev test stats --suite lang [--format text|json]
+  vo-dev test coverage --suite lang [--format text|json]
+  vo-dev test explain --suite lang --case <id> [--format text|json]
+  vo-dev test catalog --suite lang [--format text|json]
   vo-dev bench [all|vo|score|<name>] [--all-langs] [--runs N] [--warmup N] [--arch 32|64] [--jit-hot]
   vo-dev gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]
   vo-dev loc [--with-tests]

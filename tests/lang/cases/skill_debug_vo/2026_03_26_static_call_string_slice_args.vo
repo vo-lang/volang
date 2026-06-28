@@ -22,14 +22,14 @@ func parseLikeRunner(mode string, args []string) string {
     }
 
     assert(verbose, "verbose should be true")
-    assert(singleFile == "tests/lang/cases/multi_return_as_arg.vo", "singleFile mismatch")
+    assert(singleFile == "tests/lang/cases/runtime/control_flow/multi_return_as_arg.vo", "singleFile mismatch")
     assert(strings.HasPrefix(singleFile, "tests/lang/cases/"), "singleFile prefix mismatch")
     return singleFile
 }
 
 func main() {
-    args := []string{"-v", "tests/lang/cases/multi_return_as_arg.vo"}
+    args := []string{"-v", "tests/lang/cases/runtime/control_flow/multi_return_as_arg.vo"}
     file := parseLikeRunner("both", args)
-    assert(file == "tests/lang/cases/multi_return_as_arg.vo", "returned file mismatch")
+    assert(file == "tests/lang/cases/runtime/control_flow/multi_return_as_arg.vo", "returned file mismatch")
     fmt.Println("static_call_string_slice_args: ok")
 }

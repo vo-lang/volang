@@ -1,0 +1,82 @@
+name: Production Readiness
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan production gates
+    runs-on: ubuntu-latest
+    outputs:
+      has_tasks: ${{ steps.plan.outputs.has_tasks }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      tasks: ${{ steps.plan.outputs.tasks }}
+    steps:
+      - name: Checkout volang
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Plan final gate tasks
+        id: plan
+        run: cargo run -q -p vo-dev -- ci final-matrix --github-output
+
+  readiness-gate:
+    name: ${{ matrix.title }}
+    needs: plan
+    if: needs.plan.outputs.has_tasks == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout volang
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout first-party module
+        if: matrix.checkout
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.checkout_repository }}
+          path: ${{ matrix.checkout_path }}
+
+      - name: Install Rust
+        if: matrix.rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Rust cache
+        if: matrix.rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.rust_cache_workspaces }}
+
+      - name: Setup Python
+        if: matrix.python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Setup Node
+        if: matrix.node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node_version }}
+          cache: "npm"
+          cache-dependency-path: ${{ matrix.node_lockfiles }}
+
+      - name: Bootstrap task tools
+        run: cargo run -q -p vo-dev -- tool bootstrap --task "${{ matrix.task }}" --apply
+
+      - name: Check task tools
+        run: cargo run -q -p vo-dev -- tool check --task "${{ matrix.task }}"
+
+      - name: Run gate task
+        run: cargo run -q -p vo-dev -- task run "task:${{ matrix.task }}"

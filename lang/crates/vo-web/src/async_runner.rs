@@ -50,9 +50,10 @@ fn finish_async_outcome(
 /// Await a single fetch Promise: resolve it, store the result, wake the fiber, and resume VM.
 async fn await_fetch(
     vm: &mut vo_vm::vm::Vm,
-    token: u64,
+    key: vo_vm::scheduler::HostWaitKey,
     promise: js_sys::Promise,
 ) -> Result<SchedulingOutcome, vo_vm::vm::VmError> {
+    let token = key.token;
     let result = wasm_bindgen_futures::JsFuture::from(promise).await;
     let fetch_result = match result {
         Ok(val) => vo_web_runtime_wasm::net_http::parse_fetch_js_value(token, &val),
@@ -66,8 +67,27 @@ async fn await_fetch(
         },
     };
     vo_web_runtime_wasm::net_http::store_fetch_result(token, fetch_result);
-    vm.wake_host_event(token);
+    if !vm.wake_host_event(key) {
+        return Err(vo_vm::vm::VmError::Jit(format!(
+            "host replay wake rejected for fetch token {token}"
+        )));
+    }
     vm.run_scheduled()
+}
+
+fn fetch_host_wait_key(
+    vm: &vo_vm::vm::Vm,
+    token: u64,
+) -> Result<vo_vm::scheduler::HostWaitKey, vo_vm::vm::VmError> {
+    vm.host_event_key(
+        vo_vm::scheduler::HostWaitSource::replay(vo_runtime::ffi::HostEventReplaySource::Fetch),
+        token,
+    )
+    .ok_or_else(|| {
+        vo_vm::vm::VmError::Jit(format!(
+            "missing host replay wait key for fetch token {token}"
+        ))
+    })
 }
 
 // ── Sleep helpers ───────────────────────────────────────────────────────────
@@ -131,8 +151,8 @@ async fn run_vm_async(bytecode: &[u8]) -> (String, String, String) {
     };
 
     let mut vm = vo_vm::vm::Vm::new();
-    let reg = &mut vm.state.extern_registry;
     let exts = &module.externs;
+    let reg = vm.extern_registry_mut();
     register_wasm_runtime_externs(reg, exts);
     if let Err(e) = vm.load(module) {
         return ("error".into(), String::new(), format!("{:?}", e));
@@ -164,8 +184,8 @@ pub async fn run_bytecode_async_with_externs(
     };
 
     let mut vm = vo_vm::vm::Vm::new();
-    let reg = &mut vm.state.extern_registry;
     let exts = &module.externs;
+    let reg = vm.extern_registry_mut();
     register_wasm_runtime_externs(reg, exts);
     extra_reg(reg, exts);
     if let Err(e) = vm.load(module) {
@@ -195,7 +215,17 @@ pub(crate) async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, Strin
                 break;
             }
             for (token, promise) in fetches {
-                outcome = match await_fetch(vm, token, promise).await {
+                let key = match fetch_host_wait_key(vm, token) {
+                    Ok(key) => key,
+                    Err(e) => {
+                        return (
+                            "error".into(),
+                            vo_runtime::output::take_output(),
+                            format!("{:?}", e),
+                        )
+                    }
+                };
+                outcome = match await_fetch(vm, key, promise).await {
                     Ok(o) => o,
                     Err(e) => {
                         return (
@@ -212,7 +242,6 @@ pub(crate) async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, Strin
         }
 
         let mut timer_events: Vec<_> = vm
-            .scheduler
             .take_pending_host_events()
             .into_iter()
             .filter(|e| !e.replay)
@@ -228,7 +257,13 @@ pub(crate) async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, Strin
             if remaining > 0 {
                 wasm_callback_sleep_ms(remaining).await;
             }
-            vm.wake_host_event(ev.token);
+            if !vm.wake_host_event(ev.key) {
+                return (
+                    "error".into(),
+                    vo_runtime::output::take_output(),
+                    format!("host timer wake rejected for token {}", ev.token),
+                );
+            }
             outcome = match vm.run_scheduled() {
                 Ok(o) => o,
                 Err(e) => {
@@ -243,8 +278,18 @@ pub(crate) async fn run_vm_async_inner(vm: &mut vo_vm::vm::Vm) -> (String, Strin
                 break 'host_event_loop;
             }
 
-            for (ft, fp) in vo_web_runtime_wasm::net_http::take_pending_fetch_promises() {
-                outcome = match await_fetch(vm, ft, fp).await {
+            for (token, promise) in vo_web_runtime_wasm::net_http::take_pending_fetch_promises() {
+                let key = match fetch_host_wait_key(vm, token) {
+                    Ok(key) => key,
+                    Err(e) => {
+                        return (
+                            "error".into(),
+                            vo_runtime::output::take_output(),
+                            format!("{:?}", e),
+                        )
+                    }
+                };
+                outcome = match await_fetch(vm, key, promise).await {
                     Ok(o) => o,
                     Err(e) => {
                         return (
@@ -334,4 +379,43 @@ pub fn preload_ext_module(
             .map_err(|e| JsValue::from_str(&e))?;
         Ok(JsValue::UNDEFINED)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vm_wasm_fetch_wake_key_002_async_fetch_wakes_with_host_wait_key() {
+        let src = include_str!("async_runner.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("async runner source should contain tests section");
+        assert!(
+            src.contains("fn fetch_host_wait_key"),
+            "fetch runner must resolve a complete HostWaitKey before await/wake"
+        );
+        assert!(
+            src.contains("vm.wake_host_event(key)"),
+            "fetch runner must wake through the HostWaitKey API"
+        );
+        assert!(
+            src.contains("HostWaitSource::replay(vo_runtime::ffi::HostEventReplaySource::Fetch)"),
+            "fetch runner must resolve the replay key with the Fetch host replay source"
+        );
+        assert!(
+            !src.contains("wake_host_event_legacy_replay_token"),
+            "fetch runner must not wake replay waiters through a legacy token"
+        );
+    }
+
+    #[test]
+    fn vm_wasm_fetch_replay_source_045_uses_fetch_source_identity() {
+        let src = include_str!("async_runner.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("async runner source should contain tests section");
+        assert!(
+            src.contains("HostWaitSource::replay(vo_runtime::ffi::HostEventReplaySource::Fetch)"),
+            "fetch wait-key lookup must not collapse Fetch replay into GUI or extension replay"
+        );
+    }
 }

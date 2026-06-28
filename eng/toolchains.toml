@@ -20,6 +20,13 @@ version = "0.14.0"
 required = true
 check = ["wasm-pack", "--version"]
 
+[tools.hyperfine]
+version = "1.20.0"
+required = true
+usage = "vo-dev benchmark smoke tasks"
+check = ["hyperfine", "--version"]
+bootstrap = ["cargo", "install", "hyperfine", "--locked", "--version", "1.20.0"]
+
 [tools.python]
 minimum = "3.9"
 required = true

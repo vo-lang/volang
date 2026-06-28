@@ -32,7 +32,8 @@ impl DeferredHeapAlloc {
     pub fn emit(&self, func: &mut FuncBuilder) {
         let meta_reg = func.alloc_slots(&[SlotType::Value]);
         func.emit_op(Opcode::LoadConst, meta_reg, self.meta_idx, 0);
-        func.emit_ptr_new(self.gcref_slot, meta_reg, self.value_slots);
+        assert_eq!(self.value_slots as usize, self.slot_types.len());
+        func.emit_ptr_new(self.gcref_slot, meta_reg, &self.slot_types);
     }
 
     /// Emit PtrNew and copy value from stack slots to the new heap object.
@@ -196,9 +197,9 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         let elem_type = self.info.array_elem_type(type_key);
         let elem_slot_types = self.info.type_slot_types(elem_type);
         let elem_vk = self.info.type_value_kind(elem_type);
-        let gcref_slot =
-            self.func
-                .define_local_heap_array(sym, elem_slots, elem_bytes as u16, elem_vk);
+        let gcref_slot = self
+            .func
+            .define_local_heap_array(sym, elem_slots, elem_bytes, elem_vk);
 
         let arr_len = self.info.array_len(type_key);
         let elem_meta_idx = self.ctx.get_or_create_array_elem_meta(type_key, self.info);
@@ -229,7 +230,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
         Ok(StorageKind::HeapArray {
             gcref_slot,
             elem_slots,
-            elem_bytes: elem_bytes as u16,
+            elem_bytes,
             elem_vk,
         })
     }
@@ -343,7 +344,7 @@ impl<'a, 'b> LocalDefiner<'a, 'b> {
                         idx_reg,
                         src_offset,
                         ElemLayoutSpec::new(
-                            elem_bytes as usize,
+                            elem_bytes,
                             elem_vk,
                             &slot_types[(i * elem_slots) as usize..((i + 1) * elem_slots) as usize],
                         ),

@@ -12,27 +12,25 @@ use vo_runtime::instruction::Instruction;
 
 use crate::translator::ScalarEmitter;
 
-/// Try to emit an intrinsic for a CallExtern instruction.
-/// Returns `true` if the extern was handled as an intrinsic (caller should skip FFI).
-///
-/// This runs at JIT compilation time (once per CallExtern instruction),
-/// so the string match cost is negligible.
-pub fn try_emit_for_extern<'a>(e: &mut impl ScalarEmitter<'a>, inst: &Instruction) -> bool {
-    let extern_id = inst.b as usize;
-    let Some(extern_def) = e.vo_module().externs.get(extern_id) else {
-        return false;
-    };
-    let name = extern_def.name.as_str();
-
+/// Emit an intrinsic selected by the load-time resolved extern route.
+pub fn emit_resolved_intrinsic<'a>(
+    e: &mut impl ScalarEmitter<'a>,
+    inst: &Instruction,
+    name: &str,
+) -> Result<(), crate::JitError> {
     match name {
         "math_Sqrt" => emit_unary(e, inst, |b, v| b.ins().sqrt(v)),
         "math_Floor" => emit_unary(e, inst, |b, v| b.ins().floor(v)),
         "math_Ceil" => emit_unary(e, inst, |b, v| b.ins().ceil(v)),
         "math_Trunc" => emit_unary(e, inst, |b, v| b.ins().trunc(v)),
         "math_FMA" => emit_fma(e, inst),
-        _ => return false,
+        _ => {
+            return Err(crate::JitError::Internal(format!(
+                "resolved intrinsic route for unsupported extern '{name}'"
+            )))
+        }
     }
-    true
+    Ok(())
 }
 
 /// Emit a unary f64 → f64 intrinsic.
@@ -66,5 +64,28 @@ fn read_f64_arg<'a>(e: &mut impl ScalarEmitter<'a>, slot: u16) -> Value {
         val
     } else {
         e.builder().ins().bitcast(types::F64, MemFlags::new(), val)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    const SUPPORTED_EXTERN_NAMES: &[&str] = &[
+        "math_Sqrt",
+        "math_Floor",
+        "math_Ceil",
+        "math_Trunc",
+        "math_FMA",
+    ];
+
+    #[test]
+    fn runtime_intrinsic_route_list_matches_jit_support() {
+        let mut runtime = vo_runtime::ffi::jit_intrinsic_extern_names().to_vec();
+        let mut jit = SUPPORTED_EXTERN_NAMES.to_vec();
+        runtime.sort_unstable();
+        jit.sort_unstable();
+        assert_eq!(
+            runtime, jit,
+            "runtime ExternJitRoute::Intrinsic list must match JIT intrinsic support"
+        );
     }
 }

@@ -3,6 +3,18 @@ use super::*;
 #[test]
 fn accepts_method_expression_transfer_metadata_with_explicit_receiver() {
     let mut module = VoModule::new("verify".to_string());
+    module.struct_metas.push(vo_runtime::bytecode::StructMeta {
+        slot_types: vec![SlotType::Value, SlotType::Value],
+        fields: Vec::new(),
+        field_index: Default::default(),
+    });
+    module.runtime_types = vec![
+        vo_runtime::RuntimeType::Struct {
+            fields: Vec::new(),
+            meta_id: 0,
+        },
+        vo_runtime::RuntimeType::Basic(vo_runtime::ValueKind::Int),
+    ];
     let mut func = make_func_with_shape(
         vec![Instruction::new(Opcode::Return, 0, 0, 0)],
         vec![JitInstructionMetadata::None],
@@ -12,7 +24,18 @@ fn accepts_method_expression_transfer_metadata_with_explicit_receiver() {
         -1,
     );
     func.recv_slots = 2;
-    func.param_types = vec![transfer_int(2), transfer_int(1)];
+    func.param_types = vec![
+        vo_runtime::bytecode::TransferType {
+            meta_raw: vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Struct).to_raw(),
+            rttid_raw: vo_runtime::ValueRttid::new(0, vo_runtime::ValueKind::Struct).to_raw(),
+            slots: 2,
+        },
+        vo_runtime::bytecode::TransferType {
+            meta_raw: vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Int).to_raw(),
+            rttid_raw: vo_runtime::ValueRttid::new(1, vo_runtime::ValueKind::Int).to_raw(),
+            slots: 1,
+        },
+    ];
     module.functions.push(func);
 
     verify_jit_metadata(&module.functions[0], &module)
@@ -109,7 +132,8 @@ fn rejects_call_slot_contract_mismatches() {
     );
     let iface = make_func_with_slot_types(
         vec![Instruction::new(Opcode::CallIface, 0, 2, 0)],
-        vec![JitInstructionMetadata::CallLayout {
+        vec![JitInstructionMetadata::CallIfaceLayout {
+            iface_meta_id: 0,
             arg_layout: Vec::new(),
             ret_layout: Vec::new(),
         }],
@@ -117,6 +141,16 @@ fn rejects_call_slot_contract_mismatches() {
         0,
     );
     let mut module = VoModule::new("verify".to_string());
+    module
+        .interface_metas
+        .push(vo_runtime::bytecode::InterfaceMeta {
+            name: "I".to_string(),
+            method_names: vec!["M".to_string()],
+            methods: vec![vo_runtime::bytecode::InterfaceMethodMeta {
+                name: "M".to_string(),
+                signature_rttid: 0,
+            }],
+        });
     module.functions.push(caller);
     module.functions.push(callee);
     module.functions.push(closure);
@@ -146,7 +180,7 @@ fn rejects_call_slot_contract_mismatches() {
 }
 
 #[test]
-fn rejects_large_static_call_with_nonzero_legacy_shape_mirror() {
+fn rejects_large_static_call_with_nonzero_packed_shape_mirror() {
     let callee = make_func_with_shape(
         vec![Instruction::new(Opcode::Return, 300, 1, 0)],
         vec![JitInstructionMetadata::None],
@@ -232,9 +266,9 @@ fn rejects_call_extern_param_kind_mismatch() {
     let mut module = VoModule::new("verify".to_string());
     module.externs.push(ExternDef {
         name: "host".to_string(),
-        param_slots: 0,
-        ret_slots: 0,
-        is_blocking: false,
+        params: vo_runtime::bytecode::ParamShape::Exact { slots: 1 },
+        returns: vo_runtime::bytecode::ReturnShape::slots(0),
+        allowed_effects: vo_runtime::bytecode::ExternEffects::NONE,
         param_kinds: vec![vo_runtime::bytecode::ExtSlotKind::Value],
     });
     module.functions.push(make_func(

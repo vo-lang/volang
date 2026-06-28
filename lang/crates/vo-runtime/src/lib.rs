@@ -36,7 +36,9 @@ pub mod jit_api;
 
 // Re-exports from vo-common-core (no_std compatible)
 pub use vo_common_core::bytecode::{
-    Constant, ExternDef, FunctionDef, GlobalDef, InterfaceMeta, Itab, Module, StructMeta,
+    Constant, ExternDef, ExternEffects, ExternJitRoute, FunctionDef, GlobalDef, InterfaceMeta,
+    Itab, Module, ParamShape, ProviderTrust, RegisteredExternSource, ResolvedExtern,
+    ResolvedExternAbi, ResolvedExternTable, ResolvedExternTableError, ReturnShape, StructMeta,
 };
 pub use vo_common_core::instruction::{Instruction, Opcode};
 pub use vo_common_core::runtime_type::{ChanDir, InterfaceMethod, RuntimeType, StructField};
@@ -58,7 +60,10 @@ pub use vo_common_core::types as core_types;
 pub use objects::interface::InterfaceSlot;
 
 // Re-exports from ffi (core types always available)
-pub use ffi::{ExternCallContext, ExternFn, ExternRegistry, ExternResult, SentinelErrorCache};
+pub use ffi::{
+    ExternCallContext, ExternContractError, ExternEffectManifestEntry, ExternFn, ExternRegistry,
+    ExternResult, SentinelErrorCache,
+};
 // Re-exports from ffi (std only - linkme registration and extension ABI types)
 #[cfg(feature = "std")]
 pub use ffi::{lookup_extern, ExtensionTable, ExternEntry, ExternFnPtr, EXTERN_TABLE};
@@ -77,22 +82,36 @@ pub use linkme::distributed_slice;
 #[macro_export]
 macro_rules! stdlib_register {
     ($pkg:ident : $($name:ident),* $(,)?) => {
-        pub fn register_externs(
-            registry: &mut $crate::ffi::ExternRegistry,
-            externs: &[$crate::bytecode::ExternDef],
-        ) {
-            const TABLE: &[$crate::ffi::StdlibEntry] = &[
-                $(paste::paste! { [<__STDLIB_ $pkg _ $name>] }),*
+        paste::paste! {
+            #[doc(hidden)]
+            #[allow(non_upper_case_globals)]
+            pub const [<__VO_STDLIB_REGISTERED_ $pkg>]: &[$crate::ffi::StdlibEntry] = &[
+                $([<__STDLIB_ $pkg _ $name>]),*
             ];
 
-            for (id, def) in externs.iter().enumerate() {
-                for entry in TABLE {
-                    if def.name == entry.name() {
-                        entry.register(registry, id as u32);
-                        break;
+            pub fn register_externs(
+                registry: &mut $crate::ffi::ExternRegistry,
+                externs: &[$crate::bytecode::ExternDef],
+            ) {
+                for (id, def) in externs.iter().enumerate() {
+                    for entry in [<__VO_STDLIB_REGISTERED_ $pkg>] {
+                        if def.name == entry.name() {
+                            if registry.registered_by_name(entry.name()).is_none() {
+                                entry.register(registry, id as u32);
+                            }
+                            break;
+                        }
                     }
                 }
             }
         }
     };
+}
+
+#[cfg(test)]
+mod source_contract_tests {
+    #[test]
+    fn source_contract_tests_do_not_use_textual_cfg_test_truncation_062() {
+        vo_source_contract::assert_no_textual_cfg_test_splits(env!("CARGO_MANIFEST_DIR"));
+    }
 }

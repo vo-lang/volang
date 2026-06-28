@@ -26,11 +26,6 @@ impl ReturnFlags {
     }
 
     #[inline]
-    pub const fn from_bits_truncate(bits: u8) -> Self {
-        Self(bits & Self::ALLOWED_BITS)
-    }
-
-    #[inline]
     pub const fn stack_return(is_error_return: bool) -> Self {
         if is_error_return {
             Self::ERROR_RETURN
@@ -65,6 +60,8 @@ impl ReturnFlags {
 }
 
 #[cfg(not(feature = "std"))]
+use alloc::format;
+#[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 #[cfg(not(feature = "std"))]
@@ -74,8 +71,575 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::debug_info::DebugInfo;
 use crate::instruction::Instruction;
-use crate::types::{SlotType, ValueMeta, ValueRttid};
+use crate::types::{SlotType, ValueKind, ValueMeta, ValueRttid};
 use crate::RuntimeType;
+
+pub const MAP_ITER_SLOTS: usize = 7;
+
+/// Bytecode-visible slot layout for the opaque map iterator state.
+///
+/// Runtime writes this state as raw slots, so the verifier must enforce the
+/// hidden GC-bearing slots before the precise stack scanner can trust it.
+pub const MAP_ITER_SLOT_TYPES: [SlotType; MAP_ITER_SLOTS] = [
+    SlotType::Value,
+    SlotType::Value,
+    SlotType::GcRef,
+    SlotType::Value,
+    SlotType::Value,
+    SlotType::Value,
+    SlotType::GcRef,
+];
+
+/// IfaceAssign concrete-source metadata low word meaning "no itab".
+///
+/// The runtime interface slot still stores `itab_id = 0` for empty-interface
+/// values. This sentinel lives only in bytecode metadata so concrete
+/// assignments to `interface{}` cannot be confused with a valid compile-time
+/// `itab[0]`.
+pub const IFACE_ASSIGN_NO_ITAB: u32 = u32::MAX;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(transparent)]
+pub struct ExternEffects(u64);
+
+impl ExternEffects {
+    pub const NONE: Self = Self(0);
+    pub const MAY_YIELD: Self = Self(1 << 0);
+    pub const MAY_QUEUE_BLOCK: Self = Self(1 << 1);
+    pub const MAY_WAIT_IO_REPLAY: Self = Self(1 << 2);
+    pub const MAY_HOST_WAIT: Self = Self(1 << 3);
+    pub const MAY_HOST_REPLAY: Self = Self(1 << 4);
+    pub const MAY_CALL_CLOSURE_REPLAY: Self = Self(1 << 5);
+    pub const UNKNOWN_CONTROL: Self = Self(1 << 6);
+
+    pub const ALLOWED_BITS: u64 = Self::MAY_YIELD.bits()
+        | Self::MAY_QUEUE_BLOCK.bits()
+        | Self::MAY_WAIT_IO_REPLAY.bits()
+        | Self::MAY_HOST_WAIT.bits()
+        | Self::MAY_HOST_REPLAY.bits()
+        | Self::MAY_CALL_CLOSURE_REPLAY.bits()
+        | Self::UNKNOWN_CONTROL.bits();
+
+    #[inline]
+    pub const fn from_bits(bits: u64) -> Option<Self> {
+        if bits & !Self::ALLOWED_BITS != 0 {
+            return None;
+        }
+        let effects = Self(bits);
+        if effects.contains(Self::UNKNOWN_CONTROL) && bits != Self::UNKNOWN_CONTROL.bits() {
+            return None;
+        }
+        Some(effects)
+    }
+
+    #[inline]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    #[inline]
+    pub const fn is_subset_of(self, allowed: Self) -> bool {
+        allowed.contains(Self::UNKNOWN_CONTROL) || self.0 & !allowed.0 == 0
+    }
+
+    #[inline]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    #[inline]
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        [
+            (Self::MAY_YIELD, "yield"),
+            (Self::MAY_QUEUE_BLOCK, "queue_block"),
+            (Self::MAY_WAIT_IO_REPLAY, "wait_io_replay"),
+            (Self::MAY_HOST_WAIT, "host_wait"),
+            (Self::MAY_HOST_REPLAY, "host_replay"),
+            (Self::MAY_CALL_CLOSURE_REPLAY, "call_closure_replay"),
+            (Self::UNKNOWN_CONTROL, "unknown_control"),
+        ]
+        .into_iter()
+        .filter_map(move |(effect, name)| self.contains(effect).then_some(name))
+    }
+}
+
+impl core::ops::BitOr for ExternEffects {
+    type Output = Self;
+
+    #[inline]
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for ExternEffects {
+    #[inline]
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisteredExternSource {
+    Builtin,
+    Stdlib,
+    LinkmeExtension,
+    NativeExtension,
+    WasmHost,
+    WasmExtensionBridge,
+    Manual,
+    Test,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternJitRoute {
+    Intrinsic,
+    DirectHelper,
+    VmMaterializeBeforeCall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamShape {
+    Exact { slots: u16 },
+    CallSiteVariadic,
+}
+
+impl ParamShape {
+    #[inline]
+    pub const fn exact(slots: u16) -> Self {
+        Self::Exact { slots }
+    }
+
+    #[inline]
+    pub const fn call_site_variadic() -> Self {
+        Self::CallSiteVariadic
+    }
+
+    #[inline]
+    pub const fn exact_slots(&self) -> Option<u16> {
+        match self {
+            Self::Exact { slots } => Some(*slots),
+            Self::CallSiteVariadic => None,
+        }
+    }
+
+    #[inline]
+    pub const fn accepts_slots(&self, slots: u16) -> bool {
+        match self {
+            Self::Exact { slots: expected } => *expected == slots,
+            Self::CallSiteVariadic => true,
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Exact { slots } => format!("exact({slots})"),
+            Self::CallSiteVariadic => "call-site-variadic".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTrust {
+    RuntimeInternal,
+    IntrinsicEligible,
+    Untrusted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnShape {
+    pub slots: u16,
+    pub kinds: Vec<ExtSlotKind>,
+    pub slot_types: Vec<SlotType>,
+    pub interface_metas: Vec<Option<u32>>,
+}
+
+impl ReturnShape {
+    pub fn new(slots: u16, kinds: Vec<ExtSlotKind>, slot_types: Vec<SlotType>) -> Self {
+        Self {
+            slots,
+            kinds,
+            slot_types,
+            interface_metas: Vec::new(),
+        }
+    }
+
+    pub fn try_new(
+        slots: u16,
+        kinds: Vec<ExtSlotKind>,
+        slot_types: Vec<SlotType>,
+    ) -> Result<Self, String> {
+        let shape = Self {
+            slots,
+            kinds,
+            slot_types,
+            interface_metas: Vec::new(),
+        };
+        shape.validate_with_label("ReturnShape")?;
+        Ok(shape)
+    }
+
+    pub fn try_with_slot_types_and_interface_metas(
+        slot_types: Vec<SlotType>,
+        interface_metas: Vec<Option<u32>>,
+    ) -> Result<Self, String> {
+        let slots = u16::try_from(slot_types.len()).map_err(|_| {
+            format!(
+                "ReturnShape slot count exceeds u16::MAX: {} slots",
+                slot_types.len()
+            )
+        })?;
+        let shape = Self {
+            slots,
+            kinds: Vec::new(),
+            slot_types,
+            interface_metas,
+        };
+        shape.validate_with_label("ReturnShape")?;
+        Ok(shape)
+    }
+
+    pub fn slots(slots: u16) -> Self {
+        Self {
+            slots,
+            kinds: Vec::new(),
+            slot_types: Vec::new(),
+            interface_metas: Vec::new(),
+        }
+    }
+
+    pub fn with_slot_types(slot_types: Vec<SlotType>) -> Self {
+        Self::try_with_slot_types(slot_types).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_with_slot_types(slot_types: Vec<SlotType>) -> Result<Self, String> {
+        let slots = u16::try_from(slot_types.len()).map_err(|_| {
+            format!(
+                "ReturnShape slot count exceeds u16::MAX: {} slots",
+                slot_types.len()
+            )
+        })?;
+        Self::try_new(slots, Vec::new(), slot_types)
+    }
+
+    pub fn validate_with_label(&self, label: &str) -> Result<(), String> {
+        if !self.kinds.is_empty() && self.kinds.len() != self.slots as usize {
+            return Err(format!(
+                "{label} return slots {} but return kinds has {} slots",
+                self.slots,
+                self.kinds.len()
+            ));
+        }
+        if !self.slot_types.is_empty() && self.slot_types.len() != self.slots as usize {
+            return Err(format!(
+                "{label} return slots {} but return slot_types has {} slots",
+                self.slots,
+                self.slot_types.len()
+            ));
+        }
+        if !self.interface_metas.is_empty() && self.interface_metas.len() != self.slots as usize {
+            return Err(format!(
+                "{label} return slots {} but return interface_metas has {} slots",
+                self.slots,
+                self.interface_metas.len()
+            ));
+        }
+        if !self.interface_metas.is_empty() && self.slot_types.is_empty() {
+            return Err(format!(
+                "{label} return interface metadata requires return slot_types"
+            ));
+        }
+        let has_interface_slots = self
+            .slot_types
+            .iter()
+            .any(|slot_type| matches!(slot_type, SlotType::Interface0 | SlotType::Interface1));
+        if has_interface_slots && self.interface_metas.is_empty() {
+            return Err(format!(
+                "{label} return interface slots must carry expected interface metadata"
+            ));
+        }
+        for (idx, slot_type) in self.slot_types.iter().enumerate() {
+            match slot_type {
+                SlotType::Interface0 => {
+                    if !self.interface_metas.is_empty() && self.interface_metas[idx].is_none() {
+                        return Err(format!(
+                            "{label} return Interface0 slot {idx} must carry expected interface metadata"
+                        ));
+                    }
+                    if self.slot_types.get(idx + 1) != Some(&SlotType::Interface1) {
+                        return Err(format!(
+                            "{label} return Interface0 slot {idx} is not followed by Interface1"
+                        ));
+                    }
+                    if !self.interface_metas.is_empty()
+                        && self
+                            .interface_metas
+                            .get(idx + 1)
+                            .copied()
+                            .flatten()
+                            .is_some()
+                    {
+                        return Err(format!(
+                            "{label} return Interface1 slot {} must not carry interface metadata",
+                            idx + 1
+                        ));
+                    }
+                }
+                SlotType::Interface1 => {
+                    if !self.interface_metas.is_empty()
+                        && self.interface_metas.get(idx).copied().flatten().is_some()
+                    {
+                        return Err(format!(
+                            "{label} return Interface1 slot {idx} must not carry interface metadata"
+                        ));
+                    }
+                    if idx == 0 || self.slot_types.get(idx - 1) != Some(&SlotType::Interface0) {
+                        return Err(format!(
+                            "{label} return Interface1 slot {idx} is not preceded by Interface0"
+                        ));
+                    }
+                }
+                _ => {
+                    if !self.interface_metas.is_empty()
+                        && self.interface_metas.get(idx).copied().flatten().is_some()
+                    {
+                        return Err(format!(
+                            "{label} return non-interface slot {idx} must not carry interface metadata"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn ext_slot_kind_matches_slot_type(kind: ExtSlotKind, slot_type: SlotType) -> bool {
+    match kind {
+        ExtSlotKind::Value => slot_type != SlotType::GcRef,
+        ExtSlotKind::Bytes => slot_type == SlotType::GcRef,
+    }
+}
+
+pub fn ext_slot_kinds_for_slot_types(slot_types: &[SlotType]) -> Vec<ExtSlotKind> {
+    slot_types
+        .iter()
+        .map(|slot_type| {
+            if *slot_type == SlotType::GcRef {
+                ExtSlotKind::Bytes
+            } else {
+                ExtSlotKind::Value
+            }
+        })
+        .collect()
+}
+
+pub fn known_builtin_extern_param_slot_types(name: &str) -> Option<&'static [SlotType]> {
+    match name {
+        "dyn_field" => Some(&[
+            SlotType::Interface0,
+            SlotType::Interface1,
+            SlotType::GcRef,
+            SlotType::Value,
+            SlotType::Value,
+        ]),
+        "dyn_index" => Some(&[
+            SlotType::Interface0,
+            SlotType::Interface1,
+            SlotType::Interface0,
+            SlotType::Interface1,
+            SlotType::Value,
+            SlotType::Value,
+        ]),
+        "dyn_set_field" => Some(&[
+            SlotType::Interface0,
+            SlotType::Interface1,
+            SlotType::GcRef,
+            SlotType::Interface0,
+            SlotType::Interface1,
+        ]),
+        "dyn_set_index_unified" => Some(&[
+            SlotType::Interface0,
+            SlotType::Interface1,
+            SlotType::Interface0,
+            SlotType::Interface1,
+            SlotType::Interface0,
+            SlotType::Interface1,
+        ]),
+        "panic_with_error" => Some(&[SlotType::Interface0, SlotType::Interface1]),
+        "vo_copy" => Some(&[SlotType::GcRef, SlotType::GcRef]),
+        "vo_slice_append_slice" => Some(&[SlotType::GcRef, SlotType::GcRef, SlotType::Value]),
+        "vo_conv_int_str" => Some(&[SlotType::Value]),
+        "vo_conv_bytes_str" | "vo_conv_runes_str" | "vo_conv_str_bytes" | "vo_conv_str_runes"
+        | "vo_string_to_bytes" | "vo_bytes_to_string" => Some(&[SlotType::GcRef]),
+        _ => None,
+    }
+}
+
+pub fn known_builtin_extern_return_slot_count(name: &str) -> Option<u16> {
+    if let Some(slot_types) = known_builtin_extern_fixed_return_slot_types(name) {
+        return u16::try_from(slot_types.len()).ok();
+    }
+    match name {
+        "dyn_field" | "dyn_index" => Some(4),
+        "dyn_set_field" | "dyn_set_index_unified" => Some(2),
+        _ => None,
+    }
+}
+
+pub fn known_builtin_extern_fixed_return_slot_types(name: &str) -> Option<&'static [SlotType]> {
+    match name {
+        "vo_copy" => Some(&[SlotType::Value]),
+        "vo_slice_append_slice" => Some(&[SlotType::GcRef]),
+        "vo_conv_int_str" => Some(&[SlotType::GcRef]),
+        "vo_conv_bytes_str" | "vo_conv_runes_str" | "vo_conv_str_bytes" | "vo_conv_str_runes"
+        | "vo_string_to_bytes" | "vo_bytes_to_string" => Some(&[SlotType::GcRef]),
+        _ => None,
+    }
+}
+
+pub fn known_builtin_extern_requires_precise_return_layout(name: &str) -> bool {
+    known_builtin_extern_fixed_return_slot_types(name).is_some()
+        || matches!(
+            name,
+            "dyn_field" | "dyn_index" | "dyn_set_field" | "dyn_set_index_unified"
+        )
+}
+
+pub fn validate_ext_param_kinds_with_label(
+    params: &ParamShape,
+    param_kinds: &[ExtSlotKind],
+    label: &str,
+) -> Result<(), String> {
+    if param_kinds.is_empty() {
+        return Ok(());
+    }
+    let Some(param_slots) = params.exact_slots() else {
+        return Err(format!(
+            "{label} has param_kinds but params are call-site variadic"
+        ));
+    };
+    if param_kinds.len() != param_slots as usize {
+        return Err(format!(
+            "{label} exact params {param_slots} but param_kinds has {} slots",
+            param_kinds.len()
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedExternAbi {
+    pub id: u32,
+    pub name: String,
+    pub params: ParamShape,
+    pub returns: ReturnShape,
+    pub param_kinds: Vec<ExtSlotKind>,
+    pub allowed_effects: ExternEffects,
+    pub provider_effects: ExternEffects,
+    pub effective_effects: ExternEffects,
+    pub source: RegisteredExternSource,
+    pub provider_identity: u64,
+    pub abi_fingerprint: u64,
+    pub trust: ProviderTrust,
+    pub jit_route: ExternJitRoute,
+}
+
+pub type ResolvedExtern = ResolvedExternAbi;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedExternTable {
+    entries: Vec<ResolvedExtern>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedExternTableError {
+    message: String,
+}
+
+impl ResolvedExternTableError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl core::fmt::Display for ResolvedExternTableError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for ResolvedExternTableError {}
+
+impl ResolvedExternTable {
+    pub fn try_new(entries: Vec<ResolvedExtern>) -> Result<Self, ResolvedExternTableError> {
+        for (idx, entry) in entries.iter().enumerate() {
+            if entry.id as usize != idx {
+                return Err(ResolvedExternTableError::new(format!(
+                    "resolved extern table entry at index {idx} has id {}",
+                    entry.id
+                )));
+            }
+            if let Err(message) = validate_ext_param_kinds_with_label(
+                &entry.params,
+                &entry.param_kinds,
+                &format!("resolved extern '{}'", entry.name),
+            ) {
+                return Err(ResolvedExternTableError::new(message));
+            }
+            if let Err(message) = entry
+                .returns
+                .validate_with_label(&format!("resolved extern '{}'", entry.name))
+            {
+                return Err(ResolvedExternTableError::new(message));
+            }
+        }
+        Ok(Self { entries })
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn get(&self, id: u32) -> Option<&ResolvedExtern> {
+        self.entries.get(id as usize)
+    }
+
+    pub fn entries(&self) -> &[ResolvedExtern] {
+        &self.entries
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
@@ -93,11 +657,13 @@ pub struct TransferType {
     pub slots: u16,
 }
 
-/// JIT-only metadata attached to a bytecode instruction.
+/// Per-instruction metadata attached to a bytecode instruction.
 ///
 /// The instruction stream remains the VM source of truth. This table gives the
-/// JIT typed, per-PC facts that are awkward to recover from temporary metadata
-/// registers after optimization and control-flow merging.
+/// VM and JIT typed, per-PC layout facts that are awkward to recover from
+/// temporary metadata registers after optimization and control-flow merging.
+/// Strict JIT-only policy for metadata kind, lowering capability, loop/OSR
+/// facts, and helper ABI stays in `vo-jit`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum JitInstructionMetadata {
     #[default]
@@ -111,6 +677,10 @@ pub enum JitInstructionMetadata {
         key_layout: Vec<SlotType>,
         val_layout: Vec<SlotType>,
         has_ok: bool,
+    },
+    MapNew {
+        key_layout: Vec<SlotType>,
+        val_layout: Vec<SlotType>,
     },
     MapSet {
         key_layout: Vec<SlotType>,
@@ -129,6 +699,11 @@ pub enum JitInstructionMetadata {
         arg_layout: Vec<SlotType>,
         ret_layout: Vec<SlotType>,
     },
+    CallIfaceLayout {
+        iface_meta_id: u32,
+        arg_layout: Vec<SlotType>,
+        ret_layout: Vec<SlotType>,
+    },
     CallExternLayout {
         arg_layout: Vec<SlotType>,
         ret_layout: Vec<SlotType>,
@@ -142,24 +717,6 @@ pub enum JitInstructionMetadata {
     },
     IfaceAssertLayout {
         result_layout: Vec<SlotType>,
-    },
-    /// Legacy serialized map metadata kept only for bytecode compatibility.
-    /// The strict JIT verifier rejects these variants before lowering.
-    LegacyMapGet {
-        key_slots: u16,
-        val_slots: u16,
-        has_ok: bool,
-    },
-    /// Legacy serialized map metadata kept only for bytecode compatibility.
-    /// The strict JIT verifier rejects these variants before lowering.
-    LegacyMapSet {
-        key_slots: u16,
-        val_slots: u16,
-    },
-    /// Legacy serialized map metadata kept only for bytecode compatibility.
-    /// The strict JIT verifier rejects these variants before lowering.
-    LegacyMapDelete {
-        key_slots: u16,
     },
     LoopEnd {
         end_pc: u32,
@@ -201,8 +758,9 @@ pub struct FunctionDef {
     /// IC leaf optimization: a function is leaf IFF !has_calls && !has_call_extern.
     pub has_calls: bool,
     /// True if function contains CallExtern instructions.
-    /// CallExtern can return WaitIo/Replay which triggers a spill using saved_jit_bp,
-    /// so IC leaf optimization must NOT skip ctx.jit_bp/fiber_sp update for such functions.
+    /// CallExtern can leave JIT through materialization or VM-owned extern
+    /// suspend payloads, so IC leaf optimization must NOT skip
+    /// ctx.jit_bp/fiber_sp update for such functions.
     pub has_call_extern: bool,
     pub code: Vec<Instruction>,
     /// Optional per-instruction metadata for JIT lowering.
@@ -314,15 +872,69 @@ impl ExtSlotKind {
 #[derive(Debug, Clone)]
 pub struct ExternDef {
     pub name: String,
-    pub param_slots: u16,
-    pub ret_slots: u16,
-    /// True if extern may block and return WaitIo (name contains "blocking_").
-    pub is_blocking: bool,
+    pub params: ParamShape,
+    pub returns: ReturnShape,
+    /// Upper bound of control-flow effects this bytecode extern permits.
+    pub allowed_effects: ExternEffects,
     /// Ext-bridge encoding kind for each parameter slot.
     /// Non-empty only for WASM ext externs; empty for native/builtin externs.
     /// When non-empty, the ext_bridge uses tagged binary protocol for both
     /// input (using these kinds) and output (self-describing tagged stream).
     pub param_kinds: Vec<ExtSlotKind>,
+}
+
+impl ExternDef {
+    pub fn new(
+        name: String,
+        params: ParamShape,
+        returns: ReturnShape,
+        allowed_effects: ExternEffects,
+        param_kinds: Vec<ExtSlotKind>,
+    ) -> Self {
+        Self {
+            name,
+            params,
+            returns,
+            allowed_effects,
+            param_kinds,
+        }
+    }
+
+    pub fn call_site_variadic(
+        name: String,
+        ret_slots: u16,
+        allowed_effects: ExternEffects,
+        param_kinds: Vec<ExtSlotKind>,
+    ) -> Self {
+        Self::new(
+            name,
+            ParamShape::CallSiteVariadic,
+            ReturnShape::slots(ret_slots),
+            allowed_effects,
+            param_kinds,
+        )
+    }
+
+    pub fn exact(
+        name: String,
+        param_slots: u16,
+        returns: ReturnShape,
+        allowed_effects: ExternEffects,
+        param_kinds: Vec<ExtSlotKind>,
+    ) -> Self {
+        Self::new(
+            name,
+            ParamShape::Exact { slots: param_slots },
+            returns,
+            allowed_effects,
+            param_kinds,
+        )
+    }
+
+    #[inline]
+    pub fn ret_slots(&self) -> u16 {
+        self.returns.slots
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -359,7 +971,24 @@ pub struct StructMeta {
 pub struct MethodInfo {
     pub func_id: u32,
     pub is_pointer_receiver: bool,
+    pub receiver_is_iface_boxed: bool,
     pub signature_rttid: u32,
+}
+
+impl MethodInfo {
+    pub fn iface_receiver_slot_type_for_source_kind(
+        &self,
+        source_kind: ValueKind,
+    ) -> Result<SlotType, &'static str> {
+        if self.is_pointer_receiver && source_kind != ValueKind::Pointer {
+            return Err("pointer receiver target requires pointer interface receiver");
+        }
+        if self.receiver_is_iface_boxed {
+            Ok(SlotType::GcRef)
+        } else {
+            Ok(slot_type_for_value_kind(source_kind))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -373,7 +1002,7 @@ pub struct NamedTypeMeta {
 impl StructMeta {
     #[inline]
     pub fn slot_count(&self) -> u16 {
-        self.slot_types.len() as u16
+        u16::try_from(self.slot_types.len()).expect("verified StructMeta slot count must fit u16")
     }
 
     /// Get field by name (O(1) lookup).
@@ -396,9 +1025,10 @@ pub struct InterfaceMeta {
     pub methods: Vec<InterfaceMethodMeta>,
 }
 
-/// Itab: interface method table (method_idx -> func_id)
+/// Itab: interface method table for a specific target interface.
 #[derive(Debug, Clone, Default)]
 pub struct Itab {
+    pub iface_meta_id: u32,
     pub methods: Vec<u32>,
 }
 
@@ -467,6 +1097,215 @@ impl Module {
             debug_info: DebugInfo::new(),
         }
     }
+
+    pub fn canonical_value_meta_for_value_rttid(
+        &self,
+        value_rttid: ValueRttid,
+    ) -> Option<ValueMeta> {
+        let kind = value_rttid.value_kind();
+        let limit = self.runtime_types.len() + self.named_type_metas.len() + 1;
+        if self.expected_value_kind_for_value_rttid(value_rttid, 0, limit)? != kind {
+            return None;
+        }
+        match kind {
+            ValueKind::Struct => self
+                .canonical_struct_meta_id(value_rttid, 0, limit)
+                .map(|meta_id| ValueMeta::new(meta_id, kind)),
+            ValueKind::Pointer => self
+                .canonical_pointer_meta_id(value_rttid, 0, limit)
+                .map(|meta_id| ValueMeta::new(meta_id, kind)),
+            ValueKind::Interface => self
+                .canonical_interface_meta_id(value_rttid, 0, limit)
+                .map(|meta_id| ValueMeta::new(meta_id, kind)),
+            ValueKind::Array => Some(ValueMeta::new(value_rttid.rttid(), kind)),
+            _ => Some(ValueMeta::new(0, kind)),
+        }
+    }
+
+    pub fn slot_count_for_value_rttid(&self, value_rttid: ValueRttid) -> Option<usize> {
+        self.slot_layout_for_value_rttid(value_rttid)
+            .map(|layout| layout.len())
+    }
+
+    pub fn slot_layout_for_value_rttid(&self, value_rttid: ValueRttid) -> Option<Vec<SlotType>> {
+        let limit = self.runtime_types.len() + self.named_type_metas.len() + 1;
+        self.slot_layout_for_value_rttid_inner(value_rttid, 0, limit)
+    }
+
+    fn slot_layout_for_value_rttid_inner(
+        &self,
+        value_rttid: ValueRttid,
+        depth: usize,
+        limit: usize,
+    ) -> Option<Vec<SlotType>> {
+        if depth > limit {
+            return None;
+        }
+        if self.expected_value_kind_for_value_rttid(value_rttid, depth, limit)?
+            != value_rttid.value_kind()
+        {
+            return None;
+        }
+        match self.runtime_types.get(value_rttid.rttid() as usize)? {
+            RuntimeType::Basic(kind) => Some(vec![slot_type_for_value_kind(*kind)]),
+            RuntimeType::Pointer(elem) => {
+                self.canonical_struct_meta_id(*elem, depth + 1, limit)?;
+                Some(vec![SlotType::GcRef])
+            }
+            RuntimeType::Slice(_)
+            | RuntimeType::Map { .. }
+            | RuntimeType::Chan { .. }
+            | RuntimeType::Port { .. }
+            | RuntimeType::Func { .. }
+            | RuntimeType::Island => Some(vec![SlotType::GcRef]),
+            RuntimeType::Interface { .. } => Some(vec![SlotType::Interface0, SlotType::Interface1]),
+            RuntimeType::Struct { meta_id, .. } => self
+                .struct_metas
+                .get(*meta_id as usize)
+                .map(|meta| meta.slot_types.clone()),
+            RuntimeType::Array { len, elem } => {
+                let elem_layout =
+                    self.slot_layout_for_value_rttid_inner(*elem, depth + 1, limit)?;
+                let total = (*len as usize).checked_mul(elem_layout.len())?;
+                let mut layout = Vec::with_capacity(total);
+                for _ in 0..*len {
+                    layout.extend_from_slice(&elem_layout);
+                }
+                Some(layout)
+            }
+            RuntimeType::Named { id, .. } => {
+                let named = self.named_type_metas.get(*id as usize)?;
+                self.slot_layout_for_value_rttid_inner(named.underlying_rttid, depth + 1, limit)
+            }
+            RuntimeType::Tuple(elems) => {
+                let mut layout = Vec::new();
+                for elem in elems {
+                    let elem_layout =
+                        self.slot_layout_for_value_rttid_inner(*elem, depth + 1, limit)?;
+                    layout.extend_from_slice(&elem_layout);
+                }
+                Some(layout)
+            }
+        }
+    }
+
+    fn canonical_struct_meta_id(
+        &self,
+        value_rttid: ValueRttid,
+        depth: usize,
+        limit: usize,
+    ) -> Option<u32> {
+        if depth > limit {
+            return None;
+        }
+        if self.expected_value_kind_for_value_rttid(value_rttid, depth, limit)?
+            != value_rttid.value_kind()
+        {
+            return None;
+        }
+        match self.runtime_types.get(value_rttid.rttid() as usize)? {
+            RuntimeType::Struct { meta_id, .. } => Some(*meta_id),
+            RuntimeType::Named { id, .. } => {
+                let named = self.named_type_metas.get(*id as usize)?;
+                self.canonical_struct_meta_id(named.underlying_rttid, depth + 1, limit)
+            }
+            _ => None,
+        }
+    }
+
+    fn canonical_pointer_meta_id(
+        &self,
+        value_rttid: ValueRttid,
+        depth: usize,
+        limit: usize,
+    ) -> Option<u32> {
+        if depth > limit {
+            return None;
+        }
+        if self.expected_value_kind_for_value_rttid(value_rttid, depth, limit)?
+            != value_rttid.value_kind()
+        {
+            return None;
+        }
+        match self.runtime_types.get(value_rttid.rttid() as usize)? {
+            RuntimeType::Pointer(elem) => self.canonical_struct_meta_id(*elem, depth + 1, limit),
+            RuntimeType::Named { id, .. } => {
+                let named = self.named_type_metas.get(*id as usize)?;
+                self.canonical_pointer_meta_id(named.underlying_rttid, depth + 1, limit)
+            }
+            _ => None,
+        }
+    }
+
+    fn canonical_interface_meta_id(
+        &self,
+        value_rttid: ValueRttid,
+        depth: usize,
+        limit: usize,
+    ) -> Option<u32> {
+        if depth > limit {
+            return None;
+        }
+        if self.expected_value_kind_for_value_rttid(value_rttid, depth, limit)?
+            != value_rttid.value_kind()
+        {
+            return None;
+        }
+        match self.runtime_types.get(value_rttid.rttid() as usize)? {
+            RuntimeType::Interface { meta_id, .. } => Some(*meta_id),
+            RuntimeType::Named { id, .. } => {
+                let named = self.named_type_metas.get(*id as usize)?;
+                self.canonical_interface_meta_id(named.underlying_rttid, depth + 1, limit)
+            }
+            _ => None,
+        }
+    }
+
+    fn expected_value_kind_for_value_rttid(
+        &self,
+        value_rttid: ValueRttid,
+        depth: usize,
+        limit: usize,
+    ) -> Option<ValueKind> {
+        if depth > limit {
+            return None;
+        }
+        match self.runtime_types.get(value_rttid.rttid() as usize)? {
+            RuntimeType::Basic(kind) => Some(*kind),
+            RuntimeType::Named { id, .. } => {
+                let named = self.named_type_metas.get(*id as usize)?;
+                self.expected_value_kind_for_value_rttid(named.underlying_rttid, depth + 1, limit)
+            }
+            RuntimeType::Pointer(_) => Some(ValueKind::Pointer),
+            RuntimeType::Array { .. } => Some(ValueKind::Array),
+            RuntimeType::Slice(_) => Some(ValueKind::Slice),
+            RuntimeType::Map { .. } => Some(ValueKind::Map),
+            RuntimeType::Chan { .. } => Some(ValueKind::Channel),
+            RuntimeType::Port { .. } => Some(ValueKind::Port),
+            RuntimeType::Func { .. } => Some(ValueKind::Closure),
+            RuntimeType::Struct { .. } => Some(ValueKind::Struct),
+            RuntimeType::Interface { .. } => Some(ValueKind::Interface),
+            RuntimeType::Tuple(_) => Some(ValueKind::Void),
+            RuntimeType::Island => Some(ValueKind::Island),
+        }
+    }
+}
+
+#[inline]
+pub fn slot_type_for_value_kind(kind: ValueKind) -> SlotType {
+    match kind {
+        ValueKind::Float32 | ValueKind::Float64 => SlotType::Float,
+        ValueKind::String
+        | ValueKind::Slice
+        | ValueKind::Map
+        | ValueKind::Closure
+        | ValueKind::Channel
+        | ValueKind::Port
+        | ValueKind::Pointer
+        | ValueKind::Island => SlotType::GcRef,
+        ValueKind::Interface => SlotType::Interface0,
+        _ => SlotType::Value,
+    }
 }
 
 #[cfg(test)]
@@ -513,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn return_flags_separate_strict_schema_from_legacy_truncation() {
+    fn return_flags_reject_unknown_bits() {
         let strict = ReturnFlags::heap_returns(true);
         assert_eq!(
             strict.bits(),
@@ -523,9 +1362,106 @@ mod tests {
         assert!(strict.is_error_return());
 
         assert!(ReturnFlags::from_bits(0x04).is_none());
+    }
+
+    #[test]
+    fn extern_effects_are_explicit_and_validated() {
+        let effects = ExternEffects::MAY_WAIT_IO_REPLAY.union(ExternEffects::MAY_HOST_REPLAY);
         assert_eq!(
-            ReturnFlags::from_bits_truncate(0x04 | RETURN_FLAG_ERROR_RETURN).bits(),
-            RETURN_FLAG_ERROR_RETURN
+            effects.names().collect::<Vec<_>>(),
+            vec!["wait_io_replay", "host_replay"]
         );
+        assert!(ExternEffects::MAY_WAIT_IO_REPLAY.is_subset_of(effects));
+        assert!(!ExternEffects::MAY_HOST_WAIT.is_subset_of(effects));
+        assert!(ExternEffects::MAY_HOST_WAIT.is_subset_of(ExternEffects::UNKNOWN_CONTROL));
+
+        assert!(ExternEffects::from_bits(ExternEffects::ALLOWED_BITS << 1).is_none());
+        assert!(ExternEffects::from_bits(
+            ExternEffects::UNKNOWN_CONTROL.bits() | ExternEffects::MAY_YIELD.bits()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn return_shape_rejects_slot_type_width_overflow() {
+        let err = ReturnShape::try_with_slot_types(vec![SlotType::Value; 65_536])
+            .expect_err("wide return shape must not truncate");
+        assert_eq!(err, "ReturnShape slot count exceeds u16::MAX: 65536 slots");
+    }
+
+    #[test]
+    fn return_shape_constructor_rejects_invalid_interface_slot_pairs_048() {
+        let err = ReturnShape::try_with_slot_types_and_interface_metas(
+            vec![SlotType::Interface0],
+            vec![Some(0)],
+        )
+        .expect_err("ReturnShape constructor must enforce interface pair layout");
+        assert!(err.contains("Interface0 slot 0 is not followed by Interface1"));
+
+        let err = ReturnShape::try_with_slot_types_and_interface_metas(
+            vec![SlotType::Interface1],
+            vec![None],
+        )
+        .expect_err("ReturnShape constructor must reject orphan Interface1");
+        assert!(err.contains("Interface1 slot 0 is not preceded by Interface0"));
+    }
+
+    #[test]
+    fn return_shape_constructor_rejects_invalid_interface_metadata_060() {
+        let err =
+            ReturnShape::try_with_slot_types(vec![SlotType::Interface0, SlotType::Interface1])
+                .expect_err("layout-only interface returns must be rejected");
+        assert!(err.contains("return interface slots must carry expected interface metadata"));
+
+        let err = ReturnShape::try_with_slot_types_and_interface_metas(
+            vec![SlotType::Interface0, SlotType::Interface1],
+            vec![None, None],
+        )
+        .expect_err("Interface0 return slots must carry expected interface metadata");
+        assert!(err.contains("Interface0 slot 0 must carry expected interface metadata"));
+
+        let err = ReturnShape::try_with_slot_types_and_interface_metas(
+            vec![SlotType::Interface0, SlotType::Interface1],
+            vec![Some(0), Some(0)],
+        )
+        .expect_err("Interface1 return slots must not carry interface metadata");
+        assert!(err.contains("Interface1 slot 1 must not carry interface metadata"));
+
+        let err = ReturnShape::try_with_slot_types_and_interface_metas(
+            vec![SlotType::Value],
+            vec![Some(0)],
+        )
+        .expect_err("non-interface return slots must not carry interface metadata");
+        assert!(err.contains("non-interface slot 0 must not carry interface metadata"));
+
+        let mut shape = ReturnShape::slots(2);
+        shape.interface_metas = vec![Some(0), None];
+        let err = shape
+            .validate_with_label("ReturnShape")
+            .expect_err("slots-only returns must not carry interface metadata");
+        assert!(err.contains("return interface metadata requires return slot_types"));
+    }
+
+    #[test]
+    fn resolved_extern_table_rejects_non_indexed_ids() {
+        let entries = vec![ResolvedExtern {
+            id: 1,
+            name: "x".to_string(),
+            params: ParamShape::Exact { slots: 0 },
+            returns: ReturnShape::slots(0),
+            param_kinds: Vec::new(),
+            allowed_effects: ExternEffects::NONE,
+            provider_effects: ExternEffects::NONE,
+            effective_effects: ExternEffects::NONE,
+            source: RegisteredExternSource::Test,
+            provider_identity: 0,
+            abi_fingerprint: 0,
+            trust: ProviderTrust::Untrusted,
+            jit_route: ExternJitRoute::DirectHelper,
+        }];
+
+        let err = ResolvedExternTable::try_new(entries).unwrap_err();
+
+        assert!(err.message().contains("index 0 has id 1"));
     }
 }

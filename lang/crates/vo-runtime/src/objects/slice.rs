@@ -28,6 +28,10 @@ pub const FIELD_CAP: usize = 3;
 
 impl_gc_object!(SliceData);
 
+fn elem_slots_for_bytes(elem_bytes: usize) -> usize {
+    elem_bytes.div_ceil(SLOT_BYTES)
+}
+
 /// Create a new slice with packed element storage.
 /// elem_bytes: actual byte size per element (1/2/4/8 for packed, slots*8 for slot-based)
 pub fn create(
@@ -93,6 +97,7 @@ pub fn create_checked(
 
 pub fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize) -> GcRef {
     let arr_len = array::len(arr);
+    assert!(start_off <= arr_len, "slice start offset out of bounds");
     let cap = arr_len - start_off;
     from_array_range_with_cap(gc, arr, start_off, length, cap)
 }
@@ -104,9 +109,18 @@ pub fn from_array_range_with_cap(
     length: usize,
     capacity: usize,
 ) -> GcRef {
+    let arr_len = array::len(arr);
+    assert!(start_off <= arr_len, "slice start offset out of bounds");
+    let backing_cap = arr_len - start_off;
+    assert!(length <= capacity, "slice length exceeds capacity");
+    assert!(
+        capacity <= backing_cap,
+        "slice capacity exceeds backing array range"
+    );
     let elem_bytes = array::elem_bytes(arr);
     let s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
-    let data = SliceData::as_mut(s);
+    // Safety: `s` is freshly allocated and will be marked for scanning before collection.
+    let data = unsafe { SliceData::as_mut(s) };
     data.array = ptr_to_slot(arr);
     data.data_ptr = ptr_to_slot(unsafe { array::data_ptr_bytes(arr).add(start_off * elem_bytes) });
     data.len = length as Slot;
@@ -193,7 +207,10 @@ pub fn elem_meta(s: GcRef) -> ValueMeta {
 }
 
 #[inline]
-pub fn get(s: GcRef, idx: usize, elem_bytes: usize) -> u64 {
+/// # Safety
+/// `s` must be a live slice object whose element storage contains `idx`.
+/// `elem_bytes` must match the slice element width.
+pub unsafe fn get(s: GcRef, idx: usize, elem_bytes: usize) -> u64 {
     let ptr = unsafe { data_ptr(s).add(idx * elem_bytes) };
     unsafe {
         match elem_bytes {
@@ -206,7 +223,15 @@ pub fn get(s: GcRef, idx: usize, elem_bytes: usize) -> u64 {
 }
 
 #[inline]
-pub fn get_auto(base_ptr: *mut u8, idx: usize, elem_bytes: usize, elem_kind: ValueKind) -> u64 {
+/// # Safety
+/// `base_ptr` must point to a live slice element buffer containing `idx`.
+/// `elem_bytes` and `elem_kind` must describe the stored element representation.
+pub unsafe fn get_auto(
+    base_ptr: *mut u8,
+    idx: usize,
+    elem_bytes: usize,
+    elem_kind: ValueKind,
+) -> u64 {
     let ptr = unsafe { base_ptr.add(idx * elem_bytes) };
     unsafe {
         match elem_kind {
@@ -228,7 +253,11 @@ pub fn get_auto(base_ptr: *mut u8, idx: usize, elem_bytes: usize, elem_kind: Val
 }
 
 #[inline]
-pub fn set(s: GcRef, idx: usize, val: u64, elem_bytes: usize) {
+/// # Safety
+/// `s` must be a live slice object whose element storage contains `idx`.
+/// `elem_bytes` must match the slice element width, and callers must maintain
+/// any required GC write barriers before publishing reference values.
+pub unsafe fn set(s: GcRef, idx: usize, val: u64, elem_bytes: usize) {
     let ptr = unsafe { data_ptr(s).add(idx * elem_bytes) };
     unsafe {
         match elem_bytes {
@@ -241,7 +270,17 @@ pub fn set(s: GcRef, idx: usize, val: u64, elem_bytes: usize) {
 }
 
 #[inline]
-pub fn set_auto(base_ptr: *mut u8, idx: usize, val: u64, elem_bytes: usize, elem_kind: ValueKind) {
+/// # Safety
+/// `base_ptr` must point to a live slice element buffer containing `idx`.
+/// `elem_bytes` and `elem_kind` must describe the stored element representation,
+/// and callers must maintain any required GC write barriers.
+pub unsafe fn set_auto(
+    base_ptr: *mut u8,
+    idx: usize,
+    val: u64,
+    elem_bytes: usize,
+    elem_kind: ValueKind,
+) {
     let ptr = unsafe { base_ptr.add(idx * elem_bytes) };
     unsafe {
         match elem_kind {
@@ -259,7 +298,11 @@ pub fn set_auto(base_ptr: *mut u8, idx: usize, val: u64, elem_bytes: usize, elem
     }
 }
 
-pub fn get_n(s: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
+/// # Safety
+/// `s` must be a live slice object whose element storage contains `idx`.
+/// `dest` must be large enough for the decoded element slots, and
+/// `elem_bytes` must match the slice element width.
+pub unsafe fn get_n(s: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
     let ptr = unsafe { data_ptr(s).add(idx * elem_bytes) };
     match elem_bytes {
         1 => dest[0] = unsafe { *ptr } as u64,
@@ -273,7 +316,11 @@ pub fn get_n(s: GcRef, idx: usize, dest: &mut [u64], elem_bytes: usize) {
     }
 }
 
-pub fn set_n(s: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
+/// # Safety
+/// `s` must be a live slice object whose element storage contains `idx`.
+/// `src` must contain enough bytes for one element, `elem_bytes` must match the
+/// slice element width, and callers must maintain any required GC write barriers.
+pub unsafe fn set_n(s: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
     let ptr = unsafe { data_ptr(s).add(idx * elem_bytes) };
     match elem_bytes {
         1 => unsafe { *ptr = src[0] as u8 },
@@ -283,6 +330,20 @@ pub fn set_n(s: GcRef, idx: usize, src: &[u64], elem_bytes: usize) {
         _ => {
             let src_bytes = src.as_ptr() as *const u8;
             unsafe { core::ptr::copy_nonoverlapping(src_bytes, ptr, elem_bytes) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod public_api_contract_tests {
+    #[test]
+    fn raw_slice_element_accessors_are_unsafe_public_primitives_055() {
+        let src = include_str!("slice.rs");
+        for name in ["get", "get_auto", "set", "set_auto", "get_n", "set_n"] {
+            assert!(
+                src.contains(&format!("pub unsafe fn {name}(")),
+                "slice::{name} is an unchecked raw heap element primitive and must require unsafe at public call sites"
+            );
         }
     }
 }
@@ -298,7 +359,8 @@ pub fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
     let elem_bytes = array::elem_bytes(array_ref(s));
     let new_data_ptr = unsafe { data_ptr(s).add(lo * elem_bytes) };
     let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
-    let new_data = SliceData::as_mut(new_s);
+    // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
+    let new_data = unsafe { SliceData::as_mut(new_s) };
     new_data.array = data.array;
     new_data.data_ptr = ptr_to_slot(new_data_ptr);
     new_data.len = (hi - lo) as Slot;
@@ -318,7 +380,8 @@ pub fn slice_of_with_cap(gc: &mut Gc, s: GcRef, lo: usize, hi: usize, max: usize
     let elem_bytes = array::elem_bytes(array_ref(s));
     let new_data_ptr = unsafe { data_ptr(s).add(lo * elem_bytes) };
     let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
-    let new_data = SliceData::as_mut(new_s);
+    // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
+    let new_data = unsafe { SliceData::as_mut(new_s) };
     new_data.array = data.array;
     new_data.data_ptr = ptr_to_slot(new_data_ptr);
     new_data.len = (hi - lo) as Slot;
@@ -331,8 +394,13 @@ pub fn slice_of_with_cap(gc: &mut Gc, s: GcRef, lo: usize, hi: usize, max: usize
 /// Used by append when capacity is sufficient.
 pub fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
     let data = SliceData::as_ref(s);
+    assert!(
+        new_len <= slot_to_usize(data.cap),
+        "slice length exceeds capacity"
+    );
     let new_s = gc.alloc(ValueMeta::new(0, ValueKind::Slice), DATA_SLOTS);
-    let new_data = SliceData::as_mut(new_s);
+    // Safety: `new_s` is freshly allocated and will be marked for scanning before collection.
+    let new_data = unsafe { SliceData::as_mut(new_s) };
     new_data.array = data.array;
     new_data.data_ptr = data.data_ptr;
     new_data.len = new_len as Slot;
@@ -364,7 +432,13 @@ pub fn try_append(
 ) -> Result<GcRef, crate::gc_types::TypedWriteBarrierByMetaError> {
     if s.is_null() {
         let new_arr = array::create(gc, em, elem_bytes, 4);
-        array::set_n(new_arr, 0, val, elem_bytes);
+        if new_arr.is_null() {
+            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
+        }
+        if em.value_kind().may_contain_gc_refs() {
+            crate::gc_types::try_typed_write_barrier_by_meta(gc, new_arr, val, em, module)?;
+        }
+        unsafe { array::set_n(new_arr, 0, val, elem_bytes) };
         if em.value_kind().may_contain_gc_refs() {
             gc.mark_allocated_for_scan(new_arr);
         }
@@ -373,41 +447,159 @@ pub fn try_append(
     let data = SliceData::as_ref(s);
     let cur_len = slot_to_usize(data.len);
     let cur_cap = slot_to_usize(data.cap);
+    let actual_em = elem_meta(s);
+    let actual_elem_bytes = array::elem_bytes(array_ref(s));
+    if actual_elem_bytes != elem_bytes {
+        return Err(
+            crate::gc_types::TypedWriteBarrierByMetaError::ArraySlotWidthMismatch {
+                expected: elem_slots_for_bytes(actual_elem_bytes),
+                actual: elem_slots_for_bytes(elem_bytes),
+            },
+        );
+    }
     if cur_len < cur_cap {
+        if actual_em.value_kind().may_contain_gc_refs() {
+            let arr_ref = slot_to_ptr::<u64>(data.array) as GcRef;
+            if !arr_ref.is_null() {
+                crate::gc_types::try_typed_write_barrier_by_meta(
+                    gc, arr_ref, val, actual_em, module,
+                )?;
+            }
+        }
         // Write directly using data_ptr
-        let ptr = unsafe { data_ptr(s).add(cur_len * elem_bytes) };
-        match elem_bytes {
+        let ptr = unsafe { data_ptr(s).add(cur_len * actual_elem_bytes) };
+        match actual_elem_bytes {
             1 => unsafe { *ptr = val[0] as u8 },
             2 => unsafe { *(ptr as *mut u16) = val[0] as u16 },
             4 => unsafe { *(ptr as *mut u32) = val[0] as u32 },
             8 => unsafe { core::ptr::write_unaligned(ptr as *mut u64, val[0]) },
             _ => {
                 let src_bytes = val.as_ptr() as *const u8;
-                unsafe { core::ptr::copy_nonoverlapping(src_bytes, ptr, elem_bytes) };
-            }
-        }
-        // Write barrier: reusing existing backing array that may be BLACK.
-        // Type-aware to avoid UB on mixed-slot types (e.g., struct with int + pointer).
-        if em.value_kind().may_contain_gc_refs() {
-            let arr_ref = slot_to_ptr::<u64>(data.array) as GcRef;
-            if !arr_ref.is_null() {
-                crate::gc_types::try_typed_write_barrier_by_meta(gc, arr_ref, val, em, module)?;
+                unsafe { core::ptr::copy_nonoverlapping(src_bytes, ptr, actual_elem_bytes) };
             }
         }
         // Go semantics: append never modifies original slice header
         Ok(with_new_len(gc, s, cur_len + 1))
     } else {
-        let new_cap = if cur_cap == 0 { 4 } else { cur_cap * 2 };
-        let aem = elem_meta(s);
-        let new_arr = array::create(gc, aem, elem_bytes, new_cap);
+        let new_cap = if cur_cap == 0 {
+            4
+        } else {
+            cur_cap
+                .checked_mul(2)
+                .ok_or(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed)?
+        };
+        let new_arr = array::create(gc, actual_em, actual_elem_bytes, new_cap);
+        if new_arr.is_null() {
+            return Err(crate::gc_types::TypedWriteBarrierByMetaError::AllocationFailed);
+        }
+        if actual_em.value_kind().may_contain_gc_refs() {
+            crate::gc_types::try_typed_write_barrier_by_meta(gc, new_arr, val, actual_em, module)?;
+        }
         // Copy from data_ptr directly
         let src_ptr = data_ptr(s);
         let dst_ptr = array::data_ptr_bytes(new_arr);
-        unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, cur_len * elem_bytes) };
-        array::set_n(new_arr, cur_len, val, elem_bytes);
-        if aem.value_kind().may_contain_gc_refs() {
+        unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, cur_len * actual_elem_bytes) };
+        unsafe { array::set_n(new_arr, cur_len, val, actual_elem_bytes) };
+        if actual_em.value_kind().may_contain_gc_refs() {
             gc.mark_allocated_for_scan(new_arr);
         }
         Ok(from_array_range(gc, new_arr, 0, cur_len + 1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::objects::array;
+    use vo_common_core::bytecode::{Module, StructMeta};
+    use vo_common_core::types::SlotType;
+
+    #[test]
+    fn try_append_missing_struct_metadata_returns_error_before_write() {
+        let mut gc = Gc::new();
+        let em = ValueMeta::new(0, ValueKind::Struct);
+        let arr = array::create(&mut gc, em, 8, 2);
+        unsafe { array::set_n(arr, 1, &[42], 8) };
+        let s = from_array_range(&mut gc, arr, 0, 1);
+        let module = Module::new("test".to_string());
+
+        let err = try_append(&mut gc, em, 8, s, &[0], Some(&module))
+            .expect_err("missing struct metadata should reject append");
+
+        assert_eq!(
+            err,
+            crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
+        );
+        assert_eq!(unsafe { array::get(arr, 1, 8) }, 42);
+    }
+
+    #[test]
+    fn try_append_with_struct_metadata_succeeds() {
+        let mut gc = Gc::new();
+        let em = ValueMeta::new(0, ValueKind::Struct);
+        let arr = array::create(&mut gc, em, 8, 2);
+        let s = from_array_range(&mut gc, arr, 0, 1);
+        let mut module = Module::new("test".to_string());
+        module.struct_metas.push(StructMeta {
+            slot_types: vec![SlotType::GcRef],
+            fields: Vec::new(),
+            field_index: Default::default(),
+        });
+
+        let result = try_append(&mut gc, em, 8, s, &[0], Some(&module))
+            .expect("struct metadata should allow append");
+
+        assert!(!result.is_null());
+        assert_eq!(unsafe { array::get(arr, 1, 8) }, 0);
+    }
+
+    #[test]
+    fn try_append_non_nil_uses_slice_elem_meta_not_caller_metadata_057() {
+        let mut gc = Gc::new();
+        let actual_em = ValueMeta::new(0, ValueKind::Struct);
+        let caller_em = ValueMeta::new(0, ValueKind::Int64);
+        let arr = array::create(&mut gc, actual_em, 8, 2);
+        unsafe { array::set_n(arr, 1, &[42], 8) };
+        let s = from_array_range(&mut gc, arr, 0, 1);
+        let module = Module::new("test".to_string());
+
+        let err = try_append(&mut gc, caller_em, 8, s, &[0], Some(&module))
+            .expect_err("non-nil append must derive metadata from the slice backing array");
+
+        assert_eq!(
+            err,
+            crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
+        );
+        assert_eq!(unsafe { array::get(arr, 1, 8) }, 42);
+    }
+
+    #[test]
+    fn slice_header_constructors_reject_len_beyond_capacity_057() {
+        let mut gc = Gc::new();
+        let em = ValueMeta::new(0, ValueKind::Int64);
+        let arr = array::create(&mut gc, em, 8, 1);
+        let s = from_array_range(&mut gc, arr, 0, 1);
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = with_new_len(&mut gc, s, 2);
+            }))
+            .is_err(),
+            "with_new_len must not create a visible length beyond capacity"
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = from_array_range(&mut gc, arr, 1, 2);
+            }))
+            .is_err(),
+            "from_array_range must not create a visible length beyond backing capacity"
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = from_array_range_with_cap(&mut gc, arr, 0, 2, 1);
+            }))
+            .is_err(),
+            "from_array_range_with_cap must preserve len <= cap"
+        );
     }
 }

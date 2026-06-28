@@ -35,7 +35,7 @@ pub use plan::{
 };
 pub use result_flow::{
     check_call_result, emit_checked_jit_result_helper_call, emit_non_ok_slow_path,
-    NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK,
+    NonOkSlowPathParams, JIT_RESULT_CALL, JIT_RESULT_OK, JIT_RESULT_REPLAY,
 };
 pub use vm_materialization::{emit_call_via_vm, emit_jit_call_with_vm_materialization};
 
@@ -99,6 +99,42 @@ fn mark_stack_overflow_pc<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) {
         pc_val,
         ctx,
         JitContext::OFFSET_RUNTIME_TRAP_PC,
+    );
+}
+
+fn load_current_func_id<'a, E: IrEmitter<'a>>(emitter: &mut E, ctx: Value) -> Value {
+    emitter.builder().ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        ctx,
+        JitContext::OFFSET_CURRENT_FUNC_ID,
+    )
+}
+
+fn restore_caller_execution_context<'a, E: IrEmitter<'a>>(
+    emitter: &mut E,
+    ctx: Value,
+    caller_bp: Value,
+    old_fiber_sp: Value,
+    caller_func_id: Value,
+) {
+    emitter.builder().ins().store(
+        MemFlags::trusted(),
+        caller_bp,
+        ctx,
+        JitContext::OFFSET_JIT_BP,
+    );
+    emitter.builder().ins().store(
+        MemFlags::trusted(),
+        old_fiber_sp,
+        ctx,
+        JitContext::OFFSET_FIBER_SP,
+    );
+    emitter.builder().ins().store(
+        MemFlags::trusted(),
+        caller_func_id,
+        ctx,
+        JitContext::OFFSET_CURRENT_FUNC_ID,
     );
 }
 
@@ -249,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn call_plan_routes_full_function_call_shapes() {
+    fn gc_materialize_call_plan_routes_full_function_call_shapes() {
         let self_plan = CallPlan::new(7, 2, &func(8, false), None);
         assert_eq!(
             self_plan.route_for_full_function(7),
@@ -317,5 +353,25 @@ mod tests {
         assert_eq!(plan.ret_reg, 13);
         assert_eq!(plan.resume_pc, 42);
         assert_eq!(plan.route, CallRoute::DynamicInlineCache);
+    }
+
+    #[test]
+    fn vm_jit_current_func_metadata_037_restore_context_includes_current_func_id() {
+        let src = vo_source_contract::production_source_without_test_modules(include_str!(
+            "call_helpers.rs"
+        ));
+        let helper = src
+            .split("fn restore_caller_execution_context")
+            .nth(1)
+            .expect("caller context restore helper should exist")
+            .split("pub fn emit_stack_capacity_check")
+            .next()
+            .expect("caller context restore helper should precede stack capacity check");
+        assert!(
+            helper.contains("JitContext::OFFSET_JIT_BP")
+                && helper.contains("JitContext::OFFSET_FIBER_SP")
+                && helper.contains("JitContext::OFFSET_CURRENT_FUNC_ID"),
+            "caller context restore must cover bp, sp, and current_func_id together"
+        );
     }
 }

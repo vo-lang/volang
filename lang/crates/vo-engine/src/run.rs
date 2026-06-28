@@ -221,7 +221,7 @@ pub fn run_with_output_interruptible_observed(
         Vm::new()
     };
 
-    vm.state.output = sink;
+    vm.set_output_sink(sink);
     vm.set_program_args(args);
     if let Some(interrupt_flag) = interrupt_flag {
         vm.set_interrupt_flag(interrupt_flag);
@@ -243,8 +243,7 @@ fn run_observation(vm: &Vm) -> RunObservation {
     RunObservation {
         jit_function_entries: stats.function_entries,
         jit_loop_entries: stats.loop_entries,
-        jit_regular_call_side_exits: stats
-            .side_exit_count(vo_vm::vm::jit_mgr::JitSideExitReason::RegularCall),
+        jit_regular_call_side_exits: stats.side_exit_count(vo_vm::JitSideExitReason::RegularCall),
     }
 }
 
@@ -299,11 +298,39 @@ fn load_extensions(specs: &[NativeExtensionSpec]) -> Result<Option<ExtensionLoad
 mod tests {
     use super::*;
 
+    use std::sync::{Mutex, OnceLock};
     use vo_common_core::instruction::HINT_LOOP;
-    use vo_runtime::bytecode::JitInstructionMetadata;
+    use vo_runtime::bytecode::{
+        ExternDef, ExternEffects, JitInstructionMetadata, ParamShape, ReturnShape,
+    };
     use vo_runtime::instruction::Opcode;
     use vo_runtime::output::CaptureSink;
     use vo_runtime::SlotType;
+
+    static PROCESS_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(value) = &self.old {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn vm_error_for(source: &str, mode: RunMode) -> VmError {
         let compiled = crate::compile_string(source).expect("source should compile");
@@ -316,7 +343,7 @@ mod tests {
             })
             .expect("JIT should initialize"),
         };
-        vm.state.output = CaptureSink::new();
+        vm.set_output_sink(CaptureSink::new());
         if let Err(err) = vm.load(compiled.module) {
             return err;
         }
@@ -328,7 +355,7 @@ mod tests {
 
     fn vm_error_for_compiled(compiled: CompileOutput, config: vo_vm::JitConfig) -> VmError {
         let mut vm = Vm::try_with_jit_config(config).expect("JIT should initialize");
-        vm.state.output = CaptureSink::new();
+        vm.set_output_sink(CaptureSink::new());
         if let Err(err) = vm.load(compiled.module) {
             return err;
         }
@@ -349,7 +376,7 @@ mod tests {
             RunMode::Jit => Vm::try_with_jit_config(config).expect("JIT should initialize"),
         };
         let sink = CaptureSink::new();
-        vm.state.output = sink.clone();
+        vm.set_output_sink(sink.clone());
         vm.load(compiled.module).unwrap();
         let outcome = vm.run().expect("program should run");
         assert_ne!(
@@ -738,8 +765,87 @@ func main() {
     }
 
     #[test]
+    fn vm_jit_trampoline_select_017_compile_path_runs_pending_spawn_select_wake() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let case_path = repo_root.join("tests/lang/cases/jit/2026_01_29_jit_trampoline_select.vo");
+        let compiled = crate::compile(
+            case_path
+                .to_str()
+                .expect("trampoline select case path should be valid utf-8"),
+        )
+        .expect("trampoline select case should compile");
+        let mut vm = Vm::try_with_jit_config(vo_vm::JitConfig {
+            call_threshold: 1,
+            loop_threshold: 50,
+            debug_ir: false,
+        })
+        .expect("JIT should initialize");
+        let sink = CaptureSink::new();
+        vm.set_output_sink(sink.clone());
+        vm.load(compiled.module).expect("module should load");
+
+        let outcome = vm.run().expect("program should run");
+
+        assert_ne!(
+            outcome,
+            SchedulingOutcome::Blocked,
+            "JIT full-function select side exit must preserve pending goroutine spawns and queue wakes"
+        );
+        assert_eq!(
+            sink.take(),
+            "Test 6: PASSED - select from goroutines\ndone\n"
+        );
+        let observation = run_observation(&vm);
+        assert!(
+            observation.jit_function_entries > 0,
+            "proof must execute full-function JIT code"
+        );
+    }
+
+    #[test]
+    fn vm_jit_select_source_index_017_default_middle_recv_reloads_selected_value() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let case_path = repo_root
+            .join("tests/lang/cases/jit/2026_02_18_jit_select_default_middle_recv_value.vo");
+        let compiled = crate::compile_with_auto_install(
+            case_path
+                .to_str()
+                .expect("select source-index case path should be valid utf-8"),
+        )
+        .expect("select source-index case should compile");
+        let sink = CaptureSink::new();
+        let _env_guard = PROCESS_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("process env lock poisoned");
+        let _call_threshold = ScopedEnvVar::set("VO_JIT_CALL_THRESHOLD", "1");
+        let _loop_threshold = ScopedEnvVar::set("VO_JIT_LOOP_THRESHOLD", "50");
+        let result = run_with_output_observed(compiled, RunMode::Jit, Vec::new(), sink.clone());
+
+        let observation = result.expect("program should run");
+        assert_eq!(sink.take(), "jit select default middle recv value ok\n");
+        assert!(
+            observation.jit_function_entries > 0,
+            "proof must execute full-function JIT code"
+        );
+    }
+
+    #[test]
+    fn vm_jit_threshold_env_tests_use_process_env_lock_048() {
+        let source = include_str!("run.rs");
+        assert!(
+            source.contains("static PROCESS_ENV_LOCK"),
+            "tests that mutate process env must share a lock"
+        );
+        assert!(
+            source.contains("let _env_guard = PROCESS_ENV_LOCK"),
+            "JIT threshold tests must hold the process env lock while VO_JIT_* vars are overridden"
+        );
+    }
+
+    #[test]
     fn strict_jit_extern_not_registered_fails_fast() {
-        let compiled = crate::compile_string(
+        let mut compiled = crate::compile_string(
             r#"
 package main
 
@@ -755,26 +861,31 @@ func main() {
 "#,
         )
         .expect("source should compile");
+        compiled.module.externs.push(ExternDef::new(
+            "test.unregistered".to_string(),
+            ParamShape::Exact { slots: 0 },
+            ReturnShape::slots(0),
+            ExternEffects::NONE,
+            Vec::new(),
+        ));
         let mut vm = Vm::try_with_jit_config(vo_vm::JitConfig {
             call_threshold: 1,
             loop_threshold: 1_000_000,
             debug_ir: false,
         })
         .expect("JIT should initialize");
-        vm.state.output = CaptureSink::new();
-        vm.load(compiled.module).unwrap();
-        vm.state.extern_registry = vo_runtime::ExternRegistry::new();
+        vm.set_output_sink(CaptureSink::new());
 
-        let err = match vm.run() {
+        let err = match vm.load(compiled.module) {
             Err(err) => err,
-            Ok(outcome) => panic!("expected JIT extern error, VM returned {outcome:?}"),
+            Ok(()) => panic!("expected JIT extern registration error during load"),
         };
 
         let VmError::Jit(msg) = err else {
             panic!("expected strict JIT extern registration error, got {err:?}");
         };
         assert!(msg.contains("extern function"), "{msg}");
-        assert!(msg.contains("not registered"), "{msg}");
+        assert!(msg.contains("no provider registered"), "{msg}");
         assert!(!msg.contains("JIT panic"), "{msg}");
     }
 

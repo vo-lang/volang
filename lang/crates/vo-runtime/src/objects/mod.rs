@@ -18,11 +18,32 @@ macro_rules! impl_gc_object {
                 unsafe { &*(p as *const Self) }
             }
             #[inline]
-            pub fn as_mut(p: GcRef) -> &'static mut Self {
+            /// # Safety
+            /// `p` must be a valid unique reference to a live object header. If the
+            /// mutation publishes GC-visible references, the caller must apply the
+            /// required write barrier first or be initializing a freshly allocated
+            /// object that will be marked for scanning before collection.
+            pub unsafe fn as_mut(p: GcRef) -> &'static mut Self {
                 unsafe { &mut *(p as *mut Self) }
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn raw_object_headers_as_mut_are_unsafe_public_primitives_058() {
+        let source = include_str!("mod.rs");
+        assert!(
+            source.matches("pub unsafe fn as_mut(").count() >= 2,
+            "raw object header mutation must stay behind an unsafe contract"
+        );
+        assert!(
+            source.matches("required write barrier").count() >= 2,
+            "as_mut safety docs must name the write-barrier obligation"
+        );
+    }
 }
 
 #[allow(unused_imports)]

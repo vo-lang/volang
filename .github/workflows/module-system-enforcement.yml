@@ -63,9 +63,11 @@ jobs:
         with:
           workspaces: ${{ matrix.rust_cache_workspaces }}
 
-      - name: Install wasm-pack
-        if: matrix.wasm_pack
-        run: cargo install wasm-pack --locked --version "${{ matrix.wasm_pack_version }}"
+      - name: Setup Python
+        if: matrix.python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
 
       - name: Setup Node
         if: matrix.node
@@ -74,6 +76,12 @@ jobs:
           node-version: ${{ matrix.node_version }}
           cache: "npm"
           cache-dependency-path: ${{ matrix.node_lockfiles }}
+
+      - name: Bootstrap task tools
+        run: cargo run -q -p vo-dev -- tool bootstrap --task "${{ matrix.task }}" --apply
+
+      - name: Check task tools
+        run: cargo run -q -p vo-dev -- tool check --task "${{ matrix.task }}"
 
       - name: Run CI task
         run: cargo run -q -p vo-dev -- task run "task:${{ matrix.task }}"

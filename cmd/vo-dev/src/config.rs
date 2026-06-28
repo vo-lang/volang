@@ -9,8 +9,25 @@ pub(crate) struct TaskFile {
     pub(crate) version: u32,
     #[serde(default)]
     pub(crate) groups: BTreeMap<String, Vec<String>>,
+    #[serde(default, rename = "group")]
+    pub(crate) group_meta: Vec<TaskGroup>,
     #[serde(default, rename = "task")]
     pub(crate) tasks: Vec<Task>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TaskGroup {
+    pub(crate) name: String,
+    pub(crate) title: String,
+    pub(crate) tier_intent: String,
+    pub(crate) owner: String,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) tasks: Vec<String>,
+    #[serde(default)]
+    pub(crate) included_in: Vec<String>,
+    pub(crate) selection_policy: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -27,6 +44,9 @@ pub(crate) struct Task {
     #[serde(default)]
     pub(crate) outputs: Vec<String>,
     pub(crate) tier: String,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    pub(crate) owner: Option<String>,
     pub(crate) cwd: Option<String>,
     #[serde(default)]
     pub(crate) env: BTreeMap<String, String>,
@@ -68,6 +88,7 @@ pub(crate) struct Tool {
     pub(crate) required: Option<bool>,
     pub(crate) usage: Option<String>,
     pub(crate) check: Option<Vec<String>>,
+    pub(crate) bootstrap: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

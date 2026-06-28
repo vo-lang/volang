@@ -163,6 +163,16 @@ const RUNTIME_HELPER_LOWERINGS: &[RuntimeHelperLoweringDescriptor] = &[
         RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
     ),
     helper_lowering(
+        Opcode::MapLen,
+        "vo_map_len",
+        LoweringOwner::TranslateCollections,
+        "map_len",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::U64JitErrorSentinel,
+        RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
+    ),
+    helper_lowering(
         Opcode::MapGet,
         "vo_map_get",
         LoweringOwner::TranslateCollections,
@@ -193,10 +203,30 @@ const RUNTIME_HELPER_LOWERINGS: &[RuntimeHelperLoweringDescriptor] = &[
         RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
     ),
     helper_lowering(
+        Opcode::MapIterInit,
+        "vo_map_iter_init",
+        LoweringOwner::TranslateCollections,
+        "map_iter_init",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::U64JitErrorSentinel,
+        RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
+    ),
+    helper_lowering(
         Opcode::MapIterNext,
         "vo_map_iter_next",
         LoweringOwner::TranslateCollections,
         "map_iter_next",
+        JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
+        JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
+        HelperReturnPolicy::U64JitErrorSentinel,
+        RuntimeHelperLoweringPolicy::ReturnJitErrorOnU64Sentinel,
+    ),
+    helper_lowering(
+        Opcode::IfaceAssign,
+        "vo_iface_to_iface",
+        LoweringOwner::TranslateRuntimeOps,
+        "iface_assign",
         JitRuntimeHelperReturnPolicy::U64ErrorSentinel,
         JitRuntimeHelperPanicPolicy::ReturnsStatusOrSentinel,
         HelperReturnPolicy::U64JitErrorSentinel,
@@ -217,6 +247,26 @@ const RUNTIME_HELPER_LOWERINGS: &[RuntimeHelperLoweringDescriptor] = &[
         "vo_island_new",
         LoweringOwner::TranslateRuntimeOps,
         "island_new",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::QueueLen,
+        "vo_chan_len",
+        LoweringOwner::TranslateRuntimeOps,
+        "queue_len",
+        JitRuntimeHelperReturnPolicy::JitResult,
+        JitRuntimeHelperPanicPolicy::ReturnsJitResult,
+        HelperReturnPolicy::JitResultChecked,
+        RuntimeHelperLoweringPolicy::CheckedJitResult,
+    ),
+    helper_lowering(
+        Opcode::QueueCap,
+        "vo_chan_cap",
+        LoweringOwner::TranslateRuntimeOps,
+        "queue_cap",
         JitRuntimeHelperReturnPolicy::JitResult,
         JitRuntimeHelperPanicPolicy::ReturnsJitResult,
         HelperReturnPolicy::JitResultChecked,
@@ -417,10 +467,14 @@ pub(super) const DEP_QUEUE_NEW: &[RuntimeDependency] = &[
     RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
     RuntimeDependency::RuntimeHelper("vo_queue_new_checked"),
 ];
-pub(super) const DEP_QUEUE_LEN: &[RuntimeDependency] =
-    &[RuntimeDependency::RuntimeHelper("vo_chan_len")];
-pub(super) const DEP_QUEUE_CAP: &[RuntimeDependency] =
-    &[RuntimeDependency::RuntimeHelper("vo_chan_cap")];
+pub(super) const DEP_QUEUE_LEN: &[RuntimeDependency] = &[
+    RuntimeDependency::RuntimeHelper("vo_chan_len"),
+    RuntimeDependency::JitContextCallback("queue_len_fn"),
+];
+pub(super) const DEP_QUEUE_CAP: &[RuntimeDependency] = &[
+    RuntimeDependency::RuntimeHelper("vo_chan_cap"),
+    RuntimeDependency::JitContextCallback("queue_cap_fn"),
+];
 pub(super) const DEP_QUEUE_CLOSE: &[RuntimeDependency] = &[
     RuntimeDependency::RuntimeHelper("vo_chan_close"),
     RuntimeDependency::JitContextCallback("queue_close_fn"),
@@ -464,6 +518,7 @@ pub(super) const DEP_IFACE_EQ: &[RuntimeDependency] = &[
 pub(super) const DEP_CALL: &[RuntimeDependency] = &[
     RuntimeDependency::DirectJitEntry,
     RuntimeDependency::VmCallRequest,
+    RuntimeDependency::RuntimeHelper("vo_set_call_request"),
     RuntimeDependency::JitContextCallback("push_frame_fn"),
     RuntimeDependency::JitContextCallback("pop_frame_fn"),
     RuntimeDependency::JitContextCallback("stack_overflow_fn"),
@@ -477,7 +532,12 @@ pub(super) const DEP_CALL_CLOSURE: &[RuntimeDependency] = &[
     RuntimeDependency::InlineCache,
     RuntimeDependency::DirectJitEntry,
     RuntimeDependency::VmCallRequest,
+    RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
+    RuntimeDependency::RuntimeHelper("vo_set_call_request"),
     RuntimeDependency::JitContextCallback("prepare_closure_call_fn"),
+    RuntimeDependency::JitContextCallback("push_frame_fn"),
+    RuntimeDependency::JitContextCallback("pop_frame_fn"),
+    RuntimeDependency::JitContextCallback("stack_overflow_fn"),
     RuntimeDependency::JitContextCallback("push_resume_point_fn"),
     RuntimeDependency::JitContextCallback("ic_table"),
 ];
@@ -485,7 +545,12 @@ pub(super) const DEP_CALL_IFACE: &[RuntimeDependency] = &[
     RuntimeDependency::InlineCache,
     RuntimeDependency::DirectJitEntry,
     RuntimeDependency::VmCallRequest,
+    RuntimeDependency::RuntimeHelper("vo_runtime_trap"),
+    RuntimeDependency::RuntimeHelper("vo_set_call_request"),
     RuntimeDependency::JitContextCallback("prepare_iface_call_fn"),
+    RuntimeDependency::JitContextCallback("push_frame_fn"),
+    RuntimeDependency::JitContextCallback("pop_frame_fn"),
+    RuntimeDependency::JitContextCallback("stack_overflow_fn"),
     RuntimeDependency::JitContextCallback("push_resume_point_fn"),
     RuntimeDependency::JitContextCallback("ic_table"),
 ];
@@ -592,6 +657,7 @@ pub(super) const FF_META_CALLBACK_FRAME: &[FailFastCondition] = &[
 pub(super) const FF_CALL: &[FailFastCondition] = &[
     FailFastCondition::MissingFunction,
     FailFastCondition::LayoutMismatch,
+    FailFastCondition::MissingHelper,
     FailFastCondition::MissingCallback,
     FailFastCondition::InvalidJitEntry,
     FailFastCondition::CallbackError,
@@ -601,6 +667,7 @@ pub(super) const FF_CALL_METADATA: &[FailFastCondition] = &[
     FailFastCondition::MissingMetadata,
     FailFastCondition::MissingFunction,
     FailFastCondition::LayoutMismatch,
+    FailFastCondition::MissingHelper,
     FailFastCondition::MissingCallback,
     FailFastCondition::InvalidJitEntry,
     FailFastCondition::CallbackError,

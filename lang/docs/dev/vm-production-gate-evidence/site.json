@@ -1,0 +1,18 @@
+{
+  "schema": "vo-dev-task-run-evidence-v1",
+  "selector": "site",
+  "changed": false,
+  "passed": true,
+  "source_state": "vm-production-current-source:2926786af616af721c321b3c15db600c7835b176e65a195aced30fe56e26cc99",
+  "tasks": [
+    "vo-web-wasm-build",
+    "vogui-npm-ci",
+    "vogui-build",
+    "studio-wasm-build",
+    "studio-npm-ci",
+    "studio-install-local-vogui",
+    "studio-build",
+    "quickplay-validate",
+    "blockkart-smoke-static"
+  ]
+}

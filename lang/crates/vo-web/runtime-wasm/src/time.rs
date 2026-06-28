@@ -1,4 +1,3 @@
-use core::sync::atomic::{AtomicU64, Ordering};
 use vo_runtime::bytecode::ExternDef;
 use vo_runtime::ffi::{ExternCallContext, ExternRegistry, ExternResult};
 use vo_runtime::objects::string as str_obj;
@@ -119,13 +118,6 @@ extern "C" {
     fn js_local_abbrev_impl(unix_ms: f64) -> String;
 }
 
-/// Monotonically increasing token counter for callback-based sleep/fetch.
-static CALLBACK_TOKEN: AtomicU64 = AtomicU64::new(1);
-
-fn next_callback_token() -> u64 {
-    CALLBACK_TOKEN.fetch_add(1, Ordering::Relaxed)
-}
-
 fn tz_validate_impl(name: &str) -> bool {
     js_tz_validate_impl(name)
 }
@@ -173,7 +165,7 @@ fn timesys_NowMonoNano(call: &mut ExternCallContext) -> ExternResult {
 fn timesys_SleepNano(call: &mut ExternCallContext) -> ExternResult {
     let ns = call.arg_i64(0);
     let ms = ((ns as f64) / 1_000_000.0).ceil().max(0.0) as u32;
-    let token = next_callback_token();
+    let token = call.next_host_event_token();
     ExternResult::HostEventWait {
         token,
         delay_ms: ms,
@@ -234,16 +226,37 @@ fn timesys_load_location(call: &mut ExternCallContext) -> ExternResult {
 }
 
 pub fn register_externs(registry: &mut ExternRegistry, externs: &[ExternDef]) {
+    use vo_runtime::bytecode::ExternEffects;
+
     for (id, def) in externs.iter().enumerate() {
         match def.name.as_str() {
-            "time_nowUnixNano" => registry.register(id as u32, timesys_NowUnixNano),
-            "time_nowMonoNano" => registry.register(id as u32, timesys_NowMonoNano),
-            "time_blocking_sleepNano" => registry.register(id as u32, timesys_SleepNano),
-            "time_localOffsetAt" => registry.register(id as u32, timesys_local_offset_at),
-            "time_localAbbrevAt" => registry.register(id as u32, timesys_local_abbrev_at),
-            "time_ianaOffsetAt" => registry.register(id as u32, timesys_iana_offset_at),
-            "time_ianaAbbrevAt" => registry.register(id as u32, timesys_iana_abbrev_at),
-            "time_loadLocation" => registry.register(id as u32, timesys_load_location),
+            "time_nowUnixNano" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_NowUnixNano)
+            }
+            "time_nowMonoNano" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_NowMonoNano)
+            }
+            "time_blocking_sleepNano" => registry.register_wasm_host_with_effects(
+                id as u32,
+                &def.name,
+                timesys_SleepNano,
+                ExternEffects::MAY_HOST_WAIT,
+            ),
+            "time_localOffsetAt" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_local_offset_at)
+            }
+            "time_localAbbrevAt" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_local_abbrev_at)
+            }
+            "time_ianaOffsetAt" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_iana_offset_at)
+            }
+            "time_ianaAbbrevAt" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_iana_abbrev_at)
+            }
+            "time_loadLocation" => {
+                crate::register_wasm_host(registry, id as u32, &def.name, timesys_load_location)
+            }
             _ => {}
         }
     }

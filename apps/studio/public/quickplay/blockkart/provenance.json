@@ -63,7 +63,7 @@
         }
       ],
       "cacheDir": "github.com@vo-lang@voplay/v0.1.28",
-      "filesDigest": "sha256:5ef2226138c2879ce61de15575c9e1409df9a98fec4a486d25ccddc73a90c8ab",
+      "filesDigest": "sha256:5b8b6af5ab87a168fc0436c03b68efd94fba4c909bc7017c3fa26e453ed9c157",
       "module": "github.com/vo-lang/voplay",
       "version": "v0.1.28"
     }
@@ -75,9 +75,9 @@
       "size": 22708820
     },
     {
-      "digest": "sha256:8bb27949554ac0c997026754e8c2c700ba8fa00423ba89f28753d1a967342c54",
+      "digest": "sha256:115abaa5ddcd1de061e6b9e028d10160d02de7e387cdbba118fd6cc39eb97919",
       "path": "deps.json",
-      "size": 2410045
+      "size": 2410052
     }
   ]
 }

@@ -7,7 +7,8 @@
 //! - `$promoted` wrappers: For promoted methods through embedding (navigate path, call original)
 
 use vo_analysis::objects::TypeKey;
-use vo_runtime::{SlotType, ValueKind};
+use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueRttid};
+use vo_vm::bytecode::ReturnShape;
 use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
@@ -22,12 +23,19 @@ use crate::type_info::TypeInfoWrapper;
 /// Define forwarded parameters in a wrapper function.
 /// Returns the first parameter slot if any parameters were defined.
 fn define_forwarded_params(
+    ctx: &mut CodegenContext,
     builder: &mut FuncBuilder,
     param_layouts: &[Vec<SlotType>],
 ) -> Option<u16> {
     let mut first_param = None;
     for layout in param_layouts {
-        let slot = builder.define_param(None, layout.len() as u16, layout);
+        let slots = ctx.slot_count_u16_or_record(layout.len());
+        let slot = builder
+            .try_define_param(None, slots, layout)
+            .unwrap_or_else(|error| {
+                ctx.record_layout_error(error);
+                0
+            });
         if first_param.is_none() {
             first_param = Some(slot);
         }
@@ -76,6 +84,42 @@ fn flatten_param_layouts(param_layouts: &[Vec<SlotType>]) -> Vec<SlotType> {
     slot_types
 }
 
+fn slot_layout_key(slot_types: &[SlotType]) -> String {
+    if slot_types.is_empty() {
+        return "void".to_string();
+    }
+    slot_types
+        .iter()
+        .map(|slot_type| (*slot_type as u8).to_string())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+fn return_shape_key(returns: &ReturnShape) -> String {
+    let layout = slot_layout_key(&returns.slot_types);
+    if returns.interface_metas.is_empty() {
+        return layout;
+    }
+    let metas = returns
+        .interface_metas
+        .iter()
+        .map(|meta| meta.map_or_else(|| "n".to_string(), |id| id.to_string()))
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("{layout}_im{metas}")
+}
+
+fn param_layout_key(param_slot_types: &[Vec<SlotType>]) -> String {
+    if param_slot_types.is_empty() {
+        return "void".to_string();
+    }
+    param_slot_types
+        .iter()
+        .map(|layout| slot_layout_key(layout))
+        .collect::<Vec<_>>()
+        .join("__")
+}
+
 fn iface_data_slot_type(value_kind: ValueKind) -> SlotType {
     match value_kind {
         ValueKind::Array
@@ -94,7 +138,7 @@ fn iface_data_slot_type(value_kind: ValueKind) -> SlotType {
 }
 
 /// Compute total slot count for a tuple type (params or results).
-fn tuple_slot_count(tuple_key: TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> u16 {
+fn tuple_slot_count(tuple_key: TypeKey, tc_objs: &vo_analysis::objects::TCObjects) -> usize {
     let tuple = tc_objs.types[tuple_key]
         .try_as_tuple()
         .expect("signature params/results must be tuple types during wrapper generation");
@@ -103,7 +147,7 @@ fn tuple_slot_count(tuple_key: TypeKey, tc_objs: &vo_analysis::objects::TCObject
         .iter()
         .map(|v| {
             let typ = tc_objs.lobjs[*v].typ().unwrap();
-            vo_analysis::check::type_info::type_slot_count(typ, tc_objs)
+            usize::from(vo_analysis::check::type_info::type_slot_count(typ, tc_objs))
         })
         .sum()
 }
@@ -112,13 +156,14 @@ fn tuple_slot_count(tuple_key: TypeKey, tc_objs: &vo_analysis::objects::TCObject
 /// With the new call buffer layout [Value×arg_slots | ret_slots], return values
 /// live at args_start + arg_slots, not at args_start.
 fn emit_call_and_return(
+    ctx: &mut CodegenContext,
     builder: &mut FuncBuilder,
     func_id: u32,
     args_start: u16,
     arg_slots: u16,
     ret_slot_types: &[SlotType],
 ) {
-    let ret_slots = ret_slot_types.len() as u16;
+    let ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
     builder.emit_static_call(func_id, args_start, arg_slots, ret_slots);
     builder.set_ret_slot_types(ret_slot_types.to_vec());
     let ret_start = args_start + arg_slots;
@@ -145,6 +190,9 @@ pub fn generate_iface_wrapper(
         .resolve(func_decl.name.symbol)
         .unwrap_or("unknown");
     let wrapper_name = format!("{}$iface", name);
+    let orig_param_types = ctx.module().functions[original_func_id as usize]
+        .param_types
+        .clone();
 
     let mut builder = FuncBuilder::new(&wrapper_name);
 
@@ -184,6 +232,7 @@ pub fn generate_iface_wrapper(
             forwarded_param_layouts.push(slot_types.clone());
         }
     }
+    builder.add_param_transfer_types(&orig_param_types);
 
     // Get receiver value slots
     let recv_slots = info.type_slot_count(recv_type);
@@ -198,10 +247,12 @@ pub fn generate_iface_wrapper(
     // Allocate call buffer: [Value×arg_slots | Value×ret_slots]
     // New layout keeps arg and ret regions separate to prevent GC from scanning
     // arg values as GcRefs when a timeslice boundary occurs mid-call.
-    let forwarded_param_slots = flatten_param_layouts(&forwarded_param_layouts).len() as u16;
-    let total_arg_slots = recv_slots + forwarded_param_slots;
+    let forwarded_slot_types = flatten_param_layouts(&forwarded_param_layouts);
+    let forwarded_param_slots = ctx.slot_count_u16_or_record(forwarded_slot_types.len());
+    let total_arg_slots =
+        ctx.slot_count_u16_or_record(usize::from(recv_slots) + forwarded_slot_types.len());
     let mut arg_slot_types = recv_slot_types;
-    arg_slot_types.extend(flatten_param_layouts(&forwarded_param_layouts));
+    arg_slot_types.extend(forwarded_slot_types);
     let args_start = builder.alloc_call_buffer(&arg_slot_types, &ret_slot_types);
 
     if needs_unbox {
@@ -219,6 +270,7 @@ pub fn generate_iface_wrapper(
 
     // Call and return
     emit_call_and_return(
+        ctx,
         &mut builder,
         original_func_id,
         args_start,
@@ -226,8 +278,7 @@ pub fn generate_iface_wrapper(
         &ret_slot_types,
     );
 
-    let func_def = builder.build();
-    let wrapper_id = ctx.add_function(func_def);
+    let wrapper_id = ctx.add_function_from_builder(builder);
 
     Ok(wrapper_id)
 }
@@ -268,7 +319,7 @@ pub fn generate_method_expr_promoted_wrapper(
         &orig_func.slot_types[orig_recv_slots as usize..orig_param_slots as usize],
     );
     let forwarded_slot_types = flatten_param_layouts(&param_layouts);
-    let forwarded_param_slots = forwarded_slot_types.len() as u16;
+    let forwarded_param_slots = ctx.slot_count_u16_or_record(forwarded_slot_types.len());
 
     let final_type = embed_path.final_type;
     let recv_slots_for_call = if expects_ptr_recv {
@@ -303,11 +354,12 @@ pub fn generate_method_expr_promoted_wrapper(
     builder.add_param_type_key(recv_type, ctx, info);
 
     // Define forwarded params
-    let first_param_slot = define_forwarded_params(&mut builder, &param_layouts);
+    let first_param_slot = define_forwarded_params(ctx, &mut builder, &param_layouts);
     builder.add_param_transfer_types(&orig_param_types);
 
     // Allocate call buffer: [Value×arg_slots | Value×ret_slots]
-    let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
+    let total_arg_slots =
+        ctx.slot_count_u16_or_record(usize::from(recv_slots_for_call) + forwarded_slot_types.len());
     let mut arg_slot_types = if expects_ptr_recv {
         vec![SlotType::GcRef]
     } else {
@@ -341,6 +393,7 @@ pub fn generate_method_expr_promoted_wrapper(
 
     // Call and return
     emit_call_and_return(
+        ctx,
         &mut builder,
         original_func_id,
         args_start,
@@ -348,8 +401,7 @@ pub fn generate_method_expr_promoted_wrapper(
         &ret_slot_types,
     );
 
-    let func_def = builder.build();
-    ctx.add_function(func_def)
+    ctx.add_function_from_builder(builder)
 }
 
 /// Generate a wrapper for promoted method that navigates through embedded fields
@@ -376,12 +428,14 @@ pub fn generate_promoted_wrapper(
     let orig_func = &ctx.module().functions[original_func_id as usize];
     let orig_param_slots = orig_func.param_slots;
     let orig_recv_slots = orig_func.recv_slots;
+    let orig_param_types = orig_func.param_types.clone();
+    let orig_slot_types = orig_func.slot_types.clone();
     let param_layouts = split_param_layouts(
-        &orig_func.param_types,
-        &orig_func.slot_types[orig_recv_slots as usize..orig_param_slots as usize],
+        &orig_param_types,
+        &orig_slot_types[orig_recv_slots as usize..orig_param_slots as usize],
     );
     let forwarded_slot_types = flatten_param_layouts(&param_layouts);
-    let forwarded_param_slots = forwarded_slot_types.len() as u16;
+    let forwarded_param_slots = ctx.slot_count_u16_or_record(forwarded_slot_types.len());
 
     // Check if original method is pointer receiver
     let is_pointer_receiver = original_func_id == iface_func_id;
@@ -405,13 +459,20 @@ pub fn generate_promoted_wrapper(
     // Define receiver parameter (GcRef to outer type)
     builder.set_recv_slots(1);
     let outer_gcref = builder.define_param(None, 1, &[SlotType::GcRef]);
+    let outer_rttid = ctx.intern_type_key(outer_type, info);
+    let outer_kind = vo_analysis::check::type_info::type_value_kind(outer_type, tc_objs);
+    ctx.intern_rttid(RuntimeType::Pointer(ValueRttid::new(
+        outer_rttid,
+        outer_kind,
+    )));
 
     // Define forwarded params
-    let first_param_slot = define_forwarded_params(&mut builder, &param_layouts);
-    builder.add_param_transfer_types(&orig_func.param_types);
+    let first_param_slot = define_forwarded_params(ctx, &mut builder, &param_layouts);
+    builder.add_param_transfer_types(&orig_param_types);
 
     // Allocate call buffer: [Value×arg_slots | Value×ret_slots]
-    let total_arg_slots = recv_slots_for_call + forwarded_param_slots;
+    let total_arg_slots =
+        ctx.slot_count_u16_or_record(usize::from(recv_slots_for_call) + forwarded_slot_types.len());
     let mut arg_slot_types = if is_pointer_receiver {
         vec![SlotType::GcRef]
     } else {
@@ -446,6 +507,7 @@ pub fn generate_promoted_wrapper(
 
     // Call and return
     emit_call_and_return(
+        ctx,
         &mut builder,
         original_func_id,
         args_start,
@@ -453,8 +515,7 @@ pub fn generate_promoted_wrapper(
         &ret_slot_types,
     );
 
-    let func_def = builder.build();
-    ctx.add_function(func_def)
+    ctx.add_function_from_builder(builder)
 }
 
 // =============================================================================
@@ -503,9 +564,7 @@ fn generate_embedded_iface_wrapper_impl(
         .iter()
         .position(|n| n == method_name)
         .expect("method must exist in embedded interface");
-    let method_idx = u32::try_from(method_idx).unwrap_or_else(|_| {
-        panic!("CallIface method index exceeds u32 operand width: {method_idx}")
-    });
+    let method_idx = ctx.call_iface_method_index_or_record(method_idx);
 
     // Get method signature
     let method_type = tc_objs.lobjs[method_obj]
@@ -521,8 +580,10 @@ fn generate_embedded_iface_wrapper_impl(
     let sig = tc_objs.types[method_type]
         .try_as_signature()
         .expect("method type must be signature");
-    let param_slots = tuple_slot_count(sig.params(), tc_objs);
-    let ret_slots = tuple_slot_count(sig.results(), tc_objs);
+    let param_slots_usize = tuple_slot_count(sig.params(), tc_objs);
+    let ret_slots_usize = tuple_slot_count(sig.results(), tc_objs);
+    let param_slots = ctx.slot_count_u16_or_record(param_slots_usize);
+    let ret_slots = ctx.slot_count_u16_or_record(ret_slots_usize);
 
     // Build wrapper
     let wrapper_name = format!("{}{}", method_name, wrapper_suffix);
@@ -561,7 +622,7 @@ fn generate_embedded_iface_wrapper_impl(
     }
 
     // Forward parameters
-    let first_param_slot = define_forwarded_params(&mut builder, &param_layouts);
+    let first_param_slot = define_forwarded_params(ctx, &mut builder, &param_layouts);
     for &param_type_key in &param_type_keys {
         builder.add_param_type_key(param_type_key, ctx, info);
     }
@@ -592,8 +653,9 @@ fn generate_embedded_iface_wrapper_impl(
     }
 
     // CallIface: result at args_start + param_slots (new call buffer layout)
-    let c = crate::type_info::encode_call_args(param_slots, ret_slots);
+    let c = ctx.dynamic_call_shape_or_record(forwarded_slot_types.len(), ret_slot_types.len());
     builder.emit_call_iface(
+        iface_meta_id,
         method_idx,
         iface_slot,
         args_start,
@@ -605,18 +667,20 @@ fn generate_embedded_iface_wrapper_impl(
     builder.set_ret_slot_types(ret_slot_types);
     builder.emit_op(Opcode::Return, ret_start, ret_slots, 0);
 
-    ctx.add_function(builder.build())
+    ctx.add_function_from_builder(builder)
 }
 
 /// Generate wrapper that takes interface as first param and calls via CallIface.
 /// Shared implementation for method expression and defer wrappers.
 fn generate_iface_call_wrapper(
     ctx: &mut CodegenContext,
-    method_idx: u32,
+    iface_meta_id: u32,
+    method_idx: usize,
     param_slot_types: Vec<Vec<SlotType>>,
-    ret_slot_types: Vec<SlotType>,
+    call_ret_slot_types: Vec<SlotType>,
     wrapper_name: &str,
     set_recv_slots: bool,
+    return_call_results: bool,
 ) -> u32 {
     if let Some(id) = ctx.get_wrapper(wrapper_name) {
         return id;
@@ -631,36 +695,43 @@ fn generate_iface_call_wrapper(
     let iface_slot = builder.define_param(None, 2, &[SlotType::Interface0, SlotType::Interface1]);
 
     // Forward other parameters
-    let first_param_slot = define_forwarded_params(&mut builder, &param_slot_types);
+    let first_param_slot = define_forwarded_params(ctx, &mut builder, &param_slot_types);
     let forwarded_slot_types = flatten_param_layouts(&param_slot_types);
-    let param_slots = forwarded_slot_types.len() as u16;
-    let ret_slots = ret_slot_types.len() as u16;
+    let param_slots = ctx.slot_count_u16_or_record(forwarded_slot_types.len());
+    let call_ret_slots = ctx.slot_count_u16_or_record(call_ret_slot_types.len());
 
     // Allocate call buffer: [Value×param_slots | Value×ret_slots]
     let args_start = builder.alloc_dynamic_call_buffer(
         &[SlotType::Value],
         &forwarded_slot_types,
-        &ret_slot_types,
+        &call_ret_slot_types,
     );
     if let Some(first_param) = first_param_slot {
         builder.emit_copy(args_start, first_param, param_slots);
     }
 
     // CallIface
-    let c = crate::type_info::encode_call_args(param_slots, ret_slots);
+    let c = ctx.dynamic_call_shape_or_record(forwarded_slot_types.len(), call_ret_slot_types.len());
+    let method_idx = ctx.call_iface_method_index_or_record(method_idx);
     builder.emit_call_iface(
+        iface_meta_id,
         method_idx,
         iface_slot,
         args_start,
         c,
         &forwarded_slot_types,
-        &ret_slot_types,
+        &call_ret_slot_types,
     );
 
-    // Return: result at args_start + param_slots (new call buffer layout)
-    let ret_start = args_start + param_slots;
-    builder.set_ret_slot_types(ret_slot_types);
-    builder.emit_op(Opcode::Return, ret_start, ret_slots, 0);
+    if return_call_results {
+        // Return: result at args_start + param_slots (new call buffer layout)
+        let ret_start = args_start + param_slots;
+        builder.set_ret_slot_types(call_ret_slot_types);
+        builder.emit_op(Opcode::Return, ret_start, call_ret_slots, 0);
+    } else {
+        builder.set_ret_slots(0);
+        builder.emit_op(Opcode::Return, 0, 0, 0);
+    }
 
     ctx.register_wrapper_from_builder(wrapper_name, builder)
 }
@@ -670,8 +741,8 @@ pub fn generate_method_expr_iface_wrapper(
     ctx: &mut CodegenContext,
     iface_type: TypeKey,
     method_idx: u32,
-    param_slots: u16,
-    ret_slots: u16,
+    param_slots: usize,
+    ret_slots: usize,
     method_name: &str,
     info: &TypeInfoWrapper,
 ) -> u32 {
@@ -696,16 +767,16 @@ pub fn generate_method_expr_iface_wrapper(
     let iface_slot = builder.define_param(None, 2, &[SlotType::Interface0, SlotType::Interface1]);
     builder.add_param_type_key(iface_type, ctx, info);
 
-    let first_param_slot = define_forwarded_params(&mut builder, &param_slot_types);
+    let first_param_slot = define_forwarded_params(ctx, &mut builder, &param_slot_types);
     for &param_type_key in &param_type_keys {
         builder.add_param_type_key(param_type_key, ctx, info);
     }
 
-    let computed_param_slots = flatten_param_layouts(&param_slot_types).len() as u16;
     let forwarded_slot_types = flatten_param_layouts(&param_slot_types);
-    let computed_ret_slots = ret_slot_types.len() as u16;
-    assert_eq!(param_slots, computed_param_slots);
-    assert_eq!(ret_slots, computed_ret_slots);
+    let computed_param_slots = ctx.slot_count_u16_or_record(forwarded_slot_types.len());
+    let computed_ret_slots = ctx.slot_count_u16_or_record(ret_slot_types.len());
+    assert_eq!(param_slots, forwarded_slot_types.len());
+    assert_eq!(ret_slots, ret_slot_types.len());
     let args_start = builder.alloc_dynamic_call_buffer(
         &[SlotType::Value],
         &forwarded_slot_types,
@@ -715,8 +786,15 @@ pub fn generate_method_expr_iface_wrapper(
         builder.emit_copy(args_start, first_param, computed_param_slots);
     }
 
-    let c = crate::type_info::encode_call_args(computed_param_slots, computed_ret_slots);
+    let c = ctx.dynamic_call_shape_or_record(forwarded_slot_types.len(), ret_slot_types.len());
+    let iface_meta_id = ctx.get_or_create_interface_meta_id(
+        iface_type,
+        &info.project.tc_objs,
+        &info.project.interner,
+    );
+    let method_idx = ctx.call_iface_method_index_or_record(method_idx as usize);
     builder.emit_call_iface(
+        iface_meta_id,
         method_idx,
         iface_slot,
         args_start,
@@ -794,44 +872,55 @@ pub fn generate_embedded_iface_wrapper(
 
 /// Generate a wrapper for deferring extern calls (e.g., `defer fmt.Println(...)`).
 ///
-/// The wrapper takes N interface values as parameters (each 2 slots),
-/// then calls the extern function.
+/// The wrapper takes the same argument slot layout as the deferred call site,
+/// then calls the extern function with that exact ABI.
 pub fn generate_defer_extern_wrapper(
     ctx: &mut CodegenContext,
     extern_name: &str,
-    arg_count: usize,
-    ret_slot_types: Vec<SlotType>,
+    arg_slot_types: Vec<SlotType>,
+    returns: ReturnShape,
 ) -> u32 {
-    let ret_layout_key = ret_slot_types
-        .iter()
-        .map(|st| (*st as u8).to_string())
-        .collect::<Vec<_>>()
-        .join("_");
-    let wrapper_name = format!("$defer_extern_{}_{}", extern_name, ret_layout_key);
+    let arg_layout_key = slot_layout_key(&arg_slot_types);
+    let ret_layout_key = return_shape_key(&returns);
+    let wrapper_name = format!(
+        "$defer_extern_{}_a{}_r{}",
+        extern_name, arg_layout_key, ret_layout_key
+    );
 
     if let Some(id) = ctx.get_wrapper(&wrapper_name) {
         return id;
     }
 
-    let arg_slots = arg_count
-        .checked_mul(2)
-        .expect("defer extern wrapper argument slot count overflowed usize");
+    let mut param_layout_error = false;
+    let arg_slots = ctx.slot_count_u16_or_record(arg_slot_types.len());
 
     let mut builder = FuncBuilder::new(&wrapper_name);
-    for _ in 0..arg_count {
-        builder.define_param(None, 2, &[SlotType::Interface0, SlotType::Interface1]);
+    if !arg_slot_types.is_empty() {
+        builder
+            .try_define_param(None, arg_slots, &arg_slot_types)
+            .unwrap_or_else(|error| {
+                param_layout_error = true;
+                ctx.record_layout_error(error);
+                0
+            });
     }
     builder.set_ret_slots(0);
 
-    let ret_slots = ret_slot_types.len() as u16;
+    if param_layout_error {
+        builder.emit_op(Opcode::Return, 0, 0, 0);
+        return ctx.register_wrapper_from_builder(&wrapper_name, builder);
+    }
+
+    let ret_slot_types = returns.slot_types.clone();
     let ret_dst = if ret_slot_types.is_empty() {
         0
     } else {
         builder.alloc_slots(&ret_slot_types)
     };
-    let extern_id = ctx.get_or_register_extern_with_ret_slots(extern_name, ret_slots);
-    // CallExtern: flags=arg_count*2, a=dst, b=extern_id, c=args_start
-    builder.emit_call_extern(ret_dst, extern_id, 0, arg_slots, &ret_slot_types);
+    let param_kinds = crate::context::ext_slot_kinds_for_slot_types(&arg_slot_types);
+    let extern_id =
+        ctx.get_or_register_declared_extern_with_return_shape(extern_name, returns, param_kinds);
+    builder.emit_call_extern(ret_dst, extern_id, 0, arg_slot_types.len(), &ret_slot_types);
     builder.emit_op(Opcode::Return, 0, 0, 0);
 
     ctx.register_wrapper_from_builder(&wrapper_name, builder)
@@ -841,20 +930,28 @@ pub fn generate_defer_extern_wrapper(
 /// Uses shared generate_iface_call_wrapper implementation.
 pub fn generate_defer_iface_wrapper(
     ctx: &mut CodegenContext,
+    iface_meta_id: u32,
     method_name: &str,
     method_idx: usize,
     param_slot_types: Vec<Vec<SlotType>>,
+    ret_slot_types: Vec<SlotType>,
 ) -> u32 {
-    let wrapper_name = format!("{}$defer_iface_{}", method_name, method_idx);
-    let method_idx = u32::try_from(method_idx).unwrap_or_else(|_| {
-        panic!("CallIface method index exceeds u32 operand width: {method_idx}")
-    });
+    let wrapper_name = format!(
+        "{}$defer_iface_{}_i{}_p{}_r{}",
+        method_name,
+        method_idx,
+        iface_meta_id,
+        param_layout_key(&param_slot_types),
+        slot_layout_key(&ret_slot_types)
+    );
     generate_iface_call_wrapper(
         ctx,
+        iface_meta_id,
         method_idx,
         param_slot_types,
-        Vec::new(),
+        ret_slot_types,
         &wrapper_name,
+        false,
         false,
     )
 }
@@ -862,11 +959,223 @@ pub fn generate_defer_iface_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vo_vm::bytecode::{ExtSlotKind, ParamShape};
+
+    fn return_shape(slot_types: Vec<SlotType>) -> ReturnShape {
+        ReturnShape::try_with_slot_types(slot_types).expect("test return shape should be valid")
+    }
+
+    fn interface_return_shape(iface_meta_id: u32) -> ReturnShape {
+        ReturnShape::try_with_slot_types_and_interface_metas(
+            vec![SlotType::Interface0, SlotType::Interface1],
+            vec![Some(iface_meta_id), None],
+        )
+        .expect("test return shape should be valid")
+    }
 
     #[test]
-    #[should_panic(expected = "CallIface method index exceeds u8 operand width")]
-    fn defer_iface_wrapper_rejects_method_index_truncation() {
+    fn add_function_from_builder_records_layout_errors() {
+        let mut ctx = CodegenContext::new("wrapper-builder-layout-error");
+        let mut builder = FuncBuilder::new("wide-wrapper");
+        let wide_layout = vec![SlotType::Value; usize::from(u16::MAX) + 1];
+        let _ = builder.alloc_slots(&wide_layout);
+
+        let _ = ctx.add_function_from_builder(builder);
+
+        let err = ctx
+            .check_layout_errors()
+            .expect_err("builder layout errors must be recorded at registration");
+        assert_eq!(err, "type slot count exceeds u16::MAX: 65536 slots");
+    }
+
+    #[test]
+    fn wrapper_builders_use_context_registration_owner() {
+        let source = include_str!("wrapper.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("wrapper source should contain tests section");
+
+        assert!(
+            !source.contains("ctx.add_function(builder.build())"),
+            "wrapper builders must not bypass context-owned layout error recording"
+        );
+        assert!(
+            !source.contains("let func_def = builder.build()"),
+            "wrapper builders must not build before context-owned registration"
+        );
+    }
+
+    #[test]
+    fn defer_iface_wrapper_records_method_index_truncation() {
         let mut ctx = CodegenContext::new("call-iface-method-idx-width");
-        let _ = generate_defer_iface_wrapper(&mut ctx, "wide", 256, Vec::new());
+        let _ = generate_defer_iface_wrapper(&mut ctx, 0, "wide", 256, Vec::new(), Vec::new());
+        let err = ctx
+            .check_layout_errors()
+            .expect_err("wide method index should be recorded");
+        assert_eq!(err, "CallIface method index exceeds u8 operand width: 256");
+    }
+
+    #[test]
+    fn iface_wrapper_records_aggregate_param_slot_width() {
+        let mut ctx = CodegenContext::new("dynamic-call-aggregate-width");
+        let param_slot_types = vec![vec![SlotType::Value; 40_000], vec![SlotType::Value; 40_000]];
+        let _ = generate_defer_iface_wrapper(&mut ctx, 0, "wide", 0, param_slot_types, Vec::new());
+        let err = ctx
+            .check_layout_errors()
+            .expect_err("aggregate dynamic call params should be recorded");
+        assert!(err.contains("type slot count exceeds u16::MAX"));
+    }
+
+    #[test]
+    fn defer_extern_wrapper_cache_key_includes_arg_count() {
+        let mut ctx = CodegenContext::new("defer-extern-arity");
+
+        let one_arg = generate_defer_extern_wrapper(
+            &mut ctx,
+            "vo_println",
+            vec![SlotType::Interface0, SlotType::Interface1],
+            return_shape(Vec::new()),
+        );
+        let two_args = generate_defer_extern_wrapper(
+            &mut ctx,
+            "vo_println",
+            vec![
+                SlotType::Interface0,
+                SlotType::Interface1,
+                SlotType::Interface0,
+                SlotType::Interface1,
+            ],
+            return_shape(Vec::new()),
+        );
+
+        assert_ne!(one_arg, two_args);
+        assert_eq!(ctx.module().functions[one_arg as usize].param_slots, 2);
+        assert_eq!(ctx.module().functions[two_args as usize].param_slots, 4);
+        let extern_def = ctx
+            .module()
+            .externs
+            .iter()
+            .find(|def| def.name == "vo_println")
+            .expect("wrapper should register vo_println");
+        assert_eq!(extern_def.params, ParamShape::CallSiteVariadic);
+        assert!(
+            extern_def.param_kinds.is_empty(),
+            "builtin variadic externs must not capture one wrapper arity as the global ABI"
+        );
+        ctx.check_layout_errors()
+            .expect("distinct arity wrappers should not record layout errors");
+    }
+
+    #[test]
+    fn defer_extern_wrapper_records_call_extern_arg_width() {
+        let mut ctx = CodegenContext::new("defer-extern-call-width");
+
+        let _ = generate_defer_extern_wrapper(
+            &mut ctx,
+            "vo_println",
+            vec![SlotType::Value; 256],
+            return_shape(Vec::new()),
+        );
+
+        let err = ctx
+            .check_layout_errors()
+            .expect_err("wide deferred extern args should be recorded");
+        assert_eq!(
+            err,
+            "CallExtern arg slot count exceeds u8 packed operand width: 256 slots"
+        );
+    }
+
+    #[test]
+    fn vm_defer_extern_wrapper_param_width_023_records_layout_error() {
+        let mut ctx = CodegenContext::new("defer-extern-param-width");
+
+        let _ = generate_defer_extern_wrapper(
+            &mut ctx,
+            "vo_println",
+            vec![SlotType::Value; usize::from(u16::MAX) + 1],
+            return_shape(Vec::new()),
+        );
+
+        let err = ctx
+            .check_layout_errors()
+            .expect_err("wide deferred extern wrapper params should be recorded");
+        assert!(err.contains("type slot count exceeds u16::MAX"));
+    }
+
+    #[test]
+    fn defer_extern_wrapper_uses_declared_extern_effect_manifest() {
+        let mut ctx = CodegenContext::new("defer-extern-effects");
+
+        let _ = generate_defer_extern_wrapper(
+            &mut ctx,
+            "os_blocking_fileRead",
+            vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],
+            ReturnShape::try_with_slot_types_and_interface_metas(
+                vec![SlotType::Value, SlotType::Interface0, SlotType::Interface1],
+                vec![None, Some(0), None],
+            )
+            .expect("test return shape should be valid"),
+        );
+
+        let extern_def = ctx
+            .module()
+            .externs
+            .iter()
+            .find(|def| def.name == "os_blocking_fileRead")
+            .expect("defer wrapper should register extern");
+        assert_eq!(
+            extern_def.allowed_effects,
+            vo_vm::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
+        );
+    }
+
+    #[test]
+    fn defer_extern_wrapper_preserves_call_extern_param_abi_050() {
+        let mut ctx = CodegenContext::new("defer-extern-param-abi");
+
+        let wrapper_id = generate_defer_extern_wrapper(
+            &mut ctx,
+            "pkg_F",
+            vec![SlotType::GcRef],
+            return_shape(Vec::new()),
+        );
+
+        let extern_def = ctx
+            .module()
+            .externs
+            .iter()
+            .find(|def| def.name == "pkg_F")
+            .expect("defer wrapper should register extern");
+        assert_eq!(
+            extern_def.params,
+            vo_vm::bytecode::ParamShape::Exact { slots: 1 }
+        );
+        assert_eq!(extern_def.param_kinds, vec![ExtSlotKind::Bytes]);
+
+        let wrapper = &ctx.module().functions[wrapper_id as usize];
+        assert_eq!(wrapper.param_slots, 1);
+        assert_eq!(wrapper.slot_types.first().copied(), Some(SlotType::GcRef));
+        assert!(
+            wrapper.jit_metadata.iter().any(|metadata| matches!(
+                metadata,
+                vo_common_core::JitInstructionMetadata::CallExternLayout { arg_layout, .. }
+                    if arg_layout == &vec![SlotType::GcRef]
+            )),
+            "defer extern wrapper must call extern with the same precise argument layout it exposes"
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "extern 'pkg_F' registered with incompatible return interface metadata"
+    )]
+    fn defer_extern_wrapper_cache_key_does_not_bypass_return_interface_metadata_060() {
+        let mut ctx = CodegenContext::new("defer-extern-interface-return-shape");
+
+        let _ =
+            generate_defer_extern_wrapper(&mut ctx, "pkg_F", Vec::new(), interface_return_shape(1));
+        let _ =
+            generate_defer_extern_wrapper(&mut ctx, "pkg_F", Vec::new(), interface_return_shape(2));
     }
 }

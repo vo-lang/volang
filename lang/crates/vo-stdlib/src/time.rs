@@ -174,29 +174,140 @@ fn timesys_load_location(call: &mut ExternCallContext) -> ExternResult {
 }
 
 #[cfg(feature = "std")]
+#[doc(hidden)]
+pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_nowUnixNano",
+        func: timesys_now_unix_nano,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_nowMonoNano",
+        func: timesys_now_mono_nano,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_blocking_sleepNano",
+        func: timesys_sleep_nano,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_localOffsetAt",
+        func: timesys_local_offset_at,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_localAbbrevAt",
+        func: timesys_local_abbrev_at,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_ianaOffsetAt",
+        func: timesys_iana_offset_at,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_ianaAbbrevAt",
+        func: timesys_iana_abbrev_at,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_loadLocation",
+        func: timesys_load_location,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+];
+
+#[cfg(feature = "std")]
 pub fn register_externs(
     registry: &mut vo_runtime::ffi::ExternRegistry,
     externs: &[vo_runtime::bytecode::ExternDef],
 ) {
     for (id, def) in externs.iter().enumerate() {
-        match def.name.as_str() {
-            "time_nowUnixNano" => registry.register(id as u32, timesys_now_unix_nano),
-            "time_nowMonoNano" => registry.register(id as u32, timesys_now_mono_nano),
-            "time_blocking_sleepNano" => registry.register(id as u32, timesys_sleep_nano),
-            "time_localOffsetAt" => registry.register(id as u32, timesys_local_offset_at),
-            "time_localAbbrevAt" => registry.register(id as u32, timesys_local_abbrev_at),
-            "time_ianaOffsetAt" => registry.register(id as u32, timesys_iana_offset_at),
-            "time_ianaAbbrevAt" => registry.register(id as u32, timesys_iana_abbrev_at),
-            "time_loadLocation" => registry.register(id as u32, timesys_load_location),
-            _ => {}
+        for entry in REGISTERED_EXTERNS {
+            if def.name == entry.name() {
+                entry.register(registry, id as u32);
+                break;
+            }
         }
     }
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), not(target_arch = "wasm32")))]
+fn timesys_requires_std(
+    _call: &mut vo_runtime::ffi::ExternCallContext,
+) -> vo_runtime::ffi::ExternResult {
+    vo_runtime::ffi::ExternResult::Panic(alloc::string::String::from("time requires std"))
+}
+
+#[cfg(all(not(feature = "std"), not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_blocking_sleepNano",
+        func: timesys_requires_std,
+        effects: vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_nowUnixNano",
+        func: timesys_requires_std,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_nowMonoNano",
+        func: timesys_requires_std,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_localOffsetAt",
+        func: timesys_requires_std,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_localAbbrevAt",
+        func: timesys_requires_std,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_ianaOffsetAt",
+        func: timesys_requires_std,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_ianaAbbrevAt",
+        func: timesys_requires_std,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+    vo_runtime::ffi::StdlibEntry {
+        name: "time_loadLocation",
+        func: timesys_requires_std,
+        effects: vo_runtime::bytecode::ExternEffects::NONE,
+    },
+];
+
+#[cfg(all(not(feature = "std"), not(target_arch = "wasm32")))]
+pub fn register_externs(
+    registry: &mut vo_runtime::ffi::ExternRegistry,
+    externs: &[vo_runtime::bytecode::ExternDef],
+) {
+    for (id, def) in externs.iter().enumerate() {
+        for entry in REGISTERED_EXTERNS {
+            if def.name == entry.name() {
+                entry.register(registry, id as u32);
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(all(not(feature = "std"), target_arch = "wasm32"))]
+#[doc(hidden)]
+pub const REGISTERED_EXTERNS: &[vo_runtime::ffi::StdlibEntry] = &[];
+
+#[cfg(all(not(feature = "std"), target_arch = "wasm32"))]
 pub fn register_externs(
     _registry: &mut vo_runtime::ffi::ExternRegistry,
     _externs: &[vo_runtime::bytecode::ExternDef],
 ) {
-    // No-op: WASM platform externs are registered by vo-web-runtime-wasm
+    // WASM supplies time externs through vo-web-runtime-wasm.
 }

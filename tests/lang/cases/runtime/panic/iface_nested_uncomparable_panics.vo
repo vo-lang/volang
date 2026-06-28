@@ -1,0 +1,49 @@
+package main
+
+import "fmt"
+
+type SliceStruct struct {
+	xs []int
+}
+
+type NestedStruct struct {
+	inner SliceStruct
+}
+
+type SliceArray [1][]int
+
+func mustPanic(name string, f func()) {
+	var caught any
+	func() {
+		defer func() {
+			caught = recover()
+		}()
+		f()
+	}()
+	assert(caught != nil, name)
+}
+
+func main() {
+	var same any = SliceStruct{xs: []int{1}}
+	mustPanic("same interface with nested slice field should panic", func() {
+		_ = same == same
+	})
+
+	var left any = SliceStruct{xs: []int{1}}
+	var right any = SliceStruct{xs: []int{1}}
+	mustPanic("distinct interfaces with nested slice field should panic", func() {
+		_ = left == right
+	})
+
+	var nested any = NestedStruct{inner: SliceStruct{xs: []int{1}}}
+	mustPanic("nested struct with slice field should panic", func() {
+		_ = nested == nested
+	})
+
+	var arr any = SliceArray{[]int{1}}
+	mustPanic("array with slice element should panic", func() {
+		_ = arr == arr
+	})
+
+	fmt.Println("iface_nested_uncomparable_panics: ok")
+}

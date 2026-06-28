@@ -30,8 +30,8 @@
       "title": "Language Spec",
       "source": "lang/docs/spec/language.md",
       "output": "spec/language.md",
-      "source_digest": "sha256:e00b3333775d458082d248678196669999319bd12778ad1b39f23052f5f9575e",
-      "generated_at": "2026-05-27T11:17:51+08:00",
+      "source_digest": "sha256:9decc556b8bc922658086300022097383d0d08498384c60d9e230bf2d0ebfc99",
+      "generated_at": "2026-06-07T18:45:34+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -57,8 +57,8 @@
       "title": "Native FFI",
       "source": "lang/docs/spec/native-ffi.md",
       "output": "spec/native-ffi.md",
-      "source_digest": "sha256:b110a6887404ef2d623b1f980beb48afbc50cc9e4ac022ed6e7147785e2ce66e",
-      "generated_at": "2026-05-27T11:17:51+08:00",
+      "source_digest": "sha256:dab4b9e97be7004070c3d5fa3eb819dd088d296770e3a6bf947bf5fc4e1d87fd",
+      "generated_at": "2026-06-27T16:41:26+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -66,8 +66,8 @@
       "title": "Memory Model",
       "source": "lang/docs/spec/memory-model-and-instructions.md",
       "output": "spec/memory-model-and-instructions.md",
-      "source_digest": "sha256:51b28102399dda3e09f0275283070c64e984d9fa5410bf944480103dd9c78650",
-      "generated_at": "2026-01-20T20:35:05+08:00",
+      "source_digest": "sha256:d983c72a74ab43fef2a96f78b12e02b0b687b9a0bbe208cf5f8452d76db798ff",
+      "generated_at": "2026-06-27T16:41:26+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -75,8 +75,8 @@
       "title": "VM Bytecode",
       "source": "lang/docs/spec/vm-bytecode.md",
       "output": "spec/vm-bytecode.md",
-      "source_digest": "sha256:97a149bafa23c666f395555258000139c05806b99e206454510868236586a812",
-      "generated_at": "2026-01-29T19:15:13+08:00",
+      "source_digest": "sha256:2646d28baef63204f043c848c0128c83678f521e771e54e731df68c5079dc4d5",
+      "generated_at": "2026-06-27T16:41:26+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     },
     {
@@ -84,8 +84,8 @@
       "title": "JIT Design",
       "source": "lang/docs/spec/vm-jit-design.md",
       "output": "spec/vm-jit-design.md",
-      "source_digest": "sha256:8a883d71d0aa1829b6844a2b03026b26691c70720491f56f6af03c431459bb45",
-      "generated_at": "2026-06-03T02:10:07+08:00",
+      "source_digest": "sha256:7aba9c71d862a3efb599e62988e31adc68163a619abdd8a3b16965bb9266e4a2",
+      "generated_at": "2026-06-27T16:41:26+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
     }
   ]

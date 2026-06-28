@@ -6,6 +6,7 @@ use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitResult;
 
 use crate::fiber::Fiber;
+use crate::frame_call::{validate_call_frame_shape, validate_call_return_window};
 use crate::vm::{ExecResult, Vm};
 
 use super::bridge_result::{
@@ -13,6 +14,19 @@ use super::bridge_result::{
 };
 use super::context::{build_jit_context, JitContextWrapper};
 use super::transition::handle_jit_non_ok_transition;
+
+#[cfg(test)]
+fn heap_error_return_gcref_index(func: &vo_runtime::bytecode::FunctionDef) -> Option<usize> {
+    if func.error_ret_slot < 0 {
+        return None;
+    }
+    let gcref_count = func.heap_ret_gcref_count as usize;
+    if gcref_count == 0 {
+        None
+    } else {
+        Some(gcref_count - 1)
+    }
+}
 
 /// Execute a JIT-compiled function call.
 ///
@@ -52,11 +66,34 @@ pub fn dispatch_jit_call(
     let local_slots = func_def.local_slots as usize;
     let gc_scan_slots = func_def.gc_scan_slots as usize;
     let ret_slots = func_def.ret_slots as usize;
+    let ret_reg = match arg_start.checked_add(arg_slots) {
+        Some(ret_reg) => match u16::try_from(ret_reg) {
+            Ok(ret_reg) => ret_reg,
+            Err(_) => {
+                return ExecResult::JitError(format!(
+                    "JIT call return offset {ret_reg} exceeds u16 for func_id={} name={}",
+                    func_id, func_def.name
+                ));
+            }
+        },
+        None => {
+            return ExecResult::JitError(format!(
+                "JIT call return offset overflow: arg_start={arg_start} arg_slots={arg_slots} func_id={} name={}",
+                func_id, func_def.name
+            ));
+        }
+    };
+    if let Err(err) = validate_call_frame_shape(func_def) {
+        return ExecResult::JitError(err.message("JIT call callee frame shape"));
+    }
+    if let Err(err) = validate_call_return_window(caller_func, ret_reg, ret_slots as u16) {
+        return ExecResult::JitError(err.message("JIT call caller return window"));
+    }
 
     let jit_bp = match fiber.try_push_borrowed_call_frame(
         func_id,
         arg_start as u16,
-        (arg_start + arg_slots) as u16,
+        ret_reg,
         ret_slots as u16,
         caller_scan_slots,
         local_slots as u16,
@@ -119,6 +156,11 @@ fn invoke_jit_and_handle(
     ctx.ctx.stack_ptr = fiber.stack_ptr();
     ctx.ctx.stack_cap = fiber.stack.len() as u32;
     ctx.ctx.jit_bp = jit_bp as u32;
+    ctx.ctx.current_func_id = fiber
+        .frames
+        .last()
+        .map(|frame| frame.func_id)
+        .unwrap_or(u32::MAX);
 
     // Stack buffer for return values - avoids heap allocation for the common case (<=16 slots).
     // Most functions return 0-4 slots; 16 covers all practical cases.
@@ -134,7 +176,8 @@ fn invoke_jit_and_handle(
     let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
 
-    handle_jit_result(vm, fiber, module, result, ctx, ret_slots, ret)
+    let exec_result = handle_jit_result(vm, fiber, module, result, ctx, ret_slots, ret);
+    vm.attach_pending_runtime_transitions(exec_result)
 }
 
 fn handle_jit_result(
@@ -164,7 +207,16 @@ fn handle_jit_result(
             // Nested JIT callees may leave stale values in ctx; the function's
             // static properties are the ground truth.
             let heap_returns = func.heap_ret_gcref_count > 0 && ctx.ctx.ret_is_heap != 0;
-            let ret_gcref_start = ctx.ctx.ret_gcref_start as usize;
+            if heap_returns && ctx.ctx.ret_gcref_start != func.heap_ret_gcref_start {
+                return ExecResult::JitError(format!(
+                    "JIT heap return metadata mismatch: ctx ret_gcref_start={} function ret_gcref_start={} func_id={} name={}",
+                    ctx.ctx.ret_gcref_start,
+                    func.heap_ret_gcref_start,
+                    frame.func_id,
+                    func.name
+                ));
+            }
+            let ret_gcref_start = func.heap_ret_gcref_start as usize;
 
             // errdefer should run if:
             // - explicit fail return (set by JIT), OR
@@ -174,34 +226,21 @@ fn handle_jit_result(
             } else if ctx.ctx.is_error_return != 0 {
                 true
             } else if heap_returns {
-                // error_ret_slot is the index within heap returns, read from GcRef
-                let gcref_count = func.heap_ret_gcref_count as usize;
-                let error_gcref_idx = func.error_ret_slot as usize;
-                if gcref_count == 0 || error_gcref_idx >= gcref_count {
-                    false
-                } else {
-                    let bp = frame.bp;
-                    let Some(gcref_slot) = bp
-                        .checked_add(ret_gcref_start)
-                        .and_then(|slot| slot.checked_add(error_gcref_idx))
-                    else {
-                        return ExecResult::JitError(
-                            "JIT heap return error slot calculation overflowed".into(),
-                        );
-                    };
-                    let Some(&gcref_raw) = fiber.stack.get(gcref_slot) else {
-                        return ExecResult::JitError(format!(
-                            "JIT heap return error slot {gcref_slot} is outside fiber stack"
-                        ));
-                    };
-                    if gcref_raw == 0 {
-                        false
-                    } else {
-                        // Read slot0 of the error interface from heap
-                        let slot0 = unsafe { *(gcref_raw as vo_runtime::gc::GcRef) };
-                        (slot0 & 0xFF) != 0
-                    }
-                }
+                let slot0 = match crate::exec::read_heap_error_return_slot0_for_errdefer(
+                    &vm.state.gc,
+                    fiber,
+                    func,
+                    frame.bp,
+                    ret_gcref_start,
+                    func.heap_ret_gcref_count as usize,
+                    frame.func_id,
+                    frame.pc,
+                    "JIT heap return error check",
+                ) {
+                    Ok(slot0) => slot0,
+                    Err(result) => return result,
+                };
+                (slot0 & 0xFF) != 0
             } else {
                 let idx = func.error_ret_slot as usize;
                 if idx >= ret_slots {
@@ -245,9 +284,10 @@ mod tests {
     use super::super::test_support::function;
     use super::*;
     use crate::vm::JitConfig;
+    use vo_runtime::SlotType;
 
     #[test]
-    fn heap_return_error_slot_outside_stack_is_jit_error() {
+    fn vm_heap_return_metadata_mismatch_is_jit_error() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-heap-return-bounds-test".to_string());
         let mut func = function(1, 0);
@@ -264,14 +304,14 @@ mod tests {
 
         match handle_jit_result(&mut vm, &mut fiber, &module, JitResult::Ok, ctx, 0, &[]) {
             ExecResult::JitError(msg) => {
-                assert!(msg.contains("heap return error slot"), "{msg}")
+                assert!(msg.contains("heap return metadata mismatch"), "{msg}")
             }
-            other => panic!("out-of-range heap return slot must be JitError, got {other:?}"),
+            other => panic!("heap return metadata mismatch must be JitError, got {other:?}"),
         }
     }
 
     #[test]
-    fn stack_return_error_slot_outside_ret_buffer_is_jit_error() {
+    fn vm_stack_return_error_slot_outside_ret_buffer_is_jit_error() {
         let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
         let mut module = Module::new("jit-stack-return-error-slot-test".to_string());
         let mut func = function(1, 0);
@@ -289,5 +329,118 @@ mod tests {
             }
             other => panic!("out-of-range stack return error slot must be JitError, got {other:?}"),
         }
+    }
+
+    extern "C" fn unreachable_jit_call(
+        _ctx: *mut vo_runtime::jit_api::JitContext,
+        _args: *mut u64,
+        _ret: *mut u64,
+    ) -> JitResult {
+        panic!("frame-shape validation must reject before invoking JIT code")
+    }
+
+    #[test]
+    fn vm_jit_dispatch_rejects_scan_slots_beyond_locals_before_stack_overflow_trap_062() {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-dispatch-frame-shape-test".to_string());
+        module.functions.push(function(1, 0));
+        module.functions.push(function(1, 2));
+
+        let mut fiber = Fiber::new(7);
+        fiber.push_frame(0, 1, 0, 0, 0);
+        let before_frames = fiber.frames.len();
+        let before_sp = fiber.sp;
+        let inst = Instruction::new(vo_runtime::instruction::Opcode::Call, 1, 0, 0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch_jit_call(&mut vm, &mut fiber, &inst, &module, unreachable_jit_call, 1)
+        }));
+
+        match result {
+            Ok(ExecResult::JitError(msg)) => {
+                assert!(msg.contains("JIT call callee frame shape"), "{msg}");
+            }
+            Ok(other) => panic!("JIT frame-shape drift should be JitError, got {other:?}"),
+            Err(_) => panic!("JIT frame-shape drift must not panic"),
+        }
+        assert_eq!(fiber.frames.len(), before_frames);
+        assert_eq!(fiber.sp, before_sp);
+    }
+
+    #[test]
+    fn vm_jit_ok_errdefer_heap_return_check_rejects_short_error_allocation_before_defer_059() {
+        let mut vm = Vm::try_with_jit_config(JitConfig::default()).expect("jit vm");
+        let mut module = Module::new("jit-errdefer-heap-return-short-error".to_string());
+        let mut func = function(1, 0);
+        func.slot_types = vec![SlotType::GcRef];
+        func.ret_slots = 2;
+        func.ret_slot_types = vec![SlotType::Interface0, SlotType::Interface1];
+        func.heap_ret_gcref_count = 1;
+        func.heap_ret_gcref_start = 0;
+        func.heap_ret_slots = vec![2];
+        func.error_ret_slot = 0;
+        func.has_defer = true;
+        module.functions.push(func);
+        module.functions.push(function(0, 0));
+
+        let mut fiber = Fiber::new(7);
+        fiber.push_frame(0, 1, 0, 0, 0);
+        let short_ref = vm.state.gc.alloc(
+            vo_runtime::ValueMeta::new(0, vo_runtime::ValueKind::Struct),
+            1,
+        );
+        unsafe { vo_runtime::gc::Gc::write_slot(short_ref, 0, 1) };
+        fiber.stack[0] = short_ref as u64;
+        fiber.defer_stack.push(crate::fiber::DeferEntry {
+            frame_depth: fiber.frames.len(),
+            func_id: 1,
+            closure: core::ptr::null_mut(),
+            args: core::ptr::null_mut(),
+            arg_layout: crate::fiber::DeferArgLayout {
+                slot_types: Vec::new(),
+            },
+            is_closure: false,
+            is_errdefer: true,
+            registered_at_generation: 0,
+        });
+        let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
+        ctx.ctx.ret_is_heap = 1;
+        ctx.ctx.ret_gcref_start = 0;
+        ctx.ctx.is_error_return = 0;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_jit_result(&mut vm, &mut fiber, &module, JitResult::Ok, ctx, 0, &[])
+        }));
+
+        match result {
+            Ok(ExecResult::JitError(msg)) => {
+                assert!(msg.contains("JIT heap return error check"), "{msg}");
+                assert!(msg.contains("heap return allocation too small"), "{msg}");
+                assert!(msg.contains("required_slots=2"), "{msg}");
+            }
+            Ok(other) => panic!(
+                "short JIT heap error allocation should fail before errdefer frame, got {other:?}"
+            ),
+            Err(_) => panic!("short JIT heap error allocation must not be dereferenced"),
+        }
+        assert_eq!(fiber.frames.len(), 1);
+        assert!(fiber.unwinding.is_none());
+    }
+
+    #[test]
+    fn vm_jit_heap_error_return_uses_final_heap_ref_058() {
+        let mut func = function(1, 0);
+        func.ret_slots = 4;
+        func.ret_slot_types = vec![
+            SlotType::Value,
+            SlotType::GcRef,
+            SlotType::Interface0,
+            SlotType::Interface1,
+        ];
+        func.heap_ret_gcref_count = 2;
+        func.heap_ret_slots = vec![2, 2];
+        func.error_ret_slot = 2;
+
+        assert_eq!(heap_error_return_gcref_index(&func), Some(1));
     }
 }

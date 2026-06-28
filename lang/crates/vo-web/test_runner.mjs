@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // WASM test runner for vo test cases
-// Usage: node test_runner.mjs --plan <plan.json>
+// Usage: node test_runner.mjs --plan <plan.json> [--format text|json]
 
 import { readFileSync, existsSync } from "fs";
 import { join, relative, dirname, resolve } from "path";
@@ -111,17 +111,47 @@ async function compileAndRunJob(job, source, relPath) {
   );
 }
 
-async function runPlanJob(job) {
+function jsonJob(job, status, elapsedMs, stdout, stderr, error) {
+  return {
+    id: job.id,
+    case_id: job.case_id,
+    kind: job.kind,
+    path: job.path,
+    target: job.target,
+    backend: job.backend,
+    matrix: job.matrix ?? null,
+    tags: Array.isArray(job.tags) ? job.tags : [],
+    owner: job.owner ?? null,
+    expect: job.expect ?? { kind: "pass" },
+    status,
+    elapsed_ms: elapsedMs,
+    stdout: stdout ?? "",
+    stderr: stderr ?? "",
+    error: error ?? "",
+    skip_reason: null,
+    failure_reason: status === "failed" && error ? error : null,
+    baseline: null,
+    artifacts: [],
+  };
+}
+
+async function runPlanJob(job, format) {
+  const start = Date.now();
+  const emitText = format === "text";
   if (job.kind !== "file") {
     const message = `unsupported case kind ${job.kind}`;
-    console.log(`  ${RED}✗${NC} ${job.id} [wasm] ${message}`);
-    return { passed: false, label: job.id, error: message };
+    if (emitText) {
+      console.log(`  ${RED}✗${NC} ${job.id} [wasm] ${message}`);
+    }
+    return jsonJob(job, "failed", Date.now() - start, "", "", message);
   }
   const fullPath = resolveTestPath(job.path);
   if (!existsSync(fullPath)) {
     const message = `file not found: ${job.path}`;
-    console.log(`  ${RED}✗${NC} ${job.id} [wasm] ${message}`);
-    return { passed: false, label: job.id, error: message };
+    if (emitText) {
+      console.log(`  ${RED}✗${NC} ${job.id} [wasm] ${message}`);
+    }
+    return jsonJob(job, "failed", Date.now() - start, "", "", message);
   }
 
   const source = readFileSync(fullPath, "utf-8");
@@ -134,36 +164,92 @@ async function runPlanJob(job) {
       const message = `${result.stderr ?? ""}\n${result.stdout ?? ""}`;
       const patterns = patternsForExpect(job.expect);
       if (result.status === "compile_error" && patternsMatch(message, patterns)) {
-        console.log(`  ${GREEN}✓${NC} ${relPath} [wasm compile-fail]`);
-        return { passed: true, label: relPath, error: "" };
+        if (emitText) {
+          console.log(`  ${GREEN}✓${NC} ${relPath} [wasm compile-fail]`);
+        }
+        return jsonJob(
+          job,
+          "passed",
+          Date.now() - start,
+          result.stdout ?? "",
+          result.stderr ?? "",
+          "",
+        );
       }
       const error = message.trim();
-      console.log(`  ${RED}✗${NC} ${relPath} [wasm compile-fail] ${error.slice(0, 80)}`);
-      return { passed: false, label: relPath, error };
+      if (emitText) {
+        console.log(`  ${RED}✗${NC} ${relPath} [wasm compile-fail] ${error.slice(0, 80)}`);
+      }
+      return jsonJob(
+        job,
+        "failed",
+        Date.now() - start,
+        result.stdout ?? "",
+        result.stderr ?? "",
+        error,
+      );
     }
 
     if (result.status === "ok") {
-      console.log(`  ${GREEN}✓${NC} ${relPath} [wasm]`);
-      return { passed: true, label: relPath, error: "" };
+      if (emitText) {
+        console.log(`  ${GREEN}✓${NC} ${relPath} [wasm]`);
+      }
+      return jsonJob(
+        job,
+        "passed",
+        Date.now() - start,
+        result.stdout ?? "",
+        result.stderr ?? "",
+        "",
+      );
     }
     const error = result.stderr ?? "";
-    console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${error.slice(0, 80)}`);
-    return { passed: false, label: relPath, error };
+    if (emitText) {
+      console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${error.slice(0, 80)}`);
+    }
+    return jsonJob(
+      job,
+      "failed",
+      Date.now() - start,
+      result.stdout ?? "",
+      result.stderr ?? "",
+      error,
+    );
   } catch (e) {
     const error = e.message || String(e);
-    console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${error.slice(0, 80)}`);
-    return { passed: false, label: relPath, error };
+    if (emitText) {
+      console.log(`  ${RED}✗${NC} ${relPath} [wasm] ${error.slice(0, 80)}`);
+    }
+    return jsonJob(job, "failed", Date.now() - start, "", "", error);
   }
 }
 
 function loadPlan(args) {
-  if (args.length !== 2 || args[0] !== "--plan") {
-    console.error("Usage: node test_runner.mjs --plan <plan.json>");
+  let planPath;
+  let format = "text";
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--plan") {
+      i++;
+      planPath = args[i];
+    } else if (arg.startsWith("--plan=")) {
+      planPath = arg.slice("--plan=".length);
+    } else if (arg === "--format") {
+      i++;
+      format = args[i] ?? "";
+    } else if (arg.startsWith("--format=")) {
+      format = arg.slice("--format=".length);
+    } else {
+      console.error(`unknown argument: ${arg}`);
+      process.exit(2);
+    }
+  }
+  if (!planPath) {
+    console.error("Usage: node test_runner.mjs --plan <plan.json> [--format text|json]");
     process.exit(2);
   }
-  const planPath = args[1];
-  if (!planPath) {
-    console.error("--plan requires a path");
+  if (format !== "text" && format !== "json") {
+    console.error("--format must be text or json");
     process.exit(2);
   }
   const plan = JSON.parse(readFileSync(planPath, "utf-8"));
@@ -171,7 +257,7 @@ function loadPlan(args) {
     console.error(`Unsupported test plan schema: ${plan.schema}`);
     process.exit(2);
   }
-  return plan;
+  return { plan, format };
 }
 
 async function main() {
@@ -182,32 +268,45 @@ async function main() {
   await init({ module_or_path: wasmBytes });
 
   const args = process.argv.slice(2);
-  const plan = loadPlan(args);
+  const { plan, format } = loadPlan(args);
   if (!Array.isArray(plan.jobs) || plan.jobs.length === 0) {
     console.error("WASM test plan contains no jobs");
     process.exit(2);
   }
-  console.log(`Running ${plan.suite ?? "selected"} WASM tests...\n`);
-  let passed = 0;
-  let failed = 0;
-  const failures = [];
+  if (format === "text") {
+    console.log(`Running ${plan.suite ?? "selected"} WASM tests...\n`);
+  }
+  const jobs = [];
   for (const job of plan.jobs) {
-    const result = await runPlanJob(job);
-    if (result.passed) {
-      passed++;
-    } else {
-      failed++;
-      failures.push(result);
-    }
+    jobs.push(await runPlanJob(job, format));
   }
+  const passed = jobs.filter((job) => job.status === "passed").length;
+  const failed = jobs.filter((job) => job.status === "failed").length;
 
-  if (failures.length > 0) {
+  if (format === "json") {
+    console.log(
+      JSON.stringify(
+        {
+          schema: "volang.test-result.v1",
+          suite: plan.suite ?? "lang",
+          passed,
+          failed,
+          skipped: 0,
+          jobs,
+        },
+        null,
+        2,
+      ),
+    );
+  } else if (failed > 0) {
     console.log("\nFailures:");
-    for (const failure of failures) {
-      console.log(`  ✗ ${failure.label} ${failure.error}`.trimEnd());
+    for (const failure of jobs.filter((job) => job.status === "failed")) {
+      console.log(`  ✗ ${failure.id} ${failure.error}`.trimEnd());
     }
+    console.log(`\n${passed} passed, ${failed} failed`);
+  } else {
+    console.log(`\n${passed} passed, ${failed} failed`);
   }
-  console.log(`\n${passed} passed, ${failed} failed`);
 
   if (failed > 0) {
     process.exit(1);

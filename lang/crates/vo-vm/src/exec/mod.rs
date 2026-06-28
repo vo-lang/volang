@@ -1,4 +1,5 @@
 //! Instruction execution modules.
+#![allow(dead_code)]
 
 mod array;
 mod call;

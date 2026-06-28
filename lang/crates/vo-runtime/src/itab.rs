@@ -8,6 +8,8 @@
 //! construct correct interface values (with non-zero itab_id) when needed.
 
 #[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 #[cfg(not(feature = "std"))]
@@ -18,6 +20,31 @@ use std::collections::HashMap;
 use crate::ValueKind;
 use vo_common_core::bytecode::{InterfaceMeta, Itab, Module, NamedTypeMeta};
 use vo_common_core::runtime_type::RuntimeType;
+
+pub fn expected_interface_itab_methods(
+    named_type_id: u32,
+    iface_meta_id: u32,
+    src_is_pointer: bool,
+    named_type_metas: &[NamedTypeMeta],
+    interface_metas: &[InterfaceMeta],
+) -> Option<Vec<u32>> {
+    let named_type = named_type_metas.get(named_type_id as usize)?;
+    let iface_meta = interface_metas.get(iface_meta_id as usize)?;
+
+    let mut methods = Vec::with_capacity(iface_meta.methods.len());
+    for iface_method in &iface_meta.methods {
+        let method_info = named_type.methods.get(&iface_method.name)?;
+        // Value types cannot use pointer receiver methods
+        if !src_is_pointer && method_info.is_pointer_receiver {
+            return None;
+        }
+        if method_info.signature_rttid != iface_method.signature_rttid {
+            return None;
+        }
+        methods.push(method_info.func_id);
+    }
+    Some(methods)
+}
 
 /// Unified itab table with runtime cache for interface-to-interface assignments.
 #[derive(Debug, Default)]
@@ -31,6 +58,11 @@ pub struct ItabCache {
 impl ItabCache {
     /// Create from module's compile-time itabs
     pub fn from_module_itabs(itabs: Vec<Itab>) -> Self {
+        let itabs = if itabs.is_empty() {
+            vec![Itab::default()]
+        } else {
+            itabs
+        };
         Self {
             cache: HashMap::new(),
             itabs,
@@ -40,7 +72,7 @@ impl ItabCache {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
-            itabs: Vec::new(),
+            itabs: vec![Itab::default()],
         }
     }
 
@@ -116,20 +148,18 @@ impl ItabCache {
         named_type_metas: &[NamedTypeMeta],
         interface_metas: &[InterfaceMeta],
     ) -> Option<Itab> {
-        let named_type = named_type_metas.get(named_type_id as usize)?;
-        let iface_meta = interface_metas.get(iface_meta_id as usize)?;
+        let methods = expected_interface_itab_methods(
+            named_type_id,
+            iface_meta_id,
+            src_is_pointer,
+            named_type_metas,
+            interface_metas,
+        )?;
 
-        let mut methods = Vec::with_capacity(iface_meta.method_names.len());
-        for name in &iface_meta.method_names {
-            let method_info = named_type.methods.get(name)?;
-            // Value types cannot use pointer receiver methods
-            if !src_is_pointer && method_info.is_pointer_receiver {
-                return None;
-            }
-            methods.push(method_info.func_id);
-        }
-
-        Some(Itab { methods })
+        Some(Itab {
+            iface_meta_id,
+            methods,
+        })
     }
 
     #[inline]
@@ -209,5 +239,89 @@ fn extract_named_type_id(rt: &RuntimeType, runtime_types: &[RuntimeType]) -> Opt
             .get(elem_value_rttid.rttid() as usize)
             .and_then(|inner| extract_named_type_id(inner, runtime_types)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vo_common_core::bytecode::{InterfaceMethodMeta, MethodInfo};
+    use vo_common_core::types::{ValueMeta, ValueRttid};
+
+    #[test]
+    fn itab_cache_reserves_zero_for_no_itab_060() {
+        let mut methods = std::collections::BTreeMap::new();
+        methods.insert(
+            "M".to_string(),
+            MethodInfo {
+                func_id: 7,
+                is_pointer_receiver: false,
+                receiver_is_iface_boxed: false,
+                signature_rttid: 3,
+            },
+        );
+        let named = vec![NamedTypeMeta {
+            name: "T".to_string(),
+            underlying_meta: ValueMeta::new(0, ValueKind::Int64),
+            underlying_rttid: ValueRttid::new(0, ValueKind::Int64),
+            methods,
+        }];
+        let interfaces = vec![InterfaceMeta {
+            name: "I".to_string(),
+            method_names: vec!["M".to_string()],
+            methods: vec![InterfaceMethodMeta {
+                name: "M".to_string(),
+                signature_rttid: 3,
+            }],
+        }];
+
+        let mut cache = ItabCache::new();
+        assert_eq!(cache.get_itab(0).map(|itab| itab.methods.len()), Some(0));
+        assert_eq!(
+            cache.try_get_or_create(0, 0, false, &named, &interfaces),
+            Some(1)
+        );
+
+        let mut cache = ItabCache::from_module_itabs(Vec::new());
+        assert_eq!(cache.get_itab(0).map(|itab| itab.methods.len()), Some(0));
+        assert_eq!(
+            cache.try_get_or_create(0, 0, false, &named, &interfaces),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn itab_cache_rejects_signature_mismatch_060() {
+        let mut methods = std::collections::BTreeMap::new();
+        methods.insert(
+            "M".to_string(),
+            MethodInfo {
+                func_id: 7,
+                is_pointer_receiver: false,
+                receiver_is_iface_boxed: false,
+                signature_rttid: 3,
+            },
+        );
+        let named = vec![NamedTypeMeta {
+            name: "T".to_string(),
+            underlying_meta: ValueMeta::new(0, ValueKind::Int64),
+            underlying_rttid: ValueRttid::new(0, ValueKind::Int64),
+            methods,
+        }];
+        let interfaces = vec![InterfaceMeta {
+            name: "I".to_string(),
+            method_names: vec!["M".to_string()],
+            methods: vec![InterfaceMethodMeta {
+                name: "M".to_string(),
+                signature_rttid: 4,
+            }],
+        }];
+
+        let mut cache = ItabCache::new();
+
+        assert_eq!(
+            cache.try_get_or_create(0, 0, false, &named, &interfaces),
+            None
+        );
     }
 }

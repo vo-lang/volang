@@ -38,8 +38,8 @@ Examples:
 ```bash
 ./d.py test both
 ./d.py test jit --release
-./d.py test compile tests/lang/cases/goto_stmt.vo
-./d.py test wasm tests/lang/cases/append_self_slice.vo
+./d.py test compile tests/lang/cases/typechecker/goto_stmt.vo
+./d.py test wasm tests/lang/cases/runtime/slice/append_self_slice.vo
 ./d.py ci smart
 ./d.py ci task cargo-check
 ./d.py ci task:studio-wasm-build

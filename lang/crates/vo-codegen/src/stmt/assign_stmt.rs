@@ -237,14 +237,14 @@ fn compile_multi_value_assign(
                     vo_runtime::SlotType::Interface0,
                     vo_runtime::SlotType::Interface1,
                 ],
-            );
+            )?;
         } else {
             // Non-interface: apply truncation and store via LValue
             emit_int_trunc(tuple.base + offset, elem_type, func, info);
 
             let lv = resolve_lvalue(lhs_expr, ctx, func, info)?;
             let slot_types = info.type_slot_types(elem_type).to_vec();
-            emit_lvalue_store(&lv, tuple.base + offset, ctx, func, &slot_types);
+            emit_lvalue_store(&lv, tuple.base + offset, ctx, func, &slot_types)?;
         }
         offset += elem_slots;
     }
@@ -275,7 +275,7 @@ fn compile_parallel_assign(
         let mut lv = resolve_lvalue(lhs, ctx, func, info)?;
         // Snapshot index values to prevent later LHS assignments from affecting them
         // e.g., `idx, m[idx] = 5, 10` - the map key must use old idx value
-        snapshot_lvalue_index(&mut lv, func);
+        snapshot_lvalue_index(&mut lv, func)?;
         lhs_lvalues.push(Some((lv, lhs_type)));
     }
 
@@ -318,12 +318,12 @@ fn compile_parallel_assign(
                         vo_runtime::SlotType::Interface0,
                         vo_runtime::SlotType::Interface1,
                     ],
-                );
+                )?;
             } else {
                 // Apply truncation for narrow integer types (Go semantics)
                 emit_int_trunc(*tmp, lhs_type, func, info);
                 let slot_types = info.type_slot_types(lhs_type);
-                emit_lvalue_store(&lv, *tmp, ctx, func, &slot_types);
+                emit_lvalue_store(&lv, *tmp, ctx, func, &slot_types)?;
             }
         }
     }
@@ -364,7 +364,7 @@ fn compile_assign(
         info,
     )?;
 
-    emit_lvalue_store(&lv, tmp, ctx, func, &slot_types);
+    emit_lvalue_store(&lv, tmp, ctx, func, &slot_types)?;
 
     Ok(())
 }
@@ -430,11 +430,11 @@ fn compile_compound_assign(
         vo_runtime::SlotType::Value
     };
     let tmp = func.alloc_slots(&[slot_type]);
-    emit_lvalue_load(&lv, tmp, ctx, func);
+    emit_lvalue_load(&lv, tmp, ctx, func)?;
     func.emit_op(opcode, tmp, tmp, rhs_reg);
     // Apply truncation for narrow integer types (Go semantics)
     emit_int_trunc(tmp, lhs_type, func, info);
-    emit_lvalue_store(&lv, tmp, ctx, func, &[slot_type]);
+    emit_lvalue_store(&lv, tmp, ctx, func, &[slot_type])?;
 
     Ok(())
 }

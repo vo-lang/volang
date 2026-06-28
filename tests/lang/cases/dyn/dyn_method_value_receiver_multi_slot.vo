@@ -1,0 +1,51 @@
+// Regression: dynamic method lookup must capture every value-receiver slot.
+package main
+
+import "fmt"
+
+type Pair struct {
+	a int
+	b int
+}
+
+func (p Pair) Sum() int {
+	return p.a + p.b
+}
+
+func (p Pair) Mix(n int) int {
+	return p.a*100 + p.b*10 + n
+}
+
+func main() {
+	p := Pair{a: 3, b: 4}
+	var box interface{} = p
+
+	sumMethod, err := box~>Sum
+	assert(err == nil, "Sum method lookup on Pair")
+	sum := sumMethod.(func() int)
+	assert(sum() == 7, "Pair dynamic method value must capture both receiver slots")
+	fmt.Println("Pair Sum:", sum())
+
+	mixed, err := box~>Mix(8)
+	assert(err == nil, "Mix dynamic call on Pair")
+	assert(mixed.(int) == 348, "Pair dynamic method call must pass full receiver")
+	fmt.Println("Pair Mix:", mixed.(int))
+
+	q := Pair{a: 5, b: 6}
+	var ptrBox interface{} = &q
+	ptrSumMethod, err := ptrBox~>Sum
+	assert(err == nil, "Sum method lookup on *Pair")
+	ptrSum := ptrSumMethod.(func() int)
+	q.a = 50
+	q.b = 60
+	assert(ptrSum() == 110, "value receiver on pointer must observe pointee changes")
+	fmt.Println("*Pair Sum captured:", ptrSum())
+
+	fmt.Println("done")
+}
+
+// expected output:
+// Pair Sum: 7
+// Pair Mix: 348
+// *Pair Sum captured: 110
+// done
