@@ -1,4 +1,5 @@
 use crate::config::{load_tasks, load_toolchains, Task};
+use crate::first_party::ci_checkout_untracked_prefixes;
 use crate::task_graph::{resolve_selector, task_map, task_tools_recursive};
 use crate::tool_lint::lint_toolchain_file;
 use crate::tool_system::check_tools;
@@ -166,6 +167,12 @@ fn ensure_no_untracked_vm_production_source(root: &Path) -> Result<()> {
         path != "lang/docs/dev/vm-production-readiness.md"
             && !path.starts_with("lang/docs/dev/vm-production-gate-evidence/")
     });
+    let ci_checkout_prefixes = ci_checkout_untracked_prefixes(root)?;
+    files.retain(|path| {
+        !ci_checkout_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+    });
     files.sort();
     if files.is_empty() {
         return Ok(());
@@ -330,6 +337,55 @@ tier = "release"
             msg.contains(".github/workflows/production-readiness.yml"),
             "{msg}"
         );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn vm_production_source_state_ignores_declared_ci_checkout_039() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-vo-dev-source-state-ci-checkout-{stamp}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("eng")).expect("eng dir");
+        fs::create_dir_all(root.join("lang/docs/dev")).expect("docs dir");
+        fs::write(root.join("src.vo"), "package main\nfunc main() {}\n").expect("src");
+        fs::write(
+            root.join("lang/docs/dev/vm-production-readiness.md"),
+            "# VM Production Readiness Plan\n",
+        )
+        .expect("readiness");
+        fs::write(
+            root.join("eng/project.toml"),
+            r#"version = 1
+
+[repo]
+name = "volang"
+module = "github.com/vo-lang/volang"
+
+[[first_party]]
+name = "vogui"
+repository = "vo-lang/vogui"
+ci_checkout = true
+"#,
+        )
+        .expect("project config");
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["add", "."]);
+
+        fs::create_dir_all(root.join("ci_modules/vogui")).expect("ci checkout dir");
+        fs::write(
+            root.join("ci_modules/vogui/vo.mod"),
+            "module github.com/vo-lang/vogui\n",
+        )
+        .expect("ci checkout source");
+
+        current_vm_production_source_state_hash(&root)
+            .expect("declared CI checkout should not dirty final evidence state");
 
         fs::remove_dir_all(root).ok();
     }
