@@ -4521,8 +4521,19 @@ path = "cases/lang/test/http_client_test.vo"
 matrix = "default"
 tags = ["stdlib"]
 owner = "stdlib"
-skip = ["jit", "osr", "nostd"]
-reason = "http via fetch API (W3); native HTTP extern blocks under JIT; nostd: net externs are not registered in vo-embed"
+skip = ["jit", "osr", "nostd", "wasm"]
+reason = "native loopback HTTP client requires net.Listen; native HTTP extern blocks under JIT; nostd/wasm net listener externs are unavailable"
+expect = "pass"
+
+[[case]]
+id = "lang.test.http-fetch-test"
+kind = "file"
+path = "cases/lang/test/http_fetch_test.vo"
+matrix = "default"
+tags = ["stdlib"]
+owner = "stdlib"
+skip = ["jit", "nostd", "osr", "vm"]
+reason = "WASM fetch client coverage uses a data URL; native loopback HTTP client coverage lives in http-client-test"
 expect = "pass"
 
 [[case]]
