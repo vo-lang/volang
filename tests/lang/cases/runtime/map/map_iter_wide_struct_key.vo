@@ -1,0 +1,63 @@
+package main
+
+import "fmt"
+
+type WideKey struct {
+    a0  int
+    a1  int
+    a2  int
+    a3  int
+    a4  int
+    a5  int
+    a6  int
+    a7  int
+    a8  int
+    a9  int
+    a10 int
+    a11 int
+    a12 int
+    a13 int
+    a14 int
+    a15 int
+    a16 int
+}
+
+func makeWideKey(seed int) WideKey {
+    return WideKey{
+        seed + 0,
+        seed + 1,
+        seed + 2,
+        seed + 3,
+        seed + 4,
+        seed + 5,
+        seed + 6,
+        seed + 7,
+        seed + 8,
+        seed + 9,
+        seed + 10,
+        seed + 11,
+        seed + 12,
+        seed + 13,
+        seed + 14,
+        seed + 15,
+        seed + 16,
+    }
+}
+
+func main() {
+    m := map[WideKey]int{
+        makeWideKey(1): 10,
+        makeWideKey(2): 20,
+    }
+
+    seen := 0
+    sum := 0
+    for k, v := range m {
+        seen += 1
+        sum += k.a0 + k.a16 + v
+    }
+
+    assert(seen == 2, "wide struct-keyed map should iterate both entries")
+    assert(sum == 68, "wide struct key/value iteration should preserve all slots")
+    fmt.Println("map_iter_wide_struct_key: ok")
+}

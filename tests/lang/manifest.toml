@@ -4686,6 +4686,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "map-iter-wide-struct-key"
+kind = "file"
+path = "cases/runtime/map/map_iter_wide_struct_key.vo"
+matrix = "default"
+tags = ["runtime", "map", "struct", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "map-key-types"
 kind = "file"
 path = "cases/typechecker/map_key_types.vo"
@@ -5246,6 +5255,15 @@ kind = "file"
 path = "cases/runtime/method/pointer_method_call.vo"
 matrix = "default"
 tags = ["runtime", "method", "numeric"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "pointer-float-field-compound"
+kind = "file"
+path = "cases/runtime/struct/pointer_float_field_compound.vo"
+matrix = "default"
+tags = ["runtime", "regression", "struct", "numeric"]
 owner = "runtime"
 expect = "pass"
 

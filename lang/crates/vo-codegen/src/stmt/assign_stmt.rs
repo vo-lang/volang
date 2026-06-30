@@ -422,19 +422,14 @@ fn compile_compound_assign(
         return Ok(());
     }
 
-    // General path: read current value, apply operation, write back
-    // Use proper slot type for strings (GcRef) vs numeric types (Value)
-    let slot_type = if is_string {
-        vo_runtime::SlotType::GcRef
-    } else {
-        vo_runtime::SlotType::Value
-    };
-    let tmp = func.alloc_slots(&[slot_type]);
+    // General path: read current value, apply operation, write back.
+    let slot_types = info.type_slot_types(lhs_type);
+    let tmp = func.alloc_slots(&slot_types);
     emit_lvalue_load(&lv, tmp, ctx, func)?;
     func.emit_op(opcode, tmp, tmp, rhs_reg);
     // Apply truncation for narrow integer types (Go semantics)
     emit_int_trunc(tmp, lhs_type, func, info);
-    emit_lvalue_store(&lv, tmp, ctx, func, &[slot_type])?;
+    emit_lvalue_store(&lv, tmp, ctx, func, &slot_types)?;
 
     Ok(())
 }

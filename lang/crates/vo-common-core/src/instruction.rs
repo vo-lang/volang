@@ -24,6 +24,7 @@ pub const MAP_NEW_MAX_KEY_VAL_SLOTS: u16 = 0xFF;
 pub const MAP_SET_MAX_KEY_VAL_SLOTS: u16 = 0xFF;
 pub const MAP_GET_MAX_VALUE_SLOTS: u16 = 0x7FFF;
 pub const MAP_ITER_MAX_KEY_VAL_SLOTS: u16 = 0x0F;
+pub const MAP_ITER_METADATA_WIDTH_SENTINEL: u8 = 0;
 pub const IFACE_ASSERT_MAX_ASSERT_KIND: u8 = 0x01;
 pub const IFACE_ASSERT_MAX_TARGET_SLOTS: u16 = 0x1F;
 
@@ -91,7 +92,7 @@ pub const fn pack_map_iter_next_flags(key_slots: u16, val_slots: u16) -> Option<
     if key_slots <= MAP_ITER_MAX_KEY_VAL_SLOTS && val_slots <= MAP_ITER_MAX_KEY_VAL_SLOTS {
         Some((key_slots as u8) | ((val_slots as u8) << 4))
     } else {
-        None
+        Some(MAP_ITER_METADATA_WIDTH_SENTINEL)
     }
 }
 
@@ -676,8 +677,14 @@ mod tests {
         assert_eq!(pack_map_get_meta(u16::MAX, 0x7FFF, true), Some(u32::MAX));
         assert_eq!(pack_map_get_meta(1, 0x8000, false), None);
         assert_eq!(pack_map_iter_next_flags(15, 15), Some(0xFF));
-        assert_eq!(pack_map_iter_next_flags(16, 1), None);
-        assert_eq!(pack_map_iter_next_flags(1, 16), None);
+        assert_eq!(
+            pack_map_iter_next_flags(16, 1),
+            Some(MAP_ITER_METADATA_WIDTH_SENTINEL)
+        );
+        assert_eq!(
+            pack_map_iter_next_flags(1, 16),
+            Some(MAP_ITER_METADATA_WIDTH_SENTINEL)
+        );
         assert_eq!(
             pack_iface_assert_flags(1, true, 2),
             Some(1 | (1 << 2) | (2 << 3))

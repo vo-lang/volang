@@ -420,11 +420,9 @@ pub fn exec_map_iter_next_with_layout(
 ) -> Result<(), String> {
     let iter_slot = bp + inst.b as usize;
     let ok_slot = bp + inst.c as usize;
-    let key_slots = inst.map_iter_key_slots() as usize;
-    let val_slots = inst.map_iter_val_slots() as usize;
+    let (key_slots, val_slots) = map_iter_next_slot_widths(inst, expected_layout)?;
     let key_dst = bp + inst.a as usize;
     let val_dst = key_dst + key_slots;
-    validate_expected_key_value_slots(key_slots, val_slots, expected_layout, "MapIterNext")?;
 
     // Get mutable reference to iterator on stack
     let iter = unsafe { &mut *(stack.add(iter_slot) as *mut map::MapIterator) };
@@ -466,6 +464,28 @@ pub fn exec_map_iter_next_with_layout(
         }
     }
     Ok(())
+}
+
+fn map_iter_next_slot_widths(
+    inst: &Instruction,
+    expected_layout: Option<(&[SlotType], &[SlotType])>,
+) -> Result<(usize, usize), String> {
+    let encoded_key_slots = inst.map_iter_key_slots() as usize;
+    let encoded_val_slots = inst.map_iter_val_slots() as usize;
+    let Some((key_layout, val_layout)) = expected_layout else {
+        return Ok((encoded_key_slots, encoded_val_slots));
+    };
+    let key_slots = key_layout.len();
+    let val_slots = val_layout.len();
+    if (encoded_key_slots != 0 || encoded_val_slots != 0)
+        && (encoded_key_slots != key_slots || encoded_val_slots != val_slots)
+    {
+        return Err(format!(
+            "MapIterNext encoded slots key={} value={} do not match metadata key={} value={}",
+            encoded_key_slots, encoded_val_slots, key_slots, val_slots
+        ));
+    }
+    Ok((key_slots, val_slots))
 }
 
 #[cfg(test)]
