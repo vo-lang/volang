@@ -3,8 +3,9 @@
   "selector": "site",
   "changed": false,
   "passed": true,
-  "source_state": "vm-production-current-source:ab5b75990e03a59c67567e4125b665bb0666fc8fa4eaeabe60475418a243ca0e",
+  "source_state": "vm-production-current-source:f9ed3bab9e1985ae076eeb3bf0c35443b7a89afb6723c5e6e2b352e9df6eca8c",
   "tasks": [
+    "node-audit-current",
     "vo-web-wasm-build",
     "vogui-npm-ci",
     "vogui-build",
@@ -13,6 +14,7 @@
     "studio-install-local-vogui",
     "studio-build",
     "quickplay-validate",
+    "studio-browser-smoke",
     "blockkart-smoke-static"
   ]
 }
