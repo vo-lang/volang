@@ -739,12 +739,13 @@ function installExtBridgeGlobals(): void {
     bytes: Uint8Array,
     jsGlueUrl?: string,
   ): Promise<void> => {
+    const moduleBytes = bytes.slice();
     unloadExtModule(key);
     emitStudioHostLog({
       source: 'studio-extbridge',
       code: 'ext_module_setup_begin',
       level: 'system',
-      text: `key=${key} bindgen=${jsGlueUrl ? 'yes' : 'no'} bytes=${bytes.byteLength}`,
+      text: `key=${key} bindgen=${jsGlueUrl ? 'yes' : 'no'} bytes=${moduleBytes.byteLength}`,
     });
     if (jsGlueUrl) {
       const { importUrl, revoke } = await resolveJsGlueImportUrl(jsGlueUrl);
@@ -769,7 +770,7 @@ function installExtBridgeGlobals(): void {
           text: `key=${key}`,
         });
         await (glue.default as (opts: { module_or_path: Uint8Array }) => Promise<void>)({
-          module_or_path: bytes.slice(),
+          module_or_path: moduleBytes,
         });
         emitStudioHostLog({
           source: 'studio-extbridge',
@@ -804,7 +805,7 @@ function installExtBridgeGlobals(): void {
       }
     } else {
       const imports = buildStandaloneImports();
-      const { instance } = await WebAssembly.instantiate(bytes.slice(), imports);
+      const { instance } = await WebAssembly.instantiate(moduleBytes, imports);
       // Bind the late reference so host imports can access this instance's memory.
       const ref = (imports as { __ref?: { instance: WebAssembly.Instance | null } }).__ref;
       if (ref) ref.instance = instance;
