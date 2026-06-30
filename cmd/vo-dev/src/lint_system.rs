@@ -47,6 +47,10 @@ pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
             lint_docs(root)?;
             println!("vo-dev lint docs: ok");
         }
+        "evidence" => {
+            lint_vm_production_gate_evidence(root)?;
+            println!("vo-dev lint evidence: ok");
+        }
         "examples" => {
             lint_examples(root)?;
             println!("vo-dev lint examples: ok");
@@ -65,6 +69,7 @@ pub(crate) fn cmd_lint(root: &Path, args: Vec<String>) -> Result<()> {
             lint_repo_boundaries(root)?;
             lint_layout(root)?;
             lint_docs(root)?;
+            lint_vm_production_gate_evidence(root)?;
             lint_examples(root)?;
             lint_benchmarks(root)?;
             release_system::lint_release(root)?;
@@ -1550,7 +1555,6 @@ fn lint_docs(root: &Path) -> Result<()> {
             }
         }
     }
-    lint_vm_production_gate_evidence(root)?;
     lint_jit_runtime_path_wording(root)?;
     lint_touched_dev_note_front_matter(root)?;
     Ok(())

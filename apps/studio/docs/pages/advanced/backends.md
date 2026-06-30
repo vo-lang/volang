@@ -67,9 +67,9 @@ vo run main.vo --mode=jit
    so compiled functions can call each other directly without returning to
    the interpreter.
 5. **VM-managed runtime paths** — functions outside the current strict-JIT
-   support set remain interpreter-owned before JIT entry. Invalid strict-JIT
-   metadata, helper ABI drift, or runtime-path contract violations fail fast
-   instead of silently continuing under JIT.
+   support set remain interpreter-owned before JIT entry. Invalid strict-JIT metadata,
+   helper ABI drift, or runtime-path contract violations fail fast instead of
+   silently continuing under JIT.
 
 ### When to Use
 
