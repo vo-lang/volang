@@ -1,10 +1,24 @@
 package main
 
+import "fmt"
+
 type Big [16]int
 
 func main() {
-	var m map[Big]int
-	for k := range m {
-		_ = k
+	var key Big
+	for i := 0; i < 16; i++ {
+		key[i] = i + 1
 	}
+	m := map[Big]int{key: 42}
+	count := 0
+	for k := range m {
+		if k[15] != 16 {
+			panic("wide map iter key lost tail slot")
+		}
+		count++
+	}
+	if count != 1 {
+		panic("wide map iter key count mismatch")
+	}
+	fmt.Println("map_iter_key_abi_slot_count_limit: ok")
 }
