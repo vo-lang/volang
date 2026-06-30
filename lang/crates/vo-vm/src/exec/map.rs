@@ -719,7 +719,12 @@ mod tests {
         )
         .expect_err("nil MapIterNext must reject value width drift before default output");
 
-        assert!(err.contains("MapIterNext value slots 2"), "{err}");
+        assert!(
+            err.contains(
+                "MapIterNext encoded slots key=1 value=2 do not match metadata key=1 value=1"
+            ),
+            "{err}"
+        );
         assert_eq!(stack[map::MAP_ITER_SLOTS], 99);
         assert_eq!(stack[map::MAP_ITER_SLOTS + 1], 99);
         assert_eq!(stack[map::MAP_ITER_SLOTS + 2], 99);
