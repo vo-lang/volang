@@ -1247,12 +1247,22 @@ fn lint_selected_gate_tasks_have_timeouts_rejects_non_test_task_without_timeout(
     let mut groups = BTreeMap::new();
     groups.insert("contract".to_string(), vec!["docs-lint".to_string()]);
     groups.insert("vm-production".to_string(), vec!["wasm-check".to_string()]);
+    groups.insert("site".to_string(), vec!["site-build".to_string()]);
+    groups.insert(
+        "release-verify".to_string(),
+        vec!["release-verify-vogui".to_string()],
+    );
     let config = TaskFile {
         version: 1,
         final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
-        tasks: vec![task_without_timeout("docs-lint"), task("wasm-check")],
+        tasks: vec![
+            task_without_timeout("docs-lint"),
+            task("wasm-check"),
+            task("site-build"),
+            task("release-verify-vogui"),
+        ],
     };
     let task_map = task_map(&config).unwrap();
 
