@@ -204,6 +204,29 @@ pub(crate) fn path_matches_artifact(path: &str, artifact: &Artifact) -> bool {
     path == artifact.path || path.starts_with(&format!("{}/", artifact.path.trim_end_matches('/')))
 }
 
+fn suspicious_generated_path(root: &Path, path: &str) -> Result<bool> {
+    let generated_dir = path.contains("/dist/")
+        || path.contains("/pkg/")
+        || path.contains("/target/")
+        || path.starts_with("dist/")
+        || path.starts_with("target/")
+        || path.ends_with(".wasm")
+        || path.ends_with(".vpak")
+        || path.ends_with(".class")
+        || path.ends_with("/go_bench")
+        || path.ends_with("/c_bench");
+    if generated_dir {
+        return Ok(true);
+    }
+    if path.ends_with(".json") {
+        let full = root.join(path);
+        if full.exists() && fs::metadata(full)?.len() > 5_000_000 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,27 +315,4 @@ module = "github.com/vo-lang/volang"
         assert!(format!("{err:#}").contains("ci_modules/vogui/js/dist looks generated"));
         fs::remove_dir_all(root).ok();
     }
-}
-
-fn suspicious_generated_path(root: &Path, path: &str) -> Result<bool> {
-    let generated_dir = path.contains("/dist/")
-        || path.contains("/pkg/")
-        || path.contains("/target/")
-        || path.starts_with("dist/")
-        || path.starts_with("target/")
-        || path.ends_with(".wasm")
-        || path.ends_with(".vpak")
-        || path.ends_with(".class")
-        || path.ends_with("/go_bench")
-        || path.ends_with("/c_bench");
-    if generated_dir {
-        return Ok(true);
-    }
-    if path.ends_with(".json") {
-        let full = root.join(path);
-        if full.exists() && fs::metadata(full)?.len() > 5_000_000 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
