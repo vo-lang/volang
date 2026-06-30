@@ -3,7 +3,7 @@
   "selector": "site",
   "changed": false,
   "passed": true,
-  "source_state": "vm-production-current-source:f9ed3bab9e1985ae076eeb3bf0c35443b7a89afb6723c5e6e2b352e9df6eca8c",
+  "source_state": "vm-production-current-source:1ea8b76edd08bd504d0ae06a41b7b0a5bd92185c4f80cf29fa79515affca1627",
   "tasks": [
     "node-audit-current",
     "vo-web-wasm-build",
