@@ -191,12 +191,6 @@ fn ensure_clean_first_party_root(root: &Path, repo: &str, path: &Path) -> Result
             path.display()
         );
     }
-    if path.join("vo.work").exists() {
-        bail!(
-            "first-party repo {repo} contains vo.work; release/stage verification requires a root without local workspace overrides: {}",
-            path.display()
-        );
-    }
     let status = git_output(path, &["status", "--porcelain=v1", "--untracked-files=all"])?;
     if !status.status.success() {
         bail!(
@@ -214,6 +208,12 @@ fn ensure_clean_first_party_root(root: &Path, repo: &str, path: &Path) -> Result
     }
     if first_party_path_is_ci_module(root, repo, path) {
         return Ok(());
+    }
+    if path.join("vo.work").exists() {
+        bail!(
+            "first-party repo {repo} local_hint contains vo.work; release/stage verification requires a root without local workspace overrides: {}",
+            path.display()
+        );
     }
     let upstream = git_output(
         path,
@@ -502,6 +502,21 @@ mod tests {
         let root = temp_root("ci-module");
         let repo = root.join("ci_modules/vogui");
         init_clean_repo(&repo);
+        fs::write(repo.join("vo.work"), "module github.com/vo-lang/test\n").expect("vo.work");
+        run_git(&repo, &["add", "vo.work"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-q",
+                "-m",
+                "add vo.work",
+            ],
+        );
 
         ensure_clean_first_party_root(&root, "vogui", &repo)
             .expect("clean ci module should not require upstream tracking");
