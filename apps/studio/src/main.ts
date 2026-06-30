@@ -1,6 +1,7 @@
 import './app.css';
 import 'golden-layout/dist/css/goldenlayout-base.css';
 import 'monaco-editor/min/vs/style.css';
+import { mount } from 'svelte';
 import App from './App.svelte';
 
 if (!applyLaunchEnvDefaults()) {
@@ -14,11 +15,7 @@ if (!applyLaunchEnvDefaults()) {
     throw new Error('Missing #app mount point');
   }
 
-  const StudioApp = App as unknown as new (options: { target: HTMLElement }) => unknown;
-
-  new StudioApp({
-    target,
-  });
+  mount(App, { target });
 }
 
 function applyLaunchEnvDefaults(): boolean {

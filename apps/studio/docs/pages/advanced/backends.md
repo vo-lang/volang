@@ -66,16 +66,17 @@ vo run main.vo --mode=jit
 4. **Direct JIT-to-JIT calls** — the JIT manager maintains a dispatch table
    so compiled functions can call each other directly without returning to
    the interpreter.
-5. **Graceful fallback** — functions with unsupported features are marked
-   `Unsupported` and permanently remain in the interpreter. The rest of the
-   program still benefits from JIT.
+5. **VM-managed runtime paths** — functions outside the current strict-JIT
+   support set remain interpreter-owned before JIT entry. Invalid strict-JIT metadata,
+   helper ABI drift, or runtime-path contract violations fail fast instead of
+   silently continuing under JIT.
 
 ### When to Use
 
 - **Long-running or compute-heavy programs** — the warm-up cost is amortized
   across many iterations.
 - **Benchmarks and numerical workloads** — useful for exercising hot
-  full-function compilation, loop OSR, and VM fallback behavior.
+  full-function compilation, loop OSR, and VM-managed runtime paths.
 
 ### Tuning
 

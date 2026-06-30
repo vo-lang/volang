@@ -49,20 +49,28 @@ target = "target"
 name = "studio"
 path = "apps/studio"
 lockfile = "apps/studio/package-lock.json"
+audit = "current"
+audit_level = "high"
 
 [[node_workspace]]
 name = "playground-legacy"
 path = "apps/playground-legacy"
 lockfile = "apps/playground-legacy/package-lock.json"
 status = "legacy"
+audit = "legacy-exempt"
+audit_reason = "Legacy playground is excluded from current Studio release audit; tracked by legacy-excluded inventory."
 
 [[node_workspace]]
 name = "vo-web"
 path = "lang/crates/vo-web"
 lockfile = "lang/crates/vo-web/package-lock.json"
+audit = "current"
+audit_level = "high"
 
 [[node_workspace]]
 name = "vogui-js"
 repo = "vogui"
 path = "js"
 lockfile = "js/package-lock.json"
+audit = "first-party-release"
+audit_reason = "First-party dependency hygiene is owned by the vogui release verification path."

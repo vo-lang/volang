@@ -2393,6 +2393,83 @@ func main() {
 }
 
 #[test]
+fn closure_literal_named_param_transfers_use_declared_param_objects() {
+    let source = r#"
+package main
+
+func loadTexture(path string) int;
+func loadTextureBytes(data []byte) int;
+
+type Loader struct {
+    LoadFile func(path string) int
+    LoadBytes func(data []byte) int
+    Free func(id int)
+}
+
+type Loaders struct {
+    Texture Loader
+    TextureLinear Loader
+}
+
+func defaultLoaders() Loaders {
+    return Loaders{
+        Texture: Loader{
+            LoadFile: func(path string) int { return loadTexture(path) },
+            LoadBytes: func(data []byte) int { return loadTextureBytes(data) },
+            Free: func(id int) {},
+        },
+        TextureLinear: Loader{
+            LoadFile: func(path string) int { return loadTexture(path) },
+            LoadBytes: func(data []byte) int { return loadTextureBytes(data) },
+            Free: func(id int) {},
+        },
+    }
+}
+
+func main() {
+    _ = defaultLoaders()
+}
+"#;
+
+    let module = compile_source(source);
+    let load_file_extern = module
+        .externs
+        .iter()
+        .position(|extern_def| extern_def.name.contains("loadTexture"))
+        .expect("loadTexture extern") as u16;
+    let load_bytes_extern = module
+        .externs
+        .iter()
+        .position(|extern_def| extern_def.name.contains("loadTextureBytes"))
+        .expect("loadTextureBytes extern") as u16;
+
+    let closure_param_kind_for_extern = |extern_id: u16| {
+        module
+            .functions
+            .iter()
+            .filter(|f| f.name.starts_with("closure_"))
+            .find(|f| {
+                f.code
+                    .iter()
+                    .any(|inst| inst.opcode() == Opcode::CallExtern && inst.b == extern_id)
+            })
+            .and_then(|f| f.param_types.first())
+            .map(|transfer| ValueRttid::from_raw(transfer.rttid_raw).value_kind())
+    };
+
+    assert_eq!(
+        closure_param_kind_for_extern(load_file_extern),
+        Some(ValueKind::String),
+        "LoadFile closure should record a string transfer parameter"
+    );
+    assert_eq!(
+        closure_param_kind_for_extern(load_bytes_extern),
+        Some(ValueKind::Slice),
+        "LoadBytes closure should record a slice transfer parameter"
+    );
+}
+
+#[test]
 fn test_interface_method_value_wrappers_do_not_collide_across_interfaces() {
     let source = r#"
 package main

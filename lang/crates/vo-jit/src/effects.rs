@@ -4,7 +4,9 @@ use vo_common_core::bytecode::MAP_ITER_SLOTS as MAP_ITER_SLOT_COUNT;
 use vo_runtime::bytecode::{ExternDef, FunctionDef};
 use vo_runtime::instruction::{Instruction, Opcode};
 
-pub use crate::metadata::{MapGetLayout, MapSetLayout, MetadataFacts as EffectFacts};
+pub use crate::metadata::{
+    MapGetLayout, MapIterNextLayout, MapSetLayout, MetadataFacts as EffectFacts,
+};
 use crate::semantics::{opcode_register_effects, DynamicRegisterWriteEffect};
 
 mod dynamic;
@@ -250,6 +252,26 @@ mod tests {
         assert_eq!(
             try_read_regs_with_facts(&inst, EffectFacts::from_instruction(Some(&meta))).unwrap(),
             vec![1, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn map_iter_next_effects_use_metadata_layout_when_flags_are_sentinel() {
+        let inst = Instruction::with_flags(Opcode::MapIterNext, 0, 20, 3, 50);
+        let meta = JitInstructionMetadata::MapIterNext {
+            key_layout: vec![SlotType::Value; 17],
+            val_layout: vec![SlotType::GcRef, SlotType::Value],
+        };
+
+        let mut expected = Vec::new();
+        expected.extend(3..3 + MAP_ITER_SLOTS);
+        expected.extend(20..39);
+        expected.push(50);
+
+        assert_eq!(
+            try_write_regs_with_context(&inst, EffectFacts::from_instruction(Some(&meta)), &[])
+                .unwrap(),
+            expected
         );
     }
 

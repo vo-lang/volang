@@ -7,7 +7,10 @@ use crate::semantics::{
 };
 
 use super::operand_eval::{checked_slot_offset, try_push_slot_range};
-use super::{EffectError, EffectFacts, MapGetLayout, MapSetLayout, SlotRangeError};
+use super::{
+    EffectError, EffectFacts, MapGetLayout, MapIterNextLayout, MapSetLayout, SlotRangeError,
+    MAP_ITER_SLOTS,
+};
 
 pub(super) fn required_indexed_get_result_slots(
     inst: &Instruction,
@@ -55,6 +58,14 @@ fn required_map_delete_key_slots(
         .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "MapDelete"))
 }
 
+fn required_map_iter_next_layout(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Result<MapIterNextLayout, EffectError> {
+    map_iter_next_layout(inst, facts)
+        .ok_or_else(|| EffectError::missing_layout(inst.opcode(), "MapIterNext"))
+}
+
 pub fn indexed_get_result_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
     metadata::indexed_get_result_slots(inst, facts)
 }
@@ -77,6 +88,13 @@ pub fn map_set_layout(inst: &Instruction, facts: EffectFacts<'_>) -> Option<MapS
 
 pub fn map_delete_key_slots(inst: &Instruction, facts: EffectFacts<'_>) -> Option<u16> {
     metadata::map_delete_key_slots(inst, facts)
+}
+
+pub fn map_iter_next_layout(
+    inst: &Instruction,
+    facts: EffectFacts<'_>,
+) -> Option<MapIterNextLayout> {
+    metadata::map_iter_next_layout(inst, facts)
 }
 
 pub(super) fn try_dynamic_read_regs(
@@ -199,6 +217,19 @@ pub(super) fn try_dynamic_multi_write_regs(
                 .output_slots()
                 .ok_or_else(|| SlotRangeError::new("write", inst.a, layout.val_slots))?;
             try_push_slot_range(&mut regs, inst.a, slots, "write")?;
+            Ok(Some(regs))
+        }
+        DynamicRegisterWriteEffect::MapIterNextLayout => {
+            let layout = required_map_iter_next_layout(inst, facts)?;
+            try_push_slot_range(&mut regs, inst.b, MAP_ITER_SLOTS, "write")?;
+            let slots = layout
+                .key_slots
+                .checked_add(layout.val_slots)
+                .ok_or_else(|| {
+                    SlotRangeError::new("write", inst.a, layout.key_slots.saturating_add(1))
+                })?;
+            try_push_slot_range(&mut regs, inst.a, slots, "write")?;
+            regs.push(inst.c);
             Ok(Some(regs))
         }
     }

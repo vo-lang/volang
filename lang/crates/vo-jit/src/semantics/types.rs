@@ -171,6 +171,7 @@ pub enum DynamicRegisterWriteEffect {
     ExternSignature,
     IndexedGetResultLayout,
     MapGetLayout,
+    MapIterNextLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,7 +298,8 @@ impl OpcodeRegisterEffects {
             DynamicRegisterWriteEffect::StaticCallSignature => RegisterEffectShape::ModuleSignature,
             DynamicRegisterWriteEffect::ExternSignature => RegisterEffectShape::ExternSignature,
             DynamicRegisterWriteEffect::IndexedGetResultLayout
-            | DynamicRegisterWriteEffect::MapGetLayout => RegisterEffectShape::MetadataLayout,
+            | DynamicRegisterWriteEffect::MapGetLayout
+            | DynamicRegisterWriteEffect::MapIterNextLayout => RegisterEffectShape::MetadataLayout,
             DynamicRegisterWriteEffect::None => {
                 if self.single_write.is_some() {
                     RegisterEffectShape::FixedOperands

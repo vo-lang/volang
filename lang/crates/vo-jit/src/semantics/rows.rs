@@ -2491,7 +2491,7 @@ pub(super) const OPCODE_SEMANTICS: &[OpcodeSemantics] = &[
             None,
             W_MAP_ITER_NEXT,
             DynamicRegisterReadEffect::None,
-            DynamicRegisterWriteEffect::None,
+            DynamicRegisterWriteEffect::MapIterNextLayout,
             MemorySyncSpec::None,
             false,
         ),

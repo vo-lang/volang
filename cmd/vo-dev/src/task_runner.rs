@@ -6,6 +6,7 @@ use crate::tool_system::check_tools;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 #[cfg(unix)]
@@ -16,9 +17,6 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
-
-pub(crate) const VM_PRODUCTION_FINAL_GATE_SELECTORS: &[&str] =
-    &["contract", "vm-production", "site", "release-verify"];
 
 #[cfg(unix)]
 unsafe extern "C" {
@@ -65,18 +63,35 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
 }
 
 fn gate_plan_env(config: &crate::config::TaskFile) -> Result<Vec<(String, String)>> {
-    VM_PRODUCTION_FINAL_GATE_SELECTORS
-        .iter()
-        .copied()
+    final_gate_selectors(config)?
+        .into_iter()
         .map(|selector| {
-            let tasks = resolve_selector(config, selector)?;
+            let tasks = resolve_selector(config, &selector)?;
             Ok((
-                task_plan_env_name(selector),
+                task_plan_env_name(&selector),
                 serde_json::to_string(&tasks)
                     .with_context(|| format!("could not encode {selector} task plan"))?,
             ))
         })
         .collect()
+}
+
+pub(crate) fn final_gate_selectors(config: &crate::config::TaskFile) -> Result<Vec<String>> {
+    if config.final_selectors.is_empty() {
+        bail!("eng/tasks.toml final_selectors cannot be empty");
+    }
+    let mut seen = BTreeSet::new();
+    for selector in &config.final_selectors {
+        if selector.trim().is_empty() || selector.trim() != selector {
+            bail!("eng/tasks.toml final_selectors contains an empty or padded selector");
+        }
+        if !seen.insert(selector) {
+            bail!("eng/tasks.toml final_selectors contains duplicate selector {selector}");
+        }
+        resolve_selector(config, selector)
+            .with_context(|| format!("eng/tasks.toml final_selectors references {selector}"))?;
+    }
+    Ok(config.final_selectors.clone())
 }
 
 fn task_plan_env_name(selector: &str) -> String {
@@ -102,7 +117,9 @@ pub(crate) fn write_task_run_evidence(
     changed: bool,
     task_names: &[String],
 ) -> Result<()> {
-    if changed || !VM_PRODUCTION_FINAL_GATE_SELECTORS.contains(&selector) {
+    let config = load_tasks(root)?;
+    let final_selectors = final_gate_selectors(&config)?;
+    if changed || !final_selectors.iter().any(|item| item == selector) {
         return Ok(());
     }
     let evidence = TaskRunEvidence {
@@ -125,7 +142,7 @@ pub(crate) fn write_task_run_evidence(
     Ok(())
 }
 
-fn current_vm_production_source_state_hash(root: &Path) -> Result<String> {
+pub(crate) fn current_vm_production_source_state_hash(root: &Path) -> Result<String> {
     ensure_no_untracked_vm_production_source(root)?;
     let mut hasher = Sha256::new();
     hasher.update(b"vm-production-readiness-source-state-v1\0");
@@ -235,6 +252,7 @@ mod tests {
         let config: crate::config::TaskFile = toml::from_str(
             r#"
 version = 1
+final_selectors = ["contract", "vm-production", "site", "release-verify"]
 
 [groups]
 contract = ["main"]
@@ -437,7 +455,49 @@ ci_checkout = true
             "volang-vo-dev-final-evidence-{stamp}-{}",
             std::process::id()
         ));
+        fs::create_dir_all(root.join("eng")).expect("eng dir");
         fs::create_dir_all(root.join("lang/docs/dev")).expect("docs dir");
+        fs::write(
+            root.join("eng/tasks.toml"),
+            r#"version = 1
+final_selectors = ["contract", "vm-production", "site", "release-verify"]
+
+[groups]
+contract = ["contract-task"]
+vm-production = ["vm-production-task"]
+site = ["site-task"]
+release-verify = ["release-verify-task"]
+
+[[task]]
+name = "contract-task"
+title = "contract"
+command = ["true"]
+inputs = ["Cargo.toml"]
+tier = "contract"
+
+[[task]]
+name = "vm-production-task"
+title = "vm-production"
+command = ["true"]
+inputs = ["Cargo.toml"]
+tier = "contract"
+
+[[task]]
+name = "site-task"
+title = "site"
+command = ["true"]
+inputs = ["Cargo.toml"]
+tier = "site"
+
+[[task]]
+name = "release-verify-task"
+title = "release-verify"
+command = ["true"]
+inputs = ["Cargo.toml"]
+tier = "release"
+"#,
+        )
+        .expect("tasks config");
         fs::write(root.join("src.vo"), "package main\nfunc main() {}\n").expect("src");
         fs::write(
             root.join("lang/docs/dev/vm-production-readiness.md"),

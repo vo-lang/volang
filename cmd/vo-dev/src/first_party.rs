@@ -3,7 +3,7 @@ use crate::github_output::write_github_output;
 use anyhow::{anyhow, bail, Context, Result};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> {
     if args.is_empty() {
@@ -34,7 +34,8 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
             if args.is_empty() {
                 bail!("missing command after --");
             }
-            let cwd = first_party_repo_path(root, &repo)?.join(subdir);
+            let repo_root = checked_first_party_repo_path(root, &repo)?;
+            let cwd = repo_root.join(subdir);
             if !cwd.is_dir() {
                 bail!("missing first-party directory: {}", cwd.display());
             }
@@ -60,7 +61,7 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
             if args.is_empty() {
                 bail!("missing command after --");
             }
-            let cwd = first_party_workspace_path(root, &repo, &workspace)?;
+            let cwd = checked_first_party_workspace_path(root, &repo, &workspace)?;
             let status = Command::new(&args[0])
                 .args(&args[1..])
                 .current_dir(&cwd)
@@ -112,7 +113,7 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
                 bail!("usage: vo-dev first-party release-verify <repo>");
             }
             let repo = &args[0];
-            let module = first_party_repo_path(root, repo)?;
+            let module = checked_first_party_repo_path(root, repo)?;
             if !module.join("vo.mod").exists() {
                 bail!("first-party repo {} does not contain vo.mod", repo);
             }
@@ -133,7 +134,7 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
 }
 
 pub(crate) fn cmd_studio_install_local_vogui(root: &Path) -> Result<()> {
-    let package_path = first_party_workspace_path(root, "vogui", "js")?;
+    let package_path = checked_first_party_workspace_path(root, "vogui", "js")?;
     let status = Command::new("npm")
         .args(["install", "--no-save"])
         .arg(&package_path)
@@ -144,6 +145,140 @@ pub(crate) fn cmd_studio_install_local_vogui(root: &Path) -> Result<()> {
         bail!("npm install local @vogui/runtime failed");
     }
     Ok(())
+}
+
+fn checked_first_party_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
+    let path = first_party_repo_path(root, repo)?;
+    ensure_clean_first_party_root(root, repo, &path)?;
+    Ok(path)
+}
+
+fn checked_first_party_workspace_path(root: &Path, repo: &str, workspace: &str) -> Result<PathBuf> {
+    let repo_root = checked_first_party_repo_path(root, repo)?;
+    let project = load_project(root)?;
+    let entry = project
+        .first_party
+        .iter()
+        .find(|item| item.name == repo)
+        .ok_or_else(|| anyhow!("unknown first-party repo: {repo}"))?;
+    let workspace_path = entry
+        .workspace
+        .iter()
+        .find(|item| item.name == workspace)
+        .ok_or_else(|| anyhow!("unknown first-party workspace: {repo}:{workspace}"))?
+        .path
+        .clone();
+    let path = repo_root.join(&workspace_path);
+    if !path.is_dir() {
+        bail!(
+            "missing first-party workspace directory {repo}:{workspace}: {}",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn ensure_clean_first_party_root(root: &Path, repo: &str, path: &Path) -> Result<()> {
+    let inside = git_output(path, &["rev-parse", "--is-inside-work-tree"]).with_context(|| {
+        format!(
+            "could not inspect first-party repo {repo}: {}",
+            path.display()
+        )
+    })?;
+    if !inside.status.success() || String::from_utf8_lossy(&inside.stdout).trim() != "true" {
+        bail!(
+            "first-party repo {repo} is not a git worktree: {}",
+            path.display()
+        );
+    }
+    let status = git_output(path, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+    if !status.status.success() {
+        bail!(
+            "could not read git status for first-party repo {repo}: {}",
+            path.display()
+        );
+    }
+    let dirty = String::from_utf8_lossy(&status.stdout);
+    if !dirty.trim().is_empty() {
+        bail!(
+            "first-party repo {repo} is dirty and cannot be used as release/stage proof: {}\n{}",
+            path.display(),
+            dirty.trim()
+        );
+    }
+    if first_party_path_is_ci_module(root, repo, path) {
+        return Ok(());
+    }
+    if path.join("vo.work").exists() {
+        bail!(
+            "first-party repo {repo} local_hint contains vo.work; release/stage verification requires a root without local workspace overrides: {}",
+            path.display()
+        );
+    }
+    let upstream = git_output(
+        path,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )?;
+    if !upstream.status.success() {
+        bail!(
+            "first-party repo {repo} uses local_hint {} without an upstream; use a clean ci_modules/{repo} checkout or configure upstream tracking",
+            path.display()
+        );
+    }
+    let upstream_name = String::from_utf8_lossy(&upstream.stdout).trim().to_string();
+    let counts = git_output(
+        path,
+        &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+    )?;
+    if !counts.status.success() {
+        bail!("could not compare first-party repo {repo} to upstream {upstream_name}");
+    }
+    let counts_text = String::from_utf8_lossy(&counts.stdout);
+    let mut parts = counts_text.split_whitespace();
+    let ahead = parts
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(1);
+    let behind = parts
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(1);
+    if ahead != 0 || behind != 0 {
+        bail!(
+            "first-party repo {repo} is not aligned with upstream {upstream_name}: ahead {ahead}, behind {behind}; use a clean checkout for release/stage proof"
+        );
+    }
+    Ok(())
+}
+
+fn git_output(path: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .with_context(|| format!("could not run git {} in {}", args.join(" "), path.display()))
+}
+
+fn first_party_path_is_ci_module(root: &Path, repo: &str, path: &Path) -> bool {
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let root_ci = root
+        .join("ci_modules")
+        .join(repo)
+        .canonicalize()
+        .unwrap_or_else(|_| root.join("ci_modules").join(repo));
+    if canonical_path == root_ci || canonical_path.starts_with(&root_ci) {
+        return true;
+    }
+    if let Ok(module_root) = env::var("CI_MODULE_ROOT") {
+        if !module_root.trim().is_empty() {
+            let env_ci = PathBuf::from(&module_root)
+                .join(repo)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(module_root).join(repo));
+            return canonical_path == env_ci || canonical_path.starts_with(&env_ci);
+        }
+    }
+    false
 }
 
 fn first_party_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
@@ -289,4 +424,103 @@ fn repo_path_from_entry(
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "volang-first-party-{name}-{stamp}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn run_git(path: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .unwrap_or_else(|error| panic!("could not run git {}: {error}", args.join(" ")));
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
+
+    fn init_clean_repo(path: &Path) {
+        fs::create_dir_all(path).expect("repo dir");
+        run_git(path, &["init", "-q"]);
+        fs::write(path.join("vo.mod"), "module github.com/vo-lang/test\n").expect("vo.mod");
+        run_git(path, &["add", "."]);
+        run_git(
+            path,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
+    }
+
+    #[test]
+    fn first_party_clean_root_rejects_dirty_tree_062() {
+        let root = temp_root("dirty");
+        let repo = root.join("siblings/vogui");
+        init_clean_repo(&repo);
+        fs::write(repo.join("dirty.txt"), "dirty\n").expect("dirty");
+
+        let err = ensure_clean_first_party_root(&root, "vogui", &repo).unwrap_err();
+
+        assert!(format!("{err:#}").contains("is dirty"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn first_party_clean_root_rejects_local_hint_without_upstream_062() {
+        let root = temp_root("no-upstream");
+        let repo = root.join("siblings/voplay");
+        init_clean_repo(&repo);
+
+        let err = ensure_clean_first_party_root(&root, "voplay", &repo).unwrap_err();
+
+        assert!(format!("{err:#}").contains("without an upstream"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn first_party_clean_root_accepts_clean_ci_module_without_upstream_062() {
+        let root = temp_root("ci-module");
+        let repo = root.join("ci_modules/vogui");
+        init_clean_repo(&repo);
+        fs::write(repo.join("vo.work"), "module github.com/vo-lang/test\n").expect("vo.work");
+        run_git(&repo, &["add", "vo.work"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-q",
+                "-m",
+                "add vo.work",
+            ],
+        );
+
+        ensure_clean_first_party_root(&root, "vogui", &repo)
+            .expect("clean ci module should not require upstream tracking");
+
+        fs::remove_dir_all(root).ok();
+    }
 }

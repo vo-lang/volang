@@ -475,21 +475,21 @@ expect = { fail = ["MapGet value slot count exceeds 15-bit packed operand width"
 id = "2026-02-18-map-iter-key-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_iter_key_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapIterNext packs key slots into a 4-bit flags field and must fail deliberately before bytecode emission"
-expect = { fail = ["MapIterNext ABI supports at most 15 key/value slots"] }
+reason = "MapIterNext uses a metadata-width sentinel for key layouts wider than the compact 4-bit flags field"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-map-iter-value-abi-slot-count-limit"
 kind = "file"
 path = "cases/typechecker/2026_02_18_map_iter_value_abi_slot_count_limit.vo"
-matrix = "compile"
-tags = ["typechecker", "compile-fail", "map", "vm-contract"]
+matrix = "default"
+tags = ["typechecker", "regression", "map", "vm-contract"]
 owner = "typechecker"
-reason = "MapIterNext packs value slots into a 4-bit flags field and must fail deliberately before bytecode emission"
-expect = { fail = ["MapIterNext ABI supports at most 15 key/value slots"] }
+reason = "MapIterNext uses a metadata-width sentinel for value layouts wider than the compact 4-bit flags field"
+expect = "pass"
 
 [[case]]
 id = "2026-02-18-stack-array-get-element-slot-count-u8-limit"
@@ -4686,6 +4686,15 @@ owner = "runtime"
 expect = "pass"
 
 [[case]]
+id = "map-iter-wide-struct-key"
+kind = "file"
+path = "cases/runtime/map/map_iter_wide_struct_key.vo"
+matrix = "default"
+tags = ["runtime", "map", "struct", "regression"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
 id = "map-key-types"
 kind = "file"
 path = "cases/typechecker/map_key_types.vo"
@@ -5246,6 +5255,15 @@ kind = "file"
 path = "cases/runtime/method/pointer_method_call.vo"
 matrix = "default"
 tags = ["runtime", "method", "numeric"]
+owner = "runtime"
+expect = "pass"
+
+[[case]]
+id = "pointer-float-field-compound"
+kind = "file"
+path = "cases/runtime/struct/pointer_float_field_compound.vo"
+matrix = "default"
+tags = ["runtime", "regression", "struct", "numeric"]
 owner = "runtime"
 expect = "pass"
 

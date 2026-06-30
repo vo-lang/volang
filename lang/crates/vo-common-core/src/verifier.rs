@@ -3905,12 +3905,15 @@ fn instruction_writes_slot(
         }
         Opcode::MapIterInit => slot_in_range(slot, inst.a, MAP_ITER_SLOTS),
         Opcode::MapIterNext => {
+            let key_value_slots = match func.jit_metadata.get(pc) {
+                Some(JitInstructionMetadata::MapIterNext {
+                    key_layout,
+                    val_layout,
+                }) => key_layout.len() + val_layout.len(),
+                _ => usize::from(inst.map_iter_key_slots() + inst.map_iter_val_slots()),
+            };
             slot_in_range(slot, inst.b, MAP_ITER_SLOTS)
-                || slot_in_range(
-                    slot,
-                    inst.a,
-                    usize::from(inst.map_iter_key_slots() + inst.map_iter_val_slots()),
-                )
+                || slot_in_range(slot, inst.a, key_value_slots)
                 || slot == inst.c
         }
         Opcode::QueueRecv => slot_in_range(
@@ -7153,8 +7156,10 @@ fn verify_map_iter_next_contract(
             val_layout: &val_layout,
         },
     )?;
-    if key_layout.len() != inst.map_iter_key_slots() as usize
-        || val_layout.len() != inst.map_iter_val_slots() as usize
+    let encoded_key_slots = inst.map_iter_key_slots() as usize;
+    let encoded_val_slots = inst.map_iter_val_slots() as usize;
+    if (encoded_key_slots != 0 || encoded_val_slots != 0)
+        && (key_layout.len() != encoded_key_slots || val_layout.len() != encoded_val_slots)
     {
         return Err(call_shape_mismatch(
             func,
@@ -7164,8 +7169,8 @@ fn verify_map_iter_next_contract(
                 "MapIterNext metadata layout key={} val={} does not match encoded key={} val={}",
                 key_layout.len(),
                 val_layout.len(),
-                inst.map_iter_key_slots(),
-                inst.map_iter_val_slots()
+                encoded_key_slots,
+                encoded_val_slots
             ),
         ));
     }

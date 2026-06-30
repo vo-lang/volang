@@ -1,10 +1,11 @@
 # VM Production Readiness Plan
 
-Status, 2026-06-24 hardening/refactor loop: VM production-readiness signoff
-remains withdrawn for the current uncommitted source state until fresh final
-`contract`, `vm-production`, `site`, and `release-verify` evidence is recorded.
-The latest tracked final evidence remains the 2026-06-23 source state
-`vm-production-current-source:db37d60cb448118ff83cbbcdc74fc3649cdef48be32025e0e6b7a4021418d880`.
+Status, 2026-06-30 aggressive readiness pass: VM production-readiness signoff
+evidence is current for source state
+`vm-production-current-source:544659e86930cc62ae1cc6d528929527015a07030f19924076b97b99bf9ee539`.
+The declared final selectors `contract`, `vm-production`, `site`, and
+`release-verify` passed through `vo-dev task run` and recorded machine evidence
+under `lang/docs/dev/vm-production-gate-evidence/`.
 The 2026-06-23/22
 source fixes close the newly confirmed HTTP JIT contract-selection,
 endpoint-response authority-stability, raw scheduler wake call-site gate,

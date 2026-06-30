@@ -1,7 +1,7 @@
 use crate::config::load_tasks;
 use crate::task_graph::{task_map, task_to_json};
 use crate::task_planner::{plan_task_details, plan_tasks, PlanArgs};
-use crate::task_runner::{run_tasks, write_task_run_evidence, VM_PRODUCTION_FINAL_GATE_SELECTORS};
+use crate::task_runner::{final_gate_selectors, run_tasks, write_task_run_evidence};
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +16,7 @@ struct PlanOutput {
 #[derive(Debug, Serialize)]
 struct FinalSelectorsOutput {
     schema: &'static str,
-    selectors: Vec<&'static str>,
+    selectors: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,13 +39,14 @@ pub(crate) fn cmd_task(root: &Path, mut args: Vec<String>) -> Result<()> {
     match args.remove(0).as_str() {
         "final-selectors" => {
             let format = parse_format_args("task final-selectors", args)?;
-            let selectors = VM_PRODUCTION_FINAL_GATE_SELECTORS.to_vec();
+            let config = load_tasks(root)?;
+            let selectors = final_gate_selectors(&config)?;
             if format == "json" {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&FinalSelectorsOutput {
                         schema: "volang.final-task-selectors.v1",
-                        selectors,
+                        selectors: selectors.clone(),
                     })?
                 );
             } else {
@@ -515,7 +516,12 @@ mod tests {
     fn final_selectors_json_schema_is_stable_060() {
         let output = FinalSelectorsOutput {
             schema: "volang.final-task-selectors.v1",
-            selectors: VM_PRODUCTION_FINAL_GATE_SELECTORS.to_vec(),
+            selectors: vec![
+                "contract".to_string(),
+                "vm-production".to_string(),
+                "site".to_string(),
+                "release-verify".to_string(),
+            ],
         };
         let value = serde_json::to_value(output).unwrap();
         assert_eq!(value["schema"], "volang.final-task-selectors.v1");

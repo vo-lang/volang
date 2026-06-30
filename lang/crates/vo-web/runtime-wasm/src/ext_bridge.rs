@@ -28,8 +28,9 @@
 //! 0xE0                           → nil error          (2 slots: write_nil_error)
 //! 0xE1 [u16 LE len] [len bytes]  → error string       (2 slots: write_error_to)
 //! 0xE2 [u64 LE — 8 bytes]        → u64/i64 value      (1 slot:  ret_u64)
-//! 0xE3 [u32 LE len] [len bytes]  → []byte / string    (1 slot:  alloc_bytes + ret_ref)
+//! 0xE3 [u32 LE len] [len bytes]  → []byte             (1 slot:  alloc_bytes + ret_ref)
 //! 0xE4                           → nil reference      (1 slot:  ret_nil)
+//! 0xE5 [u32 LE len] [utf8 bytes] → string             (1 slot:  ret_str)
 //! ```
 //!
 //! # JS Side (vo.ts)
@@ -49,6 +50,7 @@ pub const TAG_ERROR_STR: u8 = 0xE1;
 pub const TAG_VALUE: u8 = 0xE2;
 pub const TAG_BYTES: u8 = 0xE3;
 pub const TAG_NIL_REF: u8 = 0xE4;
+pub const TAG_STRING: u8 = 0xE5;
 
 // Control tags (< 0xE0) returned by voCallExt for VM-level operations.
 // These are distinct from output tags and interpreted by wasm_ext_bridge
@@ -218,19 +220,21 @@ fn encode_ext_input(call: &ExternCallContext, param_kinds: &[ExtSlotKind]) -> Ve
     buf
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum DecodedExtOutput<'a> {
     NilError,
     ErrorStr(String),
     Value(u64),
     Bytes(&'a [u8]),
     NilRef,
+    String(&'a str),
 }
 
 impl DecodedExtOutput<'_> {
     fn slot_width(&self) -> u16 {
         match self {
             Self::NilError | Self::ErrorStr(_) => 2,
-            Self::Value(_) | Self::Bytes(_) | Self::NilRef => 1,
+            Self::Value(_) | Self::Bytes(_) | Self::NilRef | Self::String(_) => 1,
         }
     }
 }
@@ -284,6 +288,20 @@ fn decode_ext_output_items(
                 DecodedExtOutput::Bytes(bytes)
             }
             TAG_NIL_REF => DecodedExtOutput::NilRef,
+            TAG_STRING => {
+                if pos + 4 > output.len() {
+                    return Err("truncated string length".to_string());
+                }
+                let len = u32::from_le_bytes(output[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+                if pos + len > output.len() {
+                    return Err("truncated string payload".to_string());
+                }
+                let value = std::str::from_utf8(&output[pos..pos + len])
+                    .map_err(|_| "invalid string payload utf-8".to_string())?;
+                pos += len;
+                DecodedExtOutput::String(value)
+            }
             _ => return Err(format!("unknown output tag 0x{tag:02x}")),
         };
         slots = slots
@@ -305,8 +323,9 @@ fn decode_ext_output_items(
 ///   0xE0              → nil error          (slot += 2)
 ///   0xE1 [u16][msg]   → error string       (slot += 2)
 ///   0xE2 [u64 LE]     → u64 value          (slot += 1)
-///   0xE3 [u32][bytes] → []byte / string    (slot += 1)
+///   0xE3 [u32][bytes] → []byte             (slot += 1)
 ///   0xE4              → nil reference      (slot += 1)
+///   0xE5 [u32][utf8]  → string             (slot += 1)
 fn decode_ext_output(call: &mut ExternCallContext, output: &[u8]) {
     let mut slot = 0u16;
     let items = match decode_ext_output_items(output, call.ret_slots()) {
@@ -340,6 +359,10 @@ fn decode_ext_output(call: &mut ExternCallContext, output: &[u8]) {
             }
             DecodedExtOutput::NilRef => {
                 call.ret_nil(slot);
+                slot += 1;
+            }
+            DecodedExtOutput::String(value) => {
+                call.ret_str(slot, value);
                 slot += 1;
             }
         }
@@ -506,6 +529,34 @@ mod tests {
         assert!(
             !decode.contains("break;"),
             "malformed output must not be accepted by breaking out of decode_ext_output"
+        );
+    }
+
+    #[test]
+    fn wasm_extension_output_decoder_distinguishes_bytes_and_strings_062() {
+        let mut bytes_output = vec![TAG_BYTES];
+        bytes_output.extend_from_slice(&3u32.to_le_bytes());
+        bytes_output.extend_from_slice(b"abc");
+        assert!(matches!(
+            decode_ext_output_items(&bytes_output, 1).as_deref(),
+            Ok([DecodedExtOutput::Bytes(b"abc")])
+        ));
+
+        let mut string_output = vec![TAG_STRING];
+        string_output.extend_from_slice(&3u32.to_le_bytes());
+        string_output.extend_from_slice(b"abc");
+        assert!(matches!(
+            decode_ext_output_items(&string_output, 1).as_deref(),
+            Ok([DecodedExtOutput::String("abc")])
+        ));
+
+        let mut invalid_utf8 = vec![TAG_STRING];
+        invalid_utf8.extend_from_slice(&1u32.to_le_bytes());
+        invalid_utf8.push(0xff);
+        let err = decode_ext_output_items(&invalid_utf8, 1).expect_err("invalid utf8 string tag");
+        assert!(
+            err.contains("invalid string payload utf-8"),
+            "string output tag must reject invalid UTF-8, got {err}"
         );
     }
 

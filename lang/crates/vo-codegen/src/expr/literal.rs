@@ -610,21 +610,21 @@ pub(crate) fn lower_func_lit(
             continue;
         }
         for name in &param.names {
-            let param_type_key = param_type_iter
+            let _signature_param_type_key = param_type_iter
                 .next()
                 .expect("closure signature param types missing named parameter entry");
+            let obj_key = info.get_def(name);
+            let param_type_key = info.obj_type(obj_key, "param must have type");
             let slots = info
                 .try_type_slot_count(param_type_key)
                 .map_err(CodegenError::Internal)?;
             let slot_types = info.type_slot_types(param_type_key);
-            let obj_key = info.get_def(name);
-            let type_key = info.obj_type(obj_key, "param must have type");
             closure_builder
                 .try_define_param(Some(name.symbol), slots, &slot_types)
                 .map_err(CodegenError::Internal)?;
             closure_builder.add_param_type_key(param_type_key, ctx, info);
-            if info.needs_boxing(obj_key, type_key) {
-                escaped_params.push((name.symbol, type_key, slots, slot_types.clone()));
+            if info.needs_boxing(obj_key, param_type_key) {
+                escaped_params.push((name.symbol, param_type_key, slots, slot_types.clone()));
             }
         }
     }

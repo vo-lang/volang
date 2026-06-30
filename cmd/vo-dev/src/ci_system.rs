@@ -5,7 +5,7 @@ use crate::task_graph::{
     collect_task_node_workspaces, resolve_selector, task_map, task_tools_recursive,
 };
 use crate::task_planner::{plan_tasks, PlanArgs};
-use crate::task_runner::VM_PRODUCTION_FINAL_GATE_SELECTORS;
+use crate::task_runner::final_gate_selectors;
 use crate::tool_lint::validate_rust_cache_workspace;
 use crate::tool_system::desired_tool_version;
 use anyhow::{anyhow, bail, Result};
@@ -168,8 +168,8 @@ fn final_gate_task_names(root: &Path) -> Result<Vec<String>> {
     let config = load_tasks(root)?;
     let mut tasks = Vec::new();
     let mut seen = BTreeSet::new();
-    for selector in VM_PRODUCTION_FINAL_GATE_SELECTORS {
-        for task in resolve_selector(&config, selector)? {
+    for selector in final_gate_selectors(&config)? {
+        for task in resolve_selector(&config, &selector)? {
             if seen.insert(task.clone()) {
                 tasks.push(task);
             }
