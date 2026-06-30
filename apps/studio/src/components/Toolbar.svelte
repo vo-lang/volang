@@ -67,6 +67,7 @@
       on:click={() => onSetProjectHasGui(!projectHasGui)}
       disabled={isRunning}
       aria-pressed={projectHasGui}
+      aria-label="Toggle GUI project mode"
     >
       <span class="gui-toggle-track">
         <span class="gui-toggle-thumb"></span>
