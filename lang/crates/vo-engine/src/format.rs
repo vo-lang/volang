@@ -1,7 +1,7 @@
 //! Bytecode text format parser and formatter.
 
-use vo_common_core::SlotType;
-use vo_vm::bytecode::{Constant, FunctionDef, Module, ParamShape};
+use vo_common_core::{types::ValueRttid, SlotType, ValueMeta};
+use vo_vm::bytecode::{Constant, FunctionDef, Module, ParamShape, TransferType};
 use vo_vm::instruction::{Instruction, Opcode};
 
 /// Format a Module as text.
@@ -148,6 +148,12 @@ fn format_function(func_id: u32, f: &FunctionDef) -> String {
     if let Some(slot_summary) = format_slot_type_summary(&f.slot_types) {
         out.push_str(&format!("  # slot_types: {}\n", slot_summary));
     }
+    if let Some(capture_summary) = format_transfer_type_summary("c", &f.capture_types) {
+        out.push_str(&format!("  # capture_types: {}\n", capture_summary));
+    }
+    if let Some(param_summary) = format_transfer_type_summary("p", &f.param_types) {
+        out.push_str(&format!("  # param_types: {}\n", param_summary));
+    }
 
     for (pc, instr) in f.code.iter().enumerate() {
         out.push_str(&format!("  {:04}: {}\n", pc, format_instruction(instr)));
@@ -189,6 +195,33 @@ fn format_slot_type_summary(slot_types: &[SlotType]) -> Option<String> {
     } else {
         Some(parts.join(", "))
     }
+}
+
+fn format_transfer_type_summary(prefix: &str, transfer_types: &[TransferType]) -> Option<String> {
+    if transfer_types.is_empty() {
+        return None;
+    }
+
+    Some(
+        transfer_types
+            .iter()
+            .enumerate()
+            .map(|(index, transfer_type)| {
+                let meta = ValueMeta::from_raw(transfer_type.meta_raw);
+                let rttid = ValueRttid::from_raw(transfer_type.rttid_raw);
+                format!(
+                    "{}{}={:?}(meta={}, rttid={}, slots={})",
+                    prefix,
+                    index,
+                    rttid.value_kind(),
+                    meta.meta_id(),
+                    rttid.rttid(),
+                    transfer_type.slots
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn format_slot_type(slot_type: SlotType) -> &'static str {

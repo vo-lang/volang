@@ -8,6 +8,8 @@ use std::path::Path;
 pub(crate) struct TaskFile {
     pub(crate) version: u32,
     #[serde(default)]
+    pub(crate) final_selectors: Vec<String>,
+    #[serde(default)]
     pub(crate) groups: BTreeMap<String, Vec<String>>,
     #[serde(default, rename = "group")]
     pub(crate) group_meta: Vec<TaskGroup>,
@@ -98,6 +100,9 @@ pub(crate) struct NodeWorkspace {
     pub(crate) path: String,
     pub(crate) lockfile: String,
     pub(crate) status: Option<String>,
+    pub(crate) audit: Option<String>,
+    pub(crate) audit_level: Option<String>,
+    pub(crate) audit_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -15,6 +15,7 @@ use crate::lint_policy::{
 use crate::release_system;
 use crate::task_graph::{resolve_selector, task_map, task_tools_recursive};
 use crate::task_planner::git_lines;
+use crate::task_runner::{current_vm_production_source_state_hash, final_gate_selectors};
 use crate::tool_lint::lint_toolchain_file;
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
@@ -462,8 +463,8 @@ fn lint_selected_gate_tasks_have_timeouts(
     config: &TaskFile,
     task_map: &BTreeMap<String, Task>,
 ) -> Result<()> {
-    for selector in crate::task_runner::VM_PRODUCTION_FINAL_GATE_SELECTORS {
-        for task_name in resolve_selector(config, selector)? {
+    for selector in final_gate_selectors(config)? {
+        for task_name in resolve_selector(config, &selector)? {
             let Some(task) = task_map.get(&task_name) else {
                 continue;
             };
@@ -1472,6 +1473,16 @@ struct StudioDocsPage {
     file: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct VmProductionGateEvidence {
+    schema: String,
+    selector: String,
+    changed: bool,
+    passed: bool,
+    source_state: String,
+    tasks: Vec<String>,
+}
+
 fn lint_docs(root: &Path) -> Result<()> {
     for old_path in [
         "apps/playground-legacy/src/assets/docs/spec",
@@ -1539,7 +1550,108 @@ fn lint_docs(root: &Path) -> Result<()> {
             }
         }
     }
+    lint_vm_production_gate_evidence(root)?;
+    lint_jit_runtime_path_wording(root)?;
     lint_touched_dev_note_front_matter(root)?;
+    Ok(())
+}
+
+fn lint_jit_runtime_path_wording(root: &Path) -> Result<()> {
+    let path = root.join("apps/studio/docs/pages/advanced/backends.md");
+    let source = fs::read_to_string(&path)
+        .map_err(|err| anyhow!("could not read {}: {err}", path.display()))?;
+    for forbidden in ["Graceful fallback", "VM fallback behavior"] {
+        if source.contains(forbidden) {
+            bail!("Studio backend docs must avoid broad JIT fallback wording: {forbidden}");
+        }
+    }
+    if !source.contains("Invalid strict-JIT metadata")
+        || !source.contains("fail fast")
+        || !source.contains("VM-managed runtime paths")
+    {
+        bail!("Studio backend docs must spell out strict-JIT fail-fast runtime-path policy");
+    }
+    Ok(())
+}
+
+fn lint_vm_production_gate_evidence(root: &Path) -> Result<()> {
+    let config = load_tasks(root)?;
+    let selectors = final_gate_selectors(&config)?;
+    let expected_source_state = format!(
+        "vm-production-current-source:{}",
+        current_vm_production_source_state_hash(root)?
+    );
+    let evidence_dir = root.join("lang/docs/dev/vm-production-gate-evidence");
+    if !evidence_dir.is_dir() {
+        bail!("VM production gate evidence directory is missing");
+    }
+    let mut expected_files = BTreeSet::new();
+    for selector in &selectors {
+        let path = evidence_dir.join(format!("{selector}.json"));
+        expected_files.insert(format!("{selector}.json"));
+        let text = fs::read_to_string(&path)
+            .map_err(|err| anyhow!("could not read VM production evidence {selector}: {err}"))?;
+        let evidence: VmProductionGateEvidence = serde_json::from_str(&text)
+            .map_err(|err| anyhow!("could not parse VM production evidence {selector}: {err}"))?;
+        if evidence.schema != "vo-dev-task-run-evidence-v1" {
+            bail!(
+                "VM production evidence {selector} has invalid schema {}",
+                evidence.schema
+            );
+        }
+        if evidence.selector != *selector {
+            bail!(
+                "VM production evidence {} records selector {}",
+                path.display(),
+                evidence.selector
+            );
+        }
+        if evidence.changed {
+            bail!(
+                "VM production evidence {selector} must be a full selector run, not changed mode"
+            );
+        }
+        if !evidence.passed {
+            bail!("VM production evidence {selector} did not pass");
+        }
+        if evidence.source_state != expected_source_state {
+            bail!(
+                "VM production evidence {selector} has stale source_state {}; expected {expected_source_state}",
+                evidence.source_state
+            );
+        }
+        let expected_tasks = resolve_selector(&config, selector)?;
+        if evidence.tasks != expected_tasks {
+            bail!(
+                "VM production evidence {selector} task list is stale; rerun `cargo run -q -p vo-dev -- task run {selector}` after source changes"
+            );
+        }
+    }
+    for entry in fs::read_dir(&evidence_dir)
+        .map_err(|err| anyhow!("could not read {}: {err}", evidence_dir.display()))?
+    {
+        let entry = entry.map_err(|err| anyhow!("could not read evidence dir entry: {err}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".json") && !expected_files.contains(&name) {
+            bail!("unexpected VM production evidence file: {name}");
+        }
+    }
+    let readiness_path = root.join("lang/docs/dev/vm-production-readiness.md");
+    let readiness = fs::read_to_string(&readiness_path)
+        .map_err(|err| anyhow!("could not read {}: {err}", readiness_path.display()))?;
+    let top_status = readiness
+        .split("\n## ")
+        .next()
+        .unwrap_or(readiness.as_str());
+    if top_status.contains("signoff\nremains withdrawn")
+        || top_status.contains("signoff remains withdrawn")
+        || top_status.contains("signoff is withdrawn")
+    {
+        bail!("VM production readiness top status still claims signoff is withdrawn");
+    }
+    if !top_status.contains(&expected_source_state) {
+        bail!("VM production readiness top status must mention current evidence {expected_source_state}");
+    }
     Ok(())
 }
 

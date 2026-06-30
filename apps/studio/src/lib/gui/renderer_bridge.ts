@@ -113,6 +113,11 @@ type ActiveRendererBridge = {
   sessionId: number;
 } | null;
 
+type StudioBrowserSmokeRendererDebugHook = {
+  moduleBytesLength(): number;
+  dumpModuleBytes(): Promise<string>;
+};
+
 export type VfsFile = { path: string; bytes: Uint8Array };
 export type VfsSnapshot = { rootPath: string; files: VfsFile[] };
 
@@ -136,6 +141,30 @@ function optionalFunction<T>(value: unknown, label: string): T | undefined {
     throw new Error(`${label} must be a function when declared`);
   }
   return value as T;
+}
+
+function studioBrowserSmokeDebugEnabled(): boolean {
+  try {
+    return new URL(window.location.href).searchParams.get('studioBrowserSmokeDebug') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function exposeStudioBrowserSmokeRendererDebug(moduleBytes: Uint8Array): void {
+  if (!studioBrowserSmokeDebugEnabled()) {
+    return;
+  }
+  const bytes = new Uint8Array(moduleBytes);
+  (globalThis as typeof globalThis & {
+    __voStudioBrowserSmokeRenderer?: StudioBrowserSmokeRendererDebugHook;
+  }).__voStudioBrowserSmokeRenderer = {
+    moduleBytesLength: () => bytes.length,
+    dumpModuleBytes: async () => {
+      const wasm = await loadStudioWasm();
+      return wasm.dumpBytecode(bytes);
+    },
+  };
 }
 
 let activeRendererBridge: ActiveRendererBridge = null;
@@ -320,6 +349,7 @@ function makeRendererHost(
   registerWidgetWithRenderers?: (name: string, factory: WidgetFactory) => void,
 ): RendererHost {
   const capSet = new Set(declaredCapabilities);
+  exposeStudioBrowserSmokeRendererDebug(moduleBytes);
 
   // Build capability map — only capabilities declared by the framework are available.
   const capabilities: Partial<CapabilityMap> = {};

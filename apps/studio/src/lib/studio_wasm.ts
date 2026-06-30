@@ -12,6 +12,7 @@ import { hasWindowVfsBindings, installWindowVfsBackend, type WindowVfsBackend } 
 // ── VoVm instance interface (matches VoVm wasm-bindgen class exports) ────────
 
 export interface VoVmInstance {
+  dumpBytecode(): string;
   run(): string;
   runScheduled(): string;
   setGcStressEveryStep(enabled: boolean): void;
@@ -61,6 +62,8 @@ export interface StudioWasm {
   checkEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
   compileEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): WasmCompileResult;
   dumpEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): string;
+  dumpGuiEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): string;
+  dumpBytecode(bytecode: Uint8Array): string;
   // Console run (compile + execute, returns stdout)
   compileRunEntry(entryPath: string, workspaceDiscovery: WorkspaceDiscoveryMode): string;
   // Instance-based VM (VoWebModule interface)
@@ -694,9 +697,10 @@ function encodeStandaloneTagValueI64(value: number): Uint8Array {
   return bytes;
 }
 
-function encodeStandaloneTagBytes(bytes: Uint8Array): Uint8Array {
+function encodeStandaloneTagString(value: string): Uint8Array {
+  const bytes = new TextEncoder().encode(value);
   const result = new Uint8Array(5 + bytes.length);
-  result[0] = 0xE3;
+  result[0] = 0xE5;
   new DataView(result.buffer).setUint32(1, bytes.length, true);
   result.set(bytes, 5);
   return result;
@@ -709,7 +713,7 @@ function decodeWaitForEventReplayOutput(resumeData: Uint8Array): Uint8Array {
   const handlerId = new DataView(resumeData.buffer, resumeData.byteOffset, resumeData.byteLength).getInt32(0, true);
   const payloadBytes = resumeData.slice(4);
   const handlerOutput = encodeStandaloneTagValueI64(handlerId);
-  const payloadOutput = encodeStandaloneTagBytes(payloadBytes);
+  const payloadOutput = encodeStandaloneTagString(new TextDecoder().decode(payloadBytes));
   const output = new Uint8Array(handlerOutput.length + payloadOutput.length);
   output.set(handlerOutput, 0);
   output.set(payloadOutput, handlerOutput.length);
@@ -986,6 +990,10 @@ function gcStressHostStepEnabled(): boolean {
   return queryFlagEnabled('voplayGcStress') || queryFlagEnabled('voGcStressHostStep');
 }
 
+function studioBrowserSmokeDebugEnabled(): boolean {
+  return queryFlagEnabled('studioBrowserSmokeDebug');
+}
+
 function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
   const vmExport = mod.StudioVoVm;
   if (!vmExport) {
@@ -1036,6 +1044,8 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
     checkEntry: requireStudioExport(mod.checkEntry as StudioWasm['checkEntry'], 'checkEntry'),
     compileEntry: requireStudioExport(mod.compileEntry as StudioWasm['compileEntry'], 'compileEntry'),
     dumpEntry: requireStudioExport(mod.dumpEntry as StudioWasm['dumpEntry'], 'dumpEntry'),
+    dumpGuiEntry: requireStudioExport(mod.dumpGuiEntry as StudioWasm['dumpGuiEntry'], 'dumpGuiEntry'),
+    dumpBytecode: requireStudioExport(mod.dumpBytecode as StudioWasm['dumpBytecode'], 'dumpBytecode'),
     compileRunEntry: requireStudioExport(mod.compileRunEntry as StudioWasm['compileRunEntry'], 'compileRunEntry'),
     prepareEntry: requireStudioExport(mod.prepareEntry, 'prepareEntry'),
     compileGui: requireStudioExport(mod.compileGui as StudioWasm['compileGui'], 'compileGui'),
@@ -1046,6 +1056,18 @@ function normalizeStudioWasmModule(mod: RawStudioWasmModule): StudioWasm {
         const enabled = applyGcStressFlag();
         const vm = vmExport.withExterns(bytecode);
         vm.setGcStressEveryStep(enabled);
+        if (studioBrowserSmokeDebugEnabled()) {
+          const bytesLength = bytecode.length;
+          (globalThis as typeof globalThis & {
+            __voStudioBrowserSmokeRenderIsland?: {
+              moduleBytesLength(): number;
+              dumpModuleBytes(): Promise<string>;
+            };
+          }).__voStudioBrowserSmokeRenderIsland = {
+            moduleBytesLength: () => bytesLength,
+            dumpModuleBytes: async () => vm.dumpBytecode(),
+          };
+        }
         return vm;
       },
     },

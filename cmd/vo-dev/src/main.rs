@@ -19,6 +19,7 @@ mod github_output;
 mod glob;
 mod lint_policy;
 mod lint_system;
+mod node_audit;
 mod release_config;
 mod release_homebrew;
 mod release_system;
@@ -54,6 +55,7 @@ fn real_main() -> Result<()> {
         "task" => task_system::cmd_task(&root, args),
         "ci" => ci_system::cmd_ci(&root, args),
         "lint" => lint_system::cmd_lint(&root, args),
+        "node-audit" => node_audit::cmd_node_audit(&root, args),
         "tool" => tool_system::cmd_tool(&root, args),
         "verify" => verify_system::cmd_verify(&root, args),
         "release" => release_system::cmd_release(&root, args),
@@ -90,6 +92,7 @@ fn print_usage() {
   vo-dev ci metadata <selector> [--github-output]
   vo-dev ci final-matrix [--github-output]
   vo-dev lint tasks|artifacts|repo-boundaries|layout|docs|examples|benchmarks|release|all [--strict]
+  vo-dev node-audit current|list
   vo-dev tool check [--task <task>] [--json]
   vo-dev tool bootstrap [--task <task>] [--apply] [--json]
   vo-dev tool version <tool>

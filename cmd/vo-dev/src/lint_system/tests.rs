@@ -35,6 +35,13 @@ fn task_without_timeout(name: &str) -> Task {
     task
 }
 
+fn final_selectors() -> Vec<String> {
+    ["contract", "vm-production", "site", "release-verify"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 fn task_group(name: &str, tasks: &[&str], included_in: &[&str]) -> TaskGroup {
     TaskGroup {
         name: name.to_string(),
@@ -55,6 +62,7 @@ fn lint_group_metadata_included_in_must_match_parent_groups_062() {
     groups.insert("child".to_string(), vec!["leaf-task".to_string()]);
     let mut config = TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![
             task_group("parent", &["child"], &[]),
@@ -79,6 +87,7 @@ fn lint_group_metadata_included_in_rejects_extra_parent_links_062() {
     groups.insert("child".to_string(), vec!["leaf-task".to_string()]);
     let config = TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![
             task_group("parent", &["child"], &[]),
@@ -155,6 +164,7 @@ fn vm_readiness_scope_task_file(excluded_selector: &str, excluded: Option<&str>)
     groups.insert("vm-production".to_string(), scope_items("vm-production"));
     TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: names.into_iter().map(|name| task(&name)).collect(),
@@ -191,6 +201,7 @@ fn codegen_task_file(
     );
     TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![task("cargo-test-codegen")],
@@ -231,6 +242,7 @@ fn vo_dev_task_file(
     );
     TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![
@@ -275,6 +287,7 @@ fn vm_hardening_task_file(
     );
     TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: VM_HARDENING_UNFILTERED_CRATE_TESTS
@@ -318,6 +331,7 @@ fn runtime_surface_task_file(
     );
     TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![
@@ -360,6 +374,7 @@ fn ffi_task_file(
     );
     TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![
@@ -423,6 +438,7 @@ fn docs_task_file(
     );
     TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![docs_lint_task()],
@@ -460,6 +476,7 @@ fn app_contract_task_file(
     );
     TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![
@@ -492,14 +509,6 @@ fn studio_wasm_function_source<'a>(source: &'a str, signature: &str) -> Result<&
     let rest = &source[start..];
     let end = rest.find("\nfn ").unwrap_or(rest.len());
     Ok(&rest[..end])
-}
-
-fn compact_contains(compact: &[u8], pattern: &str) -> bool {
-    vo_source_contract::compact_contains(compact, pattern)
-}
-
-fn compact_region_between(source: &str, marker: &str, terminator: &str) -> Option<Vec<u8>> {
-    vo_source_contract::compact_region_between(source, marker, terminator)
 }
 
 fn ts_contains_active_line_062(source: &str, expected: &str) -> bool {
@@ -541,7 +550,7 @@ fn assert_studio_wasm_pending_host_event_contract(
     ts_source: &str,
 ) -> Result<()> {
     let rust_source = studio_wasm_production_source(rust_source);
-    let serializer = compact_region_between(
+    let serializer = vo_source_contract::compact_region_between(
         rust_source,
         "fnpending_host_event_to_js(event:&PendingHostEvent)->Object{",
         "fnproject_context_options_from_workspace_discovery",
@@ -555,34 +564,34 @@ fn assert_studio_wasm_pending_host_event_contract(
         ("replay", "JsValue::from_bool(event.replay)"),
     ] {
         let (field, value_source) = required;
-        if !compact_contains(&serializer, value_source) {
+        if !vo_source_contract::compact_contains(&serializer, value_source) {
             bail!("pending host event serializer must emit {field} from the VM-owned event field");
         }
     }
 
-    let drain = compact_region_between(
+    let drain = vo_source_contract::compact_region_between(
         rust_source,
         "pubfntake_pending_host_events(&mutself)->js_sys::Array{",
         "pubfnwake_host_event_vm",
     )
     .ok_or_else(|| anyhow!("studio wasm source missing take_pending_host_events"))?;
-    if !compact_contains(&drain, "self.runtime.take_pending_host_events()") {
+    if !vo_source_contract::compact_contains(&drain, "self.runtime.take_pending_host_events()") {
         bail!("takePendingHostEvents must drain VM-owned pending host events");
     }
-    if !compact_contains(&drain, "pending_host_event_to_js(&event)") {
+    if !vo_source_contract::compact_contains(&drain, "pending_host_event_to_js(&event)") {
         bail!("takePendingHostEvents must share pending host event serialization");
     }
 
-    let poll = compact_region_between(
+    let poll = vo_source_contract::compact_region_between(
         rust_source,
         "pubfnpoll_pending_host_event()->JsValue{",
         "pubfnwake_host_event(",
     )
     .ok_or_else(|| anyhow!("studio wasm source missing poll_pending_host_event"))?;
-    if !compact_contains(&poll, "guest.poll_pending_host_event()") {
+    if !vo_source_contract::compact_contains(&poll, "guest.poll_pending_host_event()") {
         bail!("pollPendingHostEvent must poll VM-owned pending host events");
     }
-    if !compact_contains(&poll, "pending_host_event_to_js(&event).into()") {
+    if !vo_source_contract::compact_contains(&poll, "pending_host_event_to_js(&event).into()") {
         bail!("pollPendingHostEvent must share pending host event serialization");
     }
 
@@ -1240,6 +1249,7 @@ fn lint_selected_gate_tasks_have_timeouts_rejects_non_test_task_without_timeout(
     groups.insert("vm-production".to_string(), vec!["wasm-check".to_string()]);
     let config = TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![task_without_timeout("docs-lint"), task("wasm-check")],
@@ -1266,6 +1276,7 @@ fn lint_selected_gate_tasks_have_timeouts_rejects_unbounded_final_signoff_select
     );
     let config = TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![
@@ -1297,6 +1308,7 @@ fn lint_selected_gate_tasks_have_timeouts_accepts_bounded_gate_tasks() {
     );
     let config = TaskFile {
         version: 1,
+        final_selectors: final_selectors(),
         groups,
         group_meta: vec![],
         tasks: vec![

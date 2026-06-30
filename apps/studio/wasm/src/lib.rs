@@ -267,6 +267,7 @@ where
 #[wasm_bindgen(js_name = "StudioVoVm")]
 pub struct StudioVoVm {
     runtime: RenderIslandRuntime,
+    bytecode_dump: String,
 }
 
 #[wasm_bindgen(js_class = "StudioVoVm")]
@@ -278,6 +279,7 @@ impl StudioVoVm {
         ensure_panic_hook();
         let module =
             decode_verified_module(bytecode, "Studio VM").map_err(|e| JsValue::from_str(&e))?;
+        let bytecode_dump = bytecode_text_format::format_text(&module);
         let mut vm = vo_web::create_loaded_vm_from_module(module, |reg, exts| {
             vo_web::ext_bridge::register_wasm_ext_bridges(reg, exts);
         })
@@ -285,7 +287,13 @@ impl StudioVoVm {
         apply_gc_stress_config(&mut vm);
         Ok(StudioVoVm {
             runtime: RenderIslandRuntime::new(vm, guest_stdout_source()),
+            bytecode_dump,
         })
+    }
+
+    #[wasm_bindgen(js_name = "dumpBytecode")]
+    pub fn dump_bytecode(&self) -> String {
+        self.bytecode_dump.clone()
     }
 
     #[wasm_bindgen(js_name = "setGcStressEveryStep")]
@@ -1537,6 +1545,26 @@ pub fn dump_entry(entry_path: &str, workspace_discovery: &str) -> Result<String,
     let bytecode = compile_from_vfs(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
     let module =
         decode_verified_module(&bytecode, "Studio dump").map_err(|e| JsValue::from_str(&e))?;
+    Ok(bytecode_text_format::format_text(&module))
+}
+
+#[wasm_bindgen(js_name = "dumpGuiEntry")]
+pub fn dump_gui_entry(entry_path: &str, workspace_discovery: &str) -> Result<String, JsValue> {
+    ensure_panic_hook();
+    let options = project_context_options_from_workspace_discovery(workspace_discovery)
+        .map_err(|e| JsValue::from_str(&e))?;
+    let (_target, bytecode, _framework, _provider_frameworks, _wasm_extensions) =
+        compile_gui_run_output(entry_path, &options).map_err(|e| JsValue::from_str(&e))?;
+    let module = decode_verified_module(&bytecode, "Studio GUI dump")
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(bytecode_text_format::format_text(&module))
+}
+
+#[wasm_bindgen(js_name = "dumpBytecode")]
+pub fn dump_bytecode(bytecode: &[u8]) -> Result<String, JsValue> {
+    ensure_panic_hook();
+    let module = decode_verified_module(bytecode, "Studio bytecode dump")
+        .map_err(|e| JsValue::from_str(&e))?;
     Ok(bytecode_text_format::format_text(&module))
 }
 

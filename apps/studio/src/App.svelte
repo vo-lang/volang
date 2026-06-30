@@ -19,6 +19,17 @@
   import RunnerModeLayout from './components/RunnerModeLayout.svelte';
   import DocsPanel from './components/DocsPanel.svelte';
 
+  type StudioBrowserSmokeDebugHook = {
+    entryPath(): string | null;
+    dumpCurrent(): Promise<string>;
+    dump(path: string): Promise<string>;
+  };
+
+  type StudioBrowserSmokeDebugBackend = {
+    dumpVo(path: string): Promise<string>;
+    dumpGuiBytecode?(path: string): Promise<string>;
+  };
+
   let registry: ServiceRegistry | null = null;
   let bootstrap: BootstrapContext | null = null;
   let sessionInfo: SessionInfo | null = null;
@@ -51,6 +62,7 @@
   onMount(async () => {
     try {
       registry = await createServiceRegistry();
+      refreshStudioBrowserSmokeDebugHook();
       githubStore = registry.projectCatalog.github;
       bootstrap = registry.project.bootstrapContext;
       const launch = bootstrap.launch;
@@ -114,6 +126,7 @@
 
   onDestroy(() => {
     stopRuntimePolling();
+    clearStudioBrowserSmokeDebugHook();
     unsubRoute();
     unsubIde();
   });
@@ -172,6 +185,7 @@
   function isRunnerPerfParam(name: string): boolean {
     return name === 'voplayPerf'
       || name === 'perf'
+      || name === 'studioBrowserSmokeDebug'
       || name === 'voplayPerfOverlay'
       || name === 'rendererDebug'
       || name === 'debug'
@@ -182,6 +196,55 @@
       || name === 'voGcStressEveryStep'
       || name.startsWith('voplayPerfDisable')
       || name.startsWith('voplayDisable');
+  }
+
+  function studioBrowserSmokeDebugEnabled(): boolean {
+    try {
+      return new URL(window.location.href).searchParams.get('studioBrowserSmokeDebug') === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function studioBrowserSmokeDebugGlobal(): typeof globalThis & {
+    __voStudioBrowserSmoke?: StudioBrowserSmokeDebugHook;
+  } {
+    return globalThis as typeof globalThis & {
+      __voStudioBrowserSmoke?: StudioBrowserSmokeDebugHook;
+    };
+  }
+
+  function clearStudioBrowserSmokeDebugHook(): void {
+    delete studioBrowserSmokeDebugGlobal().__voStudioBrowserSmoke;
+  }
+
+  function refreshStudioBrowserSmokeDebugHook(): void {
+    if (!registry || !studioBrowserSmokeDebugEnabled()) {
+      clearStudioBrowserSmokeDebugHook();
+      return;
+    }
+    studioBrowserSmokeDebugGlobal().__voStudioBrowserSmoke = {
+      entryPath: () => sessionInfo?.entryPath ?? null,
+      dumpCurrent: async () => {
+        const entryPath = sessionInfo?.entryPath;
+        if (!entryPath) {
+          throw new Error('No active Studio entry path');
+        }
+        return dumpStudioBrowserSmokeEntry(entryPath);
+      },
+      dump: async (path: string) => dumpStudioBrowserSmokeEntry(path),
+    };
+  }
+
+  function dumpStudioBrowserSmokeEntry(path: string): Promise<string> {
+    const backend = registry?.backend as StudioBrowserSmokeDebugBackend | undefined;
+    if (!backend) {
+      return Promise.reject(new Error('Studio registry is unavailable'));
+    }
+    if (backend.dumpGuiBytecode) {
+      return backend.dumpGuiBytecode(path);
+    }
+    return backend.dumpVo(path);
   }
 
   function isLocalRunnerHost(url: URL): boolean {
@@ -201,6 +264,7 @@
       shareInfoForMode(nextSessionInfo, 'runner'),
     );
     syncBrowserUrlToSession(nextSessionInfo, 'runner');
+    refreshStudioBrowserSmokeDebugHook();
     currentDir = nextSessionInfo.root;
     explorerEntries = [];
     editorOpen('', '');
@@ -224,6 +288,7 @@
     if (options.syncUrl !== false) {
       syncBrowserUrlToSession(nextSessionInfo, 'dev');
     }
+    refreshStudioBrowserSmokeDebugHook();
     sessionProjectHasGui = registry.projectCatalog.getSessionProjectConfig(nextSessionInfo).hasGui;
     ide.update((s) => ({ ...s, outputExpanded: false, previewCollapsed: false }));
     currentDir = nextSessionInfo.root;

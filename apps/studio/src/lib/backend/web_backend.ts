@@ -749,6 +749,15 @@ export class WebBackend implements Backend {
     return wasm.dumpEntry(normalized, workspaceDiscovery);
   }
 
+  async dumpGuiBytecode(path: string): Promise<string> {
+    const normalized = normalizePath(path);
+    const workspaceDiscovery = workspaceDiscoveryForPath(normalized);
+    const wasm = await getStudioWasm();
+    await ensureBlockKartPackagedDependenciesForEntry(normalized);
+    await wasm.prepareEntry(normalized, workspaceDiscovery);
+    return wasm.dumpGuiEntry(normalized, workspaceDiscovery);
+  }
+
   runVo(path: string, _opts?: RunOpts): StreamHandle<RunEvent> {
     const normalized = normalizePath(path);
     const workspaceDiscovery = workspaceDiscoveryForPath(normalized);

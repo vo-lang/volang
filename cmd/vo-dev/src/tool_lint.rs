@@ -159,6 +159,85 @@ pub(crate) fn lint_toolchain_file(root: &Path, config: &ToolchainFile) -> Result
                 );
             }
         }
+        match workspace.audit.as_deref() {
+            Some("current") => {
+                if workspace.status.as_deref() == Some("legacy") {
+                    bail!(
+                        "node workspace {} cannot audit current while status is legacy",
+                        workspace.name
+                    );
+                }
+                if workspace
+                    .audit_level
+                    .as_deref()
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    bail!(
+                        "node workspace {} audit=current must declare audit_level",
+                        workspace.name
+                    );
+                }
+                if !matches!(
+                    workspace.audit_level.as_deref(),
+                    Some("low" | "moderate" | "high" | "critical")
+                ) {
+                    bail!(
+                        "node workspace {} has invalid audit_level {}",
+                        workspace.name,
+                        workspace.audit_level.as_deref().unwrap_or("missing")
+                    );
+                }
+            }
+            Some("legacy-exempt") => {
+                if workspace.status.as_deref() != Some("legacy") {
+                    bail!(
+                        "node workspace {} audit=legacy-exempt requires status=legacy",
+                        workspace.name
+                    );
+                }
+                if workspace
+                    .audit_reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                {
+                    bail!(
+                        "node workspace {} audit=legacy-exempt must declare audit_reason",
+                        workspace.name
+                    );
+                }
+            }
+            Some("first-party-release") => {
+                if workspace.repo.is_none() {
+                    bail!(
+                        "node workspace {} audit=first-party-release requires repo",
+                        workspace.name
+                    );
+                }
+                if workspace
+                    .audit_reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                {
+                    bail!(
+                        "node workspace {} audit=first-party-release must declare audit_reason",
+                        workspace.name
+                    );
+                }
+            }
+            Some(other) => bail!(
+                "node workspace {} has invalid audit policy {other}",
+                workspace.name
+            ),
+            None => bail!(
+                "node workspace {} must declare audit policy",
+                workspace.name
+            ),
+        }
         if let Some(repo) = &workspace.repo {
             let entry = project_repo_entry(&project, repo).ok_or_else(|| {
                 anyhow!(

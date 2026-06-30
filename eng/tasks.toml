@@ -1,4 +1,5 @@
 version = 1
+final_selectors = ["contract", "vm-production", "site", "release-verify"]
 
 [groups]
 quality = [
@@ -12,6 +13,7 @@ quality = [
   "docs-lint",
   "eng-lint-examples",
   "eng-lint-benchmarks",
+  "node-audit-current",
   "cargo-fmt",
   "cargo-clippy",
   "cargo-check",
@@ -186,11 +188,13 @@ vm-production = [
 ]
 
 app-site = [
+  "node-audit-current",
   "vo-web-wasm-build",
   "vogui-build",
   "studio-wasm-build",
   "studio-install-local-vogui",
   "studio-build",
+  "studio-browser-smoke",
   "quickplay-validate",
   "blockkart-smoke-static",
 ]
@@ -238,6 +242,7 @@ pr = [
   "benchmarks",
   "app-contract",
   "studio-build",
+  "studio-browser-smoke",
   "quickplay-validate",
   "blockkart-smoke-static",
   "release-verify",
@@ -259,7 +264,7 @@ title = "Quality"
 tier_intent = "fast PR policy and source hygiene"
 owner = "eng"
 tags = ["quality", "repo-policy"]
-tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "eng-lint-artifacts", "eng-lint-repo-boundaries", "eng-lint-release", "eng-lint-layout", "docs-lint", "eng-lint-examples", "eng-lint-benchmarks", "cargo-fmt", "cargo-clippy", "cargo-check", "wasm-check"]
+tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "eng-lint-artifacts", "eng-lint-repo-boundaries", "eng-lint-release", "eng-lint-layout", "docs-lint", "eng-lint-examples", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "cargo-clippy", "cargo-check", "wasm-check"]
 included_in = ["pr", "full"]
 selection_policy = "Selected when the quality validation surface is requested or when a parent group includes it."
 
@@ -509,7 +514,7 @@ title = "App Site"
 tier_intent = "Studio vo-web quickplay and static site checks"
 owner = "studio"
 tags = ["app-site", "app-build", "app-smoke"]
-tasks = ["vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "quickplay-validate", "blockkart-smoke-static"]
+tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "studio-browser-smoke", "quickplay-validate", "blockkart-smoke-static"]
 included_in = ["site"]
 selection_policy = "Selected when the app-site validation surface is requested or when a parent group includes it."
 
@@ -559,7 +564,7 @@ title = "PR"
 tier_intent = "normal pull request validation"
 owner = "eng"
 tags = ["pr"]
-tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate", "blockkart-smoke-static", "release-verify"]
+tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "studio-browser-smoke", "quickplay-validate", "blockkart-smoke-static", "release-verify"]
 included_in = []
 selection_policy = "Selected when the pr validation surface is requested or when a parent group includes it."
 
@@ -606,6 +611,19 @@ outputs = []
 timeout_sec = 600
 tier = "fast"
 tags = ["manifest-lint", "repo-policy"]
+owner = "eng"
+
+[[task]]
+name = "node-audit-current"
+title = "audit current Node workspaces"
+command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "node-audit", "current"]
+tools = ["rust", "node", "npm", "vo-dev"]
+node_workspaces = ["studio", "vo-web"]
+inputs = ["cmd/vo-dev/**", "eng/toolchains.toml", "apps/studio/package.json", "apps/studio/package-lock.json", "lang/crates/vo-web/package.json", "lang/crates/vo-web/package-lock.json"]
+outputs = []
+timeout_sec = 600
+tier = "fast"
+tags = ["repo-policy", "app-smoke"]
 owner = "eng"
 
 [[task]]
@@ -1402,6 +1420,20 @@ tier = "site"
 tags = ["app-build"]
 owner = "studio"
 timeout_sec = 1800
+
+[[task]]
+name = "studio-browser-smoke"
+title = "smoke Studio browser startup"
+command = ["node", "scripts/ci/studio_browser_smoke.mjs"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/studio_browser_smoke.mjs", "apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json"]
+outputs = []
+tier = "site"
+tags = ["app-smoke", "browser-smoke"]
+owner = "studio"
+timeout_sec = 300
 
 [[task]]
 name = "cargo-test-studio-wasm-source-contract"
