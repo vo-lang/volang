@@ -148,12 +148,13 @@ pub(super) fn prepare_native_extension_specs_with_readiness(
     ready_modules: &[ReadyModule],
     mod_root: &Path,
 ) -> Result<Vec<NativeExtensionSpec>, ModuleSystemError> {
-    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
 
     let mod_root = mod_root
         .canonicalize()
         .unwrap_or_else(|_| mod_root.to_path_buf());
-    let mut prepared: BTreeMap<PathBuf, NativeExtensionSpec> = BTreeMap::new();
+    let mut seen_module_dirs = BTreeSet::new();
+    let mut specs = Vec::new();
     let native_manifests = manifests
         .iter()
         .filter(|manifest| manifest.native.is_some())
@@ -161,30 +162,14 @@ pub(super) fn prepare_native_extension_specs_with_readiness(
 
     for manifest in &native_manifests {
         let module_dir = extension_manifest_module_dir(manifest)?;
-        if prepared.contains_key(&module_dir) {
+        if !seen_module_dirs.insert(module_dir) {
             continue;
         }
         let resolved = prepare_extension_spec(manifest, ready_modules, &mod_root)?;
-        prepared.insert(module_dir, resolved);
+        specs.push(resolved);
     }
 
-    native_manifests
-        .into_iter()
-        .map(|manifest| {
-            let module_dir = extension_manifest_module_dir(manifest)?;
-            prepared.get(&module_dir).cloned().ok_or_else(|| {
-                ModuleSystemError::new(
-                    ModuleSystemStage::NativeExtension,
-                    ModuleSystemErrorKind::ValidationFailed,
-                    format!(
-                        "missing prepared native extension spec for {}",
-                        manifest.manifest_path.display(),
-                    ),
-                )
-                .with_path(&manifest.manifest_path)
-            })
-        })
-        .collect()
+    Ok(specs)
 }
 
 pub(super) fn current_target_triple() -> &'static str {
@@ -724,4 +709,87 @@ fn walkdir_files(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+    use vo_module::ext_manifest::{
+        ExtensionManifest, NativeExtensionConfig, NativeTargetDeclaration,
+    };
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn current_platform_library_name(stem: &str) -> String {
+        #[cfg(target_os = "linux")]
+        {
+            format!("{}.so", stem)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            format!("{}.dylib", stem)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            format!("{}.dll", stem.strip_prefix("lib").unwrap_or(stem))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            format!("{}.so", stem)
+        }
+    }
+
+    fn local_manifest(module_dir: &Path) -> ExtensionManifest {
+        ExtensionManifest {
+            name: "demo".to_string(),
+            include: Vec::new(),
+            native: Some(NativeExtensionConfig {
+                path: Some("rust/target/{profile}/libdemo".to_string()),
+                targets: vec![NativeTargetDeclaration {
+                    target: current_target_triple().to_string(),
+                    library: current_platform_library_name("libdemo"),
+                }],
+            }),
+            wasm: None,
+            web: None,
+            manifest_path: module_dir.join("vo.mod"),
+        }
+    }
+
+    #[test]
+    fn native_extension_specs_dedupe_duplicate_module_manifests() {
+        let root = temp_dir("vo_native_ext_dedupe");
+        let mod_root = root.join("mod-cache");
+        let module_dir = root.join("demo");
+        fs::create_dir_all(&module_dir).unwrap();
+        fs::create_dir_all(&mod_root).unwrap();
+
+        let manifest = local_manifest(&module_dir);
+        let specs = prepare_native_extension_specs_with_readiness(
+            &[manifest.clone(), manifest],
+            &[],
+            &mod_root,
+        )
+        .unwrap();
+
+        assert_eq!(
+            specs.len(),
+            1,
+            "duplicate extension specs should not reload one dylib twice"
+        );
+        assert_eq!(specs[0].name, "demo");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

@@ -96,8 +96,10 @@ pub const ABI_FINGERPRINT: u64 = vo_runtime::ffi::EXTENSION_ABI_FINGERPRINT;
 /// vo_ext::export_extensions!();
 /// ```
 ///
-/// # WASM Platform
-/// Call with list of StdlibEntry constants. Generates `vo_ext_register` function.
+/// # Explicit Entries
+/// Call with a list of generated `__EXT_*` constants to export only those
+/// entries. This is useful when a native extension links another extension crate
+/// and must avoid exporting the dependency's linkme entries.
 /// ```ignore
 /// vo_ext::export_extensions!(__EXT_gui_emitRender, __EXT_gui_navigate);
 /// ```
@@ -132,10 +134,46 @@ macro_rules! export_extensions {
         }
     };
 
-    // WASM: explicit list of entries (caller must implement registration)
+    // Explicit entries: native exports exactly this table; wasm exposes the
+    // StdlibEntry list so callers can implement static registration.
     ($($entry:path),+ $(,)?) => {
         /// All extern entries for this extension.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub static VO_EXT_ENTRIES: &[$crate::ExternEntry] = &[$($entry),*];
+
+        /// All extern entries for this extension.
+        #[cfg(target_arch = "wasm32")]
         pub static VO_EXT_ENTRIES: &[$crate::StdlibEntry] = &[$($entry),*];
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[no_mangle]
+        pub extern "C" fn vo_ext_get_entries() -> $crate::ExtensionTable {
+            $crate::ExtensionTable {
+                version: $crate::ABI_VERSION,
+                entry_count: VO_EXT_ENTRIES.len() as u32,
+                entries: VO_EXT_ENTRIES.as_ptr(),
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[no_mangle]
+        pub extern "C" fn vo_ext_get_abi_fingerprint() -> u64 {
+            $crate::ABI_FINGERPRINT
+        }
+
+        /// Receive a host bridge pointer from the extension loader.
+        #[cfg(not(target_arch = "wasm32"))]
+        #[no_mangle]
+        pub unsafe extern "C" fn vo_ext_set_host_bridge(ptr: usize) {
+            $crate::host::receive_host_bridge(ptr);
+        }
+
+        /// Clear the host bridge reference before the host drops it.
+        #[cfg(not(target_arch = "wasm32"))]
+        #[no_mangle]
+        pub extern "C" fn vo_ext_clear_host_bridge() {
+            $crate::host::receive_clear_host_bridge();
+        }
     };
 }
 
