@@ -195,6 +195,7 @@ app-site = [
   "studio-install-local-vogui",
   "studio-build",
   "studio-browser-smoke",
+  "blockkart-baseline",
   "quickplay-validate",
   "blockkart-smoke-static",
 ]
@@ -243,6 +244,7 @@ pr = [
   "app-contract",
   "studio-build",
   "studio-browser-smoke",
+  "blockkart-baseline",
   "quickplay-validate",
   "blockkart-smoke-static",
   "release-verify",
@@ -514,7 +516,7 @@ title = "App Site"
 tier_intent = "Studio vo-web quickplay and static site checks"
 owner = "studio"
 tags = ["app-site", "app-build", "app-smoke"]
-tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "studio-browser-smoke", "quickplay-validate", "blockkart-smoke-static"]
+tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "studio-browser-smoke", "blockkart-baseline", "quickplay-validate", "blockkart-smoke-static"]
 included_in = ["site"]
 selection_policy = "Selected when the app-site validation surface is requested or when a parent group includes it."
 
@@ -564,7 +566,7 @@ title = "PR"
 tier_intent = "normal pull request validation"
 owner = "eng"
 tags = ["pr"]
-tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "studio-browser-smoke", "quickplay-validate", "blockkart-smoke-static", "release-verify"]
+tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "studio-browser-smoke", "blockkart-baseline", "quickplay-validate", "blockkart-smoke-static", "release-verify"]
 included_in = []
 selection_policy = "Selected when the pr validation surface is requested or when a parent group includes it."
 
@@ -1432,6 +1434,20 @@ inputs = ["scripts/ci/studio_browser_smoke.mjs", "apps/studio/index.html", "apps
 outputs = []
 tier = "site"
 tags = ["app-smoke", "browser-smoke"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "blockkart-baseline"
+title = "baseline BlockKart smoke perf visual"
+command = ["node", "scripts/ci/blockkart_baseline.mjs", "--out-dir", "target/blockkart-baseline"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/blockkart_baseline.mjs", "apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json"]
+outputs = ["target/blockkart-baseline"]
+tier = "site"
+tags = ["app-smoke", "browser-smoke", "perf", "visual"]
 owner = "studio"
 timeout_sec = 300
 

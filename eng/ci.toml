@@ -34,7 +34,7 @@ tasks = ["docs-lint", "ci-self-check"]
 
 [[known_prefix]]
 path = "scripts/ci/**"
-tasks = ["docs-lint", "ci-self-check", "quickplay-validate", "studio-browser-smoke"]
+tasks = ["docs-lint", "ci-self-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline"]
 
 [[known_prefix]]
 path = "lang/crates/vo-runtime/**"
@@ -127,7 +127,7 @@ tasks = ["wasm-check", "vo-test-wasm", "vo-web-wasm-build", "cargo-test-web-hard
 
 [[known_prefix]]
 path = "apps/studio/**"
-tasks = ["docs-lint", "studio-build", "studio-browser-smoke", "cargo-test-studio-wasm-source-contract", "quickplay-validate", "blockkart-smoke-static"]
+tasks = ["docs-lint", "studio-build", "studio-browser-smoke", "blockkart-baseline", "cargo-test-studio-wasm-source-contract", "quickplay-validate", "blockkart-smoke-static"]
 
 [[known_prefix]]
 path = "apps/playground-legacy/rust/**"
@@ -163,6 +163,7 @@ tasks = [
   "studio-wasm-build",
   "studio-build",
   "studio-browser-smoke",
+  "blockkart-baseline",
   "quickplay-validate",
   "blockkart-smoke-static",
 ]

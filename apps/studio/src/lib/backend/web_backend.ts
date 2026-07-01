@@ -54,6 +54,10 @@ const GITHUB_SESSION_ROOT = `${WORKSPACE_ROOT}/.volang/apps/studio/sessions/gith
 const GITHUB_API_ROOT = 'https://api.github.com';
 const GITHUB_FILE_FETCH_CONCURRENCY = 8;
 const QUICKPLAY_SESSION_ROOT = `${WORKSPACE_ROOT}/.volang/apps/studio/sessions/quickplay`;
+const RUNTIME_PERSIST_ROOT = '/persist';
+const RUNTIME_PERSIST_STORAGE_KEY = 'volang.studio.runtimeVfsPersist.v1';
+const RUNTIME_PERSIST_MAX_FILE_BYTES = 256 * 1024;
+const RUNTIME_PERSIST_MAX_TOTAL_BYTES = 1024 * 1024;
 const BLOCKKART_PACKAGED_MODULE_MARKERS = [
   '/github.com@vo-lang@vogui/v0.1.15/vo.release.json',
   '/github.com@vo-lang@vopack/v0.1.2/vo.release.json',
@@ -118,6 +122,23 @@ interface GitHubBlobMetadata {
 
 interface GitHubCommitMetadata {
   sha?: string;
+}
+
+interface RuntimePersistFile {
+  contentBase64: string;
+  mode?: number;
+  modTime?: number;
+}
+
+interface RuntimePersistDir {
+  mode?: number;
+  modTime?: number;
+}
+
+interface RuntimePersistSnapshot {
+  schemaVersion?: number;
+  files?: Record<string, RuntimePersistFile>;
+  dirs?: Record<string, RuntimePersistDir>;
 }
 
 interface ResolvedGitHubSource {
@@ -1161,7 +1182,7 @@ function tryDecodeUtf8(bytes: Uint8Array): string | null {
   }
 }
 
-function setVfsFile(path: string, bytes: Uint8Array, mode = 0o644): void {
+function setVfsFile(path: string, bytes: Uint8Array, mode = 0o644, persist = true): void {
   const normalized = normalizePath(path);
   const parent = dirname(normalized);
   ensureDir(parent);
@@ -1175,14 +1196,124 @@ function setVfsFile(path: string, bytes: Uint8Array, mode = 0o644): void {
   } else {
     files.set(normalized, decoded);
   }
+  if (persist && isRuntimePersistPath(normalized)) {
+    persistRuntimeVfsSnapshot();
+  }
 }
 
-function deleteFile(path: string): void {
+function deleteFile(path: string, persist = true): void {
   const normalized = normalizePath(path);
   files.delete(normalized);
   vfsFiles.delete(normalized);
   vfsFileModes.delete(normalized);
   vfsFileModTimes.delete(normalized);
+  if (persist && isRuntimePersistPath(normalized)) {
+    persistRuntimeVfsSnapshot();
+  }
+}
+
+function isRuntimePersistPath(path: string): boolean {
+  const normalized = normalizePath(path);
+  return normalized === RUNTIME_PERSIST_ROOT || normalized.startsWith(`${RUNTIME_PERSIST_ROOT}/`);
+}
+
+function runtimePersistStorage(): Storage | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    return window.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function loadRuntimeVfsSnapshot(): void {
+  const storage = runtimePersistStorage();
+  if (!storage) {
+    return;
+  }
+  let parsed: RuntimePersistSnapshot;
+  try {
+    const raw = storage.getItem(RUNTIME_PERSIST_STORAGE_KEY);
+    if (!raw) {
+      return;
+    }
+    parsed = JSON.parse(raw) as RuntimePersistSnapshot;
+  } catch (error) {
+    console.warn('Studio runtime VFS persistence could not be loaded:', error);
+    return;
+  }
+  if (parsed.schemaVersion !== 1) {
+    return;
+  }
+  ensureDir(RUNTIME_PERSIST_ROOT);
+  for (const [path, dir] of Object.entries(parsed.dirs ?? {})) {
+    const normalized = normalizePath(path);
+    if (!isRuntimePersistPath(normalized)) {
+      continue;
+    }
+    directories.add(normalized);
+    vfsDirModes.set(normalized, dir.mode ?? 0o755);
+    vfsDirModTimes.set(normalized, dir.modTime ?? Date.now());
+  }
+  for (const [path, file] of Object.entries(parsed.files ?? {})) {
+    const normalized = normalizePath(path);
+    if (!isRuntimePersistPath(normalized)) {
+      continue;
+    }
+    try {
+      const bytes = decodeBase64Bytes(file.contentBase64);
+      if (bytes.byteLength > RUNTIME_PERSIST_MAX_FILE_BYTES) {
+        continue;
+      }
+      setVfsFile(normalized, bytes, file.mode ?? 0o644, false);
+      vfsFileModTimes.set(normalized, file.modTime ?? Date.now());
+    } catch (error) {
+      console.warn(`Studio runtime VFS persistence skipped ${normalized}:`, error);
+    }
+  }
+}
+
+function persistRuntimeVfsSnapshot(): void {
+  const storage = runtimePersistStorage();
+  if (!storage) {
+    return;
+  }
+  const snapshot: RuntimePersistSnapshot = {
+    schemaVersion: 1,
+    files: {},
+    dirs: {},
+  };
+  for (const dir of [...directories].sort()) {
+    if (!isRuntimePersistPath(dir)) {
+      continue;
+    }
+    snapshot.dirs![dir] = {
+      mode: vfsDirModes.get(dir) ?? 0o755,
+      modTime: vfsDirModTimes.get(dir) ?? 0,
+    };
+  }
+  let totalBytes = 0;
+  for (const [path, bytes] of [...vfsFiles.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (!isRuntimePersistPath(path)) {
+      continue;
+    }
+    if (bytes.byteLength > RUNTIME_PERSIST_MAX_FILE_BYTES || totalBytes + bytes.byteLength > RUNTIME_PERSIST_MAX_TOTAL_BYTES) {
+      continue;
+    }
+    totalBytes += bytes.byteLength;
+    snapshot.files![path] = {
+      contentBase64: encodeBase64Bytes(bytes),
+      mode: vfsFileModes.get(path) ?? 0o644,
+      modTime: vfsFileModTimes.get(path) ?? Date.now(),
+    };
+  }
+  try {
+    storage.setItem(RUNTIME_PERSIST_STORAGE_KEY, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn('Studio runtime VFS persistence could not be saved:', error);
+  }
 }
 
 function hasVfsFile(path: string): boolean {
@@ -1367,6 +1498,9 @@ function vfsMkdir(path: string, mode: number): string | null {
   directories.add(normalized);
   vfsDirModes.set(normalized, mode);
   vfsDirModTimes.set(normalized, Date.now());
+  if (isRuntimePersistPath(normalized)) {
+    persistRuntimeVfsSnapshot();
+  }
   return null;
 }
 
@@ -1383,6 +1517,9 @@ function vfsMkdirAll(path: string, mode: number): string | null {
       vfsDirModTimes.set(current, Date.now());
     }
   }
+  if (isRuntimePersistPath(normalized)) {
+    persistRuntimeVfsSnapshot();
+  }
   return null;
 }
 
@@ -1397,6 +1534,9 @@ function vfsRemove(path: string): string | null {
   directories.delete(normalized);
   vfsDirModes.delete(normalized);
   vfsDirModTimes.delete(normalized);
+  if (isRuntimePersistPath(normalized)) {
+    persistRuntimeVfsSnapshot();
+  }
   return null;
 }
 
@@ -1418,6 +1558,9 @@ function vfsRemoveAll(path: string): string | null {
       vfsDirModes.delete(dir);
       vfsDirModTimes.delete(dir);
     }
+  }
+  if (isRuntimePersistPath(normalized)) {
+    persistRuntimeVfsSnapshot();
   }
   return null;
 }
@@ -1446,6 +1589,9 @@ function vfsRename(oldPath: string, newPath: string): string | null {
   directories.delete(oldNorm);
   vfsDirModes.delete(oldNorm);
   vfsDirModTimes.delete(oldNorm);
+  if (isRuntimePersistPath(oldNorm) || isRuntimePersistPath(newNorm)) {
+    persistRuntimeVfsSnapshot();
+  }
   return null;
 }
 
@@ -1470,10 +1616,16 @@ function vfsChmod(path: string, mode: number): string | null {
   const normalized = normalizeRuntimeVfsPath(path);
   if (directories.has(normalized)) {
     vfsDirModes.set(normalized, mode);
+    if (isRuntimePersistPath(normalized)) {
+      persistRuntimeVfsSnapshot();
+    }
     return null;
   }
   if (!vfsFiles.has(normalized)) return ERR_NOT_EXIST;
   vfsFileModes.set(normalized, mode);
+  if (isRuntimePersistPath(normalized)) {
+    persistRuntimeVfsSnapshot();
+  }
   return null;
 }
 
@@ -1524,6 +1676,7 @@ function resetWorkspaceState(): void {
   for (const [path, content] of defaultWorkspaceFiles) {
     setFile(path, content);
   }
+  loadRuntimeVfsSnapshot();
 }
 
 function ensureDir(path: string): void {
@@ -2298,6 +2451,19 @@ function decodeBase64Bytes(value: string): Uint8Array {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+function encodeBase64Bytes(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    let binary = '';
+    const chunk = bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length));
+    for (let i = 0; i < chunk.length; i += 1) {
+      binary += String.fromCharCode(chunk[i]);
+    }
+    chunks.push(binary);
+  }
+  return btoa(chunks.join(''));
 }
 
 async function runWithConcurrency<T>(

@@ -22,7 +22,7 @@
   "project": {
     "commit": "a6726a17eb47c05a2ce112fca2601028ad616d48",
     "dirty": false,
-    "filesDigest": "sha256:5499854e4d53cc6dea06f7795eab614d88f8354104d9982d1f1fa4adb0cd4a41",
+    "filesDigest": "sha256:25129ac2b30c691a68a2860e691bda05c7195946ac111bd7f86cb0a4ade1ab57",
     "module": "github.com/vo-lang/blockkart"
   },
   "dependencies": [
@@ -63,21 +63,21 @@
         }
       ],
       "cacheDir": "github.com@vo-lang@voplay/v0.1.28",
-      "filesDigest": "sha256:5b8b6af5ab87a168fc0436c03b68efd94fba4c909bc7017c3fa26e453ed9c157",
+      "filesDigest": "sha256:57f4084ba45897309b8953992100e8e06af710472a473cd9cc816c578262a369",
       "module": "github.com/vo-lang/voplay",
       "version": "v0.1.28"
     }
   ],
   "outputs": [
     {
-      "digest": "sha256:2c8b33f1f377531d0d03528f13d47fe7776779b99153fd94f8fc29364622a052",
+      "digest": "sha256:7f23d1ddac906eed33ffcdee3c8165770ff4415dac18556ada7a65621f567f2d",
       "path": "project.json",
-      "size": 22708820
+      "size": 22740873
     },
     {
-      "digest": "sha256:115abaa5ddcd1de061e6b9e028d10160d02de7e387cdbba118fd6cc39eb97919",
+      "digest": "sha256:fff1fdfe2d88b6cd0f33b113c85121ed230957e4afe2a43431c25180fcb5af2b",
       "path": "deps.json",
-      "size": 2410052
+      "size": 2415435
     }
   ]
 }

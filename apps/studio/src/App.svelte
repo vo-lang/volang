@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { readable, type Readable } from 'svelte/store';
+  import { get, readable, type Readable } from 'svelte/store';
   import { createServiceRegistry, type ServiceRegistry } from './lib/services/service_registry';
   import type { BootstrapContext, FsEntry, SessionInfo, ShareInfo, StudioMode } from './lib/types';
   import type { GitHubAccountState, ManagedProject } from './lib/project_catalog/types';
   import { ide } from './stores/ide';
   import { route, setModeHash } from './lib/router';
-  import { consolePush } from './stores/console';
+  import { console_, consolePush, type ConsoleLine } from './stores/console';
   import { editor, editorMarkSaved, editorOpen } from './stores/editor';
   import { session, sessionOpen } from './stores/session';
   import { runtime } from './stores/runtime';
@@ -21,6 +21,8 @@
 
   type StudioBrowserSmokeDebugHook = {
     entryPath(): string | null;
+    consoleLines(): ConsoleLine[];
+    runtimeState(): unknown;
     dumpCurrent(): Promise<string>;
     dump(path: string): Promise<string>;
   };
@@ -225,6 +227,8 @@
     }
     studioBrowserSmokeDebugGlobal().__voStudioBrowserSmoke = {
       entryPath: () => sessionInfo?.entryPath ?? null,
+      consoleLines: () => get(console_).lines,
+      runtimeState: () => get(runtime),
       dumpCurrent: async () => {
         const entryPath = sessionInfo?.entryPath;
         if (!entryPath) {
