@@ -2134,10 +2134,13 @@ fn voplay_gate_source_fixture() -> (String, String, String, String) {
     let readiness = [
         "const sourceFactRequirements = [];",
         "const evidenceTable = [];",
+        "sourceAuditFailures",
+        "firstPrinciplesVerdict",
         "addRequiredSourceFact(",
         "addEvidenceRow(",
         "const requiredFalseFacts = sourceFactRequirements",
         ".filter((fact) => fact.required && fact.status !== true)",
+        "const unresolvedEvidenceNextFixes = evidenceTable",
         "'source_facts.required_all_pass'",
         "const industrialReady = failures.length === 0",
         "strictMode: !allowNotReady",
@@ -2170,7 +2173,11 @@ fn voplay_gate_source_fixture() -> (String, String, String, String) {
                 "execute_render_node!",
                 "SurfaceMaterialAtTrackPosition",
                 "Body\\.SetPosition",
+                "applyPoseResetToBackend",
+                "ApplyVehicleForces",
                 "PrimitiveStats",
+                "primitive3d\\.NewBuilder",
+                "w\\.player\\.SetVelocity",
             ]
             .into_iter(),
         )
@@ -2183,9 +2190,14 @@ fn voplay_gate_source_fixture() -> (String, String, String, String) {
             [
                 "SurfaceMaterialAtTrackPosition",
                 "Body\\.SetPosition",
+                "applyPoseResetToBackend",
+                "ApplyVehicleForces",
                 "BackendApplyHash",
                 "PrimitiveStats",
                 "w\\.vehicle\\.SetPose",
+                "primitive3d\\.NewBuilder",
+                "w\\.player\\.SetVelocity",
+                "directEntityMutation",
             ]
             .into_iter(),
         )
@@ -2203,6 +2215,7 @@ fn voplay_gate_task_file(site_items: &[&str], eng_lint_inputs: &[&str]) -> TaskF
         "voplay-physics-industrial-stress",
     ];
     let industrial_tasks = [
+        "voplay-industrial-source-audit",
         "voplay-industrial-readiness-report",
         "voplay-industrial-readiness",
     ];
@@ -2297,7 +2310,7 @@ fn lint_voplay_industrial_gate_task_wiring_requires_site_final_gate() {
     let err = lint_voplay_industrial_gate_task_wiring(&config, &task_map).unwrap_err();
 
     assert!(
-        format!("{err:#}").contains("site scope must include voplay-industrial-readiness"),
+        format!("{err:#}").contains("site scope must include voplay-industrial-source-audit"),
         "{err:#}"
     );
 }

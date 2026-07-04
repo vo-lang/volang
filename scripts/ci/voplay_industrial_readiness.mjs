@@ -81,6 +81,32 @@ function readProjectFile(projectRoot, relativePath, phase, code) {
   return source || '';
 }
 
+function listVoFiles(projectRoot) {
+  const files = [];
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const file = path.join(dir, entry);
+      const stat = statSync(file);
+      if (stat.isDirectory()) {
+        if (entry === '.git' || entry === 'target' || entry === 'node_modules') {
+          continue;
+        }
+        visit(file);
+        continue;
+      }
+      if (file.endsWith('.vo')) {
+        files.push({
+          file,
+          rel: path.relative(projectRoot, file),
+          source: readFileSync(file, 'utf8'),
+        });
+      }
+    }
+  };
+  visit(projectRoot);
+  return files;
+}
+
 function readJson(file) {
   const source = readText(file);
   if (source === null) {
@@ -117,6 +143,50 @@ function lineEvidence(file, source, token) {
     token,
     line,
     ref: line === null ? file : `${file}:${line}`,
+  };
+}
+
+function countOccurrences(source, token) {
+  if (!token) {
+    return 0;
+  }
+  return source.split(token).length - 1;
+}
+
+function hasAny(source, tokens) {
+  return tokens.some((token) => source.includes(token));
+}
+
+function evidenceForFirstToken(file, source, tokens) {
+  for (const token of tokens) {
+    if (source.includes(token)) {
+      return lineEvidence(file, source, token);
+    }
+  }
+  return lineEvidence(file, source, tokens[0] || '');
+}
+
+function evidenceForFirstRegex(entries, regex, fallbackToken) {
+  for (const entry of entries) {
+    const lines = entry.source.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const match = lines[i].match(regex);
+      if (match) {
+        return {
+          path: entry.file,
+          token: match[0],
+          line: i + 1,
+          ref: `${entry.file}:${i + 1}`,
+        };
+      }
+    }
+  }
+  const first = entries[0];
+  return {
+    path: first?.file || blockKartRoot,
+    token: fallbackToken,
+    line: null,
+    ref: first?.file || blockKartRoot,
   };
 }
 
@@ -299,6 +369,7 @@ const replay = readProjectFile(voplayRoot, 'scene3d/replay.vo', 'phase-0', 'sour
 const blockKartWorld = readProjectFile(blockKartRoot, 'world.vo', 'phase-0', 'source.blockkart_world_exists');
 const blockKartPrimitiveWorld = readProjectFile(blockKartRoot, 'primitive_world.vo', 'phase-0', 'source.blockkart_primitive_world_exists');
 const blockKartBudget = readProjectFile(blockKartRoot, 'performance_budget.vo', 'phase-0', 'source.blockkart_budget_exists');
+const blockKartVoFiles = listVoFiles(blockKartRoot);
 const rendererRuntime = [renderer, rendererFrameSubmit, rendererFrameOrchestrator].join('\n');
 const rendererModuleRuntime = listFiles(path.join(voplayRoot, 'rust', 'src', 'renderer'), '.rs')
   .map((file) => readText(file) || '')
@@ -307,6 +378,7 @@ const rendererAuditSource = [renderer, rendererFrameSubmit, rendererFrameOrchest
 
 const submitFrameBody = bodyOfFunction(renderer, 'pub fn submit_frame');
 const setPoseBody = bodyOfFunction(vehicle, 'func (v *Vehicle) SetPose');
+const applyPoseResetBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyPoseResetToBackend');
 const renderBatchPlannerBuildBody = bodyOfFunction(renderWorld, 'pub fn build');
 const renderBatchPlannerSelectLodBody = bodyOfFunction(renderWorld, 'fn select_lod');
 const rendererLines = lineCount(renderer);
@@ -365,14 +437,27 @@ const setPoseDirectPhysicsMutation = [
   'Body.Physics.velocity',
   'Body.Physics.angularVelocity',
 ].some((token) => setPoseBody.includes(token));
+const directBodyMutationTokens = [
+  'Body.SetPosition(',
+  'Body.SetRotation(',
+  'Body.SetVelocity(',
+  'Body.SetAngularVelocity(',
+  'Body.Physics.velocity',
+  'Body.Physics.angularVelocity',
+];
+const poseResetHelperDirectPhysicsMutation = hasAny(applyPoseResetBody, directBodyMutationTokens);
 const replayRecordsBackendApplyHash = replay.includes('BackendApplyHash') || replay.includes('BackendApplyCommandHash');
 const physicsBackendContractPass = !physicsTrackPositionSurfaceInference
   && !setPoseDirectPhysicsMutation
+  && !poseResetHelperDirectPhysicsMutation
   && replayRecordsBackendApplyHash;
-const blockKartPrimitiveAuthoringPresent = /type BlockKartPrimitiveScene|primitive3d\.NewLayer|SpawnPreparedMapPrimitiveLayers|AddStatic|AddDetail|spawnPrimitiveRoadBoxPhysics/.test(blockKartPrimitiveWorld);
+const blockKartPrimitiveAuthoringPresent = /type BlockKartPrimitiveScene|primitive3d\.NewLayer|primitive3d\.NewBuilder|primitive3d\.LayerDesc|primitive3d\.ChunkingDesc|SpawnPreparedMapPrimitiveLayers|AddStatic|AddDetail|spawnPrimitiveRoadBoxPhysics|BlockKartVisualContent|spawnPrimitiveTrackPhysics|spawnRoadColliderStrip/.test(blockKartPrimitiveWorld);
 const blockKartHudAssemblesLowLevelFacts = /PrimitiveStats\(|WheelState\(|VehicleGrounded|WheelMaxSlip|PrimitiveVisibleChunks/.test(blockKartWorld);
 const blockKartVisualReadsMutableVehicleState = /w\.vehicle\.(SteerAngle|WheelSpin)/.test(blockKartPrimitiveWorld);
 const blockKartDirectVehiclePoseCalls = /w\.vehicle\.SetPose\(/.test(blockKartWorld);
+const blockKartDirectPlayerPhysicsMutation = /w\.player\.SetPosition\(|w\.player\.SetRotation\(|w\.player\.SetVelocity\(|w\.player\.SetAngularVelocity\(/.test(blockKartWorld);
+const directEntityMutationRegex = /\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\.Set(Position|Rotation|Velocity|AngularVelocity)\(/;
+const blockKartDirectEntityPhysicsMutation = blockKartVoFiles.some((entry) => directEntityMutationRegex.test(entry.source));
 const resourceRegistryOwnsAllTargetKinds = [
   'depth_view',
   'msaa_color_view',
@@ -387,6 +472,30 @@ const resourceRegistryOwnsAllTargetKinds = [
 ].every((token) => frameGraph.includes(token));
 const executeNodeTakesAdHocClosure = /fn execute_node[\s\S]*?execute:\s*F[\s\S]*?F:\s*FnOnce/.test(frameGraph);
 const executeNodeOwnsPassDispatch = frameGraph.includes('fn execute_node') && !executeNodeTakesAdHocClosure;
+const batchPlanSceneWired = rendererFrameOrchestrator.includes('RenderBatchPlanner::build')
+  && rendererFrameOrchestrator.includes('planned_model_draws')
+  && rendererFrameOrchestrator.includes('planned_primitive_draws')
+  && rendererFrameOrchestrator.includes('planned_primitive_chunks')
+  && rendererFrameOrchestrator.includes('planned_water_draws')
+  && rendererFrameOrchestrator.includes('planned_water_chunks')
+  && rendererFrameOrchestrator.includes('terrain_batch_inputs')
+  && rendererFrameOrchestrator.includes('decal_batch_inputs')
+  && rendererFrameOrchestrator.includes('planned_projected_decals')
+  && rendererFrameOrchestrator.includes('projected_decals: &planned_projected_decals')
+  && rendererFrameOrchestrator.includes('perf.visible_objects = render_batch_plan.visible_objects');
+const terrainBatchEnumMentions = countOccurrences(renderWorld, 'RenderBatchKind::Terrain');
+const decalBatchEnumMentions = countOccurrences(renderWorld, 'RenderBatchKind::Decal');
+const terrainBatchConstructed = /kind:\s*RenderBatchKind::Terrain/.test(renderWorld);
+const decalBatchConstructed = /kind:\s*RenderBatchKind::Decal/.test(renderWorld);
+const terrainBatchTested = /terrain/i.test(renderWorld) && /#\[test\][\s\S]*terrain/i.test(renderWorld);
+const decalBatchTested = /decal/i.test(renderWorld) && /#\[test\][\s\S]*decal/i.test(renderWorld);
+const terrainDecalRealEntries = terrainBatchConstructed && decalBatchConstructed && terrainBatchTested && decalBatchTested;
+const batchPlanningIndustrialPass = batchPlanContractPass && batchPlanSceneWired && terrainDecalRealEntries;
+const blockKartProductBoundaryPass = !blockKartPrimitiveAuthoringPresent
+  && !blockKartHudAssemblesLowLevelFacts
+  && !blockKartVisualReadsMutableVehicleState
+  && !blockKartDirectVehiclePoseCalls
+  && !blockKartDirectEntityPhysicsMutation;
 const renderPassModuleFiles = [
   'rust/src/renderer/depth_pass.rs',
   'rust/src/renderer/shadow_pass.rs',
@@ -417,7 +526,7 @@ addCheck('phase-1', 'framegraph.resource_registry_exists', frameGraph.includes('
 addCheck('phase-1', 'renderer.targets_owned_by_registry', !rendererStillOwnsTargets, 'renderer target lifecycle is owned by RenderResourceRegistry instead of ad hoc RendererTargetRegistry fields', {});
 
 addCheck('phase-2', 'batch_plan.contract_exists', ['struct RenderBatchPlan', 'struct RenderBatchPlanner', 'struct RenderWorldChunk'].every((token) => renderWorld.includes(token)), 'RenderBatchPlan and RenderWorldChunk contracts exist', {});
-addCheck('phase-2', 'batch_plan.drives_submission', !runtimeHasDirectDraw && rendererRuntime.includes('RenderBatchPlanner::build') && rendererRuntime.includes('planned_model_draws') && rendererRuntime.includes('planned_primitive_draws') && rendererRuntime.includes('planned_water_draws'), 'RenderBatchPlan owns real draw submission routing', {});
+addCheck('phase-2', 'batch_plan.drives_submission', !runtimeHasDirectDraw && rendererRuntime.includes('RenderBatchPlanner::build') && rendererRuntime.includes('planned_model_draws') && rendererRuntime.includes('planned_primitive_draws') && rendererRuntime.includes('planned_water_draws') && rendererRuntime.includes('planned_projected_decals') && rendererRuntime.includes('terrain_batch_inputs') && rendererRuntime.includes('decal_batch_inputs'), 'RenderBatchPlan owns real draw submission routing', {});
 addCheck('phase-2', 'pipeline3d.file_size', pipeline3dLines <= 900, 'pipeline3d.rs is split into small stable responsibilities', { lines: pipeline3dLines, budget: 900 });
 const splitPipelineFiles = [
   'rust/src/pipeline3d/shader_library.rs',
@@ -430,9 +539,10 @@ const splitPipelineFiles = [
 addCheck('phase-2', 'pipeline3d.split_modules_exist', splitPipelineFiles.every((file) => existsSync(path.join(voplayRoot, file))), 'pipeline3d responsibilities are split into dedicated modules', { expected: splitPipelineFiles });
 
 const backendAdapterBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyForceCommandToBackend');
-addCheck('phase-3', 'physics.intent_chain', vehicle.includes('v.Dynamics.Step(') && vehicle.includes('BuildPhysicsBackendApplyCommand'), 'VehicleIntent reaches KartDynamics and PhysicsBackendApplyCommand', {});
+addCheck('phase-3', 'physics.intent_chain', vehicle.includes('v.Dynamics.Step(') && vehicle.includes('BuildPhysicsBackendApplyCommand') && vehicle.includes('physBackend.ApplyVehicleForces'), 'VehicleIntent reaches KartDynamics, PhysicsBackendApplyCommand, and PhysicsBackend.ApplyVehicleForces', {});
 addCheck('phase-3', 'physics.backend_command_contract', ['Wheels []PhysicsBackendWheelCommand', 'BodyForce voplay.Vec3', 'DragForce float64', 'Downforce float64', 'WaterLift float64', 'AirControl float64', 'WallGrip float64', 'RailGrip float64', 'DebugHash int'].every((token) => dynamics.includes(token)), 'PhysicsBackendApplyCommand covers wheel, body, drag, downforce, water, air, wall, rail, and debug hash', {});
-addCheck('phase-3', 'physics.backend_adapter_only_wheel_control', backendAdapterBody.includes('SetRaycastVehicleWheelControl') && !setPoseBody.includes('SetRaycastVehicleWheelControl'), 'raycast wheel control is only written by backend adapter paths', {});
+addCheck('phase-3', 'physics.backend_apply_contract', vehicle.includes('physBackend.ApplyVehicleForces') && !vehicle.includes('physBackend.SetRaycastVehicleWheelControl'), 'Vehicle applies wheel/backend forces only through PhysicsBackend.ApplyVehicleForces', {});
+addCheck('phase-3', 'physics.reset_command_contract', ['type VehiclePoseResetCommand struct', 'type VehicleMotionResetCommand struct', 'type VehicleRecoveryCommand struct', 'type VehicleSleepCommand struct'].every((token) => vehicle.includes(token)), 'vehicle reset, motion, recovery, and sleep commands exist as backend contract types', {});
 addCheck('phase-3', 'physics.no_body_position_surface_fallback', !vehicle.includes('SurfaceMaterialAtTrackPosition(v.Track, v.Body.Position())'), 'Vehicle surface selection does not infer material from body position when backend wheel contacts are absent', {});
 addCheck('phase-3', 'physics.contact_industrial_contract', contactEvent.includes('IndustrialReady() bool') && contactEvent.includes('NormalImpulse') && contactEvent.includes('TangentImpulse'), 'ContactEvent exposes industrial impulse contract', {});
 addCheck('phase-3', 'physics.replay_trace_contract', replay.includes('type PhysicsReplayTrace struct') && replay.includes('PoseHash') && replay.includes('TelemetryHash'), 'PhysicsReplayTrace records pose and telemetry hashes', {});
@@ -519,6 +629,33 @@ addRequiredSourceFact(
   },
 );
 addRequiredSourceFact(
+  'batch_plan_scene_wired',
+  batchPlanSceneWired,
+  'RenderBatchPlan controls the renderer scene submission path and telemetry workload source',
+  {
+    frameOrchestratorSubmission: lineEvidence(path.join(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs'), rendererFrameOrchestrator, 'planned_model_draws'),
+    frameOrchestratorTerrain: lineEvidence(path.join(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs'), rendererFrameOrchestrator, 'terrain_batch_inputs'),
+    frameOrchestratorDecal: lineEvidence(path.join(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs'), rendererFrameOrchestrator, 'planned_projected_decals'),
+    telemetry: lineEvidence(path.join(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs'), rendererFrameOrchestrator, 'perf.visible_objects = render_batch_plan.visible_objects'),
+    orchestrator: lineEvidence(path.join(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs'), rendererFrameOrchestrator, 'RenderBatchPlanner::build'),
+  },
+);
+addRequiredSourceFact(
+  'batch_plan_terrain_decal_real_entries',
+  terrainDecalRealEntries,
+  'terrain and decal batch kinds have real construction paths and unit coverage, not enum-only accounting',
+  {
+    terrainBatchEnumMentions,
+    decalBatchEnumMentions,
+    terrainBatchConstructed,
+    decalBatchConstructed,
+    terrainBatchTested,
+    decalBatchTested,
+    terrain: lineEvidence(path.join(voplayRoot, 'rust/src/render_world.rs'), renderWorld, 'RenderBatchKind::Terrain'),
+    decal: lineEvidence(path.join(voplayRoot, 'rust/src/render_world.rs'), renderWorld, 'RenderBatchKind::Decal'),
+  },
+);
+addRequiredSourceFact(
   'physics_surface_source_no_track_position_inference',
   !physicsTrackPositionSurfaceInference,
   'industrial vehicle, contact, and telemetry surface selection does not infer material from track position',
@@ -530,11 +667,23 @@ addRequiredSourceFact(
 );
 addRequiredSourceFact(
   'physics_set_pose_backend_only',
-  !setPoseDirectPhysicsMutation,
+  !setPoseDirectPhysicsMutation && !poseResetHelperDirectPhysicsMutation,
   'Vehicle.SetPose/reset/respawn/recovery/sleep route pose and velocity mutation through backend helper contracts',
   {
     setPose: lineEvidence(path.join(voplayRoot, 'scene3d/vehicle.vo'), vehicle, 'func (v *Vehicle) SetPose'),
-    directMutationTokens: ['Body.SetPosition(', 'Body.SetVelocity(', 'Body.Physics.velocity'],
+    applyPoseResetToBackend: evidenceForFirstToken(path.join(voplayRoot, 'scene3d/vehicle.vo'), vehicle, directBodyMutationTokens),
+    setPoseDirectPhysicsMutation,
+    poseResetHelperDirectPhysicsMutation,
+    directMutationTokens: directBodyMutationTokens,
+  },
+);
+addRequiredSourceFact(
+  'physics_pose_reset_helper_backend_only',
+  !poseResetHelperDirectPhysicsMutation,
+  'applyPoseResetToBackend does not directly mutate body pose, body velocity, or raw physics velocity fields outside a backend adapter allowlist',
+  {
+    applyPoseResetToBackend: evidenceForFirstToken(path.join(voplayRoot, 'scene3d/vehicle.vo'), vehicle, directBodyMutationTokens),
+    directMutationTokens: directBodyMutationTokens,
   },
 );
 addRequiredSourceFact(
@@ -550,13 +699,32 @@ addRequiredSourceFact(
   !blockKartPrimitiveAuthoringPresent
     && !blockKartHudAssemblesLowLevelFacts
     && !blockKartVisualReadsMutableVehicleState
-    && !blockKartDirectVehiclePoseCalls,
+    && !blockKartDirectVehiclePoseCalls
+    && !blockKartDirectEntityPhysicsMutation,
   'BlockKart owns product content/rules/HUD consumption only and does not author generic engine primitives, physics poses, or low-level facts',
   {
-    primitiveAuthoring: lineEvidence(path.join(blockKartRoot, 'primitive_world.vo'), blockKartPrimitiveWorld, 'type BlockKartPrimitiveScene'),
+    primitiveAuthoring: evidenceForFirstToken(path.join(blockKartRoot, 'primitive_world.vo'), blockKartPrimitiveWorld, ['BlockKartVisualContent', 'primitive3d.NewBuilder', 'primitive3d.LayerDesc', 'primitive3d.ChunkingDesc', 'spawnPrimitiveTrackPhysics', 'spawnRoadColliderStrip']),
     hudFacts: lineEvidence(path.join(blockKartRoot, 'world.vo'), blockKartWorld, 'PrimitiveStats()'),
     visualMutableState: lineEvidence(path.join(blockKartRoot, 'primitive_world.vo'), blockKartPrimitiveWorld, 'w.vehicle.SteerAngle'),
     directSetPose: lineEvidence(path.join(blockKartRoot, 'world.vo'), blockKartWorld, 'w.vehicle.SetPose'),
+    directPlayerMutation: evidenceForFirstToken(path.join(blockKartRoot, 'world.vo'), blockKartWorld, ['w.player.SetPosition(', 'w.player.SetVelocity(', 'w.player.SetAngularVelocity(']),
+    directEntityMutation: evidenceForFirstRegex(blockKartVoFiles, directEntityMutationRegex, '.SetPosition('),
+  },
+);
+addRequiredSourceFact(
+  'blockkart_no_direct_player_physics_mutation',
+  !blockKartDirectPlayerPhysicsMutation,
+  'BlockKart product world does not directly mutate kart/entity pose, velocity, or angular velocity',
+  {
+    directPlayerMutation: evidenceForFirstToken(path.join(blockKartRoot, 'world.vo'), blockKartWorld, ['w.player.SetPosition(', 'w.player.SetVelocity(', 'w.player.SetAngularVelocity(']),
+  },
+);
+addRequiredSourceFact(
+  'blockkart_no_direct_entity_physics_mutation',
+  !blockKartDirectEntityPhysicsMutation,
+  'BlockKart product source does not directly mutate entity pose, velocity, or angular velocity',
+  {
+    directEntityMutation: evidenceForFirstRegex(blockKartVoFiles, directEntityMutationRegex, '.SetPosition('),
   },
 );
 
@@ -589,7 +757,7 @@ addEvidenceRow({
   gateCoverage: 'source_fact.render_pipeline_stages_constructed, source_fact.frame_orchestrator_stage_only',
   status: renderPipelineStagesPass && !rendererFrameOrchestrator.includes('let mut reader = StreamReader'),
   nextFix: renderPipelineStagesPass
-    ? 'finish BlockKart product-boundary migration so scoped product code consumes voplay engine APIs read-only'
+    ? ''
     : 'split decode_frame/build_scene_snapshot/build_batch_plan/build_frame_graph/execute_frame_graph/submit_backend/encode_telemetry and construct RenderFramePipeline',
 });
 addEvidenceRow({
@@ -617,22 +785,28 @@ addEvidenceRow({
   gateCoverage: 'source_fact.framegraph_dispatch_owns_pass_execution',
   status: executeNodeOwnsPassDispatch && !runtimeUsesExecuteRenderNodeMacro,
   nextFix: executeNodeOwnsPassDispatch && !runtimeUsesExecuteRenderNodeMacro
-    ? 'finish BlockKart product-boundary migration'
+    ? ''
     : 'register pass executors by RenderPassKind and make execute_node dispatch through node metadata',
 });
 addEvidenceRow({
   capability: 'Batch planning and visibility',
   expectedOwner: 'RenderBatchPlanner',
-  actualOwner: batchPlanContractPass
+  actualOwner: batchPlanningIndustrialPass
+    ? 'RenderBatchPlanner owns visible model, primitive, terrain, water, and decal submission facts'
+    : batchPlanContractPass
     ? 'RenderBatchPlanner owns model bounds, primitive chunk facts, distance LOD, and culling counters'
     : 'PrimitiveRenderWorld performs real culling before RenderBatchPlanner rebuilds placeholder plan facts',
-  mutationPath: batchPlanContractPass
+  mutationPath: batchPlanningIndustrialPass
+    ? 'RenderBatchPlanner drives visible/resident/dirty/upload/submission facts for every batch kind'
+    : batchPlanContractPass
     ? 'PrimitiveRenderWorld exposes PrimitiveChunkBatchInfo; RenderBatchPlanner::build routes planned batches after camera and distance decisions'
     : 'RenderBatchPlanner::build pushes chunks with zero bounds and seed/workload LOD',
-  runtimePath: batchPlanContractPass
+  runtimePath: batchPlanningIndustrialPass
+    ? 'Renderer.submit_frame -> RenderBatchPlanner::build -> FrameGraph pass inputs -> BackendSubmitExecutor'
+    : batchPlanContractPass
     ? 'run_frame_orchestrator -> collect_scene_primitive_draws_with_chunk_info(None) -> RenderBatchPlanner::build(camera, quality) -> planned_* batches'
     : 'run_frame_orchestrator -> RenderBatchPlanner::build -> planned_* batches',
-  bypassFound: !batchPlanContractPass,
+  bypassFound: !batchPlanningIndustrialPass,
   evidence: batchPlanContractPass ? [
     lineEvidence(path.join(voplayRoot, 'rust/src/primitive_scene.rs'), readText(path.join(voplayRoot, 'rust/src/primitive_scene.rs')) || '', 'PrimitiveChunkBatchInfo'),
     lineEvidence(path.join(voplayRoot, 'rust/src/render_world.rs'), renderWorld, 'bounds_from_model_matrix'),
@@ -642,9 +816,11 @@ addEvidenceRow({
     lineEvidence(path.join(voplayRoot, 'rust/src/render_world.rs'), renderWorld, 'center: Vec3::ZERO'),
     lineEvidence(path.join(voplayRoot, 'rust/src/render_world.rs'), renderWorld, 'fn select_lod'),
   ],
-  gateCoverage: 'source_fact.batch_plan_real_bounds, source_fact.batch_plan_real_lod_inputs, source_fact.batch_plan_real_culling_counters',
-  status: batchPlanContractPass,
-  nextFix: batchPlanContractPass
+  gateCoverage: 'source_fact.batch_plan_real_bounds, source_fact.batch_plan_real_lod_inputs, source_fact.batch_plan_real_culling_counters, source_fact.batch_plan_scene_wired, source_fact.batch_plan_terrain_decal_real_entries',
+  status: batchPlanningIndustrialPass,
+  nextFix: batchPlanningIndustrialPass
+    ? ''
+    : batchPlanContractPass
     ? 'extend the same planner fact path to active terrain and decal batch kinds'
     : 'carry model/chunk bounds and camera/quality inputs into RenderBatchPlanner and count real culls',
 });
@@ -669,24 +845,88 @@ addEvidenceRow({
   gateCoverage: 'source_fact.physics_surface_source_no_track_position_inference, source_fact.physics_set_pose_backend_only, source_fact.physics_replay_records_backend_apply_hash',
   status: physicsBackendContractPass,
   nextFix: physicsBackendContractPass
-    ? 'extend native RaycastVehicleState with backend contact material IDs to remove the remaining sync-time Track.SurfaceAt bridge'
+    ? ''
     : 'introduce backend pose/reset/recovery helpers and make track-position surface inference compat-only',
 });
 addEvidenceRow({
   capability: 'BlockKart product boundary',
   expectedOwner: 'voplay generic authoring and structured telemetry',
-  actualOwner: 'BlockKart primitive_world.vo and world.vo',
-  mutationPath: 'BlockKart builds primitive layers/materials/colliders and assembles low-level HUD fields',
-  runtimePath: 'World.buildPrimitiveLevel/spawnPrimitiveTrackPhysics/hudState/currentPrimitiveKartVisualState',
-  bypassFound: blockKartPrimitiveAuthoringPresent || blockKartHudAssemblesLowLevelFacts || blockKartVisualReadsMutableVehicleState,
+  actualOwner: blockKartProductBoundaryPass
+    ? 'scene3d owns PrimitiveWorldAuthoring, ColliderAuthoring, primitive mutation, and physics helpers; BlockKart keeps product content IDs/rules/tuning/HUD'
+    : 'BlockKart primitive_world.vo and world.vo still own low-level engine facts',
+  mutationPath: blockKartProductBoundaryPass
+    ? 'BlockKart calls scene3d.NewPrimitiveWorldAuthoring, PrimitiveWorldAuthoring.AddPrimitive/AddDynamic, SpawnTrackColliderStrip, and vehicle constraint helpers'
+    : 'BlockKart builds primitive layers/materials/colliders or mutates player physics directly',
+  runtimePath: blockKartProductBoundaryPass
+    ? 'World.buildPrimitiveLevel -> ensurePrimitiveScene -> scene3d.PrimitiveWorldAuthoring; attachPrimitiveTrackColliderEntities -> scene3d.SpawnTrackColliderStrip'
+    : 'World.buildPrimitiveLevel/spawnPrimitiveTrackPhysics/hudState/currentPrimitiveKartVisualState',
+  bypassFound: !blockKartProductBoundaryPass,
   evidence: [
-    lineEvidence(path.join(blockKartRoot, 'primitive_world.vo'), blockKartPrimitiveWorld, 'type BlockKartPrimitiveScene'),
-    lineEvidence(path.join(blockKartRoot, 'world.vo'), blockKartWorld, 'PrimitiveStats()'),
+    lineEvidence(path.join(voplayRoot, 'scene3d/primitive_authoring.vo'), readText(path.join(voplayRoot, 'scene3d/primitive_authoring.vo')) || '', 'type PrimitiveWorldAuthoring struct'),
+    lineEvidence(path.join(voplayRoot, 'scene3d/primitive_authoring.vo'), readText(path.join(voplayRoot, 'scene3d/primitive_authoring.vo')) || '', 'func SpawnTrackColliderStrip'),
+    lineEvidence(path.join(blockKartRoot, 'primitive_world.vo'), blockKartPrimitiveWorld, 'scene3d.NewPrimitiveWorldAuthoring'),
+    lineEvidence(path.join(blockKartRoot, 'primitive_world.vo'), blockKartPrimitiveWorld, 'scene3d.SpawnTrackColliderStrip'),
   ],
   gateCoverage: 'source_fact.blockkart_product_boundary',
-  status: !blockKartPrimitiveAuthoringPresent && !blockKartHudAssemblesLowLevelFacts && !blockKartVisualReadsMutableVehicleState,
-  nextFix: 'move primitive/chunk/collider/surface authoring to voplay and make BlockKart consume read-only telemetry',
+  status: blockKartProductBoundaryPass,
+  nextFix: blockKartProductBoundaryPass
+    ? ''
+    : 'move primitive/chunk/collider/surface authoring to voplay and make BlockKart consume read-only telemetry',
 });
+
+const unresolvedEvidenceNextFixes = evidenceTable
+  .filter((row) => row.status === 'pass' && String(row.nextFix || '').trim().length > 0)
+  .map((row) => ({
+    capability: row.capability,
+    nextFix: row.nextFix,
+  }));
+addRequiredSourceFact(
+  'evidence_has_no_unresolved_next_fix',
+  unresolvedEvidenceNextFixes.length === 0,
+  'passed evidence rows do not carry unresolved Next Fix work',
+  { unresolvedEvidenceNextFixes },
+);
+
+const provenancePath = path.join(root, 'apps/studio/public/quickplay/blockkart/provenance.json');
+const provenance = readJson(provenancePath);
+const expectedBlockKartCommit = provenance.value?.project?.commit ?? null;
+const expectedVoplayCommit = provenance.value?.dependencies?.find((dep) => dep.module === 'github.com/vo-lang/voplay')?.commit ?? null;
+
+function baselineSourceMismatches(report) {
+  const mismatches = [];
+  if (!expectedBlockKartCommit || report.project?.commit !== expectedBlockKartCommit || report.project?.provenanceCommit !== expectedBlockKartCommit) {
+    mismatches.push({
+      module: 'github.com/vo-lang/blockkart',
+      expected: expectedBlockKartCommit,
+      commit: report.project?.commit ?? null,
+      provenanceCommit: report.project?.provenanceCommit ?? null,
+    });
+  }
+  const voplay = (report.dependencies ?? []).find((dep) => dep.module === 'github.com/vo-lang/voplay') ?? null;
+  if (!expectedVoplayCommit || voplay?.commit !== expectedVoplayCommit || voplay?.provenanceCommit !== expectedVoplayCommit) {
+    mismatches.push({
+      module: 'github.com/vo-lang/voplay',
+      expected: expectedVoplayCommit,
+      commit: voplay?.commit ?? null,
+      provenanceCommit: voplay?.provenanceCommit ?? null,
+    });
+  }
+  return mismatches;
+}
+
+function sceneSourceMismatches(report) {
+  const mismatches = [];
+  for (const scene of report.scenes ?? []) {
+    const sceneReport = {
+      project: scene.source?.project ?? null,
+      dependencies: scene.source?.dependencies ?? [],
+    };
+    for (const mismatch of baselineSourceMismatches(sceneReport)) {
+      mismatches.push({ scene: scene.name, ...mismatch });
+    }
+  }
+  return mismatches;
+}
 
 const renderStress = checkReport(path.join(root, 'target/voplay-render-stress-budgeted/report.json'), 'phase-5', 'gate.render_stress_budgeted', (report) => {
   const required = [
@@ -701,28 +941,34 @@ const renderStress = checkReport(path.join(root, 'target/voplay-render-stress-bu
   ];
   const names = sceneNames(report);
   const missing = required.filter((name) => !names.has(name));
-  const ok = report.status === 'pass' && allScenesPass(report) && missing.length === 0;
+  const sourceMismatches = sceneSourceMismatches(report);
+  const ok = report.status === 'pass' && allScenesPass(report) && missing.length === 0 && sourceMismatches.length === 0;
   return {
     ok,
     detail: 'render stress budgeted report passes all required industrial scenes',
     evidence: {
       status: report.status,
       missingScenes: missing,
+      sourceMismatches,
       sceneCount: report.scenes?.length || 0,
       summary: report.summary || null,
     },
   };
 });
 
-checkReport(path.join(root, 'target/voplay-render-soak-10m/report.json'), 'phase-5', 'gate.render_soak_10m', (report) => ({
-  ok: report.status === 'pass' && allScenesPass(report),
-  detail: 'ten minute render soak report exists and passes',
-  evidence: {
-    status: report.status,
-    sceneCount: report.scenes?.length || 0,
-    summary: report.summary || null,
-  },
-}));
+checkReport(path.join(root, 'target/voplay-render-soak-10m/report.json'), 'phase-5', 'gate.render_soak_10m', (report) => {
+  const sourceMismatches = sceneSourceMismatches(report);
+  return {
+    ok: report.status === 'pass' && allScenesPass(report) && sourceMismatches.length === 0,
+    detail: 'ten minute render soak report exists and passes',
+    evidence: {
+      status: report.status,
+      sourceMismatches,
+      sceneCount: report.scenes?.length || 0,
+      summary: report.summary || null,
+    },
+  };
+});
 
 checkReport(path.join(root, 'target/voplay-physics-industrial-stress/report.json'), 'phase-5', 'gate.physics_industrial_stress', (report) => {
   const required = ['skidpad', 'slalom', 'drift-turbo', 'boost-pad', 'offroad-transition', 'jump-landing', 'wall-impact', 'rail-ride', 'wall-ride', 'water-skim', 'multi-vehicle-scripted-soak'];
@@ -743,7 +989,7 @@ checkReport(path.join(root, 'target/voplay-physics-industrial-stress/report.json
   };
 });
 
-checkReport(path.join(root, 'target/quickplay-source-audit/quickplay-source-audit.json'), 'phase-5', 'gate.quickplay_source_audit', (report) => ({
+checkReport(path.join(root, 'target/quickplay-source-audit/quickplay-source-audit.json'), 'phase-6', 'gate.quickplay_source_audit', (report) => ({
   ok: report.status === 'ok' && Array.isArray(report.issues) && report.issues.length === 0,
   detail: 'quickplay source audit passes',
   evidence: {
@@ -752,31 +998,37 @@ checkReport(path.join(root, 'target/quickplay-source-audit/quickplay-source-audi
   },
 }));
 
-checkReport(path.join(root, 'target/blockkart-baseline/blockkart-baseline.json'), 'phase-5', 'gate.blockkart_baseline_report', (report) => ({
-  ok: report.status === 'pass' || report.status === 'ok' || report.lifecycle?.reachedRunning === true,
-  detail: 'BlockKart baseline report reaches running state',
-  evidence: {
-    status: report.status || null,
-    lifecycle: report.lifecycle || null,
-  },
-}));
+checkReport(path.join(root, 'target/blockkart-baseline/blockkart-baseline.json'), 'phase-6', 'gate.blockkart_baseline_report', (report) => {
+  const sourceMismatches = baselineSourceMismatches(report);
+  return {
+    ok: (report.status === 'pass' || report.status === 'ok' || report.lifecycle?.reachedRunning === true) && sourceMismatches.length === 0,
+    detail: 'BlockKart baseline report reaches running state',
+    evidence: {
+      status: report.status || null,
+      lifecycle: report.lifecycle || null,
+      sourceMismatches,
+    },
+  };
+});
 
-checkReport(path.join(root, 'target/blockkart-baseline-restart-50/blockkart-baseline.json'), 'phase-5', 'gate.blockkart_restart_50_report', (report) => ({
-  ok: (report.status === 'pass' || report.status === 'ok' || report.lifecycle?.reachedRunning === true) && Number(report.restart?.failures || 0) === 0,
-  detail: 'BlockKart restart-50 report passes without restart failures',
-  evidence: {
-    status: report.status || null,
-    restart: report.restart || null,
-    lifecycle: report.lifecycle || null,
-  },
-}));
+checkReport(path.join(root, 'target/blockkart-baseline-restart-50/blockkart-baseline.json'), 'phase-6', 'gate.blockkart_restart_50_report', (report) => {
+  const sourceMismatches = baselineSourceMismatches(report);
+  return {
+    ok: (report.status === 'pass' || report.status === 'ok' || report.lifecycle?.reachedRunning === true) && Number(report.restart?.failures || 0) === 0 && sourceMismatches.length === 0,
+    detail: 'BlockKart restart-50 report passes without restart failures',
+    evidence: {
+      status: report.status || null,
+      restart: report.restart || null,
+      lifecycle: report.lifecycle || null,
+      sourceMismatches,
+    },
+  };
+});
 
-const provenancePath = path.join(root, 'apps/studio/public/quickplay/blockkart/provenance.json');
-const provenance = readJson(provenancePath);
 const voplayArtifact = provenance.value?.dependencies?.find((dep) => dep.module === 'github.com/vo-lang/voplay') || null;
-addCheck('phase-5', 'artifact.provenance_exists', provenance.exists && !provenance.error, 'quickplay provenance JSON exists and parses', { path: provenancePath, parseError: provenance.error });
-addCheck('phase-5', 'artifact.voplay_commit_recorded', Boolean(voplayArtifact?.commit), 'quickplay provenance records the voplay artifact source commit', { version: voplayArtifact?.version || null, cacheDir: voplayArtifact?.cacheDir || null, commit: voplayArtifact?.commit || null });
-addCheck('phase-5', 'artifact.blockkart_commit_recorded', Boolean(provenance.value?.project?.commit), 'quickplay provenance records the BlockKart source commit', { commit: provenance.value?.project?.commit || null });
+addCheck('phase-6', 'artifact.provenance_exists', provenance.exists && !provenance.error, 'quickplay provenance JSON exists and parses', { path: provenancePath, parseError: provenance.error });
+addCheck('phase-6', 'artifact.voplay_commit_recorded', Boolean(voplayArtifact?.commit), 'quickplay provenance records the voplay artifact source commit', { version: voplayArtifact?.version || null, cacheDir: voplayArtifact?.cacheDir || null, commit: voplayArtifact?.commit || null });
+addCheck('phase-6', 'artifact.blockkart_commit_recorded', Boolean(provenance.value?.project?.commit), 'quickplay provenance records the BlockKart source commit', { commit: provenance.value?.project?.commit || null });
 
 const requiredFalseFacts = sourceFactRequirements
   .filter((fact) => fact.required && fact.status !== true)
@@ -813,23 +1065,79 @@ const sourceFacts = {
   executeNodeTakesAdHocClosure,
   executeNodeOwnsPassDispatch,
   resourceRegistryOwnsAllTargetKinds,
-  batchPlanSceneWired: renderer.includes('RenderBatchPlanner::build') && renderer.includes('render_batch_plan.visible_objects'),
+  batchPlanSceneWired,
   batchPlanHasZeroBounds,
   batchPlanUsesSeedWorkloadLod,
+  terrainBatchEnumMentions,
+  decalBatchEnumMentions,
+  terrainBatchConstructed,
+  decalBatchConstructed,
+  terrainBatchTested,
+  decalBatchTested,
+  terrainDecalRealEntries,
   frustumCullingCounterMutated,
   distanceCullingCounterMutated,
   physicsTrackPositionSurfaceInference,
   setPoseDirectPhysicsMutation,
+  poseResetHelperDirectPhysicsMutation,
   replayRecordsBackendApplyHash,
   blockKartPrimitiveAuthoringPresent,
   blockKartHudAssemblesLowLevelFacts,
   blockKartVisualReadsMutableVehicleState,
   blockKartDirectVehiclePoseCalls,
+  blockKartDirectPlayerPhysicsMutation,
+  blockKartDirectEntityPhysicsMutation,
   budgetedRenderStressStatus: renderStress?.status || null,
   soakReportExists: existsSync(path.join(root, 'target/voplay-render-soak-10m/report.json')),
   requiredFalseFacts,
 };
 const failures = checks.filter((check) => check.status !== 'pass');
+const sourceAuditFailures = failures.filter((failure) => (
+  failure.phase === 'source-audit'
+  || failure.code.startsWith('source_fact.')
+  || failure.code.startsWith('source_audit.')
+));
+const firstPrinciplesVerdict = {
+  status: sourceAuditFailures.length === 0 ? 'pass' : 'fail',
+  industrialReadyEligible: failures.length === 0 && sourceAuditFailures.length === 0,
+  questions: [
+    {
+      question: 'data_owner',
+      answer: 'voplay owns renderer/physics durable state; BlockKart owns product content, race rules, tuning, HUD consumption, and diagnostics consumption.',
+      pass: !blockKartPrimitiveAuthoringPresent && !blockKartDirectEntityPhysicsMutation,
+    },
+    {
+      question: 'mutation_authority',
+      answer: 'renderer mutation must flow through stage pipeline, FrameGraph, ResourceRegistry, and BatchPlanner; vehicle mutation must flow through backend contract helpers and adapters.',
+      pass: !runtimeHasDirectDraw && !runtimeHasQueueSubmit && !poseResetHelperDirectPhysicsMutation,
+    },
+    {
+      question: 'runtime_path',
+      answer: 'expected render path is Renderer.submit_frame -> stage pipeline -> FrameGraphExecutor.execute_node -> BackendSubmitExecutor; expected physics path is VehicleIntent -> KartDynamics.Step -> PhysicsBackendApplyCommand -> backend apply -> telemetry.',
+      pass: renderPipelineStagesPass && executeNodeOwnsPassDispatch && physicsBackendContractPass,
+    },
+    {
+      question: 'bypass_paths',
+      answer: 'current audit treats direct body mutation, BlockKart player Set* calls, generic primitive authoring, enum-only terrain/decal batches, and unresolved evidence nextFix rows as bypasses.',
+      pass: sourceAuditFailures.length === 0,
+    },
+    {
+      question: 'performance_evidence',
+      answer: 'budgeted render stress and soak reports must be fresh and pass hard p90/p99/slow-frame/resource budgets without host pacing waiver.',
+      pass: renderStress?.status === 'pass' && existsSync(path.join(root, 'target/voplay-render-soak-10m/report.json')),
+    },
+    {
+      question: 'blockkart_boundary',
+      answer: 'BlockKart must consume voplay product APIs and telemetry without owning generic authoring or low-level physics/render workarounds.',
+      pass: !blockKartPrimitiveAuthoringPresent && !blockKartHudAssemblesLowLevelFacts && !blockKartDirectEntityPhysicsMutation,
+    },
+    {
+      question: 'gate_leak_check',
+      answer: 'required source facts, sourceAuditFailures, and unresolved evidence nextFix checks must agree before final readiness can pass.',
+      pass: requiredFalseFacts.length === 0 && sourceAuditFailures.length === 0,
+    },
+  ],
+};
 const industrialReady = failures.length === 0;
 const readiness = {
   schemaVersion: 1,
@@ -853,6 +1161,8 @@ const readiness = {
   },
   sourceFacts,
   sourceFactRequirements,
+  sourceAuditFailures,
+  firstPrinciplesVerdict,
   evidenceTable,
   gateReports,
   checks,
@@ -893,18 +1203,35 @@ writeFileSync(mdPath, [
   `- rendererStillOwnsTargets: ${readiness.sourceFacts.rendererStillOwnsTargets}`,
   `- allPipelineStagesConstructed: ${readiness.sourceFacts.allPipelineStagesConstructed}`,
   `- runtimeUsesExecuteRenderNodeMacro: ${readiness.sourceFacts.runtimeUsesExecuteRenderNodeMacro}`,
+  `- batchPlanSceneWired: ${readiness.sourceFacts.batchPlanSceneWired}`,
   `- batchPlanHasZeroBounds: ${readiness.sourceFacts.batchPlanHasZeroBounds}`,
   `- batchPlanUsesSeedWorkloadLod: ${readiness.sourceFacts.batchPlanUsesSeedWorkloadLod}`,
+  `- terrainDecalRealEntries: ${readiness.sourceFacts.terrainDecalRealEntries}`,
   `- physicsTrackPositionSurfaceInference: ${readiness.sourceFacts.physicsTrackPositionSurfaceInference}`,
   `- setPoseDirectPhysicsMutation: ${readiness.sourceFacts.setPoseDirectPhysicsMutation}`,
+  `- poseResetHelperDirectPhysicsMutation: ${readiness.sourceFacts.poseResetHelperDirectPhysicsMutation}`,
   `- blockKartPrimitiveAuthoringPresent: ${readiness.sourceFacts.blockKartPrimitiveAuthoringPresent}`,
+  `- blockKartDirectPlayerPhysicsMutation: ${readiness.sourceFacts.blockKartDirectPlayerPhysicsMutation}`,
+  `- blockKartDirectEntityPhysicsMutation: ${readiness.sourceFacts.blockKartDirectEntityPhysicsMutation}`,
   `- soakReportExists: ${readiness.sourceFacts.soakReportExists}`,
+  '',
+  '## First Principles Verdict',
+  '',
+  `- status: ${firstPrinciplesVerdict.status}`,
+  `- industrialReadyEligible: ${firstPrinciplesVerdict.industrialReadyEligible}`,
+  ...firstPrinciplesVerdict.questions.map((item) => `- ${item.pass ? 'pass' : 'fail'} ${item.question}: ${item.answer}`),
   '',
   '## Required Source Facts',
   '',
   ...(sourceFactRequirements.length === 0
     ? ['- none']
     : sourceFactRequirements.map((fact) => `- ${fact.status ? 'pass' : 'fail'} ${fact.code}: ${fact.detail}`)),
+  '',
+  '## Source Audit Failures',
+  '',
+  ...(sourceAuditFailures.length === 0
+    ? ['- none']
+    : sourceAuditFailures.map((failure) => `- [${failure.phase}] ${failure.code}: ${failure.detail}`)),
   '',
   '## Evidence Table',
   '',

@@ -142,6 +142,8 @@ for (const token of ['struct RenderWorldChunk', 'struct RenderBatchPlan', 'struc
 for (const token of ['RenderBatchKind::Mesh', 'RenderBatchKind::Primitive', 'RenderBatchKind::Water']) {
   check(renderWorld.includes(token), 'render_world.unified_batch_kind_missing', `${token} is missing from unified batch planning`);
 }
+check(/kind:\s*RenderBatchKind::Terrain/.test(renderWorld) && /#\[test\][\s\S]*terrain/i.test(renderWorld), 'render_world.terrain_batch_unwired', 'RenderBatchKind::Terrain is not backed by a real construction path and unit coverage');
+check(/kind:\s*RenderBatchKind::Decal/.test(renderWorld) && /#\[test\][\s\S]*decal/i.test(renderWorld), 'render_world.decal_batch_unwired', 'RenderBatchKind::Decal is not backed by a real construction path and unit coverage');
 check(!/bounds:\s*RenderChunkBounds\s*\{[\s\S]*?center:\s*Vec3::ZERO[\s\S]*?radius:\s*0\.0/.test(renderBatchPlannerBuildBody), 'render_world.zero_bounds', 'RenderBatchPlanner still emits zero placeholder bounds');
 check(!renderBatchPlannerSelectLodBody.includes('seed') && !renderBatchPlannerSelectLodBody.includes('workload'), 'render_world.seed_workload_lod', 'RenderBatchPlanner LOD still uses seed/workload heuristics');
 check(/frustum_culled_chunks\s*(?:\+=|=)/.test(renderBatchPlannerBuildBody), 'render_world.frustum_counters_not_mutated', 'frustum_culled_chunks is not mutated from batch-planning decisions');
@@ -157,6 +159,7 @@ check(!updateIntentBody.includes('DefaultSurfaceMaterial()'), 'vehicle.intent_de
 check(vehicle.includes('func (v *Vehicle) applyForceCommandToBackend'), 'vehicle.backend_adapter_missing', 'Vehicle backend adapter is missing');
 const backendAdapterBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyForceCommandToBackend');
 check(backendAdapterBody.includes('BuildPhysicsBackendApplyCommand'), 'vehicle.backend_contract_not_used', 'Vehicle backend adapter does not use BuildPhysicsBackendApplyCommand');
+check(backendAdapterBody.includes('physBackend.ApplyVehicleForces') && !vehicle.includes('physBackend.SetRaycastVehicleWheelControl'), 'vehicle.backend_apply_contract_not_used', 'Vehicle backend adapter does not use PhysicsBackend.ApplyVehicleForces as the wheel/backend apply contract');
 check(!backendAdapterBody.includes('vehicleDriveWheelCount'), 'vehicle.backend_adapter_owns_distribution', 'Vehicle backend adapter still owns drive wheel force distribution');
 check(!vehicle.includes('v.applyControls(command.VehicleInput'), 'vehicle.command_folded_to_input', 'Vehicle.ApplyForceCommand still folds command back to VehicleInput');
 check(!vehicle.includes('func (v *Vehicle) applyControls'), 'vehicle.legacy_apply_controls', 'Vehicle still exposes the legacy direct applyControls path');
@@ -166,6 +169,8 @@ check(!contactEvent.includes('SurfaceMaterialAtTrackPosition'), 'contact.track_p
 check(!vehicleTelemetry.includes('SurfaceMaterialAtTrackPosition'), 'telemetry.track_position_surface_inference', 'VehicleTelemetry still infers wheel surface material from track position');
 const setPoseBody = bodyOfFunction(vehicle, 'func (v *Vehicle) SetPose');
 check(!/Body\.SetPosition\(|Body\.SetRotation\(|Body\.SetVelocity\(|Body\.SetAngularVelocity\(|Body\.Physics\.velocity|Body\.Physics\.angularVelocity/.test(setPoseBody), 'vehicle.set_pose_direct_physics_mutation', 'Vehicle.SetPose still mutates body pose or physics state directly');
+const applyPoseResetBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyPoseResetToBackend');
+check(!/Body\.SetPosition\(|Body\.SetRotation\(|Body\.SetVelocity\(|Body\.SetAngularVelocity\(|Body\.Physics\.velocity|Body\.Physics\.angularVelocity/.test(applyPoseResetBody), 'vehicle.pose_reset_helper_direct_physics_mutation', 'Vehicle.applyPoseResetToBackend still mutates body pose or physics state directly');
 for (const token of ['type KartVehicleModel struct', 'type WheelContactSample struct', 'type VehicleForceCommand struct', 'type PhysicsBackendApplyCommand struct', 'BodyForce voplay.Vec3', 'DebugHash int', 'func BuildPhysicsBackendApplyCommand', 'func NormalizeVehicleForceCommand']) {
   check(kartDynamics.includes(token), 'vehicle.dynamics_contract_missing', `${token} is missing`);
 }
@@ -183,10 +188,15 @@ for (const token of ['BlockKartRenderBudget', 'PostProcessConfig', 'ShadowResolu
   }
 }
 check(blockKartBudget.includes('SetRenderingQuality'), 'blockkart.quality_profile_missing', 'BlockKart does not use voplay rendering quality profile');
-check(!/type BlockKartPrimitiveScene|primitive3d\.NewLayer|SpawnPreparedMapPrimitiveLayers|spawnPrimitiveRoadBoxPhysics/.test(blockKartPrimitiveWorld), 'blockkart.primitive_authoring_owner', 'BlockKart still owns generic primitive/chunk/collider/surface authoring');
+check(!/type BlockKartPrimitiveScene|primitive3d\.NewLayer|primitive3d\.NewBuilder|primitive3d\.LayerDesc|primitive3d\.ChunkingDesc|SpawnPreparedMapPrimitiveLayers|spawnPrimitiveRoadBoxPhysics|BlockKartVisualContent|spawnPrimitiveTrackPhysics|spawnRoadColliderStrip/.test(blockKartPrimitiveWorld), 'blockkart.primitive_authoring_owner', 'BlockKart still owns generic primitive/chunk/collider/surface authoring');
 check(!/PrimitiveStats\(|WheelState\(|VehicleGrounded|WheelMaxSlip|PrimitiveVisibleChunks/.test(blockKartWorld), 'blockkart.low_level_hud_facts', 'BlockKart HUD still assembles low-level engine facts directly');
 check(!/w\.vehicle\.(SteerAngle|WheelSpin)/.test(blockKartPrimitiveWorld), 'blockkart.visual_mutable_vehicle_state', 'BlockKart kart visual state still reads mutable vehicle steering or wheel spin fields');
 check(!/w\.vehicle\.SetPose\(/.test(blockKartWorld), 'blockkart.direct_vehicle_set_pose', 'BlockKart still calls Vehicle.SetPose directly');
+check(!/w\.player\.SetPosition\(|w\.player\.SetRotation\(|w\.player\.SetVelocity\(|w\.player\.SetAngularVelocity\(/.test(blockKartWorld), 'blockkart.direct_player_physics_mutation', 'BlockKart world still directly mutates player pose, velocity, or angular velocity');
+const directEntityMutation = /\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\.Set(Position|Rotation|Velocity|AngularVelocity)\(/;
+for (const entry of blockKartVoFiles) {
+  check(!directEntityMutation.test(entry.source), 'blockkart.direct_entity_physics_mutation', `BlockKart ${entry.rel} directly mutates entity pose, velocity, or angular velocity`);
+}
 check(!blockKartWorld.includes('SurfaceAt(w.player.Position())'), 'blockkart.surface_position_workaround', 'BlockKart world still infers surface from player position');
 check(!blockKartProductFoundation.includes('SurfaceAt(w.player.Position())'), 'blockkart.surface_position_workaround', 'BlockKart product diagnostics still infer surface from player position');
 check(!blockKartWorld.includes('kartPhysicsIdle'), 'blockkart.local_physics_sleep_thresholds', 'BlockKart still owns local physics sleep thresholds');

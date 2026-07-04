@@ -241,6 +241,10 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
     command: meta.command,
     budgetApplied: strictBudget,
     budget: sceneBudget,
+    source: {
+      project: baseline.project ?? null,
+      dependencies: baseline.dependencies ?? [],
+    },
     artifacts: {
       directory: meta.sceneOut,
       log: meta.logPath,

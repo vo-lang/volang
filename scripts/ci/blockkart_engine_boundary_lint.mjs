@@ -90,12 +90,17 @@ const blockKartPrimitiveWorld = readProjectFile(blockKartRoot, 'primitive_world.
 const blockKartVoFiles = listVoFiles(blockKartRoot);
 
 check(vehicle.includes('func (v *Vehicle) applyForceCommandToBackend'), 'voplay.backend_adapter_missing', 'voplay vehicle backend adapter is missing');
+const backendAdapterBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyForceCommandToBackend');
+check(backendAdapterBody.includes('BuildPhysicsBackendApplyCommand'), 'voplay.backend_apply_builder_not_used', 'voplay vehicle backend adapter does not build PhysicsBackendApplyCommand');
+check(backendAdapterBody.includes('physBackend.ApplyVehicleForces') && !vehicle.includes('physBackend.SetRaycastVehicleWheelControl'), 'voplay.backend_apply_contract_not_used', 'voplay vehicle backend adapter does not route wheel controls through PhysicsBackend.ApplyVehicleForces');
 check(!vehicle.includes('func (v *Vehicle) applyControls'), 'voplay.legacy_apply_controls', 'voplay still exposes direct applyControls');
 check(!vehicle.includes('SurfaceMaterialAtTrackPosition'), 'voplay.vehicle_track_position_surface_inference', 'Vehicle still infers surface material from track position');
 check(!contactEvent.includes('SurfaceMaterialAtTrackPosition'), 'voplay.contact_track_position_surface_inference', 'ContactEvent still infers surface material from track position');
 check(!vehicleTelemetry.includes('SurfaceMaterialAtTrackPosition'), 'voplay.telemetry_track_position_surface_inference', 'VehicleTelemetry still infers surface material from track position');
 const setPoseBody = bodyOfFunction(vehicle, 'func (v *Vehicle) SetPose');
 check(!/Body\.SetPosition\(|Body\.SetRotation\(|Body\.SetVelocity\(|Body\.SetAngularVelocity\(|Body\.Physics\.velocity|Body\.Physics\.angularVelocity/.test(setPoseBody), 'voplay.set_pose_direct_physics_mutation', 'Vehicle.SetPose still mutates body pose or physics state directly');
+const applyPoseResetBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyPoseResetToBackend');
+check(!/Body\.SetPosition\(|Body\.SetRotation\(|Body\.SetVelocity\(|Body\.SetAngularVelocity\(|Body\.Physics\.velocity|Body\.Physics\.angularVelocity/.test(applyPoseResetBody), 'voplay.pose_reset_helper_direct_physics_mutation', 'Vehicle.applyPoseResetToBackend still mutates body pose or physics state directly');
 check(dynamics.includes('type KartVehicleModel struct'), 'voplay.kart_model_missing', 'KartVehicleModel is missing');
 check(dynamics.includes('type VehicleForceCommand struct'), 'voplay.force_command_missing', 'VehicleForceCommand is missing');
 check(dynamics.includes('type PhysicsBackendApplyCommand struct'), 'voplay.backend_apply_command_missing', 'PhysicsBackendApplyCommand is missing');
@@ -108,10 +113,15 @@ check(replay.includes('BackendApplyHash') || replay.includes('BackendApplyComman
 check(idleSleep.includes('VehicleShouldSleepIdlePhysics'), 'voplay.idle_sleep_helper_missing', 'vehicle idle sleep helper is missing');
 
 check(blockKartBudget.includes('SetRenderingQuality'), 'blockkart.quality_profile_missing', 'BlockKart budget does not map to voplay quality profile');
-check(!/type BlockKartPrimitiveScene|primitive3d\.NewLayer|SpawnPreparedMapPrimitiveLayers|spawnPrimitiveRoadBoxPhysics/.test(blockKartPrimitiveWorld), 'blockkart.primitive_authoring_owner', 'BlockKart still owns generic primitive/chunk/collider/surface authoring');
+check(!/type BlockKartPrimitiveScene|primitive3d\.NewLayer|primitive3d\.NewBuilder|primitive3d\.LayerDesc|primitive3d\.ChunkingDesc|SpawnPreparedMapPrimitiveLayers|spawnPrimitiveRoadBoxPhysics|BlockKartVisualContent|spawnPrimitiveTrackPhysics|spawnRoadColliderStrip/.test(blockKartPrimitiveWorld), 'blockkart.primitive_authoring_owner', 'BlockKart still owns generic primitive/chunk/collider/surface authoring');
 check(!/PrimitiveStats\(|WheelState\(|VehicleGrounded|WheelMaxSlip|PrimitiveVisibleChunks/.test(blockKartWorld), 'blockkart.low_level_hud_facts', 'BlockKart HUD still assembles low-level engine facts directly');
 check(!/w\.vehicle\.(SteerAngle|WheelSpin)/.test(blockKartPrimitiveWorld), 'blockkart.visual_mutable_vehicle_state', 'BlockKart kart visual state still reads mutable vehicle steering or wheel spin fields');
 check(!/w\.vehicle\.SetPose\(/.test(blockKartWorld), 'blockkart.direct_vehicle_set_pose', 'BlockKart still calls Vehicle.SetPose directly');
+check(!/w\.player\.SetPosition\(|w\.player\.SetRotation\(|w\.player\.SetVelocity\(|w\.player\.SetAngularVelocity\(/.test(blockKartWorld), 'blockkart.direct_player_physics_mutation', 'BlockKart world still directly mutates player pose, velocity, or angular velocity');
+const directEntityMutation = /\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\.Set(Position|Rotation|Velocity|AngularVelocity)\(/;
+for (const entry of blockKartVoFiles) {
+  check(!directEntityMutation.test(entry.source), 'blockkart.direct_entity_physics_mutation', `${entry.rel} directly mutates entity pose, velocity, or angular velocity`);
+}
 check(blockKartWorld.includes('VehicleShouldSleepIdlePhysics'), 'blockkart.idle_sleep_policy_owned', 'BlockKart does not delegate idle sleep policy to voplay');
 check(blockKartWorld.includes('VehicleAudioInputFromVehicle'), 'blockkart.audio_telemetry_missing', 'BlockKart vehicle audio does not start from voplay telemetry');
 check(!blockKartWorld.includes('SurfaceAt(w.player.Position())'), 'blockkart.surface_position_workaround', 'BlockKart world still infers surface by player position');

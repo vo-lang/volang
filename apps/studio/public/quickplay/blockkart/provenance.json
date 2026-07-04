@@ -21,9 +21,9 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "f4f37f831c750bd7a4fc8fe7a8a0b1d0c88b5c5b",
+    "commit": "45916f0073afa7853d98892e105134b85e808b0c",
     "dirty": false,
-    "filesDigest": "sha256:b840e1010fa3ecf6311efed192aafa1f53fd754dd6e265c467f359d587d985b5",
+    "filesDigest": "sha256:732b335e2a545b187c2fbe75802af03a9bafd77875635868a8b4c7d36674b226",
     "module": "github.com/vo-lang/blockkart"
   },
   "dependencies": [
@@ -66,22 +66,22 @@
         }
       ],
       "cacheDir": "github.com@vo-lang@voplay/v0.1.34",
-      "filesDigest": "sha256:3664e2d53ffb2ffb02c847fec5900891c1fc800c617d8c87c7b3769c8dd3abd5",
+      "filesDigest": "sha256:a82fa3958eec58f575710bba436223e40c5f74ac8e895860609eb2e0ef71021f",
       "module": "github.com/vo-lang/voplay",
       "version": "v0.1.34",
-      "commit": "2c1da9f56777e37b7e1f33b7d53451dc7deaaaca"
+      "commit": "bc75f42a71d46e6ad88991c996fc11aa63f78fc8"
     }
   ],
   "outputs": [
     {
-      "digest": "sha256:c25f206278c2f06c08c72c63a15874b256310aadbfe6a26e343381f1201ddf90",
+      "digest": "sha256:04a1e53d3ab72a59e73f75f23336c0d9b9a993a3c0f998ff517ef47070f5c3d2",
       "path": "project.json",
-      "size": 22743386
+      "size": 22740411
     },
     {
-      "digest": "sha256:19409e4908f89761bb9bf47050a781bae5be61120cf503a61cf8c7c2d5c6905e",
+      "digest": "sha256:b76a54db39026dd347f52dda9f0b4134b36dcc9c342a6ad7d84f695a49bf4bc6",
       "path": "deps.json",
-      "size": 2494171
+      "size": 2516568
     }
   ]
 }

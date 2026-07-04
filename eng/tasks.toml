@@ -225,6 +225,7 @@ app-site = [
 ]
 
 voplay-industrial = [
+  "voplay-industrial-source-audit",
   "voplay-industrial-readiness-report",
   "voplay-industrial-readiness",
 ]
@@ -580,7 +581,7 @@ title = "voplay Industrial"
 tier_intent = "explicit voplay industrial readiness final gate"
 owner = "studio"
 tags = ["app-site", "contract", "final-gate", "voplay"]
-tasks = ["voplay-industrial-readiness-report", "voplay-industrial-readiness"]
+tasks = ["voplay-industrial-source-audit", "voplay-industrial-readiness-report", "voplay-industrial-readiness"]
 included_in = ["site"]
 selection_policy = "Selected by the site final gate and explicit voplay industrial readiness runs."
 
@@ -1884,6 +1885,21 @@ tier = "contract"
 tags = ["app-smoke", "contract", "perf", "physics"]
 owner = "studio"
 timeout_sec = 300
+
+[[task]]
+name = "voplay-industrial-source-audit"
+title = "write voplay industrial source audit report"
+command = ["node", "scripts/ci/voplay_industrial_readiness.mjs", "--out-dir", "target/voplay-industrial-source-audit", "--allow-not-ready"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+internal = true
+inputs = ["scripts/ci/voplay_industrial_readiness.mjs", "module-cache:voplay", "external:BlockKart", "apps/studio/public/quickplay/blockkart/provenance.json"]
+outputs = ["target/voplay-industrial-source-audit"]
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "perf", "physics", "source-audit", "final-gate"]
+owner = "studio"
+timeout_sec = 120
 
 [[task]]
 name = "voplay-industrial-readiness-report"

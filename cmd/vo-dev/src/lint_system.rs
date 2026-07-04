@@ -948,10 +948,16 @@ const VOPLAY_REQUIRED_SOURCE_FACTS: &[&str] = &[
     "batch_plan_real_bounds",
     "batch_plan_real_lod_inputs",
     "batch_plan_real_culling_counters",
+    "batch_plan_scene_wired",
+    "batch_plan_terrain_decal_real_entries",
     "physics_surface_source_no_track_position_inference",
     "physics_set_pose_backend_only",
+    "physics_pose_reset_helper_backend_only",
     "physics_replay_records_backend_apply_hash",
     "blockkart_product_boundary",
+    "blockkart_no_direct_player_physics_mutation",
+    "blockkart_no_direct_entity_physics_mutation",
+    "evidence_has_no_unresolved_next_fix",
 ];
 
 const VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES: &[&str] = &[
@@ -961,15 +967,21 @@ const VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES: &[&str] = &[
     "render_world.seed_workload_lod",
     "render_world.frustum_counters_not_mutated",
     "render_world.distance_counters_not_mutated",
+    "render_world.terrain_batch_unwired",
+    "render_world.decal_batch_unwired",
     "vehicle.track_position_surface_inference",
     "contact.track_position_surface_inference",
     "telemetry.track_position_surface_inference",
     "vehicle.set_pose_direct_physics_mutation",
+    "vehicle.pose_reset_helper_direct_physics_mutation",
+    "vehicle.backend_apply_contract_not_used",
     "replay.backend_apply_hash_missing",
     "blockkart.primitive_authoring_owner",
     "blockkart.low_level_hud_facts",
     "blockkart.visual_mutable_vehicle_state",
     "blockkart.direct_vehicle_set_pose",
+    "blockkart.direct_player_physics_mutation",
+    "blockkart.direct_entity_physics_mutation",
 ];
 
 const VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES: &[&str] = &[
@@ -977,11 +989,15 @@ const VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES: &[&str] = &[
     "voplay.contact_track_position_surface_inference",
     "voplay.telemetry_track_position_surface_inference",
     "voplay.set_pose_direct_physics_mutation",
+    "voplay.pose_reset_helper_direct_physics_mutation",
+    "voplay.backend_apply_contract_not_used",
     "voplay.replay_backend_apply_hash_missing",
     "blockkart.primitive_authoring_owner",
     "blockkart.low_level_hud_facts",
     "blockkart.visual_mutable_vehicle_state",
     "blockkart.direct_vehicle_set_pose",
+    "blockkart.direct_player_physics_mutation",
+    "blockkart.direct_entity_physics_mutation",
 ];
 
 fn lint_voplay_industrial_gate_policy(
@@ -1015,6 +1031,7 @@ fn lint_voplay_industrial_gate_task_wiring(
 ) -> Result<()> {
     let site_scope: BTreeSet<_> = resolve_selector(config, "site")?.into_iter().collect();
     for required in [
+        "voplay-industrial-source-audit",
         "voplay-industrial-readiness-report",
         "voplay-industrial-readiness",
     ] {
@@ -1059,10 +1076,13 @@ fn lint_voplay_industrial_gate_sources(
         &[
             "sourceFactRequirements",
             "evidenceTable",
+            "sourceAuditFailures",
+            "firstPrinciplesVerdict",
             "addRequiredSourceFact(",
             "addEvidenceRow(",
             "const requiredFalseFacts = sourceFactRequirements",
             ".filter((fact) => fact.required && fact.status !== true)",
+            "const unresolvedEvidenceNextFixes = evidenceTable",
             "'source_facts.required_all_pass'",
             "const industrialReady = failures.length === 0",
             "strictMode: !allowNotReady",
@@ -1115,7 +1135,11 @@ fn lint_voplay_industrial_gate_sources(
             "execute_render_node!",
             "SurfaceMaterialAtTrackPosition",
             "Body\\.SetPosition",
+            "applyPoseResetToBackend",
+            "ApplyVehicleForces",
             "PrimitiveStats",
+            "primitive3d\\.NewBuilder",
+            "w\\.player\\.SetVelocity",
         ],
     )?;
 
@@ -1130,9 +1154,14 @@ fn lint_voplay_industrial_gate_sources(
         &[
             "SurfaceMaterialAtTrackPosition",
             "Body\\.SetPosition",
+            "applyPoseResetToBackend",
+            "ApplyVehicleForces",
             "BackendApplyHash",
             "PrimitiveStats",
             "w\\.vehicle\\.SetPose",
+            "primitive3d\\.NewBuilder",
+            "w\\.player\\.SetVelocity",
+            "directEntityMutation",
         ],
     )?;
     Ok(())

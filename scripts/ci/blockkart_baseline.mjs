@@ -3054,6 +3054,8 @@ async function main() {
       dependencies: (depsPackage.modules ?? []).map((modulePack) => ({
         module: modulePack.module,
         version: modulePack.version,
+        commit: modulePack.commit ?? null,
+        provenanceCommit: (provenance.dependencies ?? []).find((dep) => dep.module === modulePack.module)?.commit ?? null,
         artifacts: (modulePack.artifacts ?? []).map((artifact) => artifact.url),
       })),
       artifacts: {
