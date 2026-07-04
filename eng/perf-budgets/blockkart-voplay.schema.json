@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vo-lang.org/schemas/blockkart-voplay-perf-budget.schema.json",
+  "title": "BlockKart voplay performance budget",
+  "type": "object",
+  "required": ["schemaVersion", "target", "render", "physics"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "target": {
+      "type": "object",
+      "required": ["width", "height", "fps"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "fps": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "render": {
+      "type": "object",
+      "required": ["p90Ms", "p99Ms", "maxSlowFrames", "maxP0", "maxP1"],
+      "properties": {
+        "p90Ms": { "type": "number", "exclusiveMinimum": 0 },
+        "p99Ms": { "type": "number", "exclusiveMinimum": 0 },
+        "maxSlowFrames": { "type": "integer", "minimum": 0 },
+        "maxResourceChurnEvents": { "type": "integer", "minimum": 0 },
+        "maxUploadBytes": { "type": "integer", "minimum": 0 },
+        "maxP0": { "type": "integer", "minimum": 0 },
+        "maxP1": { "type": "integer", "minimum": 0 },
+        "scenes": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/renderSceneBudget"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "physics": {
+      "type": "object",
+      "required": ["maxVelocity", "maxAngularVelocity", "maxReplayDriftMeters", "maxP0", "maxP1"],
+      "properties": {
+        "maxVelocity": { "type": "number", "exclusiveMinimum": 0 },
+        "maxAngularVelocity": { "type": "number", "exclusiveMinimum": 0 },
+        "maxReplayDriftMeters": { "type": "number", "minimum": 0 },
+        "maxLongStuckSeconds": { "type": "number", "minimum": 0 },
+        "maxP0": { "type": "integer", "minimum": 0 },
+        "maxP1": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "renderSceneBudget": {
+      "type": "object",
+      "required": ["p90Ms", "p99Ms", "maxSlowFrames"],
+      "properties": {
+        "p90Ms": { "type": "number", "exclusiveMinimum": 0 },
+        "p99Ms": { "type": "number", "exclusiveMinimum": 0 },
+        "maxSlowFrames": { "type": "integer", "minimum": 0 },
+        "maxResourceChurnEvents": { "type": "integer", "minimum": 0 },
+        "maxUploadBytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

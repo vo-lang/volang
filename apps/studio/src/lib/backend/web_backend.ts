@@ -58,12 +58,6 @@ const RUNTIME_PERSIST_ROOT = '/persist';
 const RUNTIME_PERSIST_STORAGE_KEY = 'volang.studio.runtimeVfsPersist.v1';
 const RUNTIME_PERSIST_MAX_FILE_BYTES = 256 * 1024;
 const RUNTIME_PERSIST_MAX_TOTAL_BYTES = 1024 * 1024;
-const BLOCKKART_PACKAGED_MODULE_MARKERS = [
-  '/github.com@vo-lang@vogui/v0.1.15/vo.release.json',
-  '/github.com@vo-lang@vopack/v0.1.2/vo.release.json',
-  '/github.com@vo-lang@voplay/v0.1.28/vo.web.json',
-  '/github.com@vo-lang@voplay/v0.1.28/artifacts/voplay_island_bg.wasm',
-];
 const sessionWorkspaceDiscovery = new Map<string, WorkspaceDiscoveryMode>();
 const DISPLAY_PULSE_DELAY_MS = 0xFFFFFFFF;
 const PERF_SAMPLE_WINDOW = 240;
@@ -1856,9 +1850,7 @@ async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
   if (!hasVfsFile(entryPath)) {
     throw new Error('BlockKart quickplay package is missing main.vo');
   }
-  if (!hasBlockKartPackagedDependencies()) {
-    await installBlockKartPackagedDependencies();
-  }
+  await ensureBlockKartPackagedDependencies();
   return buildSessionInfo(
     sessionRoot,
     'url',
@@ -1875,15 +1867,10 @@ async function openBlockKartQuickPlaySession(): Promise<SessionInfo> {
 
 async function ensureBlockKartPackagedDependenciesForEntry(entryPath: string): Promise<void> {
   const projectRoot = findProjectRootForEntry(entryPath);
-  if (!projectRoot || !isBlockKartProjectRoot(projectRoot) || hasBlockKartPackagedDependencies()) {
+  if (!projectRoot || !isBlockKartProjectRoot(projectRoot)) {
     return;
   }
-  if (!blockKartDepsInstallPromise) {
-    blockKartDepsInstallPromise = installBlockKartPackagedDependencies().finally(() => {
-      blockKartDepsInstallPromise = null;
-    });
-  }
-  await blockKartDepsInstallPromise;
+  await ensureBlockKartPackagedDependencies();
 }
 
 function findProjectRootForEntry(entryPath: string): string | null {
@@ -1904,17 +1891,49 @@ function isBlockKartProjectRoot(projectRoot: string): boolean {
   return modContent?.split(/\r?\n/).some((line) => line.trim() === 'module github.com/vo-lang/blockkart') ?? false;
 }
 
-function hasBlockKartPackagedDependencies(): boolean {
-  return BLOCKKART_PACKAGED_MODULE_MARKERS.every((path) => hasVfsFile(path));
+async function ensureBlockKartPackagedDependencies(): Promise<void> {
+  if (!blockKartDepsInstallPromise) {
+    blockKartDepsInstallPromise = installBlockKartPackagedDependencies().finally(() => {
+      blockKartDepsInstallPromise = null;
+    });
+  }
+  await blockKartDepsInstallPromise;
+}
+
+function blockKartDependencyMarkers(pack: BlockKartDepsPackage): string[] {
+  const markers: string[] = [];
+  for (const modulePack of pack.modules) {
+    const moduleRoot = `/${modulePack.cacheDir}`;
+    const files = new Set(modulePack.files.map((file) => file.path));
+    if (files.has('vo.release.json')) {
+      markers.push(`${moduleRoot}/vo.release.json`);
+    } else if (files.has('vo.web.json')) {
+      markers.push(`${moduleRoot}/vo.web.json`);
+    } else if (files.has('vo.mod')) {
+      markers.push(`${moduleRoot}/vo.mod`);
+    }
+    for (const artifact of modulePack.artifacts ?? []) {
+      markers.push(`${moduleRoot}/${artifact.path}`);
+    }
+  }
+  return markers;
+}
+
+function hasBlockKartPackagedDependencies(pack: BlockKartDepsPackage): boolean {
+  const markers = blockKartDependencyMarkers(pack);
+  return markers.length > 0 && markers.every((path) => hasVfsFile(path));
 }
 
 async function installBlockKartPackagedDependencies(): Promise<void> {
-  consolePush('system', 'Loading BlockKart dependencies...');
-  const start = performance.now();
   const pack = await fetchStaticJson<BlockKartDepsPackage>(BLOCKKART_DEPS_PACKAGE_URL);
   if (pack.schemaVersion !== 1) {
     throw new Error('Invalid BlockKart dependency package');
   }
+  if (hasBlockKartPackagedDependencies(pack)) {
+    return;
+  }
+  consolePush('system', 'Loading BlockKart dependencies...');
+  const start = performance.now();
   for (const modulePack of pack.modules) {
     const moduleRoot = `/${modulePack.cacheDir}`;
     writeStaticPackageFiles(moduleRoot, modulePack.files);

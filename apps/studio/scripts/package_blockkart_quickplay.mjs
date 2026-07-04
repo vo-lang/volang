@@ -8,7 +8,8 @@ const STUDIO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const REPO_ROOT = path.resolve(STUDIO_ROOT, '../..');
 const BLOCKKART_ROOT = path.resolve(process.env.BLOCKKART_ROOT ?? path.join(REPO_ROOT, '..', 'BlockKart'));
 const MOD_CACHE_ROOT = path.resolve(process.env.VO_MOD_CACHE ?? path.join(os.homedir(), '.vo', 'mod'));
-const OUT_ROOT = path.join(STUDIO_ROOT, 'public', 'quickplay', 'blockkart');
+const VOPLAY_ROOT = path.resolve(process.env.VOPLAY_ROOT ?? path.join(REPO_ROOT, '..', 'voplay'));
+const OUT_ROOT = path.resolve(process.env.BLOCKKART_QUICKPLAY_OUT_ROOT ?? path.join(STUDIO_ROOT, 'public', 'quickplay', 'blockkart'));
 const WASM_TARGET = 'wasm32-unknown-unknown';
 const BLOCKKART_RUNTIME_ASSETS = ['assets/blockkart.vpak'];
 const QUICKPLAY_ARTIFACT_NAME = 'studio.quickplay.blockkart';
@@ -19,6 +20,7 @@ const QUICKPLAY_GENERATOR_INPUTS = [
   'eng/project.toml',
   'external:BlockKart',
   'module-cache:voplay',
+  'module-cache:vopack',
   'module-cache:vogui',
 ];
 
@@ -34,6 +36,14 @@ function requireCleanGitTree(cwd, label) {
   const status = gitOutput(['status', '--porcelain'], cwd);
   if (status) {
     throw new Error(`${label} has uncommitted changes; refusing to create checked-in quickplay package`);
+  }
+}
+
+function requireGitHead(cwd, label, expected) {
+  if (!expected) return;
+  const head = gitOutput(['rev-parse', 'HEAD'], cwd);
+  if (head !== expected) {
+    throw new Error(`${label} HEAD ${head} does not match locked commit ${expected}`);
   }
 }
 
@@ -165,6 +175,33 @@ function shouldDeclarePackagedSourceFile(file) {
   return true;
 }
 
+function upsertTextFile(files, filePath, content) {
+  const existing = files.find((file) => file.path === filePath);
+  if (existing) {
+    existing.content = content;
+    delete existing.contentBase64;
+    return;
+  }
+  files.push({ path: filePath, content });
+}
+
+function dropNativeExtensionTables(voModSource) {
+  const lines = voModSource.split(/\r?\n/);
+  const out = [];
+  let skip = false;
+  for (const line of lines) {
+    const table = line.trim().match(/^\[\[?([^\]]+)\]\]?$/);
+    if (table) {
+      const name = table[1].trim();
+      skip = name === 'extension.native' || name.startsWith('extension.native.');
+    }
+    if (!skip) {
+      out.push(line);
+    }
+  }
+  return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
+}
+
 function packagedSourceEntry(file) {
   const bytes = Buffer.from(file.content, 'utf8');
   return {
@@ -178,7 +215,41 @@ function sourceSetDigest(entries) {
   return sha256Digest(Buffer.from(JSON.stringify(entries), 'utf8'));
 }
 
-async function rewritePackagedWebManifest(moduleDir, files, artifacts) {
+function syntheticBrowserReleaseManifest(manifest) {
+  const artifacts = (manifest.artifacts ?? [])
+    .map((artifact) => ({
+      kind: artifact.kind,
+      target: artifact.target,
+      name: artifact.name,
+      size: artifact.size,
+      digest: artifact.digest,
+    }))
+    .sort((a, b) => (
+      a.kind.localeCompare(b.kind)
+      || a.target.localeCompare(b.target)
+      || a.name.localeCompare(b.name)
+    ));
+  const require = (manifest.require ?? [])
+    .map((entry) => ({ module: entry.module, constraint: entry.constraint }))
+    .sort((a, b) => a.module.localeCompare(b.module));
+  return {
+    schema_version: 1,
+    module: manifest.module,
+    version: manifest.version,
+    commit: manifest.commit,
+    module_root: manifest.module_root ?? '.',
+    vo: manifest.vo,
+    require,
+    source: {
+      name: 'vo.web.json',
+      size: manifest.source.reduce((total, entry) => total + entry.size, 0),
+      digest: manifest.source_digest,
+    },
+    artifacts,
+  };
+}
+
+async function rewritePackagedWebManifest(moduleDir, files, artifacts, locked) {
   const manifestFile = files.find((file) => file.path === 'vo.web.json');
   if (!manifestFile) return;
 
@@ -188,7 +259,17 @@ async function rewritePackagedWebManifest(moduleDir, files, artifacts) {
   // exact packaged VFS payload or browser runtime integrity checks fail later.
   if (files.some((file) => file.path === 'vo.release.json')) return;
 
+  const modFile = files.find((file) => file.path === 'vo.mod');
+  if (modFile) {
+    modFile.content = dropNativeExtensionTables(modFile.content);
+  }
+
   const manifest = JSON.parse(manifestFile.content);
+  manifest.module = locked.path;
+  manifest.version = locked.version;
+  if (locked.commit) {
+    manifest.commit = locked.commit;
+  }
   const source = files
     .filter(shouldDeclarePackagedSourceFile)
     .map(packagedSourceEntry)
@@ -202,10 +283,10 @@ async function rewritePackagedWebManifest(moduleDir, files, artifacts) {
     for (const artifact of manifest.artifacts) {
       const packagedPath = packagedArtifactPaths.get(artifact.name);
       if (!packagedPath) {
-        nextArtifacts.push(artifact);
         continue;
       }
-      const bytes = await fs.readFile(path.join(moduleDir, packagedPath));
+      const artifactInfo = artifacts.find((entry) => path.posix.basename(entry.path) === artifact.name);
+      const bytes = await fs.readFile(artifactInfo?.sourcePath ?? path.join(moduleDir, packagedPath));
       nextArtifacts.push({
         ...artifact,
         digest: sha256Digest(bytes),
@@ -217,6 +298,45 @@ async function rewritePackagedWebManifest(moduleDir, files, artifacts) {
   }
 
   manifestFile.content = `${JSON.stringify(manifest, null, 2)}\n`;
+  upsertTextFile(files, '.vo-version', `${locked.version}\n`);
+  upsertTextFile(files, '.vo-source-digest', `${manifest.source_digest}\n`);
+  upsertTextFile(files, 'vo.release.json', `${JSON.stringify(syntheticBrowserReleaseManifest(manifest), null, 2)}\n`);
+}
+
+async function dependencyModuleDir(locked) {
+  if (locked.path === 'github.com/vo-lang/voplay' && await pathExists(VOPLAY_ROOT)) {
+    requireCleanGitTree(VOPLAY_ROOT, locked.path);
+    requireGitHead(VOPLAY_ROOT, locked.path, locked.commit);
+    return {
+      cacheDir: `${cacheKey(locked.path)}/${locked.version}`,
+      moduleDir: VOPLAY_ROOT,
+      source: 'external',
+    };
+  }
+  const key = cacheKey(locked.path);
+  const moduleDir = path.join(MOD_CACHE_ROOT, key, locked.version);
+  if (!(await pathExists(moduleDir))) {
+    throw new Error(`Missing installed dependency cache: ${moduleDir}`);
+  }
+  return {
+    cacheDir: `${key}/${locked.version}`,
+    moduleDir,
+    source: 'module-cache',
+  };
+}
+
+async function dependencyArtifactSourcePath(moduleDir, artifact) {
+  const candidates = [
+    path.join(moduleDir, 'artifacts', artifact.name),
+    path.join(moduleDir, 'web-artifacts', artifact.name),
+    path.join(moduleDir, artifact.name),
+  ];
+  for (const candidate of candidates) {
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(`Missing dependency artifact ${artifact.name}; checked ${candidates.join(', ')}`);
 }
 
 async function buildProjectPackage() {
@@ -256,10 +376,7 @@ async function buildDependencyPackage(lockModules) {
   const modules = [];
   for (const locked of lockModules) {
     const key = cacheKey(locked.path);
-    const moduleDir = path.join(MOD_CACHE_ROOT, key, locked.version);
-    if (!(await pathExists(moduleDir))) {
-      throw new Error(`Missing installed dependency cache: ${moduleDir}`);
-    }
+    const { cacheDir, moduleDir } = await dependencyModuleDir(locked);
 
     const files = [];
     for (const absolute of await walkFiles(moduleDir)) {
@@ -275,28 +392,27 @@ async function buildDependencyPackage(lockModules) {
     for (const artifact of locked.artifacts) {
       if (artifact.target !== WASM_TARGET) continue;
       if (artifact.kind !== 'extension-wasm' && artifact.kind !== 'extension-js-glue') continue;
-      const sourcePath = path.join(moduleDir, 'artifacts', artifact.name);
-      if (!(await pathExists(sourcePath))) {
-        throw new Error(`Missing dependency artifact: ${sourcePath}`);
-      }
+      const sourcePath = await dependencyArtifactSourcePath(moduleDir, artifact);
       const outRelative = path.posix.join('artifacts', key, locked.version, artifact.name);
       artifacts.push({
         path: path.posix.join('artifacts', artifact.name),
+        sourcePath,
         url: `/quickplay/blockkart/${outRelative}`,
       });
       await fs.mkdir(path.join(OUT_ROOT, 'artifacts', key, locked.version), { recursive: true });
       await fs.copyFile(sourcePath, path.join(OUT_ROOT, outRelative));
     }
 
-    await rewritePackagedWebManifest(moduleDir, files, artifacts);
+    await rewritePackagedWebManifest(moduleDir, files, artifacts, locked);
     files.sort((a, b) => a.path.localeCompare(b.path));
     artifacts.sort((a, b) => a.path.localeCompare(b.path));
     modules.push({
       module: locked.path,
       version: locked.version,
-      cacheDir: `${key}/${locked.version}`,
+      commit: locked.commit ?? null,
+      cacheDir,
       files,
-      artifacts,
+      artifacts: artifacts.map(({ sourcePath, ...artifact }) => artifact),
     });
   }
   modules.sort((a, b) => a.module.localeCompare(b.module));
@@ -334,6 +450,7 @@ async function dependencyProvenance(module) {
     filesDigest: packagedFilesDigest(module.files),
     module: module.module,
     version: module.version,
+    commit: module.commit ?? null,
   };
 }
 

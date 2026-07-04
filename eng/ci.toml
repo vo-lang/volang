@@ -34,7 +34,7 @@ tasks = ["docs-lint", "ci-self-check"]
 
 [[known_prefix]]
 path = "scripts/ci/**"
-tasks = ["docs-lint", "ci-self-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline"]
+tasks = ["eng-lint-tasks", "docs-lint", "ci-self-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline"]
 
 [[known_prefix]]
 path = "lang/crates/vo-runtime/**"

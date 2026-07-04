@@ -1,7 +1,7 @@
 # BlockKart / voplay Product Foundation Plan
 
-Status: active plan  
-Date: 2026-07-01  
+Status: M1 foundation complete for the checked-in quickplay package
+Date: 2026-07-02
 Scope: BlockKart first product phase, driven by voplay and Studio quickplay foundations.
 
 ## Purpose
@@ -18,6 +18,113 @@ rendering, repeatable content production, strong diagnostics, and later support
 for larger modes. voplay is not ready for that whole target today, but it has a
 credible starting point and must be improved deliberately.
 
+## M1 Completion Summary
+
+M1 is complete for the checked-in Studio quickplay package as of 2026-07-02.
+The result is not a complete kart-racing product; it is the product foundation
+needed before adding larger gameplay systems.
+
+Completed capabilities:
+
+- lifecycle states are explicit: `Boot`, `Loading`, `Ready`, `Running`,
+  `Paused`, `Restarting`, `Failed`, and `Closed`
+- forced asset-pack failure reaches `Failed` with player-safe copy and a
+  structured developer report
+- retry/restart uses the same lifecycle path as first startup
+- restart preserves settings and best-time persistence while rebuilding fresh
+  race, input, scene, physics, vehicle, and audio state
+- immutable resource-heavy data is cached at `PlayState` scope:
+  asset-pack mount, skybox, prepared map asset, and static primitive template
+- live asset, scene, vehicle, and race diagnostics are emitted to both JSON and
+  Markdown baseline reports
+- baseline now drives default, forced-failure, start-race, storage-reload,
+  restart-2, and restart-10 product paths
+- perf attribution separates first-frame warmup, restart rebuild, and
+  steady-state slow frames
+- restart diagnostics fail on resource growth, duplicate mounts, missing cache
+  reuse, or repeated immutable cache rebuilds
+
+Why the voplay changes remain generic:
+
+- lifecycle/error APIs are `GameCtx.SetLifecycle`, `GameCtx.ReportIssue`, and
+  `GameCtx.Diagnostics`, with generic lifecycle constants and no BlockKart
+  naming
+- `AssetReport`, idempotent mount behavior, linear texture accounting,
+  prepared-map helpers, primitive layer cloning, scene diagnostics, render
+  timing, settings storage, and input action maps are reusable game-engine
+  capabilities
+- BlockKart-specific ownership stays in BlockKart: product copy, race state,
+  tuning presets, asset package requirements, map content, and HUD semantics
+
+What this unlocks:
+
+- new tracks, vehicles, AI, item systems, menus, and online modes can build on
+  observable lifecycle and cleanup boundaries instead of implicit demo state
+- regressions now point at likely owners (`voplay`, `Studio`, `BlockKart`) and
+  subsystems (`Asset`, `Map`, `Scene`, `Renderer`, `Vehicle`, `Gameplay`, and
+  others)
+- repeated restart can be used as a product quality gate instead of a manual
+  browser exercise
+
+Still not Mario Kart-class:
+
+- no item system, AI roster, multiplayer, track production pipeline, product
+  menus, progression, replay/ghost system, or final visual polish
+- race-loop coverage is minimal: start, telemetry, clean restart, and settings
+  persistence are covered, not a complete mode flow
+- longer soaks and native-host persistence are later product gates
+
+## Source Audit Summary
+
+Runtime and lifecycle ownership:
+
+- `PlayState` owns the product lifecycle, failure state, retry/restart path,
+  settings persistence handoff, and the runtime cache.
+- voplay owns generic game diagnostics through `GameCtx`, not BlockKart-specific
+  state names.
+- `NewWorld` returns a `BlockKartFailureReport` instead of panicking for known
+  product startup failures.
+
+Resource and scene ownership:
+
+- `BlockKartRuntimeCache` owns long-lived immutable resources shared across
+  restarts: the mounted asset pack, skybox, prepared map asset, and static
+  primitive template.
+- Each `World` owns the fresh race run: scene, physics bodies, track result,
+  vehicle, input profile, vehicle audio, dynamic primitive layer, collectibles,
+  checkpoints, boost pads, obstacles, and race timers.
+- `World.Close` destroys racing debug overlays and vehicle audio, closes the
+  scene/physics world, releases track textures, clears dynamic world pointers,
+  and only releases the asset group when it is not runtime-cache owned.
+- `Scene.Close` clears entities and primitive layers and destroys the physics
+  world. Cached primitive templates are cloned into new scenes, so scene-local
+  state is not shared between runs.
+
+Failure and rollback ownership:
+
+- missing or invalid asset-pack setup fails in `loadAssets`, reports
+  `BlockKart/Asset`, closes the partial world, and enters `Failed`.
+- map preparation failures report `BlockKart/Map`, close partial world state,
+  and keep already-cached immutable resources bounded by the runtime cache.
+- failure retry closes the runtime cache and restarts through `Restarting` and
+  `Loading`, then can return to `Running`.
+
+Root cause fixed:
+
+- `--restart-count 2` was functionally correct, but restart rebuilt immutable
+  data on the render-driven frame. The expensive path was
+  `preparePrimitiveMapAsset`, `buildPrimitiveTrackVisuals`, and
+  `BlockKart world:buildLevel`.
+- repeated restart also lacked hard evidence that `.vpak` mounts and asset
+  groups stayed bounded.
+- voplay render-loop slow-frame logs were counting intentional paced cadence as
+  slow work when a larger frame divisor was selected.
+
+The fix caches immutable work and makes the baseline prove the result:
+`mountCount` must stay at `1`, immutable cache build counts must stay at `1`,
+reuse counts must advance across restarts, and scene/asset/entity/audio/physics
+counts must not grow.
+
 ## Current Baseline
 
 The current checked-in BlockKart quickplay package is a real downstream pressure
@@ -28,14 +135,24 @@ test for voplay and Studio:
   decals, sky, post effects, and audio startup.
 - The new `blockkart-baseline` task captures a smoke, visual, startup, and perf
   baseline from the actual quickplay package.
-- Recent local evidence:
-  - canvas: `1280x720`, non-empty
-  - startup phases: `42`
-  - voplay perf reports: `11`
-  - slow frames: `1`
-  - warnings: `0`
-  - errors: `0`
-  - resource failures: `0`
+- 2026-07-02 M1 local evidence:
+  - default baseline: status `ok`, lifecycle `Running`, canvas `1280x720`
+    non-empty, P0/P1 `0`
+  - forced failure: status `ok`, lifecycle `Failed`, structured failure report
+    owner/subsystem `BlockKart/Asset`
+  - start race: status `ok`, `startRace.completed=true`, race state `Running`
+  - storage reload: status `ok`, `settingsLoadedFromStorage=true`
+  - restart-2: status `ok`, `completed=2/2`, lifecycle `Running`,
+    P0/P1 `0`
+  - restart-10: status `ok`, `completed=10/10`, lifecycle `Running`,
+    P0/P1 `0`
+  - restart-10 bounded resources:
+    `mountCount=1`, `groupCount=1`, `textures=5`, `linearTextures=9`,
+    `cubemaps=1`, `models=9`, `audio=5`, `entities=68`, `physics=60`,
+    `primitiveLayers=7`
+  - restart-10 cache evidence:
+    `preparedMapBuilds=1`, `preparedMapReuses=11`,
+    `primitiveTemplateBuilds=1`, `primitiveTemplateReuses=11`
 
 That baseline is only a guardrail. It proves the demo still runs. It does not
 prove the game is product-grade.
@@ -117,14 +234,16 @@ Required capabilities:
 - emit JSON and Markdown reports
 - fail CI on P0/P1 issues
 
-Current status: mostly implemented by `scripts/ci/blockkart_baseline.mjs`.
+Current status: implemented by `scripts/ci/blockkart_baseline.mjs` for M1.
 
 Next hardening:
 
-- add a restart scenario once BlockKart exposes a restart entry point
 - add a longer capture mode for local product investigation
-- split initial slow-frame tolerance from steady-state slow-frame tolerance
-- include a small summary table of the slowest BlockKart startup phases
+- promote the restart-10 soak from explicit acceptance command to default CI
+  only if CI time budget remains acceptable
+- add a native-host settings persistence gate when the native host owns product
+  preference sync
+- add deeper steady-state race-loop soak once AI/items/more track content begin
 
 Acceptance:
 
@@ -132,6 +251,8 @@ Acceptance:
 - changed-mode PR planning selects `blockkart-baseline` for Studio, quickplay,
   and browser-smoke changes
 - report artifacts are actionable without opening the browser manually
+- explicit product-path commands cover forced failure, start race, storage
+  reload, restart-2, and restart-10
 
 ### R2. Game Lifecycle
 
@@ -373,7 +494,7 @@ Acceptance:
 
 Goal: make BlockKart a downstream guardrail.
 
-Status: implemented enough to use.
+Status: M1 complete.
 
 Deliverables:
 
@@ -438,6 +559,91 @@ Exit criteria:
 - bad content produces a structured report
 - restart does not grow resource or scene counts
 - baseline can include asset and scene summaries
+
+#### Phase 2A: Restart / Resource Rebuild Stabilization
+
+Status: completed for the checked-in quickplay baseline on 2026-07-02.
+
+Root cause:
+
+- Restart was functionally correct, but it rebuilt immutable resource-heavy
+  data on the restart frame. The measured offenders were
+  `preparePrimitiveMapAsset` around `1.2s`, `buildPrimitiveTrackVisuals` up to
+  roughly `2s`, and `BlockKart world:buildLevel` up to roughly `3.5s`.
+- Repeated restart also reasserted the same `.vpak` mount without diagnostics
+  proving that mount readers stayed bounded.
+- voplay render-loop slow-frame logs treated paced render cadence as a slow
+  loop when the pacer intentionally rendered at a higher `FrameDivisor`.
+
+Fix direction:
+
+- BlockKart now owns a `PlayState` runtime cache for product-level immutable
+  data: the asset pack mount, skybox, prepared map asset, and a static primitive
+  scene template.
+- Restart still creates a fresh `World`, `Scene`, physics state, race state,
+  input profile, vehicle, audio sources, and dynamic kart primitive layer.
+  Cached static primitive layers are cloned into the new scene so old race or
+  entity state cannot leak into the next run.
+- voplay/vopack changes stayed generic: duplicate same-path/same-priority
+  mounts are idempotent, `AssetReport` includes `mountCount`, primitive layers
+  can be cloned for scene reuse, and render-loop diagnostics now compare loop
+  time against the expected paced interval before recording a slow frame.
+- BlockKart asset diagnostics include the restart root-cause note plus
+  `mountCount`, runtime cache readiness, prepared-map build/reuse counts, and
+  primitive-template build/reuse counts.
+
+Measured result:
+
+- `target/blockkart-baseline-restart/blockkart-baseline.md` status: `ok`
+- restart mode: `requested=2 completed=2`
+- final lifecycle: `Running`
+- canvas: `1280x720`, `nonEmpty=true`
+- P0/P1: none
+- voplay render slow frames: `3` with budget `4`
+- world-ready asset counts stayed bounded:
+  `mountCount=1`, `textures=5`, `linearTextures=9`, `cubemaps=1`,
+  `models=9`, `audio=5`
+- cache evidence after restart:
+  `preparedMapBuilds=1`, `preparedMapReuses=3`,
+  `primitiveTemplateBuilds=1`, `primitiveTemplateReuses=3`
+- `target/blockkart-baseline-restart-10/blockkart-baseline.md` status: `ok`
+- restart-10 mode: `requested=10 completed=10`
+- restart-10 final lifecycle: `Running`
+- restart-10 P0/P1: none
+- restart-10 voplay render slow frames: `2` with budget `4`
+- restart-10 bounded counts:
+  `mountCount=1`, `groupCount=1`, `textures=5`, `linearTextures=9`,
+  `cubemaps=1`, `models=9`, `audio=5`, `entities=68`, `physics=60`,
+  `primitiveLayers=7`
+- restart-10 cache evidence:
+  `preparedMapBuilds=1`, `preparedMapReuses=11`,
+  `primitiveTemplateBuilds=1`, `primitiveTemplateReuses=11`
+
+Validated commands:
+
+- `git diff --check`
+- `./d.py ci task docs-lint`
+- `./d.py ci task quickplay-validate`
+- `./d.py ci task blockkart-smoke-static`
+- `./d.py ci task blockkart-baseline`
+- `node scripts/ci/blockkart_baseline.mjs --out-dir target/blockkart-baseline-failure --simulate-failure asset-pack --capture-ms 1000`
+- `node scripts/ci/blockkart_baseline.mjs --out-dir target/blockkart-baseline-start-race --start-race --capture-ms 1000`
+- `node scripts/ci/blockkart_baseline.mjs --out-dir target/blockkart-baseline-storage --verify-storage-reload --capture-ms 1000`
+- `node scripts/ci/blockkart_baseline.mjs --out-dir target/blockkart-baseline-restart --restart-count 2 --capture-ms 1000`
+- `node scripts/ci/blockkart_baseline.mjs --out-dir target/blockkart-baseline-restart-10 --restart-count 10 --capture-ms 1000`
+
+Remaining Phase 2 / Phase 3 risks:
+
+- The default checked-in baseline is short. The explicit 10-restart command is
+  now the local soak gate; making it default CI still depends on CI time budget.
+- Scene close currently relies on normal render cleanup behavior; an explicit
+  render-side scene destroy/flush contract is still a useful voplay lifecycle
+  hardening item.
+- Restart still pays for fresh terrain, physics, vehicle, and race state. That
+  is intentional for correctness, but occasional spikes in `spawnPlayer`,
+  `restartRun`, or physics setup remain Phase 3 attribution targets.
+- The slow-frame budget remains a product guardrail, not a final FPS promise;
+  longer race-loop captures are still needed before visual or gameplay scale-up.
 
 ### Phase 3: Performance Attribution
 
@@ -529,14 +735,18 @@ Do not start these until Phases 1-5 are stable:
 - real-time multiplayer: requires deterministic input/snapshot strategy
 - open-world/free-roam: requires world graph and streaming foundations
 
-## Immediate Next Step
+## Next Phase Boundary
 
-The next engineering task is Phase 1:
+M1 is complete enough to allow the next product phase, but that phase should
+stay inside these boundaries:
 
-1. inspect BlockKart startup, world construction, failure, and restart paths
-2. write the lifecycle state contract
-3. implement the smallest lifecycle/error surface needed to make the current
-   quickplay report product-grade
-4. update `blockkart-baseline` to verify lifecycle reaches `Running`
-
-Do not add new gameplay until this is complete.
+1. Keep `blockkart-baseline` green for default, forced failure, start race,
+   storage reload, restart-2, and restart-10 before adding large gameplay.
+2. Treat any asset/scene/resource growth after restart as a product blocker.
+3. Use the existing voplay generic APIs for lifecycle, diagnostics, settings,
+   input, assets, scene, renderer perf, and prepared map reuse.
+4. Add new voplay capabilities only when they are reusable engine features, not
+   BlockKart-only racing shortcuts.
+5. Move toward deeper product loops next: complete race flow, track packaging
+   validation, input/settings UI, longer steady-state race soak, and eventually
+   AI/items/content production after those gates are stable.

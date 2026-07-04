@@ -133,7 +133,7 @@ macro_rules! export_extensions {
     };
 
     // WASM: explicit list of entries (caller must implement registration)
-    ($($entry:ident),+ $(,)?) => {
+    ($($entry:path),+ $(,)?) => {
         /// All extern entries for this extension.
         pub static VO_EXT_ENTRIES: &[$crate::StdlibEntry] = &[$($entry),*];
     };

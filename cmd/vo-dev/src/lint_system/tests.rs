@@ -2021,6 +2021,20 @@ fn lint_vm_readiness_changed_prefixes_requires_docs_lint_script_route_058() {
     let err = lint_vm_readiness_changed_prefixes(&prefixes).unwrap_err();
     assert!(
             format!("{err:#}").contains(
+                "eng/ci.toml known_prefix scripts/ci/** must select eng-lint-tasks for VM readiness changed-mode coverage"
+            ),
+            "{err:#}"
+        );
+
+    let mut prefixes = vm_readiness_prefixes();
+    let scripts_ci = prefixes
+        .iter_mut()
+        .find(|prefix| prefix.path == "scripts/ci/**")
+        .expect("scripts/ci route");
+    scripts_ci.tasks.retain(|task| task != "docs-lint");
+    let err = lint_vm_readiness_changed_prefixes(&prefixes).unwrap_err();
+    assert!(
+            format!("{err:#}").contains(
                 "eng/ci.toml known_prefix scripts/ci/** must select docs-lint for VM readiness changed-mode coverage"
             ),
             "{err:#}"
@@ -2114,6 +2128,196 @@ fn lint_vm_jit_manager_surface_accepts_vm_owned_state() {
             "#,
     )
     .unwrap();
+}
+
+fn voplay_gate_source_fixture() -> (String, String, String, String) {
+    let readiness = [
+        "const sourceFactRequirements = [];",
+        "const evidenceTable = [];",
+        "addRequiredSourceFact(",
+        "addEvidenceRow(",
+        "const requiredFalseFacts = sourceFactRequirements",
+        ".filter((fact) => fact.required && fact.status !== true)",
+        "'source_facts.required_all_pass'",
+        "const industrialReady = failures.length === 0",
+        "strictMode: !allowNotReady",
+        "if (!industrialReady && !allowNotReady)",
+        "## Evidence Table",
+    ]
+    .into_iter()
+    .chain(VOPLAY_REQUIRED_SOURCE_FACTS.iter().copied())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let render_stress = [
+        "'render.perf_gate_failed'",
+        "'render.p90_over_budget'",
+        "'render.p99_over_budget'",
+        "'render.slow_frames_over_budget'",
+        "'summary.p90_over_budget'",
+        "'summary.p99_over_budget'",
+        "'summary.slow_frames_over_budget'",
+        "p1 += summaryIssues.filter((issue) => issue.severity === 1).length",
+        "status: p0 === 0 && p1 === 0 ? 'pass' : 'fail'",
+        "if (report.status !== 'pass')",
+    ]
+    .join("\n");
+    let architecture = VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES
+        .iter()
+        .copied()
+        .chain(
+            [
+                "constructsRuntimeStage(rendererAuditSource, token)",
+                "execute_render_node!",
+                "SurfaceMaterialAtTrackPosition",
+                "Body\\.SetPosition",
+                "PrimitiveStats",
+            ]
+            .into_iter(),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+    let blockkart_boundary = VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES
+        .iter()
+        .copied()
+        .chain(
+            [
+                "SurfaceMaterialAtTrackPosition",
+                "Body\\.SetPosition",
+                "BackendApplyHash",
+                "PrimitiveStats",
+                "w\\.vehicle\\.SetPose",
+            ]
+            .into_iter(),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+    (readiness, render_stress, architecture, blockkart_boundary)
+}
+
+fn voplay_gate_task_file(site_items: &[&str], eng_lint_inputs: &[&str]) -> TaskFile {
+    let app_site_tasks = [
+        "voplay-render-architecture-lint",
+        "blockkart-engine-boundary-lint",
+        "voplay-render-stress-budgeted",
+        "voplay-render-soak-10m",
+        "voplay-physics-industrial-stress",
+    ];
+    let industrial_tasks = [
+        "voplay-industrial-readiness-report",
+        "voplay-industrial-readiness",
+    ];
+    let mut groups = BTreeMap::new();
+    groups.insert(
+        "app-site".to_string(),
+        app_site_tasks
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect(),
+    );
+    groups.insert(
+        "voplay-industrial".to_string(),
+        industrial_tasks
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect(),
+    );
+    groups.insert(
+        "site".to_string(),
+        site_items.iter().map(|item| (*item).to_string()).collect(),
+    );
+    let mut tasks = app_site_tasks
+        .iter()
+        .chain(industrial_tasks.iter())
+        .map(|name| task(name))
+        .collect::<Vec<_>>();
+    tasks.push(task_with_inputs("eng-lint-tasks", eng_lint_inputs));
+    TaskFile {
+        version: 1,
+        final_selectors: final_selectors(),
+        groups,
+        group_meta: vec![],
+        tasks,
+    }
+}
+
+#[test]
+fn lint_voplay_industrial_gate_source_policy_accepts_required_sentinels() {
+    let (readiness, render_stress, architecture, blockkart_boundary) = voplay_gate_source_fixture();
+
+    lint_voplay_industrial_gate_sources(
+        &readiness,
+        &render_stress,
+        &architecture,
+        &blockkart_boundary,
+    )
+    .unwrap();
+}
+
+#[test]
+fn lint_voplay_industrial_gate_source_policy_rejects_missing_required_fact() {
+    let (readiness, render_stress, architecture, blockkart_boundary) = voplay_gate_source_fixture();
+    let readiness = readiness.replace("batch_plan_real_bounds", "");
+
+    let err = lint_voplay_industrial_gate_sources(
+        &readiness,
+        &render_stress,
+        &architecture,
+        &blockkart_boundary,
+    )
+    .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("batch_plan_real_bounds"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn lint_voplay_industrial_gate_source_policy_rejects_host_pacing_budget_bypass() {
+    let (readiness, mut render_stress, architecture, blockkart_boundary) =
+        voplay_gate_source_fixture();
+    render_stress.push_str("\nif (hostPacingOnly) return diagnosticsOnly;\n");
+
+    let err = lint_voplay_industrial_gate_sources(
+        &readiness,
+        &render_stress,
+        &architecture,
+        &blockkart_boundary,
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("hostPacingOnly"), "{err:#}");
+}
+
+#[test]
+fn lint_voplay_industrial_gate_task_wiring_requires_site_final_gate() {
+    let config = voplay_gate_task_file(&["app-site"], VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS);
+    let task_map = task_map(&config).unwrap();
+
+    let err = lint_voplay_industrial_gate_task_wiring(&config, &task_map).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("site scope must include voplay-industrial-readiness"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn lint_voplay_industrial_gate_task_wiring_requires_eng_lint_script_inputs() {
+    let inputs = VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS
+        .iter()
+        .copied()
+        .filter(|input| *input != "scripts/ci/voplay_render_stress.mjs")
+        .collect::<Vec<_>>();
+    let config = voplay_gate_task_file(&["app-site", "voplay-industrial"], &inputs);
+    let task_map = task_map(&config).unwrap();
+
+    let err = lint_voplay_industrial_gate_task_wiring(&config, &task_map).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("scripts/ci/voplay_render_stress.mjs"),
+        "{err:#}"
+    );
 }
 
 #[test]

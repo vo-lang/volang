@@ -28,6 +28,67 @@ export interface GuiCompileOutput {
   wasmExtensions: WasmExtCompileSpec[];
 }
 
+const fingerprintEncoder = new TextEncoder();
+
+function extensionAliasSegment(ext: WasmExtCompileSpec): string {
+  if (ext.name.trim().length > 0) {
+    return ext.name;
+  }
+  const moduleKey = ext.moduleKey || 'module';
+  return moduleKey.split('/').filter(Boolean).pop() || 'module';
+}
+
+function packFingerprintBytes(parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const part of parts) {
+    total += 4 + part.byteLength;
+  }
+  const packed = new Uint8Array(total);
+  const view = new DataView(packed.buffer);
+  let offset = 0;
+  for (const part of parts) {
+    view.setUint32(offset, part.byteLength, true);
+    offset += 4;
+    packed.set(part, offset);
+    offset += part.byteLength;
+  }
+  return packed;
+}
+
+function hexDigest(bytes: ArrayBuffer): string {
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function fallbackFingerprint(bytes: Uint8Array): string {
+  let hash = 2166136261;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return `fnv1a32_${hash.toString(16).padStart(8, '0')}`;
+}
+
+async function extensionArtifactFingerprint(ext: WasmExtCompileSpec): Promise<string> {
+  const identityBytes = fingerprintEncoder.encode(`${ext.moduleKey || ''}\0${ext.name || ''}`);
+  const packed = packFingerprintBytes([
+    identityBytes,
+    ext.wasmBytes,
+    ext.jsGlueBytes ?? new Uint8Array(0),
+  ]);
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle) {
+    return `sha256_${hexDigest(await subtle.digest('SHA-256', packed))}`;
+  }
+  return fallbackFingerprint(packed);
+}
+
+async function extensionPreloadKey(ext: WasmExtCompileSpec): Promise<string> {
+  const moduleKey = ext.moduleKey || ext.name || 'module';
+  const alias = extensionAliasSegment(ext);
+  const fingerprint = await extensionArtifactFingerprint(ext);
+  return `${moduleKey}/artifact_${fingerprint}/${alias}`;
+}
+
 function combineHostBridgeModules(modules: HostBridgeModule[]): HostBridgeModule {
   return {
     buildImports(ctx) {
@@ -59,7 +120,7 @@ export async function executeGuiFromCompileOutput(
       jsGlueUrl = URL.createObjectURL(blob);
     }
     try {
-      const preloadKey = ext.moduleKey || ext.name;
+      const preloadKey = await extensionPreloadKey(ext);
       if (shouldEmitVoplayPerfConsoleDiagnostics()) {
         console.info(
           `[studio-gui] preload wasm extension name=${ext.name} moduleKey=${preloadKey} wasmBytes=${ext.wasmBytes.length} jsGlueBytes=${ext.jsGlueBytes?.length ?? 0}`,

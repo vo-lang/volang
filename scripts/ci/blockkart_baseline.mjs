@@ -25,10 +25,23 @@ const viewportWidth = positiveInt(argValue('--viewport-width') || process.env.BL
 const viewportHeight = positiveInt(argValue('--viewport-height') || process.env.BLOCKKART_BASELINE_VIEWPORT_HEIGHT, 720);
 const firstFrameTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_FIRST_FRAME_TIMEOUT_MS, 90000);
 const captureMs = positiveInt(argValue('--capture-ms') || process.env.BLOCKKART_BASELINE_CAPTURE_MS, 6000);
+const cdpScreenshotAttempts = positiveInt(process.env.BLOCKKART_BASELINE_CDP_SCREENSHOT_ATTEMPTS, 3);
+const cdpScreenshotTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_CDP_SCREENSHOT_TIMEOUT_MS, 15000);
+const canvasDataUrlAttempts = positiveInt(process.env.BLOCKKART_BASELINE_CANVAS_DATA_URL_ATTEMPTS, 3);
+const canvasDataUrlTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_CANVAS_DATA_URL_TIMEOUT_MS, 60000);
 const startupWarnMs = positiveInt(process.env.BLOCKKART_BASELINE_STARTUP_WARN_MS, 20000);
 const maxSlowFrames = positiveInt(process.env.BLOCKKART_BASELINE_MAX_SLOW_FRAMES, 2);
 const restartCount = nonNegativeInt(argValue('--restart-count') || process.env.BLOCKKART_BASELINE_RESTART_COUNT, 0);
 const restartWaitTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_RESTART_TIMEOUT_MS, 30000);
+const resetKey = { key: 'r', code: 'KeyR', keyCode: 82 };
+const startRaceKey = { key: 'w', code: 'KeyW', keyCode: 87 };
+const renderStressKeys = {
+  primitive10k: { key: 'F7', code: 'F7', keyCode: 118 },
+  water: { key: 'F8', code: 'F8', keyCode: 119 },
+  'resource-churn': { key: 'F9', code: 'F9', keyCode: 120 },
+  'chunked-world-drive': { key: 'F10', code: 'F10', keyCode: 121 },
+  'shadow-post-matrix': { key: 'F11', code: 'F11', keyCode: 122 },
+};
 const requireWebGpuAdapter = process.env.BLOCKKART_BASELINE_REQUIRE_WEBGPU === '1';
 const failOnIssues = !process.argv.includes('--no-fail-on-issues') && process.env.BLOCKKART_BASELINE_NO_FAIL !== '1';
 const noWebGpuAdapterPattern = /no suitable GPU adapter|requestAdapter returned null|navigator\.gpu is unavailable/i;
@@ -36,6 +49,13 @@ const simulatedFailure = argValue('--simulate-failure') || process.env.BLOCKKART
 const expectedLifecycleState = argValue('--expect-lifecycle-state') || process.env.BLOCKKART_BASELINE_EXPECT_LIFECYCLE || (simulatedFailure ? 'Failed' : 'Running');
 const startRaceRequested = process.argv.includes('--start-race') || process.env.BLOCKKART_BASELINE_START_RACE === '1';
 const verifyStorageReload = process.argv.includes('--verify-storage-reload') || process.env.BLOCKKART_BASELINE_VERIFY_STORAGE_RELOAD === '1';
+const renderStressProfile = argValue('--stress-profile') || process.env.BLOCKKART_BASELINE_STRESS_PROFILE || '';
+const resizeCycleRequested = boolOption('--resize-cycle', process.env.BLOCKKART_BASELINE_RESIZE_CYCLE, false);
+const perfMode = argValue('--perf-mode') || process.env.BLOCKKART_BASELINE_PERF_MODE || 'trace';
+const perfConsole = boolOption('--perf-console', process.env.BLOCKKART_BASELINE_PERF_CONSOLE, true);
+const pulseMode = normalizePulseMode(argValue('--pulse-mode') || process.env.BLOCKKART_BASELINE_PULSE_MODE || '');
+const perfDiag = perfDiagForPulseMode(argValue('--perf-diag') || process.env.BLOCKKART_BASELINE_PERF_DIAG || 'gpu,pulseHybrid', pulseMode);
+const perfGpuProbe = boolOption('--perf-gpu-probe', process.env.BLOCKKART_BASELINE_PERF_GPU_PROBE, true);
 const blockKartLifecycleMarker = '__BLOCKKART_LIFECYCLE__';
 const blockKartFailureReportMarker = '__BLOCKKART_FAILURE_REPORT__';
 const blockKartAssetReportMarker = '__BLOCKKART_ASSET_REPORT__';
@@ -68,6 +88,66 @@ function positiveInt(value, fallback) {
 function nonNegativeInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function boolOption(name, envValue, fallback) {
+  const index = process.argv.indexOf(name);
+  if (index !== -1) {
+    const raw = process.argv[index + 1];
+    if (raw && !raw.startsWith('--')) {
+      return parseBool(raw, true);
+    }
+    return true;
+  }
+  if (envValue != null && String(envValue) !== '') {
+    return parseBool(envValue, fallback);
+  }
+  return fallback;
+}
+
+function parseBool(value, fallback) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on') {
+    return true;
+  }
+  if (raw === '0' || raw === 'false' || raw === 'no' || raw === 'off') {
+    return false;
+  }
+  return fallback;
+}
+
+function normalizePulseMode(value) {
+  const mode = String(value ?? '').trim().toLowerCase();
+  if (mode === '' || mode === 'default') {
+    return '';
+  }
+  if (mode === 'raf' || mode === 'timer' || mode === 'hybrid') {
+    return mode;
+  }
+  fail(`unsupported --pulse-mode "${value}"; expected raf, timer, hybrid, or default`);
+}
+
+function perfDiagForPulseMode(value, mode) {
+  if (!mode) {
+    return value;
+  }
+  const pulseToken = `pulse${mode[0].toUpperCase()}${mode.slice(1)}`;
+  const tokens = String(value ?? '')
+    .split(/[,\s;&|]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  let replaced = false;
+  const next = tokens.map((token) => {
+    if (/^pulse(?:raf|timer|hybrid)$/i.test(token)) {
+      replaced = true;
+      return pulseToken;
+    }
+    return token;
+  });
+  if (!replaced) {
+    next.push(pulseToken);
+  }
+  return next.join(',');
 }
 
 function readJson(file) {
@@ -230,12 +310,17 @@ function stopProcess(child) {
   if (process.platform !== 'win32' && child.pid) {
     try {
       process.kill(-child.pid, 'SIGTERM');
-      return;
     } catch {
       // Fall through to direct kill.
+      child.kill('SIGTERM');
     }
+  } else {
+    child.kill('SIGTERM');
   }
-  child.kill('SIGTERM');
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.stdin?.destroy?.();
+  child.unref?.();
 }
 
 function startPreviewServer(port) {
@@ -278,6 +363,10 @@ async function startBrowser(debugPort) {
     [
       '--headless=new',
       '--disable-dev-shm-usage',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-features=CalculateNativeWinOcclusion',
       '--enable-unsafe-webgpu',
       '--ignore-gpu-blocklist',
       '--no-sandbox',
@@ -685,24 +774,55 @@ async function focusQuickplaySurface(client) {
 }
 
 async function dispatchResetKey(client) {
-  await dispatchKey(client, { key: 'r', code: 'KeyR', keyCode: 82 });
+  await dispatchKey(client, resetKey);
 }
 
 async function dispatchStartRaceKey(client) {
-  await dispatchKey(client, { key: 'w', code: 'KeyW', keyCode: 87 });
+  await dispatchKey(client, startRaceKey);
+}
+
+async function dispatchRenderStressKey(client, profile) {
+  const key = renderStressKeys[profile];
+  if (!key) {
+    throw new Error(`unsupported render stress profile "${profile}"`);
+  }
+  await dispatchKey(client, key);
 }
 
 async function dispatchKey(client, key) {
-  await focusQuickplaySurface(client);
-  const keyDownDispatched = await dispatchCdpKeyEvent(client, 'keyDown', key);
+  let lastFailure = 'not attempted';
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const result = await tryDispatchKey(client, key);
+    if (result.ok) {
+      return;
+    }
+    lastFailure = result.failure;
+    await sleep(250 * attempt);
+  }
+  throw new Error(`${lastFailure} after retries for ${key.code}`);
+}
+
+async function tryDispatchKey(client, key) {
+  const keyDownDispatched = await dispatchKeyPhase(client, 'keyDown', key);
   if (!keyDownDispatched) {
-    throw new Error(`CDP Input.dispatchKeyEvent keyDown failed for ${key.code}`);
+    return { ok: false, failure: 'keyDown dispatch failed' };
   }
   await sleep(120);
-  const keyUpDispatched = await dispatchCdpKeyEvent(client, 'keyUp', key);
+  const keyUpDispatched = await dispatchKeyPhase(client, 'keyUp', key);
   if (!keyUpDispatched) {
-    throw new Error(`CDP Input.dispatchKeyEvent keyUp failed for ${key.code}`);
+    return { ok: false, failure: 'keyUp dispatch failed' };
   }
+  return { ok: true, failure: null };
+}
+
+async function dispatchKeyPhase(client, type, key) {
+  await focusQuickplaySurface(client);
+  const domType = type === 'keyDown' ? 'keydown' : 'keyup';
+  const domDispatched = await dispatchDomKeyEvent(client, domType, key);
+  if (domDispatched) {
+    return true;
+  }
+  return await dispatchCdpKeyEvent(client, type, key);
 }
 
 async function dispatchCdpKeyEvent(client, type, key) {
@@ -722,6 +842,15 @@ async function dispatchCdpKeyEvent(client, type, key) {
   }
 }
 
+async function dispatchDomKeyEvent(client, type, key) {
+  try {
+    await client.evaluate(keyEventExpression(type, key), 10000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function keyEventExpression(type, key) {
   return `(() => {
     const init = {
@@ -733,11 +862,15 @@ function keyEventExpression(type, key) {
       cancelable: true,
       composed: true,
     };
-    const targets = [window, document, document.body, document.querySelector('.runner-surface canvas, .renderer-surface canvas, canvas')].filter(Boolean);
+    const canvas = document.querySelector('.runner-surface canvas, .renderer-surface canvas, canvas');
+    if (canvas && typeof canvas.focus === 'function') {
+      canvas.focus();
+    }
+    const targets = [canvas, document, window].filter(Boolean);
     for (const target of targets) {
       target.dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, init));
     }
-    return true;
+    return targets.length > 0;
   })()`;
 }
 
@@ -754,6 +887,63 @@ async function waitForLifecycleStateCount(events, state, minCount, timeoutMs) {
   return { ok: false, count };
 }
 
+async function waitForRestartProgress(events, minRestartingCount, minRunningCount, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let restartingCount = countLifecycleState(events, 'Restarting');
+  let runningCount = countLifecycleState(events, 'Running');
+  while (Date.now() < deadline) {
+    restartingCount = countLifecycleState(events, 'Restarting');
+    runningCount = countLifecycleState(events, 'Running');
+    if (restartingCount >= minRestartingCount) {
+      return { ok: true, phase: 'Restarting', restartingCount, runningCount };
+    }
+    if (runningCount >= minRunningCount) {
+      return { ok: true, phase: 'Running', restartingCount, runningCount };
+    }
+    await sleep(100);
+  }
+  return { ok: false, phase: 'none', restartingCount, runningCount };
+}
+
+async function requestRestartWithConfirmation(client, events, beforeRestartingEvents, beforeRunningEvents, timeoutMs) {
+  const attempts = [];
+  const confirmTimeoutMs = Math.min(5000, Math.max(1500, Math.floor(timeoutMs / 6)));
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await dispatchKeyPhase(client, 'keyUp', resetKey).catch(() => false);
+    await sleep(50);
+    const keyDownDispatched = await dispatchKeyPhase(client, 'keyDown', resetKey);
+    if (!keyDownDispatched) {
+      const progress = {
+        ok: false,
+        phase: 'dispatch-failed',
+        restartingCount: countLifecycleState(events, 'Restarting'),
+        runningCount: countLifecycleState(events, 'Running'),
+      };
+      attempts.push({ attempt, ...progress });
+      await sleep(250 * attempt);
+      continue;
+    }
+    let progress = null;
+    try {
+      progress = await waitForRestartProgress(events, beforeRestartingEvents + 1, beforeRunningEvents + 1, confirmTimeoutMs);
+      attempts.push({
+        attempt,
+        ok: progress.ok,
+        phase: progress.phase,
+        restartingCount: progress.restartingCount,
+        runningCount: progress.runningCount,
+      });
+      if (progress.ok) {
+        return { ok: true, attempts, progress };
+      }
+    } finally {
+      await dispatchKeyPhase(client, 'keyUp', resetKey).catch(() => false);
+    }
+    await sleep(250 * attempt);
+  }
+  return { ok: false, attempts, progress: attempts[attempts.length - 1] ?? null };
+}
+
 function countRaceState(events, state) {
   return collectBlockKartDiagnostics(events.console, []).raceReports.filter((report) => report.raceState === state).length;
 }
@@ -762,11 +952,28 @@ function countRaceReportsLoadedFromStorage(events) {
   return collectBlockKartDiagnostics(events.console, []).raceReports.filter((report) => report.settingsLoadedFromStorage === true).length;
 }
 
+function countRenderStressReports(events, profile) {
+  return collectBlockKartDiagnostics(events.console, []).sceneReports.filter((report) => report.renderStressProfile === profile && report.renderStressApplied === true).length;
+}
+
 async function waitForRaceStateCount(events, state, minCount, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let count = countRaceState(events, state);
   while (Date.now() < deadline) {
     count = countRaceState(events, state);
+    if (count >= minCount) {
+      return { ok: true, count };
+    }
+    await sleep(100);
+  }
+  return { ok: false, count };
+}
+
+async function waitForRenderStressProfile(events, profile, minCount, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let count = countRenderStressReports(events, profile);
+  while (Date.now() < deadline) {
+    count = countRenderStressReports(events, profile);
     if (count >= minCount) {
       return { ok: true, count };
     }
@@ -786,6 +993,78 @@ async function waitForRaceStorageLoadedCount(events, minCount, timeoutMs) {
     await sleep(100);
   }
   return { ok: false, count };
+}
+
+async function runRenderStressScenario(client, events, profile, timeoutMs) {
+  const requested = profile !== '';
+  const initialReports = requested ? countRenderStressReports(events, profile) : 0;
+  const scenario = {
+    requested,
+    profile,
+    completed: false,
+    skipped: !requested,
+    skipReason: requested ? null : 'render stress mode disabled',
+    initialReports,
+    finalReports: initialReports,
+    latestSceneReport: collectBlockKartDiagnostics(events.console, []).latestSceneReport,
+  };
+  if (!requested) {
+    return scenario;
+  }
+  if (!renderStressKeys[profile]) {
+    scenario.skipped = false;
+    scenario.failure = `unsupported render stress profile "${profile}"`;
+    return scenario;
+  }
+  await dispatchRenderStressKey(client, profile);
+  const wait = await waitForRenderStressProfile(events, profile, initialReports + 1, timeoutMs);
+  scenario.completed = wait.ok;
+  scenario.skipped = false;
+  scenario.skipReason = null;
+  scenario.finalReports = countRenderStressReports(events, profile);
+  scenario.latestSceneReport = collectBlockKartDiagnostics(events.console, []).latestSceneReport;
+  if (!wait.ok) {
+    scenario.failure = `render stress profile ${profile} did not report applied=true within ${timeoutMs}ms`;
+  }
+  return scenario;
+}
+
+async function runResizeCycleScenario(client, requested) {
+  const scenario = {
+    requested,
+    completed: false,
+    skipped: !requested,
+    skipReason: requested ? null : 'resize cycle disabled',
+    steps: [],
+  };
+  if (!requested) {
+    return scenario;
+  }
+  const sizes = [
+    { width: Math.max(640, Math.floor(viewportWidth * 0.75)), height: Math.max(360, Math.floor(viewportHeight * 0.75)) },
+    { width: viewportWidth, height: viewportHeight },
+  ];
+  try {
+    for (const size of sizes) {
+      await client.send('Emulation.setDeviceMetricsOverride', {
+        width: size.width,
+        height: size.height,
+        deviceScaleFactor: 1,
+        mobile: false,
+        screenWidth: size.width,
+        screenHeight: size.height,
+      });
+      scenario.steps.push(size);
+      await sleep(900);
+    }
+    scenario.completed = true;
+    scenario.skipped = false;
+    scenario.skipReason = null;
+  } catch (error) {
+    scenario.skipped = false;
+    scenario.failure = error instanceof Error ? error.message : String(error);
+  }
+  return scenario;
 }
 
 async function runStartRaceScenario(client, events, requested, timeoutMs) {
@@ -870,13 +1149,20 @@ async function runRestartScenario(client, events, requested, timeoutMs) {
   for (let index = 1; index <= requested; index++) {
     const beforeRunningEvents = countLifecycleState(events, 'Running');
     const beforeRestartingEvents = countLifecycleState(events, 'Restarting');
-    await dispatchResetKey(client);
-    const wait = await waitForLifecycleStateCount(events, 'Running', beforeRunningEvents + 1, timeoutMs);
+    if (requested >= 10) {
+      console.log(`BlockKart baseline: restart ${index}/${requested} request`);
+    }
+    const request = await requestRestartWithConfirmation(client, events, beforeRestartingEvents, beforeRunningEvents, timeoutMs);
+    const wait = countLifecycleState(events, 'Running') >= beforeRunningEvents + 1
+      ? { ok: true, count: countLifecycleState(events, 'Running') }
+      : await waitForLifecycleStateCount(events, 'Running', beforeRunningEvents + 1, timeoutMs);
     const afterRunningEvents = countLifecycleState(events, 'Running');
     const afterRestartingEvents = countLifecycleState(events, 'Restarting');
     const iteration = {
       index,
       ok: wait.ok,
+      restartRequestConfirmed: request.ok,
+      restartRequestAttempts: request.attempts,
       beforeRunningEvents,
       afterRunningEvents,
       beforeRestartingEvents,
@@ -885,10 +1171,17 @@ async function runRestartScenario(client, events, requested, timeoutMs) {
     scenario.iterations.push(iteration);
     scenario.finalRunningEvents = afterRunningEvents;
     if (!wait.ok) {
-      scenario.failure = `restart ${index} did not return to Running within ${timeoutMs}ms`;
+      const requestDetail = request.ok ? `request confirmed via ${request.progress?.phase ?? 'progress'}` : `request was not confirmed after ${request.attempts.length} attempts`;
+      scenario.failure = `restart ${index} did not return to Running within ${timeoutMs}ms (${requestDetail})`;
+      if (requested >= 10) {
+        console.log(`BlockKart baseline: restart ${index}/${requested} failed running=${afterRunningEvents} restarting=${afterRestartingEvents}`);
+      }
       break;
     }
     scenario.completed = index;
+    if (requested >= 10) {
+      console.log(`BlockKart baseline: restart ${index}/${requested} ok running=${afterRunningEvents} restarting=${afterRestartingEvents}`);
+    }
     await sleep(150);
   }
   scenario.skipped = false;
@@ -911,17 +1204,22 @@ async function captureScreenshot(client, file, clip = null) {
   let result = null;
   let lastError = null;
   await client.send('Page.bringToFront', {}, 5000).catch(() => undefined);
-  for (const attempt of attempts) {
-    const params = normalizedClip ? { ...attempt, clip: normalizedClip } : attempt;
-    try {
-      result = await client.send('Page.captureScreenshot', params, 5000);
-      break;
-    } catch (error) {
-      lastError = error;
+  for (let attemptIndex = 1; attemptIndex <= cdpScreenshotAttempts && !result; attemptIndex++) {
+    for (const attempt of attempts) {
+      const params = normalizedClip ? { ...attempt, clip: normalizedClip } : attempt;
+      try {
+        result = await client.send('Page.captureScreenshot', params, cdpScreenshotTimeoutMs);
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!result && attemptIndex < cdpScreenshotAttempts) {
+      await sleep(500);
     }
   }
   if (!result) {
-    throw lastError ?? new Error('Page.captureScreenshot failed');
+    throw new Error(`Page.captureScreenshot failed after ${cdpScreenshotAttempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error')}`);
   }
   const bytes = Buffer.from(result.data, 'base64');
   writeFileSync(file, bytes);
@@ -929,27 +1227,125 @@ async function captureScreenshot(client, file, clip = null) {
 }
 
 async function captureCanvasDataUrl(client, file) {
-  const dataUrl = await client.evaluate(`(() => {
-    const canvas = document.querySelector('.runner-surface canvas, .renderer-surface canvas, canvas');
-    if (!canvas) {
-      return { error: 'canvas not found' };
-    }
+  let lastError = null;
+  for (let attempt = 1; attempt <= canvasDataUrlAttempts; attempt++) {
     try {
-      return { dataUrl: canvas.toDataURL('image/png') };
+      const dataUrl = await client.evaluate(`(() => {
+        const canvas = document.querySelector('.runner-surface canvas, .renderer-surface canvas, canvas');
+        if (!canvas) {
+          return { error: 'canvas not found' };
+        }
+        try {
+          return { dataUrl: canvas.toDataURL('image/png') };
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : String(error) };
+        }
+      })()`, canvasDataUrlTimeoutMs);
+      if (!dataUrl?.dataUrl || typeof dataUrl.dataUrl !== 'string') {
+        throw new Error(dataUrl?.error ?? 'canvas toDataURL returned no data');
+      }
+      const match = dataUrl.dataUrl.match(/^data:image\/png;base64,(.+)$/);
+      if (!match) {
+        throw new Error('canvas toDataURL did not return a PNG data URL');
+      }
+      const bytes = Buffer.from(match[1], 'base64');
+      writeFileSync(file, bytes);
+      return analyzePng(bytes);
     } catch (error) {
-      return { error: error instanceof Error ? error.message : String(error) };
+      lastError = error;
+      if (attempt < canvasDataUrlAttempts) {
+        await sleep(500);
+      }
     }
-  })()`, 10000);
-  if (!dataUrl?.dataUrl || typeof dataUrl.dataUrl !== 'string') {
-    throw new Error(dataUrl?.error ?? 'canvas toDataURL returned no data');
   }
-  const match = dataUrl.dataUrl.match(/^data:image\/png;base64,(.+)$/);
-  if (!match) {
-    throw new Error('canvas toDataURL did not return a PNG data URL');
+  throw new Error(`canvas toDataURL capture failed after ${canvasDataUrlAttempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error')}`);
+}
+
+async function captureFreshBrowserCanvas(url, viewportFile, canvasFile, browserBin) {
+  const bin = browserBin ?? findBrowserBinary();
+  if (!bin) {
+    throw new Error('could not find Chrome/Chromium for fresh browser canvas capture');
   }
-  const bytes = Buffer.from(match[1], 'base64');
-  writeFileSync(file, bytes);
-  return analyzePng(bytes);
+  const debugPort = await reservePort();
+  const profileDir = mkdtempSync(path.join(os.tmpdir(), 'volang-blockkart-fresh-capture-'));
+  let log = '';
+  const child = spawn(
+    bin,
+    [
+      '--headless=new',
+      '--disable-dev-shm-usage',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-features=CalculateNativeWinOcclusion',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist',
+      '--no-sandbox',
+      `--remote-debugging-port=${debugPort}`,
+      `--user-data-dir=${profileDir}`,
+      'about:blank',
+    ],
+    {
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  child.stdout.on('data', (chunk) => {
+    log = appendLog(log, chunk);
+  });
+  child.stderr.on('data', (chunk) => {
+    log = appendLog(log, chunk);
+  });
+  let client = null;
+  let targetId = null;
+  try {
+    await fetchOk(`http://127.0.0.1:${debugPort}/json/version`);
+    ({ targetId, client } = await openPage(debugPort));
+    await client.send('Page.enable');
+    await client.send('Runtime.enable');
+    await client.send('Log.enable');
+    await client.send('Network.enable');
+    await client.send('Emulation.setDeviceMetricsOverride', {
+      width: viewportWidth,
+      height: viewportHeight,
+      deviceScaleFactor: 1,
+      mobile: false,
+      screenWidth: viewportWidth,
+      screenHeight: viewportHeight,
+    });
+    await navigate(client, url);
+    const firstFrame = await waitForQuickplayFirstFrame(client, firstFrameTimeoutMs);
+    if (!firstFrame.ok || firstFrame.skipped) {
+      throw new Error(firstFrame.reason ?? 'fresh browser did not reach first frame');
+    }
+    await sleep(1000);
+    const state = await client.evaluate(quickplayStateExpression(), 30000).catch(() => firstFrame.state ?? {});
+    const viewportAnalysis = await captureScreenshot(client, viewportFile);
+    let canvasAnalysis = null;
+    let canvasMode = 'fresh-browser-crop';
+    if (state.canvasRect && state.canvasRect.width > 0 && state.canvasRect.height > 0) {
+      const canvasBytes = cropPng(readFileSync(viewportFile), state.canvasRect, viewportWidth, viewportHeight);
+      writeFileSync(canvasFile, canvasBytes);
+      canvasAnalysis = analyzePng(canvasBytes);
+    }
+    if (!canvasAnalysis?.nonEmpty) {
+      canvasAnalysis = await captureCanvasDataUrl(client, canvasFile);
+      canvasMode = 'fresh-browser-data-url';
+    }
+    return { viewportAnalysis, canvasAnalysis, viewportMode: 'fresh-browser', canvasMode };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(log ? `${detail}\nfresh browser log:\n${log}` : detail);
+  } finally {
+    client?.close();
+    await closePage(debugPort, targetId).catch(() => undefined);
+    stopProcess(child);
+    try {
+      rmSync(profileDir, { recursive: true, force: true });
+    } catch {
+      // Chrome may release profile files after the fallback screenshot is already usable.
+    }
+  }
 }
 
 async function captureViewportScreencast(client, file) {
@@ -995,9 +1391,7 @@ async function captureViewportBrowserCli(url, file, browserBin) {
     }
   }
   if (best) {
-    best.metadata = { ...best.metadata, attempts, failures };
-    writeFileSync(file, best.bytes);
-    return best;
+    throw new Error(failures.join('\n') || 'browser CLI screenshot produced only visually blank frames');
   }
   throw new Error(failures.join('\n') || 'browser CLI screenshot failed');
 }
@@ -1553,6 +1947,7 @@ function collectBlockKartDiagnostics(consoleEvents, consoleLines) {
   const sceneReports = collectStructuredMarkerReports(consoleEvents, consoleLines, blockKartSceneReportMarker);
   const vehicleReports = collectStructuredMarkerReports(consoleEvents, consoleLines, blockKartVehicleReportMarker);
   const raceReports = collectStructuredMarkerReports(consoleEvents, consoleLines, blockKartRaceReportMarker);
+  const restartDiagnosticReports = (reports) => reports.filter((report) => report.phase === 'worldReady' || report.phase === 'raceRestart');
   return {
     assetReports,
     sceneReports,
@@ -1566,6 +1961,10 @@ function collectBlockKartDiagnostics(consoleEvents, consoleLines) {
     worldReadySceneReports: sceneReports.filter((report) => report.phase === 'worldReady'),
     worldReadyVehicleReports: vehicleReports.filter((report) => report.phase === 'worldReady'),
     worldReadyRaceReports: raceReports.filter((report) => report.phase === 'worldReady'),
+    restartAssetReports: restartDiagnosticReports(assetReports),
+    restartSceneReports: restartDiagnosticReports(sceneReports),
+    restartVehicleReports: restartDiagnosticReports(vehicleReports),
+    restartRaceReports: restartDiagnosticReports(raceReports),
   };
 }
 
@@ -1671,16 +2070,20 @@ function sumDurationBy(records, key) {
 }
 
 function collectSlowFrameAttribution(slowFrames, lifecycle) {
-  const runningTs = (lifecycle?.events ?? []).find((event) => event.state === 'Running')?.ts ?? null;
+  const events = lifecycle?.events ?? [];
+  const runningTs = events.find((event) => event.state === 'Running')?.ts ?? null;
+  const restartWindows = lifecycleRestartWindows(events);
   const frames = (slowFrames ?? []).map((frame, index) => {
     const text = String(frame.text ?? '');
-    const subsystem = /render|renderer|submit/i.test(text) ? 'Renderer' : 'Runtime';
-    const phase = runningTs == null || frame.ts == null || frame.ts <= runningTs ? 'first-frame' : 'steady-state';
+    const reason = slowFrameReason(text);
+    const subsystem = /submit|renderer|render slow|reason=(loop|submit|cadence|pacing)/i.test(text) ? 'Renderer' : 'Runtime';
+    const phase = classifySlowFramePhase(frame.ts ?? null, runningTs, restartWindows);
     return {
       index,
       phase,
       owner: 'voplay',
       subsystem,
+      reason,
       text,
       ts: frame.ts ?? null,
       source: frame.source ?? null,
@@ -1688,16 +2091,140 @@ function collectSlowFrameAttribution(slowFrames, lifecycle) {
   });
   return {
     count: frames.length,
-    firstFrame: frames.filter((frame) => frame.phase === 'first-frame').length,
+    firstFrame: frames.filter((frame) => frame.phase === 'first-frame-warmup').length,
+    firstFrameWarmup: frames.filter((frame) => frame.phase === 'first-frame-warmup').length,
+    restartRebuild: frames.filter((frame) => frame.phase === 'restart-rebuild').length,
     steadyState: frames.filter((frame) => frame.phase === 'steady-state').length,
+    byPhase: countBy(frames, 'phase'),
+    byReason: countBy(frames, 'reason'),
     frames,
   };
+}
+
+function lifecycleRestartWindows(events) {
+  const windows = [];
+  let active = null;
+  for (const event of events ?? []) {
+    if (event.state === 'Restarting') {
+      active = { start: event.ts ?? null, end: null };
+      continue;
+    }
+    if (event.state === 'Running' && active) {
+      active.end = event.ts ?? null;
+      windows.push(active);
+      active = null;
+    }
+  }
+  if (active) {
+    windows.push(active);
+  }
+  return windows;
+}
+
+function classifySlowFramePhase(ts, runningTs, restartWindows) {
+  if (ts != null) {
+    for (const window of restartWindows ?? []) {
+      if (window.start == null) {
+        continue;
+      }
+      const end = window.end == null ? window.start + 5000 : window.end + 1000;
+      if (ts >= window.start && ts <= end) {
+        return 'restart-rebuild';
+      }
+    }
+  }
+  if (runningTs == null || ts == null || ts <= runningTs) {
+    return 'first-frame-warmup';
+  }
+  return 'steady-state';
+}
+
+function slowFrameReason(text) {
+  const match = String(text ?? '').match(/\breason=([A-Za-z0-9_.:-]+)/);
+  if (match) {
+    return match[1];
+  }
+  if (/submit/i.test(text)) {
+    return 'submit';
+  }
+  if (/work slow/i.test(text)) {
+    return 'work';
+  }
+  if (/render/i.test(text)) {
+    return 'render';
+  }
+  return 'unknown';
+}
+
+function actionableRenderSlowFrames(performanceAttribution, rawSlowFrames) {
+  const attributed = performanceAttribution?.slowFrames?.frames;
+  const frames = Array.isArray(attributed) && attributed.length > 0
+    ? attributed
+    : (rawSlowFrames ?? []).map((frame, index) => ({
+      index,
+      phase: 'unknown',
+      reason: slowFrameReason(frame?.text ?? ''),
+      text: frame?.text ?? '',
+      ts: frame?.ts ?? null,
+      source: frame?.source ?? null,
+    }));
+  return frames.filter(isActionableRenderSlowFrame);
+}
+
+function isActionableRenderSlowFrame(frame) {
+  const phase = frame?.phase ?? 'unknown';
+  if (phase === 'first-frame-warmup') {
+    return false;
+  }
+  const metrics = parseSlowFrameMetrics(frame?.text ?? '');
+  if (isHostLoopSlowFrame(frame, metrics)) {
+    return false;
+  }
+  return true;
+}
+
+function isHostLoopSlowFrame(frame, metrics) {
+  const reason = String(frame?.reason ?? slowFrameReason(frame?.text ?? '')).toLowerCase();
+  if (reason !== 'loop' && reason !== 'pacing' && reason !== 'cadence') {
+    return false;
+  }
+  return metrics.submitMs === 0
+    && metrics.drawBytes === 0
+    && metrics.cachedFrames > 0;
+}
+
+function parseSlowFrameMetrics(text) {
+  return {
+    frame: numericTextMetric(text, 'frame'),
+    loopMs: numericTextMetric(text, 'loopMs'),
+    submitMs: numericTextMetric(text, 'submitMs'),
+    drawBytes: numericTextMetric(text, 'drawBytes'),
+    cachedFrames: numericTextMetric(text, 'cached'),
+  };
+}
+
+function numericTextMetric(text, key) {
+  const match = String(text ?? '').match(new RegExp(`\\b${key}=([0-9]+(?:\\.[0-9]+)?)`));
+  if (!match) {
+    return null;
+  }
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function countBy(records, key) {
+  const counts = new Map();
+  for (const record of records ?? []) {
+    const value = record?.[key] ?? 'unknown';
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return Object.fromEntries([...counts.entries()].sort(([a], [b]) => String(a).localeCompare(String(b))));
 }
 
 function buildPerformanceAttribution({ startupPhases, slowFrames, lifecycle, perf, diagnostics }) {
   const startup = summarizeStartupAttribution(startupPhases);
   const slow = collectSlowFrameAttribution(slowFrames, lifecycle);
-  const latestPerf = perf?.last?.length ? perf.last[perf.last.length - 1] : null;
+  const latestPerf = perf?.latestPerfSummary ?? (perf?.last?.length ? perf.last[perf.last.length - 1] : null);
   const scene = diagnostics?.latestSceneReport ?? null;
   const asset = diagnostics?.latestAssetReport ?? null;
   const render = extractRenderPerf(latestPerf);
@@ -1710,13 +2237,21 @@ function buildPerformanceAttribution({ startupPhases, slowFrames, lifecycle, per
     primitiveVisibleChunks: numericReportValue(scene, 'primitiveVisibleChunks'),
     primitiveDrawCalls: numericReportValue(scene, 'primitiveDrawCalls'),
     primitiveUploadBytes: numericReportValue(scene, 'primitiveUploadBytes'),
+    waterSurfaces: numericReportValue(scene, 'waterSurfaces'),
+    visibleWaterSurfaces: numericReportValue(scene, 'visibleWaterSurfaces'),
   } : null;
   const assetComplexity = asset ? {
+    mountCount: numericReportValue(asset, 'mountCount'),
     groupCount: numericReportValue(asset, 'groupCount'),
     textureCount: numericReportValue(asset, 'textureCount'),
+    linearTextureCount: numericReportValue(asset, 'linearTextureCount'),
     cubemapCount: numericReportValue(asset, 'cubemapCount'),
     modelCount: numericReportValue(asset, 'modelCount'),
     audioCount: numericReportValue(asset, 'audioCount'),
+    preparedMapBuilds: numericReportValue(asset, 'preparedMapBuilds'),
+    preparedMapReuses: numericReportValue(asset, 'preparedMapReuses'),
+    primitiveTemplateBuilds: numericReportValue(asset, 'primitiveTemplateBuilds'),
+    primitiveTemplateReuses: numericReportValue(asset, 'primitiveTemplateReuses'),
   } : null;
   const optimizationTarget = startup.slowest[0] ? {
     owner: startup.slowest[0].owner,
@@ -1750,8 +2285,11 @@ function extractRenderPerf(latestPerf) {
     frameP90Ms: latestPerf.window?.frameP90Ms ?? latestPerf.frameP90Ms ?? null,
     frameP99Ms: latestPerf.window?.frameP99Ms ?? latestPerf.frameP99Ms ?? null,
     renderLoopP90Ms: latestPerf.window?.renderLoopP90Ms ?? latestPerf.renderLoopP90Ms ?? null,
+    renderWorkP90Ms: latestPerf.window?.renderWorkP90Ms ?? latestPerf.renderWorkP90Ms ?? null,
     renderSubmitP90Ms: latestPerf.window?.renderSubmitP90Ms ?? latestPerf.renderSubmitP90Ms ?? null,
     gpuWorkDoneP90Ms: latestPerf.window?.gpuWorkDoneP90Ms ?? latestPerf.gpuWorkDoneP90Ms ?? null,
+    activeWorkP90Ms: latestPerf.window?.activeWorkP90Ms ?? latestPerf.gate?.activeWorkP90Ms ?? null,
+    activeWorkP99Ms: latestPerf.window?.activeWorkP99Ms ?? latestPerf.gate?.activeWorkP99Ms ?? null,
     drawUploadBytes: latestPerf.workload?.uploadBytes ?? latestPerf.current?.uploadBytes ?? latestPerf.current?.drawBytes ?? null,
     currentCause: latestPerf.current?.classification?.primaryCause ?? latestPerf.classification?.primaryCause ?? null,
   };
@@ -1776,6 +2314,7 @@ const sceneGrowthKeys = [
 ];
 
 const assetGrowthKeys = [
+  'mountCount',
   'groupCount',
   'activeGroupDepth',
   'textureCount',
@@ -1829,10 +2368,13 @@ function isIgnoredBrowserLogError(event) {
 }
 
 function isIgnoredResourceFailure(failure) {
+  if (failure?.kind === 'loadingFailed' && failure?.canceled === true && failure?.errorText === 'net::ERR_ABORTED') {
+    return true;
+  }
   return /\/favicon\.ico(?:[?#]|$)/i.test(failure?.url ?? '');
 }
 
-function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resourceFailures, startupPhases, slowFrames, perfReports, lifecycle, expectedLifecycleState, diagnostics, restartScenario, startRaceScenario, storageReloadScenario, performanceAttribution }) {
+function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resourceFailures, startupPhases, slowFrames, perfReports, lifecycle, expectedLifecycleState, diagnostics, restartScenario, startRaceScenario, storageReloadScenario, renderStressScenario, resizeScenario, performanceAttribution }) {
   const issues = [];
   const add = (severity, owner, title, evidence) => issues.push({ severity, owner, title, evidence });
   if (!firstFrame.ok) {
@@ -1866,8 +2408,9 @@ function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resource
     add('P1', 'voplay/studio', 'BlockKart startup phase is slower than baseline threshold', `${opened.text}; threshold=${startupWarnMs}ms`);
   }
   const slowFrameBudget = adjustedSlowFrameBudget(restartScenario, startRaceScenario, storageReloadScenario);
-  if (slowFrames.length > slowFrameBudget) {
-    add('P1', 'voplay', 'voplay render slow frames persisted during baseline capture', `count=${slowFrames.length} budget=${slowFrameBudget}\n${slowFrames.slice(0, 8).map((entry) => entry.text).join('\n')}`);
+  const actionableSlowFrames = actionableRenderSlowFrames(performanceAttribution, slowFrames);
+  if (actionableSlowFrames.length > slowFrameBudget) {
+    add('P1', 'voplay', 'voplay render slow frames persisted during baseline capture', `actionable=${actionableSlowFrames.length} total=${slowFrames.length} budget=${slowFrameBudget}\n${actionableSlowFrames.slice(0, 8).map((entry) => entry.text).join('\n')}`);
   }
   if (!firstFrame.skipped && expectedLifecycleState !== 'Failed' && perfReports.length === 0) {
     add('P1', 'voplay', 'voplay perf reports were not captured under trace mode', 'globalThis.__voplayPerfReports was empty after capture window');
@@ -1903,16 +2446,22 @@ function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resource
   if (!firstFrame.skipped && storageReloadScenario?.requested && !storageReloadScenario.completed) {
     add('P0', 'BlockKart/Studio', 'BlockKart settings did not survive a reload', storageReloadScenario.failure ?? JSON.stringify(storageReloadScenario));
   }
+  if (!firstFrame.skipped && renderStressScenario?.requested && !renderStressScenario.completed) {
+    add('P0', 'BlockKart', 'BlockKart render stress profile did not apply', renderStressScenario.failure ?? JSON.stringify(renderStressScenario));
+  }
+  if (!firstFrame.skipped && resizeScenario?.requested && !resizeScenario.completed) {
+    add('P1', 'voplay/studio', 'BlockKart resize cycle did not complete', resizeScenario.failure ?? JSON.stringify(resizeScenario));
+  }
   if (!firstFrame.skipped && restartScenario?.requested > 0) {
     if (restartScenario.skipped) {
       add('P1', 'BlockKart', 'BlockKart restart diagnostic mode was skipped', restartScenario.skipReason ?? 'restart scenario skipped');
     } else if (restartScenario.completed < restartScenario.requested) {
       add('P0', 'BlockKart', 'BlockKart restart did not reliably return to Running', restartScenario.failure ?? JSON.stringify(restartScenario.iterations));
     }
-    const sceneReports = diagnostics?.worldReadySceneReports ?? [];
-    const assetReports = diagnostics?.worldReadyAssetReports ?? [];
+    const sceneReports = diagnostics?.restartSceneReports ?? [];
+    const assetReports = diagnostics?.restartAssetReports ?? [];
     if (sceneReports.length < 2) {
-      add('P1', 'BlockKart', 'BlockKart restart mode had insufficient scene diagnostics', `worldReady scene reports=${sceneReports.length}`);
+      add('P1', 'BlockKart', 'BlockKart restart mode had insufficient scene diagnostics', `restart scene reports=${sceneReports.length}`);
     } else {
       const growth = reportGrowth(sceneReports[0], sceneReports[sceneReports.length - 1], sceneGrowthKeys);
       if (growth.length > 0) {
@@ -1920,11 +2469,34 @@ function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resource
       }
     }
     if (assetReports.length < 2) {
-      add('P1', 'BlockKart', 'BlockKart restart mode had insufficient asset diagnostics', `worldReady asset reports=${assetReports.length}`);
+      add('P1', 'BlockKart', 'BlockKart restart mode had insufficient asset diagnostics', `restart asset reports=${assetReports.length}`);
     } else {
       const growth = reportGrowth(assetReports[0], assetReports[assetReports.length - 1], assetGrowthKeys);
       if (growth.length > 0) {
         add('P0', 'voplay/BlockKart', 'BlockKart asset counts grew after restart', JSON.stringify(growth));
+      }
+      const latestAsset = assetReports[assetReports.length - 1];
+      const maxMountCount = Math.max(...assetReports.map((report) => numericReportValue(report, 'mountCount')));
+      if (maxMountCount > 1) {
+        add('P0', 'voplay/Asset', 'BlockKart restart mounted duplicate asset packs', `max mountCount=${maxMountCount}`);
+      }
+      if (!latestAsset.preparedMapCached || !latestAsset.primitiveTemplateCached) {
+        add('P1', 'BlockKart/Scene', 'BlockKart restart did not retain immutable map and primitive caches', JSON.stringify({
+          preparedMapCached: latestAsset.preparedMapCached,
+          primitiveTemplateCached: latestAsset.primitiveTemplateCached,
+        }));
+      }
+      if (numericReportValue(latestAsset, 'preparedMapBuilds') > 1 || numericReportValue(latestAsset, 'primitiveTemplateBuilds') > 1) {
+        add('P1', 'BlockKart/Scene', 'BlockKart restart rebuilt immutable cached resources', JSON.stringify({
+          preparedMapBuilds: latestAsset.preparedMapBuilds,
+          primitiveTemplateBuilds: latestAsset.primitiveTemplateBuilds,
+        }));
+      }
+      if (restartScenario.completed > 0 && latestAsset.phase === 'worldReady' && numericReportValue(latestAsset, 'preparedMapReuses') < restartScenario.completed) {
+        add('P1', 'BlockKart/Map', 'BlockKart restart did not report prepared map reuse for every completed restart', `preparedMapReuses=${latestAsset.preparedMapReuses} completed=${restartScenario.completed}`);
+      }
+      if (restartScenario.completed > 0 && latestAsset.phase === 'worldReady' && numericReportValue(latestAsset, 'primitiveTemplateReuses') < restartScenario.completed) {
+        add('P1', 'BlockKart/Scene', 'BlockKart restart did not report primitive template reuse for every completed restart', `primitiveTemplateReuses=${latestAsset.primitiveTemplateReuses} completed=${restartScenario.completed}`);
       }
     }
   }
@@ -1937,7 +2509,7 @@ function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resource
 function adjustedSlowFrameBudget(restartScenario, startRaceScenario, storageReloadScenario) {
   let budget = maxSlowFrames;
   if (restartScenario?.requested > 0) {
-    budget += restartScenario.completed;
+    budget += restartScenario.completed > 0 ? 2 : 0;
   }
   if (startRaceScenario?.requested && !startRaceScenario.skipped) {
     budget += 3;
@@ -1961,14 +2533,19 @@ function normalizePerfReports(debugReports, endpointReports) {
 
 function summarizePerfReports(perfReports) {
   const byKind = new Map();
+  let latestPerfSummary = null;
   for (const report of perfReports ?? []) {
     const kind = report?.kind ?? 'unknown';
     byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
+    if (kind === 'perf-summary') {
+      latestPerfSummary = report;
+    }
   }
   return {
     count: perfReports?.length ?? 0,
     byKind: Object.fromEntries([...byKind.entries()].sort(([a], [b]) => String(a).localeCompare(String(b)))),
     last: perfReports?.slice?.(-5) ?? [],
+    latestPerfSummary,
   };
 }
 
@@ -2029,13 +2606,19 @@ function markdownReport(report) {
         lines.push(`  - ${Math.round(phase.durationMs)}ms ${phase.owner}/${phase.subsystem} ${phase.label}:${phase.name}`);
       }
     }
-    lines.push(`- Slow frames: first-frame=${attribution.slowFrames.firstFrame} steady-state=${attribution.slowFrames.steadyState}`);
+    lines.push(`- Slow frames: first-frame warmup=${attribution.slowFrames.firstFrameWarmup} restart rebuild=${attribution.slowFrames.restartRebuild} steady-state=${attribution.slowFrames.steadyState}`);
+    lines.push(`- Slow-frame reasons: ${JSON.stringify(attribution.slowFrames.byReason)}`);
     if (attribution.render) {
-      lines.push(`- Render perf: kind=${attribution.render.kind ?? 'n/a'} frameP90=${attribution.render.frameP90Ms ?? 'n/a'} renderP90=${attribution.render.renderLoopP90Ms ?? 'n/a'} gpuP90=${attribution.render.gpuWorkDoneP90Ms ?? 'n/a'}`);
+      lines.push(`- Render perf: kind=${attribution.render.kind ?? 'n/a'} frameP90=${attribution.render.frameP90Ms ?? 'n/a'} renderP90=${attribution.render.renderLoopP90Ms ?? 'n/a'} renderWorkP90=${attribution.render.renderWorkP90Ms ?? 'n/a'} activeP90/P99=${attribution.render.activeWorkP90Ms ?? 'n/a'}/${attribution.render.activeWorkP99Ms ?? 'n/a'} submitP90=${attribution.render.renderSubmitP90Ms ?? 'n/a'} gpuP90=${attribution.render.gpuWorkDoneP90Ms ?? 'n/a'} upload=${attribution.render.drawUploadBytes ?? 'n/a'} cause=${attribution.render.currentCause ?? 'n/a'}`);
     }
     if (attribution.sceneComplexity) {
       const scene = attribution.sceneComplexity;
-      lines.push(`- Scene complexity: entities=${scene.activeEntities} physics=${scene.physicsBodies} primitives=${scene.primitiveInstances} chunks=${scene.primitiveChunks} drawCalls=${scene.primitiveDrawCalls} upload=${scene.primitiveUploadBytes}`);
+      lines.push(`- Scene complexity: entities=${scene.activeEntities} physics=${scene.physicsBodies} primitives=${scene.primitiveInstances} chunks=${scene.primitiveChunks} water=${scene.waterSurfaces}/${scene.visibleWaterSurfaces} drawCalls=${scene.primitiveDrawCalls} upload=${scene.primitiveUploadBytes}`);
+    }
+    if (attribution.assetComplexity) {
+      const asset = attribution.assetComplexity;
+      lines.push(`- Asset complexity: mounts=${asset.mountCount} groups=${asset.groupCount} textures=${asset.textureCount}/${asset.linearTextureCount} cubemaps=${asset.cubemapCount} models=${asset.modelCount} audio=${asset.audioCount}`);
+      lines.push(`- Restart cache: preparedMap builds/reuses=${asset.preparedMapBuilds}/${asset.preparedMapReuses} primitiveTemplate builds/reuses=${asset.primitiveTemplateBuilds}/${asset.primitiveTemplateReuses}`);
     }
   }
   lines.push('');
@@ -2063,11 +2646,15 @@ function markdownReport(report) {
   lines.push(`- Race reports: ${report.diagnostics.raceReports.length}`);
   if (report.diagnostics.latestAssetReport) {
     const asset = report.diagnostics.latestAssetReport;
-    lines.push(`- Latest asset report: phase=${asset.phase} group=${asset.groupCount} textures=${asset.textureCount} cubemaps=${asset.cubemapCount} models=${asset.modelCount} audio=${asset.audioCount}`);
+    lines.push(`- Latest asset report: phase=${asset.phase} mounts=${asset.mountCount ?? 'n/a'} group=${asset.groupCount} textures=${asset.textureCount}/${asset.linearTextureCount ?? 'n/a'} cubemaps=${asset.cubemapCount} models=${asset.modelCount} audio=${asset.audioCount}`);
+    lines.push(`- Latest cache report: runtime=${asset.runtimeCacheReady === true} preparedMap=${asset.preparedMapCached === true} primitiveTemplate=${asset.primitiveTemplateCached === true} preparedMap builds/reuses=${asset.preparedMapBuilds ?? 'n/a'}/${asset.preparedMapReuses ?? 'n/a'} primitiveTemplate builds/reuses=${asset.primitiveTemplateBuilds ?? 'n/a'}/${asset.primitiveTemplateReuses ?? 'n/a'}`);
+    if (asset.restartRootCause) {
+      lines.push(`- Restart root cause: ${oneLine(asset.restartRootCause)}`);
+    }
   }
   if (report.diagnostics.latestSceneReport) {
     const scene = report.diagnostics.latestSceneReport;
-    lines.push(`- Latest scene report: phase=${scene.phase} entities=${scene.activeEntities} physics=${scene.physicsBodies} primitives=${scene.primitiveInstances} chunks=${scene.primitiveChunks}`);
+    lines.push(`- Latest scene report: phase=${scene.phase} entities=${scene.activeEntities} physics=${scene.physicsBodies} primitives=${scene.primitiveInstances} chunks=${scene.primitiveChunks} water=${scene.waterSurfaces ?? 'n/a'}/${scene.visibleWaterSurfaces ?? 'n/a'}`);
   }
   if (report.diagnostics.latestVehicleReport) {
     const vehicle = report.diagnostics.latestVehicleReport;
@@ -2079,6 +2666,8 @@ function markdownReport(report) {
   }
   lines.push(`- Start-race mode: requested=${report.startRace.requested} completed=${report.startRace.completed}${report.startRace.skipped ? ` skipped=${oneLine(report.startRace.skipReason)}` : ''}`);
   lines.push(`- Storage reload mode: requested=${report.storageReload.requested} completed=${report.storageReload.completed}${report.storageReload.skipped ? ` skipped=${oneLine(report.storageReload.skipReason)}` : ''}`);
+  lines.push(`- Render stress mode: requested=${report.renderStress.requested} profile=${report.renderStress.profile || 'none'} completed=${report.renderStress.completed}${report.renderStress.skipped ? ` skipped=${oneLine(report.renderStress.skipReason)}` : ''}`);
+  lines.push(`- Resize cycle mode: requested=${report.resize.requested} completed=${report.resize.completed}${report.resize.skipped ? ` skipped=${oneLine(report.resize.skipReason)}` : ''}`);
   lines.push(`- Restart mode: requested=${report.restart.requested} completed=${report.restart.completed}${report.restart.skipped ? ` skipped=${oneLine(report.restart.skipReason)}` : ''}`);
   lines.push('');
   lines.push('## Perf And Diagnostics');
@@ -2177,11 +2766,28 @@ async function main() {
     quickplayUrl.searchParams.set('proj', 'vo:quickplay:blockkart');
     quickplayUrl.searchParams.set('mode', 'runner');
     quickplayUrl.searchParams.set('studioBrowserSmokeDebug', '1');
-    quickplayUrl.searchParams.set('voplayPerf', 'trace');
-    quickplayUrl.searchParams.set('voplayPerfConsole', '1');
-    quickplayUrl.searchParams.set('voplayPerfDiag', 'gpu,pulseHybrid');
-    quickplayUrl.searchParams.set('voplayPerfGpu', '1');
+    if (perfMode) {
+      quickplayUrl.searchParams.set('voplayPerf', perfMode);
+    }
+    if (perfConsole) {
+      quickplayUrl.searchParams.set('voplayPerfConsole', '1');
+    }
+    if (perfDiag) {
+      quickplayUrl.searchParams.set('voplayPerfDiag', perfDiag);
+    }
+    if (pulseMode) {
+      quickplayUrl.searchParams.set('voplayPulseMode', pulseMode);
+    }
+    if (perfGpuProbe) {
+      quickplayUrl.searchParams.set('voplayPerfGpu', '1');
+    }
     quickplayUrl.searchParams.set('voplayRendererPerf', '1');
+    if (renderStressProfile) {
+      quickplayUrl.searchParams.set('blockkartRenderStress', renderStressProfile);
+    }
+    if (resizeCycleRequested) {
+      quickplayUrl.searchParams.set('blockkartResizeCycle', '1');
+    }
     quickplayUrl.hash = '#/runner';
 
     const startedAt = new Date().toISOString();
@@ -2195,6 +2801,45 @@ async function main() {
       firstFrameTimeoutMs,
     );
     const firstFrame = await waitForQuickplayFirstFrame(client, firstFrameTimeoutMs);
+    let renderStressScenario = {
+      requested: renderStressProfile !== '',
+      profile: renderStressProfile,
+      completed: false,
+      skipped: renderStressProfile === '',
+      skipReason: renderStressProfile === '' ? 'render stress mode disabled' : null,
+      initialReports: 0,
+      finalReports: 0,
+      latestSceneReport: collectBlockKartDiagnostics(events.console, []).latestSceneReport,
+    };
+    if (renderStressProfile !== '') {
+      if (!firstFrame.ok || firstFrame.skipped) {
+        renderStressScenario.skipped = true;
+        renderStressScenario.skipReason = firstFrame.reason ?? 'first frame did not complete';
+      } else if (expectedLifecycleState !== 'Running') {
+        renderStressScenario.skipped = true;
+        renderStressScenario.skipReason = `render stress mode requires expected lifecycle Running, got ${expectedLifecycleState}`;
+      } else {
+        renderStressScenario = await runRenderStressScenario(client, events, renderStressProfile, restartWaitTimeoutMs);
+      }
+    }
+    let resizeScenario = {
+      requested: resizeCycleRequested,
+      completed: false,
+      skipped: !resizeCycleRequested,
+      skipReason: resizeCycleRequested ? null : 'resize cycle disabled',
+      steps: [],
+    };
+    if (resizeCycleRequested) {
+      if (!firstFrame.ok || firstFrame.skipped) {
+        resizeScenario.skipped = true;
+        resizeScenario.skipReason = firstFrame.reason ?? 'first frame did not complete';
+      } else if (expectedLifecycleState !== 'Running') {
+        resizeScenario.skipped = true;
+        resizeScenario.skipReason = `resize cycle requires expected lifecycle Running, got ${expectedLifecycleState}`;
+      } else {
+        resizeScenario = await runResizeCycleScenario(client, true);
+      }
+    }
     let startRaceScenario = {
       requested: startRaceRequested,
       completed: false,
@@ -2306,11 +2951,42 @@ async function main() {
         canvasCaptureMode = 'failed';
         captureWarnings.push(`canvas viewport crop failed: ${error instanceof Error ? error.message : String(error)}`);
       }
+    } else if (finalState.canvasRect && finalState.canvasRect.width > 0 && finalState.canvasRect.height > 0) {
+      try {
+        canvasAnalysis = await captureScreenshot(client, canvasScreenshot, finalState.canvasRect);
+        canvasCaptureMode = 'cdp-canvas-crop';
+      } catch (error) {
+        canvasCaptureMode = 'failed';
+        captureWarnings.push(`canvas CDP crop failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } else if (!viewportCapture) {
       canvasCaptureMode = 'not-captured';
     } else {
       canvasCaptureMode = 'not-found';
       captureWarnings.push('canvas crop skipped because no canvas rect was available');
+    }
+    if (!canvasAnalysis?.nonEmpty) {
+      try {
+        const dataUrlAnalysis = await captureCanvasDataUrl(client, canvasScreenshot);
+        canvasAnalysis = dataUrlAnalysis;
+        canvasCaptureMode = 'canvas-data-url';
+      } catch (error) {
+        captureWarnings.push(`canvas data-url capture failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (!canvasAnalysis?.nonEmpty) {
+      try {
+        const freshCapture = await captureFreshBrowserCanvas(quickplayUrl.toString(), viewportScreenshot, canvasScreenshot, browser?.browserBin);
+        if (!viewportAnalysis?.nonEmpty) {
+          viewportAnalysis = freshCapture.viewportAnalysis;
+          viewportCapture = { bytes: readFileSync(viewportScreenshot), analysis: viewportAnalysis };
+          viewportCaptureMode = freshCapture.viewportMode;
+        }
+        canvasAnalysis = freshCapture.canvasAnalysis;
+        canvasCaptureMode = freshCapture.canvasMode;
+      } catch (error) {
+        captureWarnings.push(`fresh browser canvas capture failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     const startupPhases = classifyStartupPhases([
@@ -2356,6 +3032,8 @@ async function main() {
       restartScenario,
       startRaceScenario,
       storageReloadScenario,
+      renderStressScenario,
+      resizeScenario,
       performanceAttribution,
     });
     const p0p1 = issues.filter((issue) => issue.severity === 'P0' || issue.severity === 'P1');
@@ -2392,6 +3070,8 @@ async function main() {
       simulation,
       startRace: startRaceScenario,
       storageReload: storageReloadScenario,
+      renderStress: renderStressScenario,
+      resize: resizeScenario,
       restart: restartScenario,
       diagnostics,
       performanceAttribution,

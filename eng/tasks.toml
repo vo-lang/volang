@@ -194,14 +194,44 @@ app-site = [
   "studio-wasm-build",
   "studio-install-local-vogui",
   "studio-build",
+  "quickplay-validate-selftest",
+  "voplay-sample-validate",
+  "voplay-render-architecture-lint",
+  "blockkart-engine-boundary-lint",
+  "voplay-render-structure-lint",
+  "blockkart-product-boundary-strict",
+  "voplay-framegraph-unit",
+  "voplay-render-core-unit",
+  "voplay-batch-planner-unit",
+  "voplay-vehicle-dynamics-unit",
+  "voplay-vehicle-model-unit",
+  "voplay-physics-backend-unit",
+  "voplay-physics-backend-contract",
+  "voplay-render-stress",
+  "voplay-render-stress-budgeted",
+  "voplay-render-soak-10m",
+  "voplay-physics-stress",
+  "voplay-physics-industrial-stress",
+  "quickplay-source-audit",
+  "quickplay-regenerate-check",
+  "quickplay-validate",
   "studio-browser-smoke",
   "blockkart-baseline",
-  "quickplay-validate",
+  "blockkart-baseline-start-race",
+  "blockkart-baseline-storage-reload",
+  "blockkart-baseline-restart-10",
+  "blockkart-baseline-restart-50",
   "blockkart-smoke-static",
+]
+
+voplay-industrial = [
+  "voplay-industrial-readiness-report",
+  "voplay-industrial-readiness",
 ]
 
 site = [
   "app-site",
+  "voplay-industrial",
 ]
 
 release-verify = [
@@ -243,9 +273,33 @@ pr = [
   "benchmarks",
   "app-contract",
   "studio-build",
+  "quickplay-validate-selftest",
+  "voplay-sample-validate",
+  "voplay-render-architecture-lint",
+  "blockkart-engine-boundary-lint",
+  "voplay-render-structure-lint",
+  "blockkart-product-boundary-strict",
+  "voplay-framegraph-unit",
+  "voplay-render-core-unit",
+  "voplay-batch-planner-unit",
+  "voplay-vehicle-dynamics-unit",
+  "voplay-vehicle-model-unit",
+  "voplay-physics-backend-unit",
+  "voplay-physics-backend-contract",
+  "voplay-render-stress",
+  "voplay-render-stress-budgeted",
+  "voplay-render-soak-10m",
+  "voplay-physics-stress",
+  "voplay-physics-industrial-stress",
+  "quickplay-source-audit",
+  "quickplay-regenerate-check",
+  "quickplay-validate",
   "studio-browser-smoke",
   "blockkart-baseline",
-  "quickplay-validate",
+  "blockkart-baseline-start-race",
+  "blockkart-baseline-storage-reload",
+  "blockkart-baseline-restart-10",
+  "blockkart-baseline-restart-50",
   "blockkart-smoke-static",
   "release-verify",
 ]
@@ -516,9 +570,19 @@ title = "App Site"
 tier_intent = "Studio vo-web quickplay and static site checks"
 owner = "studio"
 tags = ["app-site", "app-build", "app-smoke"]
-tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "studio-browser-smoke", "blockkart-baseline", "quickplay-validate", "blockkart-smoke-static"]
+tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-vehicle-model-unit", "voplay-physics-backend-unit", "voplay-physics-backend-contract", "voplay-render-stress", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline", "blockkart-baseline-start-race", "blockkart-baseline-storage-reload", "blockkart-baseline-restart-10", "blockkart-baseline-restart-50", "blockkart-smoke-static"]
 included_in = ["site"]
 selection_policy = "Selected when the app-site validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "voplay-industrial"
+title = "voplay Industrial"
+tier_intent = "explicit voplay industrial readiness final gate"
+owner = "studio"
+tags = ["app-site", "contract", "final-gate", "voplay"]
+tasks = ["voplay-industrial-readiness-report", "voplay-industrial-readiness"]
+included_in = ["site"]
+selection_policy = "Selected by the site final gate and explicit voplay industrial readiness runs."
 
 [[group]]
 name = "site"
@@ -526,7 +590,7 @@ title = "Site"
 tier_intent = "top-level local site validation"
 owner = "studio"
 tags = ["site", "app-site"]
-tasks = ["app-site"]
+tasks = ["app-site", "voplay-industrial"]
 included_in = ["full"]
 selection_policy = "Selected when the site validation surface is requested or when a parent group includes it."
 
@@ -566,7 +630,7 @@ title = "PR"
 tier_intent = "normal pull request validation"
 owner = "eng"
 tags = ["pr"]
-tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "studio-browser-smoke", "blockkart-baseline", "quickplay-validate", "blockkart-smoke-static", "release-verify"]
+tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-vehicle-model-unit", "voplay-physics-backend-unit", "voplay-physics-backend-contract", "voplay-render-stress", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline", "blockkart-baseline-start-race", "blockkart-baseline-storage-reload", "blockkart-baseline-restart-10", "blockkart-baseline-restart-50", "blockkart-smoke-static", "release-verify"]
 included_in = []
 selection_policy = "Selected when the pr validation surface is requested or when a parent group includes it."
 
@@ -608,7 +672,7 @@ name = "eng-lint-tasks"
 title = "engineering task manifest lint"
 command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "tasks", "--strict"]
 tools = ["rust", "vo-dev"]
-inputs = ["eng/tasks.toml", "eng/toolchains.toml", "eng/project.toml", "eng/artifacts.toml", "eng/ci.toml", "cmd/vo-dev/**", "Cargo.toml", "Cargo.lock"]
+inputs = ["eng/tasks.toml", "eng/toolchains.toml", "eng/project.toml", "eng/artifacts.toml", "eng/ci.toml", "cmd/vo-dev/**", "scripts/ci/voplay_industrial_readiness.mjs", "scripts/ci/voplay_render_stress.mjs", "scripts/ci/voplay_render_architecture_lint.mjs", "scripts/ci/blockkart_engine_boundary_lint.mjs", "Cargo.toml", "Cargo.lock"]
 outputs = []
 timeout_sec = 600
 tier = "fast"
@@ -1440,7 +1504,7 @@ timeout_sec = 300
 [[task]]
 name = "blockkart-baseline"
 title = "baseline BlockKart smoke perf visual"
-command = ["node", "scripts/ci/blockkart_baseline.mjs", "--out-dir", "target/blockkart-baseline"]
+command = ["node", "scripts/ci/blockkart_baseline.mjs", "--out-dir", "target/blockkart-baseline", "--perf-mode", "stats", "--perf-console", "0", "--perf-gpu-probe", "0", "--perf-diag", "pulseHybrid"]
 needs = ["studio-build", "quickplay-validate"]
 tools = ["node", "npm"]
 node_workspaces = ["studio"]
@@ -1450,6 +1514,62 @@ tier = "site"
 tags = ["app-smoke", "browser-smoke", "perf", "visual"]
 owner = "studio"
 timeout_sec = 300
+
+[[task]]
+name = "blockkart-baseline-start-race"
+title = "baseline BlockKart start race product path"
+command = ["node", "scripts/ci/blockkart_baseline.mjs", "--out-dir", "target/blockkart-baseline-start-race", "--start-race"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/blockkart_baseline.mjs", "apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json"]
+outputs = ["target/blockkart-baseline-start-race"]
+tier = "site"
+tags = ["app-smoke", "browser-smoke", "perf", "visual", "product-path"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "blockkart-baseline-storage-reload"
+title = "baseline BlockKart storage reload product path"
+command = ["node", "scripts/ci/blockkart_baseline.mjs", "--out-dir", "target/blockkart-baseline-storage-reload", "--verify-storage-reload"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/blockkart_baseline.mjs", "apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json"]
+outputs = ["target/blockkart-baseline-storage-reload"]
+tier = "site"
+tags = ["app-smoke", "browser-smoke", "perf", "visual", "product-path"]
+owner = "studio"
+timeout_sec = 360
+
+[[task]]
+name = "blockkart-baseline-restart-10"
+title = "baseline BlockKart restart 10 product path"
+command = ["node", "scripts/ci/blockkart_baseline.mjs", "--out-dir", "target/blockkart-baseline-restart-10", "--restart-count", "10"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/blockkart_baseline.mjs", "apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json"]
+outputs = ["target/blockkart-baseline-restart-10"]
+tier = "site"
+tags = ["app-smoke", "browser-smoke", "perf", "visual", "product-path"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
+name = "blockkart-baseline-restart-50"
+title = "baseline BlockKart restart 50 product path"
+command = ["node", "scripts/ci/blockkart_baseline.mjs", "--out-dir", "target/blockkart-baseline-restart-50", "--restart-count", "50", "--perf-mode", "stats", "--perf-console", "0", "--perf-gpu-probe", "0", "--perf-diag", "pulseHybrid"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/blockkart_baseline.mjs", "apps/studio/index.html", "apps/studio/package.json", "apps/studio/package-lock.json", "apps/studio/src/**", "apps/studio/public/**", "apps/studio/scripts/**", "apps/studio/vite.config.*", "apps/studio/tsconfig*.json"]
+outputs = ["target/blockkart-baseline-restart-50"]
+tier = "site"
+tags = ["app-smoke", "browser-smoke", "perf", "visual", "product-path"]
+owner = "studio"
+timeout_sec = 1200
 
 [[task]]
 name = "cargo-test-studio-wasm-source-contract"
@@ -1472,19 +1592,337 @@ tools = ["node", "npm"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "module-cache:voplay", "module-cache:vogui"]
+inputs = ["apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "module-cache:voplay", "module-cache:vopack", "module-cache:vogui"]
 outputs = ["apps/studio/public/quickplay/blockkart"]
 tier = "manual"
 tags = ["app-smoke", "manual"]
 owner = "studio"
 
 [[task]]
+name = "quickplay-regenerate-check"
+title = "regenerate and compare BlockKart quickplay package"
+command = ["node", "scripts/ci/quickplay_regenerate_check.mjs"]
+tools = ["node", "npm"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+internal = true
+inputs = ["scripts/ci/quickplay_regenerate_check.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "module-cache:voplay", "module-cache:vopack", "module-cache:vogui", "apps/studio/public/quickplay/blockkart/**"]
+outputs = []
+tier = "site"
+tags = ["app-smoke", "provenance"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
+name = "quickplay-source-audit"
+title = "audit BlockKart quickplay source and release provenance"
+command = ["node", "scripts/ci/quickplay_source_audit.mjs", "--out-dir", "target/quickplay-source-audit"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+internal = true
+inputs = ["scripts/ci/quickplay_source_audit.mjs", "apps/studio/public/quickplay/blockkart/**", "external:BlockKart", "module-cache:voplay", "module-cache:vopack", "module-cache:vogui"]
+outputs = ["target/quickplay-source-audit"]
+tier = "site"
+tags = ["app-smoke", "provenance"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
+name = "quickplay-validate-selftest"
+title = "prove quickplay validator rejects dependency source drift"
+command = ["node", "scripts/ci/quickplay_validate_selftest.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+internal = true
+inputs = ["scripts/ci/quickplay_validate_selftest.mjs", "scripts/ci/quickplay_validate.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "external:BlockKart"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "provenance", "contract"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
+name = "voplay-sample-validate"
+title = "validate non-BlockKart voplay sample contract"
+command = ["node", "scripts/ci/voplay_sample_validate.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+internal = true
+inputs = ["scripts/ci/voplay_sample_validate.mjs", "module-cache:voplay", "apps/studio/public/quickplay/blockkart/deps.json"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "voplay-render-architecture-lint"
+title = "lint voplay render and physics architecture boundaries"
+command = ["node", "scripts/ci/voplay_render_architecture_lint.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_render_architecture_lint.mjs", "module-cache:voplay", "external:BlockKart"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "perf", "physics"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "blockkart-engine-boundary-lint"
+title = "lint BlockKart product and engine boundaries"
+command = ["node", "scripts/ci/blockkart_engine_boundary_lint.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+inputs = ["scripts/ci/blockkart_engine_boundary_lint.mjs", "module-cache:voplay", "external:BlockKart"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "physics"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "voplay-render-structure-lint"
+title = "lint strict voplay render structure boundaries"
+command = ["node", "scripts/ci/voplay_render_architecture_lint.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_render_architecture_lint.mjs", "module-cache:voplay", "external:BlockKart"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "perf"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "blockkart-product-boundary-strict"
+title = "lint strict BlockKart product and engine boundaries"
+command = ["node", "scripts/ci/blockkart_engine_boundary_lint.mjs"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+inputs = ["scripts/ci/blockkart_engine_boundary_lint.mjs", "module-cache:voplay", "external:BlockKart"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "physics"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "voplay-framegraph-unit"
+title = "run voplay framegraph unit tests"
+command = ["node", "scripts/ci/voplay_rust_unit.mjs", "--suite", "renderer_frame"]
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_rust_unit.mjs", "module-cache:voplay"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "perf"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "voplay-render-core-unit"
+title = "run voplay render core unit tests"
+command = ["node", "scripts/ci/voplay_rust_unit.mjs", "--suite", "renderer_frame"]
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_rust_unit.mjs", "module-cache:voplay"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "perf"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "voplay-batch-planner-unit"
+title = "run voplay render batch planner unit tests"
+command = ["node", "scripts/ci/voplay_rust_unit.mjs", "--suite", "render_world"]
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_rust_unit.mjs", "module-cache:voplay"]
+outputs = []
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "perf"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "voplay-vehicle-dynamics-unit"
+title = "run voplay vehicle dynamics unit contract"
+command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "vehicle-dynamics", "--out-dir", "target/voplay-vehicle-dynamics-unit"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_scene3d_unit.mjs", "module-cache:voplay", "module-cache:vogui", "module-cache:vopack"]
+outputs = ["target/voplay-vehicle-dynamics-unit"]
+tier = "contract"
+tags = ["app-smoke", "contract", "physics"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
+name = "voplay-vehicle-model-unit"
+title = "run voplay vehicle model unit contract"
+command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "vehicle-dynamics", "--out-dir", "target/voplay-vehicle-model-unit"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_scene3d_unit.mjs", "module-cache:voplay", "module-cache:vogui", "module-cache:vopack"]
+outputs = ["target/voplay-vehicle-model-unit"]
+tier = "contract"
+tags = ["app-smoke", "contract", "physics"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
+name = "voplay-physics-backend-unit"
+title = "run voplay physics backend unit contract"
+command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "physics-backend", "--out-dir", "target/voplay-physics-backend-unit"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_scene3d_unit.mjs", "module-cache:voplay", "module-cache:vogui", "module-cache:vopack"]
+outputs = ["target/voplay-physics-backend-unit"]
+tier = "contract"
+tags = ["app-smoke", "contract", "physics"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
+name = "voplay-physics-backend-contract"
+title = "run voplay physics backend contract"
+command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "physics-backend", "--out-dir", "target/voplay-physics-backend-contract"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_scene3d_unit.mjs", "module-cache:voplay", "module-cache:vogui", "module-cache:vopack"]
+outputs = ["target/voplay-physics-backend-contract"]
+tier = "contract"
+tags = ["app-smoke", "contract", "physics"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
+name = "voplay-render-stress"
+title = "stress voplay render framegraph diagnostics"
+command = ["node", "scripts/ci/voplay_render_stress.mjs", "--out-dir", "target/voplay-render-stress"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_render_stress.mjs", "eng/perf-budgets/blockkart-voplay.schema.json", "eng/perf-budgets/blockkart-voplay.medium.json", "module-cache:voplay"]
+outputs = ["target/voplay-render-stress"]
+tier = "contract"
+tags = ["app-smoke", "contract", "perf", "visual"]
+owner = "studio"
+timeout_sec = 1200
+
+[[task]]
+name = "voplay-render-stress-budgeted"
+title = "stress voplay render scenes with budgets"
+command = ["node", "scripts/ci/voplay_render_stress.mjs", "--out-dir", "target/voplay-render-stress-budgeted", "--budget-all"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_render_stress.mjs", "eng/perf-budgets/blockkart-voplay.schema.json", "eng/perf-budgets/blockkart-voplay.medium.json", "module-cache:voplay"]
+outputs = ["target/voplay-render-stress-budgeted"]
+tier = "contract"
+tags = ["app-smoke", "contract", "perf", "visual"]
+owner = "studio"
+timeout_sec = 1200
+
+[[task]]
+name = "voplay-render-soak-10m"
+title = "soak voplay medium render profile for ten minutes"
+command = ["node", "scripts/ci/voplay_render_stress.mjs", "--out-dir", "target/voplay-render-soak-10m", "--budget-all", "--restart-count", "0", "--capture-ms", "600000", "--coverage-capture-ms", "600000"]
+needs = ["studio-build", "quickplay-validate"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_render_stress.mjs", "eng/perf-budgets/blockkart-voplay.schema.json", "eng/perf-budgets/blockkart-voplay.medium.json", "module-cache:voplay"]
+outputs = ["target/voplay-render-soak-10m"]
+tier = "contract"
+tags = ["app-smoke", "contract", "perf", "visual", "soak"]
+owner = "studio"
+timeout_sec = 900
+
+[[task]]
+name = "voplay-physics-stress"
+title = "stress voplay headless vehicle physics scenarios"
+command = ["node", "scripts/ci/voplay_physics_stress.mjs", "--out-dir", "target/voplay-physics-stress"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_physics_stress.mjs", "eng/perf-budgets/blockkart-voplay.schema.json", "eng/perf-budgets/blockkart-voplay.medium.json", "module-cache:voplay"]
+outputs = ["target/voplay-physics-stress"]
+tier = "contract"
+tags = ["app-smoke", "contract", "perf", "physics"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "voplay-physics-industrial-stress"
+title = "stress voplay industrial vehicle physics scenarios"
+command = ["node", "scripts/ci/voplay_physics_stress.mjs", "--out-dir", "target/voplay-physics-industrial-stress"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_physics_stress.mjs", "eng/perf-budgets/blockkart-voplay.schema.json", "eng/perf-budgets/blockkart-voplay.medium.json", "module-cache:voplay"]
+outputs = ["target/voplay-physics-industrial-stress"]
+tier = "contract"
+tags = ["app-smoke", "contract", "perf", "physics"]
+owner = "studio"
+timeout_sec = 300
+
+[[task]]
+name = "voplay-industrial-readiness-report"
+title = "write voplay industrial readiness report"
+command = ["node", "scripts/ci/voplay_industrial_readiness.mjs", "--out-dir", "target/voplay-industrial-readiness-report", "--allow-not-ready"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+internal = true
+inputs = ["scripts/ci/voplay_industrial_readiness.mjs", "module-cache:voplay", "external:BlockKart", "apps/studio/public/quickplay/blockkart/provenance.json"]
+outputs = ["target/voplay-industrial-readiness-report"]
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "perf", "physics", "final-gate"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
+name = "voplay-industrial-readiness"
+title = "verify voplay industrial readiness final gate"
+command = ["node", "scripts/ci/voplay_industrial_readiness.mjs", "--out-dir", "target/voplay-industrial-readiness"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+internal = true
+inputs = ["scripts/ci/voplay_industrial_readiness.mjs", "module-cache:voplay", "external:BlockKart", "apps/studio/public/quickplay/blockkart/provenance.json"]
+outputs = ["target/voplay-industrial-readiness"]
+tier = "contract"
+tags = ["app-smoke", "contract", "architecture", "perf", "physics", "soak", "final-gate"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
 name = "quickplay-validate"
 title = "validate BlockKart quickplay package"
 command = ["node", "scripts/ci/quickplay_validate.mjs"]
+needs = ["quickplay-validate-selftest", "voplay-sample-validate", "quickplay-source-audit", "quickplay-regenerate-check"]
 tools = ["node"]
 node_workspaces = ["studio"]
-inputs = ["scripts/ci/quickplay_validate.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml"]
+inputs = ["scripts/ci/quickplay_validate.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "external:BlockKart"]
 outputs = []
 tier = "site"
 tags = ["app-smoke", "manifest-lint"]

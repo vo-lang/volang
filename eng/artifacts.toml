@@ -15,6 +15,7 @@ inputs = [
   "eng/project.toml",
   "external:BlockKart",
   "module-cache:voplay",
+  "module-cache:vopack",
   "module-cache:vogui",
 ]
 tracked = true

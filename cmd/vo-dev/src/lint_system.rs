@@ -144,6 +144,7 @@ pub(crate) fn lint_task_file_with_options(
     lint_vm_hardening_tasks_run_unfiltered_crate_tests(&task_map)?;
     lint_vm_jit_manager_surface(root)?;
     lint_playground_host_wake_task_filter(&task_map)?;
+    lint_voplay_industrial_gate_policy(root, config, &task_map)?;
 
     for task in &config.tasks {
         if task.name.trim().is_empty() {
@@ -841,7 +842,12 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
     (".github/workflows/**", &["docs-lint", "ci-self-check"]),
     (
         "scripts/ci/**",
-        &["docs-lint", "ci-self-check", "quickplay-validate"],
+        &[
+            "eng-lint-tasks",
+            "docs-lint",
+            "ci-self-check",
+            "quickplay-validate",
+        ],
     ),
 ];
 
@@ -923,6 +929,229 @@ fn lint_playground_host_wake_task_filter(task_map: &BTreeMap<String, Task>) -> R
         bail!(
             "cargo-test-vo-playground-host-wake must use host_wake filter so all host wake proofs run"
         );
+    }
+    Ok(())
+}
+
+const VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS: &[&str] = &[
+    "scripts/ci/voplay_industrial_readiness.mjs",
+    "scripts/ci/voplay_render_stress.mjs",
+    "scripts/ci/voplay_render_architecture_lint.mjs",
+    "scripts/ci/blockkart_engine_boundary_lint.mjs",
+];
+
+const VOPLAY_REQUIRED_SOURCE_FACTS: &[&str] = &[
+    "render_pipeline_stages_constructed",
+    "frame_orchestrator_stage_only",
+    "framegraph_dispatch_owns_pass_execution",
+    "resource_registry_owns_all_targets",
+    "batch_plan_real_bounds",
+    "batch_plan_real_lod_inputs",
+    "batch_plan_real_culling_counters",
+    "physics_surface_source_no_track_position_inference",
+    "physics_set_pose_backend_only",
+    "physics_replay_records_backend_apply_hash",
+    "blockkart_product_boundary",
+];
+
+const VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES: &[&str] = &[
+    "renderer.execute_render_node_macro",
+    "framegraph.pipeline_stage_unused",
+    "render_world.zero_bounds",
+    "render_world.seed_workload_lod",
+    "render_world.frustum_counters_not_mutated",
+    "render_world.distance_counters_not_mutated",
+    "vehicle.track_position_surface_inference",
+    "contact.track_position_surface_inference",
+    "telemetry.track_position_surface_inference",
+    "vehicle.set_pose_direct_physics_mutation",
+    "replay.backend_apply_hash_missing",
+    "blockkart.primitive_authoring_owner",
+    "blockkart.low_level_hud_facts",
+    "blockkart.visual_mutable_vehicle_state",
+    "blockkart.direct_vehicle_set_pose",
+];
+
+const VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES: &[&str] = &[
+    "voplay.vehicle_track_position_surface_inference",
+    "voplay.contact_track_position_surface_inference",
+    "voplay.telemetry_track_position_surface_inference",
+    "voplay.set_pose_direct_physics_mutation",
+    "voplay.replay_backend_apply_hash_missing",
+    "blockkart.primitive_authoring_owner",
+    "blockkart.low_level_hud_facts",
+    "blockkart.visual_mutable_vehicle_state",
+    "blockkart.direct_vehicle_set_pose",
+];
+
+fn lint_voplay_industrial_gate_policy(
+    root: &Path,
+    config: &TaskFile,
+    task_map: &BTreeMap<String, Task>,
+) -> Result<()> {
+    lint_voplay_industrial_gate_task_wiring(config, task_map)?;
+    let readiness = read_gate_policy_script(root, VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS[0])?;
+    let render_stress = read_gate_policy_script(root, VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS[1])?;
+    let architecture = read_gate_policy_script(root, VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS[2])?;
+    let blockkart_boundary =
+        read_gate_policy_script(root, VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS[3])?;
+    lint_voplay_industrial_gate_sources(
+        &readiness,
+        &render_stress,
+        &architecture,
+        &blockkart_boundary,
+    )
+}
+
+fn read_gate_policy_script(root: &Path, relative: &str) -> Result<String> {
+    let path = root.join(relative);
+    fs::read_to_string(&path)
+        .map_err(|err| anyhow!("could not read voplay industrial gate script {relative}: {err}"))
+}
+
+fn lint_voplay_industrial_gate_task_wiring(
+    config: &TaskFile,
+    task_map: &BTreeMap<String, Task>,
+) -> Result<()> {
+    let site_scope: BTreeSet<_> = resolve_selector(config, "site")?.into_iter().collect();
+    for required in [
+        "voplay-industrial-readiness-report",
+        "voplay-industrial-readiness",
+    ] {
+        if !site_scope.contains(required) {
+            bail!("site scope must include {required} through voplay-industrial final gate");
+        }
+    }
+
+    let app_site_scope: BTreeSet<_> = resolve_selector(config, "app-site")?.into_iter().collect();
+    for required in [
+        "voplay-render-architecture-lint",
+        "blockkart-engine-boundary-lint",
+        "voplay-render-stress-budgeted",
+        "voplay-render-soak-10m",
+        "voplay-physics-industrial-stress",
+    ] {
+        if !app_site_scope.contains(required) {
+            bail!("app-site scope must include {required} for voplay industrial gate coverage");
+        }
+    }
+
+    let Some(eng_lint_tasks) = task_map.get("eng-lint-tasks") else {
+        bail!("eng/tasks.toml missing required task eng-lint-tasks");
+    };
+    for required in VOPLAY_INDUSTRIAL_GATE_SCRIPT_INPUTS {
+        if !eng_lint_tasks.inputs.iter().any(|input| input == required) {
+            bail!("eng-lint-tasks inputs must include {required} because task lint reads voplay industrial gate source sentinels");
+        }
+    }
+    Ok(())
+}
+
+fn lint_voplay_industrial_gate_sources(
+    readiness: &str,
+    render_stress: &str,
+    architecture: &str,
+    blockkart_boundary: &str,
+) -> Result<()> {
+    require_gate_source_tokens(
+        "scripts/ci/voplay_industrial_readiness.mjs",
+        readiness,
+        &[
+            "sourceFactRequirements",
+            "evidenceTable",
+            "addRequiredSourceFact(",
+            "addEvidenceRow(",
+            "const requiredFalseFacts = sourceFactRequirements",
+            ".filter((fact) => fact.required && fact.status !== true)",
+            "'source_facts.required_all_pass'",
+            "const industrialReady = failures.length === 0",
+            "strictMode: !allowNotReady",
+            "if (!industrialReady && !allowNotReady)",
+            "## Evidence Table",
+        ],
+    )?;
+    require_gate_source_tokens(
+        "scripts/ci/voplay_industrial_readiness.mjs",
+        readiness,
+        VOPLAY_REQUIRED_SOURCE_FACTS,
+    )?;
+
+    require_gate_source_tokens(
+        "scripts/ci/voplay_render_stress.mjs",
+        render_stress,
+        &[
+            "'render.perf_gate_failed'",
+            "'render.p90_over_budget'",
+            "'render.p99_over_budget'",
+            "'render.slow_frames_over_budget'",
+            "'summary.p90_over_budget'",
+            "'summary.p99_over_budget'",
+            "'summary.slow_frames_over_budget'",
+            "p1 += summaryIssues.filter((issue) => issue.severity === 1).length",
+            "status: p0 === 0 && p1 === 0 ? 'pass' : 'fail'",
+            "if (report.status !== 'pass')",
+        ],
+    )?;
+    reject_gate_source_tokens(
+        "scripts/ci/voplay_render_stress.mjs",
+        render_stress,
+        &[
+            "&& !hostPacingOnly",
+            "if (hostPacingOnly)",
+            "hostPacingOnly ?",
+        ],
+    )?;
+
+    require_gate_source_tokens(
+        "scripts/ci/voplay_render_architecture_lint.mjs",
+        architecture,
+        VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES,
+    )?;
+    require_gate_source_tokens(
+        "scripts/ci/voplay_render_architecture_lint.mjs",
+        architecture,
+        &[
+            "constructsRuntimeStage(rendererAuditSource, token)",
+            "execute_render_node!",
+            "SurfaceMaterialAtTrackPosition",
+            "Body\\.SetPosition",
+            "PrimitiveStats",
+        ],
+    )?;
+
+    require_gate_source_tokens(
+        "scripts/ci/blockkart_engine_boundary_lint.mjs",
+        blockkart_boundary,
+        VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES,
+    )?;
+    require_gate_source_tokens(
+        "scripts/ci/blockkart_engine_boundary_lint.mjs",
+        blockkart_boundary,
+        &[
+            "SurfaceMaterialAtTrackPosition",
+            "Body\\.SetPosition",
+            "BackendApplyHash",
+            "PrimitiveStats",
+            "w\\.vehicle\\.SetPose",
+        ],
+    )?;
+    Ok(())
+}
+
+fn require_gate_source_tokens(script: &str, source: &str, required: &[&str]) -> Result<()> {
+    for token in required {
+        if !source.contains(token) {
+            bail!("{script} must keep voplay industrial gate sentinel {token:?}");
+        }
+    }
+    Ok(())
+}
+
+fn reject_gate_source_tokens(script: &str, source: &str, forbidden: &[&str]) -> Result<()> {
+    for token in forbidden {
+        if source.contains(token) {
+            bail!("{script} must not weaken voplay industrial gate with sentinel {token:?}");
+        }
     }
     Ok(())
 }

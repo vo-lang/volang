@@ -1,15 +1,17 @@
 #!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join, posix } from 'node:path';
+import { join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const quickplayDir = join(root, 'apps/studio/public/quickplay/blockkart');
+const quickplayDir = resolve(process.env.QUICKPLAY_DIR ?? join(root, 'apps/studio/public/quickplay/blockkart'));
 const projectPath = join(quickplayDir, 'project.json');
 const depsPath = join(quickplayDir, 'deps.json');
 const provenancePath = join(quickplayDir, 'provenance.json');
 const quickplayTsPath = join(root, 'apps/studio/src/lib/quickplay.ts');
+const blockKartRoot = resolve(process.env.BLOCKKART_ROOT ?? join(root, '..', 'BlockKart'));
 
 const expected = {
   projectName: 'BlockKart',
@@ -26,6 +28,7 @@ const expected = {
     'eng/project.toml',
     'external:BlockKart',
     'module-cache:voplay',
+    'module-cache:vopack',
     'module-cache:vogui',
   ],
 };
@@ -43,6 +46,15 @@ function readJson(path) {
   }
 }
 
+function gitOutput(args, cwd) {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  } catch (error) {
+    const stderr = error?.stderr ? String(error.stderr).trim() : '';
+    fail(`git ${args.join(' ')} failed in ${cwd}: ${stderr || error.message}`);
+  }
+}
+
 function assert(condition, message) {
   if (!condition) {
     fail(message);
@@ -52,7 +64,7 @@ function assert(condition, message) {
 function localPathForArtifact(url) {
   const prefix = '/quickplay/blockkart/';
   assert(url.startsWith(prefix), `artifact URL must be quickplay-local: ${url}`);
-  return join(root, 'apps/studio/public/quickplay/blockkart', url.slice(prefix.length));
+  return join(quickplayDir, url.slice(prefix.length));
 }
 
 function moduleByName(modules, moduleName) {
@@ -149,6 +161,74 @@ function validatePackagedWebManifest(mod) {
   }
 }
 
+function parseReleaseManifest(mod) {
+  const source = requireModuleFile(mod, 'vo.release.json');
+  try {
+    return JSON.parse(source);
+  } catch (error) {
+    fail(`${mod.module} vo.release.json is invalid JSON: ${error.message}`);
+  }
+}
+
+function validateSourceEntry(entry, moduleName) {
+  assert(entry && typeof entry === 'object', `${moduleName} vo.web.json source entries must be objects`);
+  assert(typeof entry.path === 'string' && entry.path.length > 0, `${moduleName} vo.web.json source entry path must be a string`);
+  assert(Number.isInteger(entry.size) && entry.size >= 0, `${moduleName} vo.web.json source entry ${entry.path} size must be a non-negative integer`);
+  assert(sha256Field(entry.digest), `${moduleName} vo.web.json source entry ${entry.path} digest must be sha256`);
+}
+
+function shouldValidateEmbeddedSourceFile(file) {
+  if (file.content == null) return false;
+  return ![
+    '.vo-source-digest',
+    '.vo-version',
+    'vo.release.json',
+    'vo.web.json',
+  ].includes(file.path);
+}
+
+function validateReleaseSourceContracts(mod, lockedModule) {
+  const releaseFile = mod.files.find((file) => file.path === 'vo.release.json');
+  if (!releaseFile) return;
+
+  const releaseSource = moduleFileBytes(releaseFile);
+  const release = parseReleaseManifest(mod);
+  const webManifest = parseVoWebManifest(mod);
+  const sourceMarker = requireModuleFile(mod, '.vo-source-digest').trim();
+
+  assert(release.schema_version === 1, `${mod.module} vo.release.json schema_version must be 1`);
+  assert(release.module === mod.module, `${mod.module} vo.release.json module mismatch`);
+  assert(release.version === mod.version, `${mod.module} vo.release.json version mismatch`);
+  assert(release.commit === lockedModule.commit, `${mod.module} vo.release.json commit must match project vo.lock`);
+  assert(sha256Digest(releaseSource) === lockedModule.release_manifest, `${mod.module} vo.release.json digest must match project vo.lock`);
+  assert(release.source?.digest === lockedModule.source, `${mod.module} vo.release.json source digest must match project vo.lock`);
+  assert(sourceMarker === lockedModule.source, `${mod.module} .vo-source-digest must match project vo.lock`);
+  assert(sourceMarker === release.source?.digest, `${mod.module} .vo-source-digest must match vo.release.json source digest`);
+  validateReleaseArtifactContract(mod, release);
+
+  assert(webManifest.module === mod.module, `${mod.module} vo.web.json module mismatch`);
+  assert(webManifest.version === mod.version, `${mod.module} vo.web.json version mismatch`);
+  assert(webManifest.commit === lockedModule.commit, `${mod.module} vo.web.json commit must match project vo.lock`);
+  assert(Array.isArray(webManifest.source), `${mod.module} vo.web.json source must be an array`);
+  const seen = new Set();
+  for (const entry of webManifest.source) {
+    validateSourceEntry(entry, mod.module);
+    assert(!seen.has(entry.path), `${mod.module} vo.web.json duplicate source entry ${entry.path}`);
+    seen.add(entry.path);
+  }
+  assert(sourceSetDigest(webManifest.source) === webManifest.source_digest, `${mod.module} vo.web.json source_digest mismatch`);
+
+  const sourceByPath = new Map(webManifest.source.map((entry) => [entry.path, entry]));
+  for (const file of mod.files) {
+    if (!shouldValidateEmbeddedSourceFile(file)) continue;
+    const entry = sourceByPath.get(file.path);
+    assert(entry, `${mod.module} embeds source file not declared by vo.web.json: ${file.path}`);
+    const bytes = moduleFileBytes(file);
+    assert(bytes.byteLength === entry.size, `${mod.module} embedded source size mismatch for ${file.path}`);
+    assert(sha256Digest(bytes) === entry.digest, `${mod.module} embedded source digest mismatch for ${file.path}`);
+  }
+}
+
 function requireModuleFile(mod, path) {
   const file = mod.files.find((file) => file.path === path);
   assert(file, `${mod.module} must include ${path}`);
@@ -172,6 +252,63 @@ function parseVoModRequires(source) {
     }
   }
   return requires;
+}
+
+function parseVoModDeclaredArtifacts(source) {
+  const artifacts = [];
+  let table = '';
+  const wasm = {};
+  let nativeTarget = null;
+
+  function flushNativeTarget() {
+    if (!nativeTarget) return;
+    if (nativeTarget.target && nativeTarget.library) {
+      artifacts.push({
+        kind: 'extension-native',
+        target: nativeTarget.target,
+        name: nativeTarget.library,
+      });
+    }
+    nativeTarget = null;
+  }
+
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    const tableMatch = line.match(/^\[\[?([^\]]+)\]\]?$/);
+    if (tableMatch) {
+      flushNativeTarget();
+      table = tableMatch[1].trim();
+      if (table === 'extension.native.targets') {
+        nativeTarget = {};
+      }
+      continue;
+    }
+    const pair = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*"([^"]*)"$/);
+    if (!pair) continue;
+    const [, key, value] = pair;
+    if (table === 'extension.wasm' && (key === 'wasm' || key === 'js_glue')) {
+      wasm[key] = value;
+    } else if (table === 'extension.native.targets' && nativeTarget && (key === 'target' || key === 'library')) {
+      nativeTarget[key] = value;
+    }
+  }
+  flushNativeTarget();
+  if (wasm.wasm) {
+    artifacts.push({
+      kind: 'extension-wasm',
+      target: 'wasm32-unknown-unknown',
+      name: wasm.wasm,
+    });
+  }
+  if (wasm.js_glue) {
+    artifacts.push({
+      kind: 'extension-js-glue',
+      target: 'wasm32-unknown-unknown',
+      name: wasm.js_glue,
+    });
+  }
+  return artifacts.sort((a, b) => artifactKey(a).localeCompare(artifactKey(b)));
 }
 
 function parseVoLockValue(value) {
@@ -233,6 +370,29 @@ function artifactKey(artifact) {
   return `${artifact.kind}\u0000${artifact.target}\u0000${artifact.name}`;
 }
 
+function artifactLabel(artifact) {
+  return `${artifact.kind} ${artifact.target} ${artifact.name}`;
+}
+
+function validateReleaseArtifactContract(mod, release) {
+  const declared = parseVoModDeclaredArtifacts(requireModuleFile(mod, 'vo.mod'));
+  const published = (release.artifacts ?? [])
+    .map((artifact) => ({
+      kind: artifact.kind,
+      target: artifact.target,
+      name: artifact.name,
+    }))
+    .sort((a, b) => artifactKey(a).localeCompare(artifactKey(b)));
+  const declaredKeys = new Set(declared.map(artifactKey));
+  const publishedKeys = new Set(published.map(artifactKey));
+  const missing = declared.filter((artifact) => !publishedKeys.has(artifactKey(artifact)));
+  const undeclared = published.filter((artifact) => !declaredKeys.has(artifactKey(artifact)));
+  assert(
+    missing.length === 0 && undeclared.length === 0,
+    `${mod.module} vo.mod artifact contract mismatch: missing [${missing.map(artifactLabel).join(', ')}] undeclared [${undeclared.map(artifactLabel).join(', ')}]`,
+  );
+}
+
 function validateProjectDependencyContracts(project, deps) {
   const directRequires = parseVoModRequires(requireProjectFile(project, 'vo.mod'));
   const locked = parseVoLockResolved(requireProjectFile(project, 'vo.lock'));
@@ -258,6 +418,7 @@ function validateProjectDependencyContracts(project, deps) {
     assert(sha256Field(lockedModule.release_manifest), `project vo.lock must bind ${mod.module} release manifest digest`);
 
     const webManifest = parseVoWebManifest(mod);
+    validateReleaseSourceContracts(mod, lockedModule);
     assert(webManifest.module === mod.module, `${mod.module} vo.web.json module mismatch`);
     assert(webManifest.version === mod.version, `${mod.module} vo.web.json version mismatch`);
     assert(webManifest.commit === lockedModule.commit, `${mod.module} vo.web.json commit must match project vo.lock`);
@@ -275,6 +436,24 @@ function validateProjectDependencyContracts(project, deps) {
         `${mod.module} artifact digest mismatch for ${lockedArtifact.name}`,
       );
     }
+  }
+}
+
+function validateProjectSourceCheckout(project) {
+  assert(existsSync(blockKartRoot), `BlockKart source checkout is required at ${blockKartRoot}`);
+  assert(gitOutput(['rev-parse', '--is-inside-work-tree'], blockKartRoot) === 'true', `BlockKart source is not a git checkout: ${blockKartRoot}`);
+  const head = gitOutput(['rev-parse', 'HEAD'], blockKartRoot);
+  assert(head === project.commit, `BlockKart source HEAD ${head} does not match project commit ${project.commit}`);
+  const status = gitOutput(['status', '--porcelain'], blockKartRoot);
+  assert(status === '', `BlockKart source checkout must be clean:\n${status}`);
+
+  for (const file of project.files ?? []) {
+    const sourcePath = join(blockKartRoot, file.path);
+    assert(existsSync(sourcePath), `BlockKart source checkout is missing packaged file ${file.path}`);
+    const sourceBytes = readFileSync(sourcePath);
+    const packagedBytes = moduleFileBytes(file);
+    assert(sourceBytes.byteLength === packagedBytes.byteLength, `BlockKart source size mismatch for ${file.path}`);
+    assert(sha256Digest(sourceBytes) === sha256Digest(packagedBytes), `BlockKart source digest mismatch for ${file.path}`);
   }
 }
 
@@ -432,6 +611,7 @@ for (const moduleName of expected.requiredModules) {
 }
 validateProjectDependencyContracts(project, deps);
 validateProvenance(project, deps);
+validateProjectSourceCheckout(project);
 
 for (const mod of deps.modules) {
   assert(typeof mod.cacheDir === 'string' && mod.cacheDir.length > 0, `${mod.module} must have cacheDir`);
