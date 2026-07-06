@@ -1,19 +1,21 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const quickplayDir = resolve(process.env.QUICKPLAY_DIR ?? join(root, 'apps/studio/public/quickplay/blockkart'));
-const blockKartRoot = resolve(process.env.BLOCKKART_ROOT ?? join(root, '..', 'BlockKart'));
+const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const outDir = resolve(argValue('--out-dir') || process.env.QUICKPLAY_SOURCE_AUDIT_OUT_DIR || join(root, 'target/quickplay-source-audit'));
 
 const dependencyRepos = new Map([
-  ['github.com/vo-lang/vogui', resolve(process.env.VOGUI_ROOT ?? join(root, '..', 'vogui'))],
-  ['github.com/vo-lang/voplay', resolve(process.env.VOPLAY_ROOT ?? join(root, '..', 'voplay'))],
-  ['github.com/vo-lang/vopack', resolve(process.env.VOPACK_ROOT ?? join(root, '..', 'vopack'))],
+  ['github.com/vo-lang/vogui', requireRepoRoot('VOGUI_ROOT', 'vogui')],
+  ['github.com/vo-lang/voplay', requireRepoRoot('VOPLAY_ROOT', 'voplay')],
+  ['github.com/vo-lang/vopack', requireRepoRoot('VOPACK_ROOT', 'vopack')],
 ]);
 
 function argValue(name) {
@@ -104,6 +106,43 @@ function sourceSetDigest(entries) {
   return sha256(Buffer.from(JSON.stringify(entries), 'utf8'));
 }
 
+function packagedFilesDigest(files) {
+  const entries = (files ?? [])
+    .map((file) => {
+      const bytes = fileBytes(file);
+      return {
+        digest: sha256(bytes),
+        path: file.path,
+        size: bytes.byteLength,
+      };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+  return sourceSetDigest(entries);
+}
+
+function listSourceFiles(projectRoot, extension) {
+  const files = [];
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const file = join(dir, entry);
+      const stat = statSync(file);
+      if (stat.isDirectory()) {
+        if (entry === '.git' || entry === 'target' || entry === 'node_modules' || entry === 'tmp_checks') continue;
+        visit(file);
+      } else if (file.endsWith(extension)) {
+        const bytes = readFileSync(file);
+        files.push({
+          path: posix.normalize(file.slice(projectRoot.length + 1).split(/[\\/]/).join('/')),
+          digest: sha256(bytes),
+          size: bytes.byteLength,
+        });
+      }
+    }
+  };
+  visit(projectRoot);
+  return files.sort((a, b) => a.path.localeCompare(b.path));
+}
+
 function shouldValidateEmbeddedSource(file) {
   if (file.content == null) return false;
   return !['.vo-source-digest', '.vo-version', 'vo.release.json', 'vo.web.json'].includes(file.path);
@@ -142,10 +181,19 @@ function repoSourceBytesForAudit(mod, files, entry, sourceBytes) {
   return sourceBytes;
 }
 
-function auditBlockKart(project, issues) {
+function auditBlockKart(project, provenance, issues) {
   if (!existsSync(blockKartRoot)) {
     issue(issues, 'BlockKart', 'Source', 'P0', 'BlockKart source checkout is missing', { blockKartRoot });
     return;
+  }
+  if (provenance?.schemaVersion !== 2) {
+    issue(issues, 'BlockKart', 'Provenance', 'P0', 'Quickplay provenance must use schema v2', { schemaVersion: provenance?.schemaVersion ?? null });
+  }
+  if (provenance?.project?.commit && provenance.project.commit !== project.commit) {
+    issue(issues, 'BlockKart', 'Provenance', 'P0', 'Project provenance commit does not match project package', { expected: project.commit, found: provenance.project.commit });
+  }
+  if (provenance?.project?.filesDigest && provenance.project.filesDigest !== packagedFilesDigest(project.files)) {
+    issue(issues, 'BlockKart', 'Provenance', 'P0', 'Project provenance filesDigest does not match project package files', { expected: packagedFilesDigest(project.files), found: provenance.project.filesDigest });
   }
   const inside = tryGit(['rev-parse', '--is-inside-work-tree'], blockKartRoot);
   if (!inside.ok || inside.stdout !== 'true') {
@@ -157,11 +205,58 @@ function auditBlockKart(project, issues) {
     issue(issues, 'BlockKart', 'Source', 'P0', 'BlockKart source HEAD does not match packaged commit', { expected: project.commit, found: head });
   }
   const status = git(['status', '--porcelain'], blockKartRoot);
-  if (status !== '') {
-    issue(issues, 'BlockKart', 'Source', 'P0', 'BlockKart source checkout is dirty', { status });
+  const dirty = status !== '';
+  if (dirty) {
+    issue(issues, 'BlockKart', 'Source', 'P0', 'BlockKart source checkout must be clean for strict quickplay source audit', { status });
+  }
+  if (dirty && provenance?.project?.dirty !== true) {
+    issue(issues, 'BlockKart', 'Source', 'P0', 'BlockKart source checkout is dirty but provenance project.dirty is not true', { status, provenanceDirty: provenance?.project?.dirty ?? null });
+  }
+  if (!dirty && provenance?.project?.dirty === true) {
+    issue(issues, 'BlockKart', 'Source', 'P0', 'BlockKart provenance project.dirty is true but source checkout is clean');
+  }
+  if (provenance?.project?.dirty === true) {
+    issue(issues, 'BlockKart', 'Provenance', 'P0', 'BlockKart provenance project.dirty must be false for strict source audit');
   }
 
   const packaged = new Map((project.files ?? []).map((file) => [file.path, file]));
+  const sourceFiles = listSourceFiles(blockKartRoot, '.vo');
+  const packagedVo = new Set([...packaged.keys()].filter((file) => file.endsWith('.vo')));
+  const sourceAllowlist = new Map((provenance?.project?.sourceAllowlist ?? project.sourceAllowlist ?? [])
+    .map((entry) => [entry.path, entry]));
+  const unpackaged = sourceFiles
+    .filter((entry) => !packagedVo.has(entry.path))
+    .filter((entry) => !sourceAllowlist.has(entry.path));
+  if (unpackaged.length > 0) {
+    issue(issues, 'BlockKart', 'SourceCoverage', 'P0', 'BlockKart source files are missing from quickplay package and have no allowlist reason', { unpackaged });
+  }
+  const invalidAllowlist = [...sourceAllowlist.values()].filter((entry) => (
+    !entry?.path
+    || typeof entry.reason !== 'string'
+    || entry.reason.trim().length < 12
+    || typeof entry.expiresAt !== 'string'
+    || Number.isNaN(Date.parse(entry.expiresAt))
+    || Date.parse(entry.expiresAt) <= Date.now()
+    || !sourceFiles.some((source) => source.path === entry.path)
+  ));
+  if (invalidAllowlist.length > 0) {
+    issue(issues, 'BlockKart', 'SourceCoverage', 'P0', 'BlockKart quickplay source allowlist entries must name an existing source file and include a reason plus future expiresAt', { invalidAllowlist });
+  }
+  const manifestSourceFiles = project.sourceFiles ?? provenance?.project?.sourceFiles ?? null;
+  if (!Array.isArray(manifestSourceFiles)) {
+    issue(issues, 'BlockKart', 'SourceCoverage', 'P0', 'Quickplay package manifest must record BlockKart source file digest list', { expected: 'project.sourceFiles[] or provenance.project.sourceFiles[]' });
+  } else if (sourceSetDigest(manifestSourceFiles) !== sourceSetDigest(sourceFiles)) {
+    issue(issues, 'BlockKart', 'SourceCoverage', 'P0', 'Quickplay package source digest list does not match BlockKart/**/*.vo', {
+      expected: sourceSetDigest(sourceFiles),
+      found: sourceSetDigest(manifestSourceFiles),
+    });
+  }
+  if (provenance?.project?.sourceFilesDigest !== sourceSetDigest(sourceFiles)) {
+    issue(issues, 'BlockKart', 'SourceCoverage', 'P0', 'Quickplay provenance sourceFilesDigest does not match BlockKart/**/*.vo', {
+      expected: sourceSetDigest(sourceFiles),
+      found: provenance?.project?.sourceFilesDigest ?? null,
+    });
+  }
   for (const [path, file] of packaged) {
     const sourcePath = join(blockKartRoot, path);
     if (!existsSync(sourcePath)) {
@@ -184,7 +279,11 @@ function auditBlockKart(project, issues) {
   }
 }
 
-function auditDependencyRelease(mod, locked, issues) {
+function auditDependencyRelease(mod, locked, provenanceDependency, issues) {
+  const dependencyDirty = provenanceDependency?.dirty === true;
+  if (dependencyDirty) {
+    issue(issues, mod.module, 'Provenance', 'P0', 'Dependency provenance dirty flag must be false for strict source audit', { module: mod.module });
+  }
   const files = new Map((mod.files ?? []).map((file) => [file.path, file]));
   const releaseFile = files.get('vo.release.json');
   const webFile = files.get('vo.web.json');
@@ -254,12 +353,19 @@ function auditDependencyRelease(mod, locked, issues) {
   }
 }
 
-function auditDependencyRepoCommit(mod, locked, issues) {
+function auditDependencyRepoCommit(mod, locked, provenanceDependency, issues) {
   if (!locked?.commit) return;
   const repoRoot = dependencyRepos.get(mod.module);
   if (!repoRoot || !existsSync(repoRoot)) {
     issue(issues, mod.module, 'SourceRepo', 'P1', 'Dependency source repo checkout is missing', { repoRoot });
     return;
+  }
+  const head = tryGit(['rev-parse', 'HEAD'], repoRoot);
+  if (provenanceDependency?.dirty === true) {
+    if (!head.ok || head.stdout !== locked.commit) {
+      issue(issues, mod.module, 'SourceRepo', 'P0', 'Dirty dependency source repo HEAD does not match locked commit', { expected: locked.commit, found: head.ok ? head.stdout : null, repoRoot, error: head.error });
+      return;
+    }
   }
   const commitType = tryGit(['cat-file', '-t', locked.commit], repoRoot);
   if (!commitType.ok || commitType.stdout !== 'commit') {
@@ -281,7 +387,8 @@ function auditDependencyRepoCommit(mod, locked, issues) {
       issue(issues, mod.module, 'SourceRepo', 'P0', 'Locked dependency commit is missing release source file', { commit: locked.commit, path: entry.path });
       continue;
     }
-    const expectedBytes = repoSourceBytesForAudit(mod, files, entry, source.bytes);
+    const sourceBytes = source.bytes;
+    const expectedBytes = repoSourceBytesForAudit(mod, files, entry, sourceBytes);
     if (expectedBytes.byteLength !== entry.size || sha256(expectedBytes) !== entry.digest) {
       issue(issues, mod.module, 'SourceRepo', 'P0', 'Locked dependency commit source differs from vo.web.json source entry', {
         commit: locked.commit,
@@ -309,26 +416,68 @@ function markdown(report) {
 
 const project = readJson(join(quickplayDir, 'project.json'));
 const deps = readJson(join(quickplayDir, 'deps.json'));
+const provenance = readJson(join(quickplayDir, 'provenance.json'));
 const issues = [];
-auditBlockKart(project, issues);
+auditBlockKart(project, provenance, issues);
 const projectFiles = new Map((project.files ?? []).map((file) => [file.path, file]));
 const locked = parseVoLockResolved(fileBytes(projectFiles.get('vo.lock')).toString('utf8'));
+const provenanceDependencies = new Map((provenance.dependencies ?? []).map((entry) => [entry.module, entry]));
 for (const mod of deps.modules ?? []) {
   const lockedModule = locked.get(mod.module);
   if (!lockedModule) {
     issue(issues, mod.module, 'Lock', 'P0', 'Dependency module is missing from project vo.lock', { version: mod.version });
     continue;
   }
-  auditDependencyRelease(mod, lockedModule, issues);
-  auditDependencyRepoCommit(mod, lockedModule, issues);
+  const provenanceDependency = provenanceDependencies.get(mod.module);
+  auditDependencyRelease(mod, lockedModule, provenanceDependency, issues);
+  auditDependencyRepoCommit(mod, lockedModule, provenanceDependency, issues);
 }
 
+const generatedAt = new Date().toISOString();
 const report = {
   schemaVersion: 1,
+  kind: 'quickplay.sourceAuditReport',
   status: issues.length === 0 ? 'ok' : 'failed',
+  generatedAt,
+  freshEvidence: sourceBoundEvidence({
+    gate: 'quickplay-source-audit',
+    generatedAt,
+    root,
+    repos: [
+      { name: 'volang', root },
+      { name: 'BlockKart', root: blockKartRoot },
+      ...[...dependencyRepos.entries()].map(([module, repoRoot]) => ({ name: module, root: repoRoot })),
+    ],
+    gateFiles: [
+      'scripts/ci/quickplay_source_audit.mjs',
+      'scripts/ci/repo_roots.mjs',
+      'scripts/ci/source_bound_evidence.mjs',
+      'apps/studio/scripts/package_blockkart_quickplay.mjs',
+      'eng/tasks.toml',
+      'eng/artifacts.toml',
+      'eng/project.toml',
+    ],
+    artifacts: [quickplayDir],
+  }),
   quickplayDir,
   blockKartRoot,
-  checkedAt: new Date().toISOString(),
+  checkedAt: generatedAt,
+  sourceFiles: listSourceFiles(blockKartRoot, '.vo'),
+  packagedSources: (project.files ?? [])
+    .filter((file) => file.path.endsWith('.vo'))
+    .map((file) => {
+      const bytes = fileBytes(file);
+      return {
+        path: file.path,
+        digest: sha256(bytes),
+        size: bytes.byteLength,
+      };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path)),
+  packageManifest: {
+    sourceFiles: project.sourceFiles ?? null,
+    sourceAllowlist: project.sourceAllowlist ?? provenance.project?.sourceAllowlist ?? [],
+  },
   issues,
 };
 

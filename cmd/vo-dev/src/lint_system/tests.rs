@@ -16,6 +16,7 @@ fn task(name: &str) -> Task {
         env: BTreeMap::new(),
         needs: vec![],
         repo: None,
+        repos: vec![],
         internal: false,
         timeout_sec: Some(60),
         platforms: vec![],

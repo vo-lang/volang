@@ -1,14 +1,32 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "artifact": "playground.generated-docs",
   "path": "apps/playground-legacy/src/assets/docs/generated",
-  "generator": {
+  "task": {
+    "id": "docs-sync",
     "command": [
       "vo-dev",
       "task",
       "run",
       "task:docs-sync"
     ]
+  },
+  "generator": {
+    "command": [
+      "vo-dev",
+      "task",
+      "run",
+      "task:docs-sync"
+    ],
+    "script": "scripts/ci/docs_sync.mjs",
+    "version": 2
+  },
+  "toolchain": {
+    "node": "v24.16.0",
+    "voDev": "ae6758cd9dfc71b24b92b013732852b443e5b68d"
+  },
+  "sourceRoots": {
+    "volang": "/Users/macm1/code/github/volang"
   },
   "inputs": [
     "scripts/ci/docs_sync.mjs",
@@ -87,6 +105,48 @@
       "source_digest": "sha256:7aba9c71d862a3efb599e62988e31adc68163a619abdd8a3b16965bb9266e4a2",
       "generated_at": "2026-06-27T16:41:26+08:00",
       "generator": "node scripts/ci/docs_sync.mjs"
+    }
+  ],
+  "outputs": [
+    {
+      "digest": "sha256:fd14dc534edef6fb5d12c1b1964c04183f3d3394369b52e391c67e94fc99b79a",
+      "path": "vo-for-gophers.md",
+      "size": 1827
+    },
+    {
+      "digest": "sha256:0aff88a0eed48a204cdc227dc88449c3133c62c882c764d7cab1537068a96bb5",
+      "path": "spec/language.md",
+      "size": 50641
+    },
+    {
+      "digest": "sha256:b31e3c50c5d83754e8e19d919f2b7d47398e4cf3e725a89ef30e313280ad0058",
+      "path": "spec/dynamic.md",
+      "size": 16831
+    },
+    {
+      "digest": "sha256:7c245628166239b50bcc0911983fd215e57dd69f6b03ceaf6bec141ebce27add",
+      "path": "spec/module.md",
+      "size": 56618
+    },
+    {
+      "digest": "sha256:c85d9f8083e98849d25c3567c8063b459be4678530179f0fa07913c8526958c4",
+      "path": "spec/native-ffi.md",
+      "size": 11079
+    },
+    {
+      "digest": "sha256:fe7e27f7be72c3f07be61a5b2d0f1d3a4a62d0a78aafa4e3d487fb8227e2483f",
+      "path": "spec/memory-model-and-instructions.md",
+      "size": 35290
+    },
+    {
+      "digest": "sha256:75f2b24c28e14cdfffef9a29c05c1551cc0139db7feca1fb6e949afc667fef45",
+      "path": "spec/vm-bytecode.md",
+      "size": 30748
+    },
+    {
+      "digest": "sha256:b14c134a0085375c10aeb7b8675715ac22936d1b5d7b055c95e1ff01a0b418fa",
+      "path": "spec/vm-jit-design.md",
+      "size": 9566
     }
   ]
 }

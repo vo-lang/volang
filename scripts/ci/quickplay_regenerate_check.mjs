@@ -1,16 +1,59 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const checkedDir = path.join(root, 'apps/studio/public/quickplay/blockkart');
 const generator = path.join(root, 'apps/studio/scripts/package_blockkart_quickplay.mjs');
+const reportDir = path.resolve(process.env.QUICKPLAY_REGENERATE_CHECK_OUT_DIR || path.join(root, 'target/quickplay-regenerate-check'));
+const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
+const dependencyRepos = [
+  { name: 'github.com/vo-lang/vogui', root: requireRepoRoot('VOGUI_ROOT', 'vogui') },
+  { name: 'github.com/vo-lang/voplay', root: requireRepoRoot('VOPLAY_ROOT', 'voplay') },
+  { name: 'github.com/vo-lang/vopack', root: requireRepoRoot('VOPACK_ROOT', 'vopack') },
+];
 
-function fail(message) {
+function writeReport(status, details = {}) {
+  const generatedAt = new Date().toISOString();
+  mkdirSync(reportDir, { recursive: true });
+  writeFileSync(path.join(reportDir, 'report.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    kind: 'quickplay.regenerateCheckReport',
+    gate: 'quickplay-regenerate-check',
+    status,
+    generatedAt,
+    freshEvidence: sourceBoundEvidence({
+      gate: 'quickplay-regenerate-check',
+      generatedAt,
+      root,
+      repos: [
+        { name: 'volang', root },
+        { name: 'BlockKart', root: blockKartRoot },
+        ...dependencyRepos,
+      ],
+      gateFiles: [
+        'scripts/ci/quickplay_regenerate_check.mjs',
+        'scripts/ci/repo_roots.mjs',
+        'scripts/ci/source_bound_evidence.mjs',
+        'apps/studio/scripts/package_blockkart_quickplay.mjs',
+        'eng/tasks.toml',
+        'eng/project.toml',
+      ],
+      artifacts: [checkedDir],
+    }),
+    checkedDir,
+    ...details,
+  }, null, 2)}\n`);
+}
+
+function fail(message, details = {}) {
+  writeReport('failed', { message, ...details });
   console.error(`quickplay regenerate check: ${message}`);
   process.exit(1);
 }
@@ -78,12 +121,17 @@ try {
     maxBuffer: 20 * 1024 * 1024,
   });
   if (result.status !== 0) {
-    fail(`generator failed with status ${result.status}\n${result.stdout}${result.stderr}`);
+    fail(`generator failed with status ${result.status}\n${result.stdout}${result.stderr}`, {
+      generatorStatus: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
   }
   const diff = compareDirs(outDir, checkedDir);
   if (diff.missing.length > 0 || diff.extra.length > 0 || diff.changed.length > 0) {
-    fail(`regenerated package differs from checked-in artifact\n${JSON.stringify(diff, null, 2)}`);
+    fail(`regenerated package differs from checked-in artifact\n${JSON.stringify(diff, null, 2)}`, { diff });
   }
+  writeReport('ok', { diff });
   console.log('quickplay regenerate check: ok');
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });

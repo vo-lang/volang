@@ -2,7 +2,8 @@ use crate::config::{load_tasks, load_toolchains, NodeWorkspace, Task, ToolchainF
 use crate::first_party::{ci_checkout_for, CiCheckout};
 use crate::github_output::write_github_output;
 use crate::task_graph::{
-    collect_task_node_workspaces, resolve_selector, task_map, task_tools_recursive,
+    collect_task_node_workspaces, resolve_selector, task_map, task_repos_recursive_from_map,
+    task_tools_recursive,
 };
 use crate::task_planner::{plan_tasks, PlanArgs};
 use crate::task_runner::final_gate_selectors;
@@ -112,6 +113,28 @@ struct MatrixRow {
     checkout: bool,
     checkout_repository: String,
     checkout_path: String,
+    checkout_expected_commit: String,
+    checkouts: Vec<CiCheckout>,
+    checkout_vogui: bool,
+    checkout_vogui_repository: String,
+    checkout_vogui_path: String,
+    checkout_vogui_expected_commit: String,
+    checkout_voplay: bool,
+    checkout_voplay_repository: String,
+    checkout_voplay_path: String,
+    checkout_voplay_expected_commit: String,
+    checkout_vopack: bool,
+    checkout_vopack_repository: String,
+    checkout_vopack_path: String,
+    checkout_vopack_expected_commit: String,
+    checkout_vostore: bool,
+    checkout_vostore_repository: String,
+    checkout_vostore_path: String,
+    checkout_vostore_expected_commit: String,
+    checkout_blockkart: bool,
+    checkout_blockkart_repository: String,
+    checkout_blockkart_path: String,
+    checkout_blockkart_expected_commit: String,
     repos: Vec<String>,
     tools: Vec<String>,
     rust: bool,
@@ -128,6 +151,8 @@ struct MatrixRow {
 #[derive(Debug, Serialize)]
 pub(crate) struct CiMetadata {
     tasks: Vec<String>,
+    repos: Vec<String>,
+    checkouts: Vec<CiCheckout>,
     tools: Vec<String>,
     rust: bool,
     python: bool,
@@ -141,12 +166,35 @@ pub(crate) struct CiMetadata {
     checkout: bool,
     checkout_repository: String,
     checkout_path: String,
+    checkout_expected_commit: String,
+    checkout_vogui: bool,
+    checkout_vogui_repository: String,
+    checkout_vogui_path: String,
+    checkout_vogui_expected_commit: String,
+    checkout_voplay: bool,
+    checkout_voplay_repository: String,
+    checkout_voplay_path: String,
+    checkout_voplay_expected_commit: String,
+    checkout_vopack: bool,
+    checkout_vopack_repository: String,
+    checkout_vopack_path: String,
+    checkout_vopack_expected_commit: String,
+    checkout_vostore: bool,
+    checkout_vostore_repository: String,
+    checkout_vostore_path: String,
+    checkout_vostore_expected_commit: String,
+    checkout_blockkart: bool,
+    checkout_blockkart_repository: String,
+    checkout_blockkart_path: String,
+    checkout_blockkart_expected_commit: String,
 }
 
 impl CiMetadata {
     pub(crate) fn github_outputs(&self) -> Result<Vec<(&str, String)>> {
         Ok(vec![
             ("tasks", serde_json::to_string(&self.tasks)?),
+            ("repos", serde_json::to_string(&self.repos)?),
+            ("checkouts", serde_json::to_string(&self.checkouts)?),
             ("tools", serde_json::to_string(&self.tools)?),
             ("rust", self.rust.to_string()),
             ("python", self.python.to_string()),
@@ -160,6 +208,63 @@ impl CiMetadata {
             ("checkout", self.checkout.to_string()),
             ("checkout_repository", self.checkout_repository.clone()),
             ("checkout_path", self.checkout_path.clone()),
+            (
+                "checkout_expected_commit",
+                self.checkout_expected_commit.clone(),
+            ),
+            ("checkout_vogui", self.checkout_vogui.to_string()),
+            (
+                "checkout_vogui_repository",
+                self.checkout_vogui_repository.clone(),
+            ),
+            ("checkout_vogui_path", self.checkout_vogui_path.clone()),
+            (
+                "checkout_vogui_expected_commit",
+                self.checkout_vogui_expected_commit.clone(),
+            ),
+            ("checkout_voplay", self.checkout_voplay.to_string()),
+            (
+                "checkout_voplay_repository",
+                self.checkout_voplay_repository.clone(),
+            ),
+            ("checkout_voplay_path", self.checkout_voplay_path.clone()),
+            (
+                "checkout_voplay_expected_commit",
+                self.checkout_voplay_expected_commit.clone(),
+            ),
+            ("checkout_vopack", self.checkout_vopack.to_string()),
+            (
+                "checkout_vopack_repository",
+                self.checkout_vopack_repository.clone(),
+            ),
+            ("checkout_vopack_path", self.checkout_vopack_path.clone()),
+            (
+                "checkout_vopack_expected_commit",
+                self.checkout_vopack_expected_commit.clone(),
+            ),
+            ("checkout_vostore", self.checkout_vostore.to_string()),
+            (
+                "checkout_vostore_repository",
+                self.checkout_vostore_repository.clone(),
+            ),
+            ("checkout_vostore_path", self.checkout_vostore_path.clone()),
+            (
+                "checkout_vostore_expected_commit",
+                self.checkout_vostore_expected_commit.clone(),
+            ),
+            ("checkout_blockkart", self.checkout_blockkart.to_string()),
+            (
+                "checkout_blockkart_repository",
+                self.checkout_blockkart_repository.clone(),
+            ),
+            (
+                "checkout_blockkart_path",
+                self.checkout_blockkart_path.clone(),
+            ),
+            (
+                "checkout_blockkart_expected_commit",
+                self.checkout_blockkart_expected_commit.clone(),
+            ),
         ])
     }
 }
@@ -191,9 +296,11 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
             .get(name)
             .ok_or_else(|| anyhow!("unknown task for matrix: {name}"))?;
         let tools = task_tools_recursive(root, name)?;
-        let repos = task_repos_recursive(name, &task_map)?;
+        let repos = task_repos_recursive_from_map(&task_map, name)?;
         let repo = repos.iter().next().cloned().unwrap_or_default();
-        let checkout = matrix_checkout(root, name, &repos)?;
+        let checkouts = ci_checkouts(root, &repos)?;
+        let checkout = legacy_checkout(&checkouts);
+        let named_checkouts = NamedCheckoutFields::from_checkouts(&checkouts);
         include.push(MatrixRow {
             task: name.clone(),
             title: task.title.clone(),
@@ -202,6 +309,28 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
             checkout: checkout.enabled,
             checkout_repository: checkout.repository,
             checkout_path: checkout.path,
+            checkout_expected_commit: checkout.expected_commit,
+            checkouts,
+            checkout_vogui: named_checkouts.vogui.enabled,
+            checkout_vogui_repository: named_checkouts.vogui.repository,
+            checkout_vogui_path: named_checkouts.vogui.path,
+            checkout_vogui_expected_commit: named_checkouts.vogui.expected_commit,
+            checkout_voplay: named_checkouts.voplay.enabled,
+            checkout_voplay_repository: named_checkouts.voplay.repository,
+            checkout_voplay_path: named_checkouts.voplay.path,
+            checkout_voplay_expected_commit: named_checkouts.voplay.expected_commit,
+            checkout_vopack: named_checkouts.vopack.enabled,
+            checkout_vopack_repository: named_checkouts.vopack.repository,
+            checkout_vopack_path: named_checkouts.vopack.path,
+            checkout_vopack_expected_commit: named_checkouts.vopack.expected_commit,
+            checkout_vostore: named_checkouts.vostore.enabled,
+            checkout_vostore_repository: named_checkouts.vostore.repository,
+            checkout_vostore_path: named_checkouts.vostore.path,
+            checkout_vostore_expected_commit: named_checkouts.vostore.expected_commit,
+            checkout_blockkart: named_checkouts.blockkart.enabled,
+            checkout_blockkart_repository: named_checkouts.blockkart.repository,
+            checkout_blockkart_path: named_checkouts.blockkart.path,
+            checkout_blockkart_expected_commit: named_checkouts.blockkart.expected_commit,
             rust: true,
             python: tools.contains("python"),
             node: tools.contains("node"),
@@ -248,14 +377,18 @@ pub(crate) fn ci_metadata_for(root: &Path, task_names: &[String]) -> Result<CiMe
     let mut repos = BTreeSet::new();
     for name in task_names {
         tools.extend(task_tools_recursive(root, name)?);
-        repos.extend(task_repos_recursive(name, &task_map)?);
+        repos.extend(task_repos_recursive_from_map(&task_map, name)?);
     }
-    let checkout = metadata_checkout(root, &repos)?;
+    let checkouts = ci_checkouts(root, &repos)?;
+    let checkout = legacy_checkout(&checkouts);
+    let named_checkouts = NamedCheckoutFields::from_checkouts(&checkouts);
     let python = tools.contains("python");
     let node = tools.contains("node");
     let wasm_pack = tools.contains("wasm-pack");
     Ok(CiMetadata {
         tasks: task_names.to_vec(),
+        repos: repos.iter().cloned().collect(),
+        checkouts,
         tools: tools.iter().cloned().collect(),
         rust: true,
         python,
@@ -285,6 +418,27 @@ pub(crate) fn ci_metadata_for(root: &Path, task_names: &[String]) -> Result<CiMe
         checkout: checkout.enabled,
         checkout_repository: checkout.repository,
         checkout_path: checkout.path,
+        checkout_expected_commit: checkout.expected_commit,
+        checkout_vogui: named_checkouts.vogui.enabled,
+        checkout_vogui_repository: named_checkouts.vogui.repository,
+        checkout_vogui_path: named_checkouts.vogui.path,
+        checkout_vogui_expected_commit: named_checkouts.vogui.expected_commit,
+        checkout_voplay: named_checkouts.voplay.enabled,
+        checkout_voplay_repository: named_checkouts.voplay.repository,
+        checkout_voplay_path: named_checkouts.voplay.path,
+        checkout_voplay_expected_commit: named_checkouts.voplay.expected_commit,
+        checkout_vopack: named_checkouts.vopack.enabled,
+        checkout_vopack_repository: named_checkouts.vopack.repository,
+        checkout_vopack_path: named_checkouts.vopack.path,
+        checkout_vopack_expected_commit: named_checkouts.vopack.expected_commit,
+        checkout_vostore: named_checkouts.vostore.enabled,
+        checkout_vostore_repository: named_checkouts.vostore.repository,
+        checkout_vostore_path: named_checkouts.vostore.path,
+        checkout_vostore_expected_commit: named_checkouts.vostore.expected_commit,
+        checkout_blockkart: named_checkouts.blockkart.enabled,
+        checkout_blockkart_repository: named_checkouts.blockkart.repository,
+        checkout_blockkart_path: named_checkouts.blockkart.path,
+        checkout_blockkart_expected_commit: named_checkouts.blockkart.expected_commit,
     })
 }
 
@@ -352,7 +506,7 @@ fn node_workspace_ci_lockfile(root: &Path, workspace: &NodeWorkspace) -> Result<
     }
 }
 
-fn matrix_checkout(root: &Path, task_name: &str, repos: &BTreeSet<String>) -> Result<CiCheckout> {
+fn ci_checkouts(root: &Path, repos: &BTreeSet<String>) -> Result<Vec<CiCheckout>> {
     let mut checkouts = Vec::new();
     for repo in repos {
         let checkout = ci_checkout_for(root, repo)?;
@@ -360,88 +514,41 @@ fn matrix_checkout(root: &Path, task_name: &str, repos: &BTreeSet<String>) -> Re
             checkouts.push(checkout);
         }
     }
-    match checkouts.len() {
-        0 => Ok(CiCheckout {
-            repo: String::new(),
-            repository: String::new(),
-            path: String::new(),
-            enabled: false,
-        }),
-        1 => Ok(checkouts.remove(0)),
-        _ => bail!(
-            "task {task_name} requires multiple CI checkouts: {}",
-            checkouts
-                .iter()
-                .map(|item| item.repo.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+    Ok(checkouts)
 }
 
-fn metadata_checkout(root: &Path, repos: &BTreeSet<String>) -> Result<CiCheckout> {
-    let mut checkouts = Vec::new();
-    for repo in repos {
-        let checkout = ci_checkout_for(root, repo)?;
-        if checkout.enabled {
-            checkouts.push(checkout);
+fn legacy_checkout(checkouts: &[CiCheckout]) -> CiCheckout {
+    checkouts.first().cloned().unwrap_or_else(|| CiCheckout {
+        repo: String::new(),
+        repository: String::new(),
+        path: String::new(),
+        expected_commit: String::new(),
+        enabled: false,
+    })
+}
+
+#[derive(Default)]
+struct NamedCheckoutFields {
+    vogui: CiCheckout,
+    voplay: CiCheckout,
+    vopack: CiCheckout,
+    vostore: CiCheckout,
+    blockkart: CiCheckout,
+}
+
+impl NamedCheckoutFields {
+    fn from_checkouts(checkouts: &[CiCheckout]) -> Self {
+        let mut fields = Self::default();
+        for checkout in checkouts {
+            match checkout.repo.as_str() {
+                "vogui" => fields.vogui = checkout.clone(),
+                "voplay" => fields.voplay = checkout.clone(),
+                "vopack" => fields.vopack = checkout.clone(),
+                "vostore" => fields.vostore = checkout.clone(),
+                "BlockKart" => fields.blockkart = checkout.clone(),
+                _ => {}
+            }
         }
+        fields
     }
-    match checkouts.len() {
-        0 => Ok(CiCheckout {
-            repo: String::new(),
-            repository: String::new(),
-            path: String::new(),
-            enabled: false,
-        }),
-        1 => Ok(checkouts.remove(0)),
-        _ => bail!(
-            "CI metadata requires multiple checkouts; use ci matrix instead: {}",
-            checkouts
-                .iter()
-                .map(|item| item.repo.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
-
-fn task_repos_recursive(name: &str, task_map: &BTreeMap<String, Task>) -> Result<BTreeSet<String>> {
-    let mut repos = BTreeSet::new();
-    let mut stack = Vec::new();
-    let mut seen = HashSet::new();
-    collect_task_repos(name, task_map, &mut repos, &mut stack, &mut seen)?;
-    Ok(repos)
-}
-
-fn collect_task_repos(
-    name: &str,
-    task_map: &BTreeMap<String, Task>,
-    repos: &mut BTreeSet<String>,
-    stack: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) -> Result<()> {
-    if seen.contains(name) {
-        return Ok(());
-    }
-    if stack.iter().any(|item| item == name) {
-        stack.push(name.to_string());
-        bail!(
-            "task dependency cycle while collecting repos: {}",
-            stack.join(" -> ")
-        );
-    }
-    stack.push(name.to_string());
-    let task = task_map
-        .get(name)
-        .ok_or_else(|| anyhow!("unknown task for repo collection: {name}"))?;
-    for dep in &task.needs {
-        collect_task_repos(dep, task_map, repos, stack, seen)?;
-    }
-    if let Some(repo) = &task.repo {
-        repos.insert(repo.clone());
-    }
-    stack.pop();
-    seen.insert(name.to_string());
-    Ok(())
 }

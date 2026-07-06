@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const quickplayDir = resolve(process.env.QUICKPLAY_DIR ?? join(root, 'apps/studio/public/quickplay/blockkart'));
@@ -11,7 +13,13 @@ const projectPath = join(quickplayDir, 'project.json');
 const depsPath = join(quickplayDir, 'deps.json');
 const provenancePath = join(quickplayDir, 'provenance.json');
 const quickplayTsPath = join(root, 'apps/studio/src/lib/quickplay.ts');
-const blockKartRoot = resolve(process.env.BLOCKKART_ROOT ?? join(root, '..', 'BlockKart'));
+const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
+const outDir = resolve(process.env.QUICKPLAY_VALIDATE_OUT_DIR || join(root, 'target/quickplay-validate'));
+const dependencyRepos = [
+  { name: 'github.com/vo-lang/vogui', root: requireRepoRoot('VOGUI_ROOT', 'vogui') },
+  { name: 'github.com/vo-lang/voplay', root: requireRepoRoot('VOPLAY_ROOT', 'voplay') },
+  { name: 'github.com/vo-lang/vopack', root: requireRepoRoot('VOPACK_ROOT', 'vopack') },
+];
 
 const expected = {
   projectName: 'BlockKart',
@@ -33,7 +41,43 @@ const expected = {
   ],
 };
 
+function writeReport(status, details = {}) {
+  const generatedAt = new Date().toISOString();
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, 'report.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    kind: 'quickplay.validateReport',
+    gate: 'quickplay-validate',
+    status,
+    generatedAt,
+    freshEvidence: sourceBoundEvidence({
+      gate: 'quickplay-validate',
+      generatedAt,
+      root,
+      repos: [
+        { name: 'volang', root },
+        { name: 'BlockKart', root: blockKartRoot },
+        ...dependencyRepos,
+      ],
+      gateFiles: [
+        'scripts/ci/quickplay_validate.mjs',
+        'scripts/ci/repo_roots.mjs',
+        'scripts/ci/source_bound_evidence.mjs',
+        'apps/studio/scripts/package_blockkart_quickplay.mjs',
+        'apps/studio/src/lib/quickplay.ts',
+        'eng/artifacts.toml',
+        'eng/tasks.toml',
+        'eng/project.toml',
+      ],
+      artifacts: [quickplayDir],
+    }),
+    quickplayDir,
+    ...details,
+  }, null, 2)}\n`);
+}
+
 function fail(message) {
+  writeReport('failed', { message });
   console.error(`quickplay validate: ${message}`);
   process.exit(1);
 }
@@ -53,6 +97,10 @@ function gitOutput(args, cwd) {
     const stderr = error?.stderr ? String(error.stderr).trim() : '';
     fail(`git ${args.join(' ')} failed in ${cwd}: ${stderr || error.message}`);
   }
+}
+
+function gitDirty(cwd) {
+  return gitOutput(['status', '--porcelain'], cwd) !== '';
 }
 
 function assert(condition, message) {
@@ -99,6 +147,29 @@ function moduleFileBytes(file) {
 
 function sourceSetDigest(entries) {
   return sha256Digest(Buffer.from(JSON.stringify(entries), 'utf8'));
+}
+
+function listProjectSourceFiles(projectRoot, extension) {
+  const files = [];
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const file = join(dir, entry);
+      const stat = statSync(file);
+      if (stat.isDirectory()) {
+        if (entry === '.git' || entry === 'target' || entry === 'node_modules' || entry === 'tmp_checks') continue;
+        visit(file);
+      } else if (file.endsWith(extension)) {
+        const bytes = readFileSync(file);
+        files.push({
+          path: posix.normalize(file.slice(projectRoot.length + 1).split(/[\\/]/).join('/')),
+          digest: sha256Digest(bytes),
+          size: bytes.byteLength,
+        });
+      }
+    }
+  };
+  visit(projectRoot);
+  return files.sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function packagedFilesDigest(files) {
@@ -187,7 +258,9 @@ function shouldValidateEmbeddedSourceFile(file) {
   ].includes(file.path);
 }
 
-function validateReleaseSourceContracts(mod, lockedModule) {
+function validateReleaseSourceContracts(mod, lockedModule, provenanceDependency) {
+  const dependencyDirty = provenanceDependency?.dirty === true;
+  assert(!dependencyDirty, `${mod.module} provenance dirty flag must be false in strict validation`);
   const releaseFile = mod.files.find((file) => file.path === 'vo.release.json');
   if (!releaseFile) return;
 
@@ -393,9 +466,10 @@ function validateReleaseArtifactContract(mod, release) {
   );
 }
 
-function validateProjectDependencyContracts(project, deps) {
+function validateProjectDependencyContracts(project, deps, provenance) {
   const directRequires = parseVoModRequires(requireProjectFile(project, 'vo.mod'));
   const locked = parseVoLockResolved(requireProjectFile(project, 'vo.lock'));
+  const provenanceDeps = new Map((provenance.dependencies ?? []).map((mod) => [mod.module, mod]));
 
   for (const moduleName of expected.requiredModules) {
     const requiredVersion = directRequires.get(moduleName);
@@ -418,7 +492,7 @@ function validateProjectDependencyContracts(project, deps) {
     assert(sha256Field(lockedModule.release_manifest), `project vo.lock must bind ${mod.module} release manifest digest`);
 
     const webManifest = parseVoWebManifest(mod);
-    validateReleaseSourceContracts(mod, lockedModule);
+    validateReleaseSourceContracts(mod, lockedModule, provenanceDeps.get(mod.module));
     assert(webManifest.module === mod.module, `${mod.module} vo.web.json module mismatch`);
     assert(webManifest.version === mod.version, `${mod.module} vo.web.json version mismatch`);
     assert(webManifest.commit === lockedModule.commit, `${mod.module} vo.web.json commit must match project vo.lock`);
@@ -439,13 +513,15 @@ function validateProjectDependencyContracts(project, deps) {
   }
 }
 
-function validateProjectSourceCheckout(project) {
+function validateProjectSourceCheckout(project, provenance) {
   assert(existsSync(blockKartRoot), `BlockKart source checkout is required at ${blockKartRoot}`);
   assert(gitOutput(['rev-parse', '--is-inside-work-tree'], blockKartRoot) === 'true', `BlockKart source is not a git checkout: ${blockKartRoot}`);
   const head = gitOutput(['rev-parse', 'HEAD'], blockKartRoot);
   assert(head === project.commit, `BlockKart source HEAD ${head} does not match project commit ${project.commit}`);
   const status = gitOutput(['status', '--porcelain'], blockKartRoot);
-  assert(status === '', `BlockKart source checkout must be clean:\n${status}`);
+  assert((status !== '') === provenance.project?.dirty, 'BlockKart source dirty state must match provenance project.dirty');
+  assert(status === '', 'BlockKart source checkout must be clean for strict quickplay validation');
+  assert(provenance.project?.dirty === false, 'provenance project.dirty must be false for strict quickplay validation');
 
   for (const file of project.files ?? []) {
     const sourcePath = join(blockKartRoot, file.path);
@@ -454,6 +530,36 @@ function validateProjectSourceCheckout(project) {
     const packagedBytes = moduleFileBytes(file);
     assert(sourceBytes.byteLength === packagedBytes.byteLength, `BlockKart source size mismatch for ${file.path}`);
     assert(sha256Digest(sourceBytes) === sha256Digest(packagedBytes), `BlockKart source digest mismatch for ${file.path}`);
+  }
+
+  const sourceFiles = listProjectSourceFiles(blockKartRoot, '.vo');
+  const manifestSourceFiles = project.sourceFiles ?? provenance.project?.sourceFiles;
+  assert(Array.isArray(manifestSourceFiles), 'quickplay package must record BlockKart sourceFiles digest list');
+  assert(
+    sourceSetDigest(manifestSourceFiles) === sourceSetDigest(sourceFiles),
+    'quickplay package sourceFiles digest list must match BlockKart source checkout',
+  );
+  assert(
+    provenance.project?.sourceFilesDigest === sourceSetDigest(sourceFiles),
+    'provenance project sourceFilesDigest must match BlockKart source checkout',
+  );
+
+  const packagedVo = new Set((project.files ?? [])
+    .map((file) => file.path)
+    .filter((file) => file.endsWith('.vo')));
+  const sourceAllowlist = new Map((provenance.project?.sourceAllowlist ?? project.sourceAllowlist ?? [])
+    .map((entry) => [entry.path, entry]));
+  const unpackaged = sourceFiles
+    .filter((entry) => !packagedVo.has(entry.path))
+    .filter((entry) => !sourceAllowlist.has(entry.path));
+  assert(unpackaged.length === 0, `BlockKart source files missing from quickplay package or allowlist: ${unpackaged.map((entry) => entry.path).join(', ')}`);
+  for (const entry of sourceAllowlist.values()) {
+    assert(
+      typeof entry.reason === 'string'
+        && entry.reason.trim().length >= 12
+        && sourceFiles.some((source) => source.path === entry.path),
+      `invalid BlockKart source allowlist entry: ${entry.path ?? '<missing>'}`,
+    );
   }
 }
 
@@ -540,23 +646,44 @@ function validateVoplayHostWakeKeyContract(voplay) {
 
 function validateProvenance(project, deps) {
   const provenance = readJson(provenancePath);
-  assert(provenance.schemaVersion === 1, 'provenance schemaVersion must be 1');
+  assert(provenance.schemaVersion === 2, 'provenance schemaVersion must be 2');
   assert(provenance.artifact === expected.artifactName, `provenance artifact must be ${expected.artifactName}`);
   assert(provenance.path === expected.artifactPath, `provenance path must be ${expected.artifactPath}`);
+  assert(provenance.task?.id === 'quickplay-blockkart-package', 'provenance task id mismatch');
+  assert(
+    sameStringArray(provenance.task?.command, expected.generatorCommand),
+    'provenance task command mismatch',
+  );
   assert(
     sameStringArray(provenance.generator?.command, expected.generatorCommand),
     'provenance generator command mismatch',
   );
+  assert(Number(provenance.generator?.version) >= 2, 'provenance generator version must be at least 2');
+  assert(typeof provenance.toolchain?.node === 'string' && provenance.toolchain.node.length > 0, 'provenance node toolchain version missing');
+  assert(typeof provenance.toolchain?.voDev === 'string' && provenance.toolchain.voDev.length >= 7, 'provenance vo-dev toolchain version missing');
+  assert(provenance.toolchain?.wasmTarget === 'wasm32-unknown-unknown', 'provenance wasm target mismatch');
+  assert(typeof provenance.sourceRoots?.volang === 'string' && provenance.sourceRoots.volang.length > 0, 'provenance volang source root missing');
+  assert(typeof provenance.sourceRoots?.blockKart === 'string' && provenance.sourceRoots.blockKart.length > 0, 'provenance BlockKart source root missing');
+  assert(typeof provenance.sourceRoots?.voplay === 'string' && provenance.sourceRoots.voplay.length > 0, 'provenance voplay source root missing');
   assert(
     sameStringArray(provenance.inputs, expected.generatorInputs),
     'provenance generator inputs mismatch',
   );
   assert(provenance.project?.module === project.module, 'provenance project module mismatch');
   assert(provenance.project?.commit === project.commit, 'provenance project commit mismatch');
-  assert(provenance.project?.dirty === false, 'checked-in quickplay package must not be generated from a dirty BlockKart tree');
+  assert(provenance.project?.dirty === gitDirty(blockKartRoot), 'provenance project dirty flag mismatch');
+  assert(provenance.project?.dirty === false, 'provenance project dirty flag must be false');
   assert(
     provenance.project?.filesDigest === packagedFilesDigest(project.files),
     'provenance project files digest mismatch',
+  );
+  assert(
+    sourceSetDigest(provenance.project?.sourceFiles ?? []) === sourceSetDigest(project.sourceFiles ?? []),
+    'provenance project sourceFiles must match project sourceFiles',
+  );
+  assert(
+    provenance.project?.sourceFilesDigest === sourceSetDigest(project.sourceFiles ?? []),
+    'provenance project sourceFilesDigest mismatch',
   );
 
   const outputMap = new Map((provenance.outputs ?? []).map((output) => [output.path, output]));
@@ -573,6 +700,12 @@ function validateProvenance(project, deps) {
     assert(provenanceMod, `provenance missing dependency ${mod.module}`);
     assert(provenanceMod.version === mod.version, `provenance version mismatch for ${mod.module}`);
     assert(provenanceMod.cacheDir === mod.cacheDir, `provenance cacheDir mismatch for ${mod.module}`);
+    assert(provenanceMod.commit === mod.commit, `provenance commit mismatch for ${mod.module}`);
+    assert(typeof provenanceMod.dirty === 'boolean', `provenance dirty flag missing for ${mod.module}`);
+    assert(provenanceMod.dirty === false, `provenance dirty flag must be false for ${mod.module}`);
+    if (provenanceMod.source === 'external' && mod.module === 'github.com/vo-lang/voplay') {
+      assert(provenanceMod.dirty === gitDirty(provenance.sourceRoots.voplay), `provenance dirty flag mismatch for ${mod.module}`);
+    }
     assert(provenanceMod.filesDigest === packagedFilesDigest(mod.files), `provenance files digest mismatch for ${mod.module}`);
 
     const artifactDigests = new Map((provenanceMod.artifacts ?? []).map((artifact) => [artifact.url, artifact]));
@@ -590,6 +723,7 @@ function validateProvenance(project, deps) {
 
 const project = readJson(projectPath);
 const deps = readJson(depsPath);
+const provenance = readJson(provenancePath);
 const quickplayTs = readFileSync(quickplayTsPath, 'utf8');
 
 assert(project.schemaVersion === 1, 'project schemaVersion must be 1');
@@ -609,9 +743,9 @@ const modules = new Map(deps.modules.map((mod) => [mod.module, mod]));
 for (const moduleName of expected.requiredModules) {
   moduleByName(modules, moduleName);
 }
-validateProjectDependencyContracts(project, deps);
+validateProjectDependencyContracts(project, deps, provenance);
 validateProvenance(project, deps);
-validateProjectSourceCheckout(project);
+validateProjectSourceCheckout(project, provenance);
 
 for (const mod of deps.modules) {
   assert(typeof mod.cacheDir === 'string' && mod.cacheDir.length > 0, `${mod.module} must have cacheDir`);
@@ -646,4 +780,16 @@ for (const artifact of requiredVoplayArtifacts(voplay)) {
   assert(declaredArtifactUrls.has(artifact.url), `voplay artifact is not declared: ${artifact.url}`);
 }
 
+writeReport('ok', {
+  project: {
+    module: project.module,
+    commit: project.commit ?? null,
+    provenanceCommit: provenance.project?.commit ?? null,
+  },
+  dependencies: (deps.modules ?? []).map((mod) => ({
+    module: mod.module,
+    version: mod.version,
+    commit: mod.commit ?? null,
+  })),
+});
 console.log('quickplay validate: ok');

@@ -2,12 +2,11 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const localVoplayRoot = path.resolve(root, '..', 'voplay');
-const localBlockKartRoot = path.resolve(root, '..', 'BlockKart');
-const voplayRoot = path.resolve(process.env.VOPLAY_ROOT || (existsSync(path.join(localVoplayRoot, 'vo.mod')) ? localVoplayRoot : path.join(root, 'ci_modules/voplay')));
-const blockKartRoot = path.resolve(process.env.BLOCKKART_ROOT || (existsSync(path.join(localBlockKartRoot, 'vo.mod')) ? localBlockKartRoot : path.join(root, 'ci_modules/BlockKart')));
+const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
+const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const issues = [];
 
 function fail(message) {
@@ -123,7 +122,7 @@ for (const entry of blockKartVoFiles) {
   check(!directEntityMutation.test(entry.source), 'blockkart.direct_entity_physics_mutation', `${entry.rel} directly mutates entity pose, velocity, or angular velocity`);
 }
 check(blockKartWorld.includes('VehicleShouldSleepIdlePhysics'), 'blockkart.idle_sleep_policy_owned', 'BlockKart does not delegate idle sleep policy to voplay');
-check(blockKartWorld.includes('VehicleAudioInputFromVehicle'), 'blockkart.audio_telemetry_missing', 'BlockKart vehicle audio does not start from voplay telemetry');
+check(blockKartVoFiles.some((entry) => entry.source.includes('VehicleAudioInputFromTelemetry')), 'blockkart.audio_telemetry_missing', 'BlockKart vehicle audio does not start from voplay telemetry');
 check(!blockKartWorld.includes('SurfaceAt(w.player.Position())'), 'blockkart.surface_position_workaround', 'BlockKart world still infers surface by player position');
 check(!blockKartProductFoundation.includes('SurfaceAt(w.player.Position())'), 'blockkart.surface_position_workaround', 'BlockKart diagnostics still infer surface by player position');
 check(!blockKartWorld.includes('kartPhysicsIdle'), 'blockkart.local_physics_sleep_thresholds', 'BlockKart still owns local physics sleep thresholds');

@@ -1,6 +1,8 @@
 # voplay Industrial Completion Plan
 
-Status: proposed
+Status: superseded
+Superseded-By: lang/docs/dev/voplay-code-engineering-quality-plan.md
+Superseded-Date: 2026-07-05
 Date: 2026-07-04
 Scope: completion plan for the voplay graphics, physics, resource,
 diagnostics, performance, and BlockKart product-boundary work required before
@@ -8,9 +10,9 @@ the engine can be called industrial-grade for a kart-racing product.
 
 ## Document Role
 
-This document is the completion contract for the voplay industrial effort. It
-turns the current `industrialReady: false` report into concrete work packages,
-owned outcomes, gates, and exit criteria.
+This historical document was an earlier completion contract for the voplay
+industrial effort. The active execution plan is now
+`lang/docs/dev/voplay-code-engineering-quality-plan.md`.
 
 The only final completion signal is:
 

@@ -1,0 +1,1335 @@
+#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
+
+const root = fileURLToPath(new URL('../..', import.meta.url));
+const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
+const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
+const args = process.argv.slice(2);
+let outDir = path.join(root, 'target', 'voplay-engineering-quality-readiness');
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === '--out-dir') {
+    outDir = path.resolve(args[++i]);
+  } else {
+    console.error(`voplay engineering quality readiness: unknown argument ${arg}`);
+    process.exit(2);
+  }
+}
+
+function readText(file) {
+  return readFileSync(file, 'utf8');
+}
+
+function projectText(projectRoot, relativePath) {
+  const file = path.join(projectRoot, relativePath);
+  if (!existsSync(file)) {
+    return '';
+  }
+  return readText(file);
+}
+
+function projectTexts(projectRoot, relativePaths) {
+  return relativePaths.map((relativePath) => projectText(projectRoot, relativePath)).join('\n');
+}
+
+function lineCount(source) {
+  return source.length === 0 ? 0 : source.split(/\r?\n/).length;
+}
+
+function listFiles(projectRoot, extension) {
+  const files = [];
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const file = path.join(dir, entry);
+      const stat = statSync(file);
+      if (stat.isDirectory()) {
+        if (entry === '.git' || entry === 'target' || entry === 'node_modules') continue;
+        visit(file);
+      } else if (file.endsWith(extension)) {
+        files.push({
+          rel: path.relative(projectRoot, file).split(path.sep).join('/'),
+          source: readText(file),
+        });
+      }
+    }
+  };
+  visit(projectRoot);
+  return files;
+}
+
+function jsonFile(relativePath) {
+  return JSON.parse(readText(path.join(root, relativePath)));
+}
+
+function jsonMaybe(relativePath) {
+  const file = path.join(root, relativePath);
+  if (!existsSync(file)) {
+    return null;
+  }
+  try {
+    return JSON.parse(readText(file));
+  } catch {
+    return null;
+  }
+}
+
+function bodyOfFunction(source, signature) {
+  const start = source.indexOf(signature);
+  if (start < 0) return '';
+  const brace = source.indexOf('{', start);
+  if (brace < 0) return '';
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(brace + 1, i);
+    }
+  }
+  return '';
+}
+
+function gitOutput(args, cwd) {
+  try {
+    return { ok: true, stdout: execFileSync('git', args, { cwd, encoding: 'utf8' }).trim() };
+  } catch (error) {
+    return {
+      ok: false,
+      error: String(error?.stderr || error?.message || error).trim(),
+    };
+  }
+}
+
+function repoEnvName(repo) {
+  let out = '';
+  for (const ch of repo) {
+    out += /[A-Za-z0-9]/.test(ch) ? ch.toUpperCase() : '_';
+  }
+  return `${out}_ROOT`;
+}
+
+function parseExpectedCommits(projectSource) {
+  const expected = new Map();
+  let current = null;
+  for (const rawLine of projectSource.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === '[[first_party]]' || line === '[[external_project]]') {
+      current = {};
+      continue;
+    }
+    if (!current) continue;
+    const pair = line.match(/^([A-Za-z0-9_]+)\s*=\s*"([^"]*)"$/);
+    if (!pair) continue;
+    current[pair[1]] = pair[2];
+    if (current.name && current.expected_commit) {
+      expected.set(current.name, current.expected_commit);
+    }
+  }
+  return expected;
+}
+
+function crossRepoHeadMismatches(expectedCommits) {
+  const mismatches = [];
+  for (const [repo, expected] of expectedCommits.entries()) {
+    const envName = repoEnvName(repo);
+    const rootValue = process.env[envName];
+    if (!rootValue || String(rootValue).trim() === '') {
+      continue;
+    }
+    const repoRoot = path.resolve(rootValue);
+    const head = gitOutput(['rev-parse', 'HEAD'], repoRoot);
+    if (!head.ok || head.stdout !== expected) {
+      mismatches.push({
+        repo,
+        root: repoRoot,
+        expected,
+        found: head.ok ? head.stdout : null,
+        error: head.error ?? null,
+      });
+    }
+  }
+  return mismatches;
+}
+
+function repoState(repo, repoRoot, expectedCommit = '') {
+  const head = gitOutput(['rev-parse', 'HEAD'], repoRoot);
+  const status = gitOutput(['status', '--porcelain'], repoRoot);
+  return {
+    repo,
+    root: repoRoot,
+    expectedCommit,
+    head: head.ok ? head.stdout : null,
+    headError: head.error ?? null,
+    dirty: status.ok ? status.stdout !== '' : null,
+    status: status.ok ? status.stdout : '',
+    statusError: status.error ?? null,
+  };
+}
+
+function dirtyProvenanceEvidence(provenance) {
+  const dirtyEntries = [];
+  if (provenance?.project?.dirty === true) {
+    dirtyEntries.push({
+      owner: provenance.project.module || 'project',
+      kind: 'project',
+      commit: provenance.project.commit ?? null,
+    });
+  }
+  for (const dependency of provenance?.dependencies ?? []) {
+    if (dependency?.dirty === true) {
+      dirtyEntries.push({
+        owner: dependency.module || '(unknown)',
+        kind: 'dependency',
+        source: dependency.source ?? null,
+        version: dependency.version ?? null,
+        commit: dependency.commit ?? null,
+      });
+    }
+  }
+  return dirtyEntries;
+}
+
+function lineOf(source, token) {
+  const lines = source.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes(token)) return i + 1;
+  }
+  return null;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function emptyOwnerModules(projectRoot) {
+  const modules = [];
+  const pipelineDir = path.join(projectRoot, 'rust/src/pipeline3d');
+  if (!existsSync(pipelineDir)) return modules;
+  const rustFiles = listFiles(projectRoot, '.rs');
+  const productionSource = rustFiles
+    .map((file) => file.source)
+    .join('\n');
+  for (const entry of readdirSync(pipelineDir)) {
+    if (!entry.endsWith('_submitter.rs')) continue;
+    const rel = `rust/src/pipeline3d/${entry}`;
+    const source = projectText(projectRoot, rel);
+    const hasProductionMethod = /\bpub(?:\(crate\)|\(super\))?\s+fn\s+(prepare|upload|draw|bind|submit|load|compile|create|resolve|cache)\w*\b/.test(source)
+      || /\bfn\s+(prepare|upload|draw|bind|submit|load|compile|create|resolve|cache)\w*\b/.test(source);
+    const hasMeaningfulImpl = /impl\s+\w+[\s\S]*\{[\s\S]*\bfn\b/.test(source);
+    const ownerName = entry
+      .replace(/\.rs$/, '')
+      .split('_')
+      .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+      .join('');
+    const calledByProduction = productionSource.includes(`${ownerName}::`) || productionSource.includes(`${ownerName} {`);
+    if (!hasProductionMethod || !hasMeaningfulImpl || !calledByProduction) {
+      modules.push({
+        path: rel,
+        owner: ownerName,
+        hasProductionMethod,
+        hasMeaningfulImpl,
+        calledByProduction,
+        lineCount: lineCount(source),
+      });
+    }
+  }
+  return modules;
+}
+
+function findBlockKartLowLevelFacts(files) {
+  const forbidden = [
+    'ApplyVehicleConstraint(',
+    'ApplyEntityPhysicsConstraint(',
+    '.Diagnostics()',
+    '.Telemetry()',
+    'PrimitiveStats(',
+    'primitive3d.NewLayer',
+    'primitive3d.NewBuilder',
+    'primitive3d.LayerDesc',
+    'primitive3d.ChunkingDesc',
+    'primitive3d.MaterialDesc',
+  ];
+  const hits = [];
+  for (const file of files) {
+    for (const token of forbidden) {
+      const line = lineOf(file.source, token);
+      if (line !== null) {
+        hits.push({ path: file.rel, token, line });
+      }
+    }
+  }
+  return hits;
+}
+
+function sourceAuditFailuresFromSource({
+  frameGraph,
+  framePassSequence,
+  rendererPassDispatch,
+  renderPassSources,
+  renderWorld,
+  voplayPhysics,
+  voplayVehicle,
+  voplayDynamics,
+  kartController,
+  vehicleTelemetry,
+  vehiclePhysicsSession,
+  physicsStressSource,
+  sceneSource,
+  replaySource,
+  blockKartFiles,
+}) {
+  const failures = [];
+  const manualFrameGraphSequence =
+    framePassSequence.includes('FrameGraphPlanNodes')
+    || framePassSequence.includes('FramePassDispatcher')
+    || /\.execute_node\(&context\.nodes\./.test(framePassSequence)
+    || frameGraph.includes('struct FrameGraphPlanNodes');
+  if (!/\bfn\s+execute_all\b/.test(frameGraph) || manualFrameGraphSequence) {
+    failures.push({
+      code: 'render.framegraph_manual_sequence',
+      severity: 'P1',
+      owner: 'voplay/render',
+      message: 'FrameGraph does not own full pass execution order through execute_all',
+      evidence: {
+        hasExecuteAll: /\bfn\s+execute_all\b/.test(frameGraph),
+        manualFrameGraphSequence,
+        frameGraphPlanNodesLine: lineOf(framePassSequence, 'FrameGraphPlanNodes') ?? lineOf(frameGraph, 'struct FrameGraphPlanNodes'),
+      },
+    });
+  }
+  if (/renderer:\s*&'?[_A-Za-z0-9]*\s*mut\s+Renderer\b/.test(`${rendererPassDispatch}\n${renderPassSources}`)) {
+    failures.push({
+      code: 'render.dispatcher_global_renderer',
+      severity: 'P1',
+      owner: 'voplay/render',
+      message: 'Render pass dispatch contexts still capture &mut Renderer',
+      evidence: { path: 'voplay/rust/src/renderer/pass_dispatch.rs', line: lineOf(rendererPassDispatch, 'renderer:') },
+    });
+  }
+  const hotPathPanic =
+    /\b(panic!|expect\s*\(|unwrap\s*\(|todo!|unimplemented!)/.test(renderPassSources)
+    || /\.filter_map\(\|[^|]*(?:index|draw_index|chunk_index)[^|]*\|[\s\S]*?\.get\(/.test(renderWorld);
+  if (hotPathPanic) {
+    failures.push({
+      code: 'render.hot_path_panic_or_silent_skip',
+      severity: 'P1',
+      owner: 'voplay/render',
+      message: 'Render hot paths still contain panic-prone calls or silent invalid batch index drops',
+      evidence: {
+        passExpectLine: lineOf(renderPassSources, 'expect('),
+        silentSkipLine: lineOf(renderWorld, '.filter_map('),
+      },
+    });
+  }
+  const backendBody = bodyOfFunction(voplayPhysics, 'func (defaultPhysicsBackend) ApplyVehicleForces');
+  const backendFields = ['BodyForce', 'DragForce', 'Downforce', 'WaterLift', 'AirControl', 'WallGrip', 'RailGrip'];
+  const unconsumedFields = backendFields.filter((field) => !backendBody.includes(`command.${field}`));
+  if (unconsumedFields.length > 0) {
+    failures.push({
+      code: 'physics.backend_apply_fields_unconsumed',
+      severity: 'P0',
+      owner: 'voplay/scene3d',
+      message: 'PhysicsBackendApplyCommand fields are not consumed by the default backend apply path',
+      evidence: { fields: unconsumedFields, path: 'voplay/scene3d/physics.vo' },
+    });
+  }
+  const applyForceBody = bodyOfFunction(voplayVehicle, 'func (v *Vehicle) ApplyForceCommand');
+  if (applyForceBody.includes('applyForceCommandToBackend') && applyForceBody.includes('v.Body.ApplyForce')) {
+    failures.push({
+      code: 'physics.post_backend_body_force',
+      severity: 'P0',
+      owner: 'voplay/scene3d',
+      message: 'ApplyForceCommand applies core body forces after backend apply',
+      evidence: { path: 'voplay/scene3d/vehicle.vo', line: lineOf(voplayVehicle, 'v.Body.ApplyForce') },
+    });
+  }
+  const emptyHooks = [
+    'ApplyPoseReset',
+    'ApplyMotionReset',
+    'ApplySleepState',
+    'ApplyRecovery',
+  ].filter((hook) => new RegExp(`func \\(defaultPhysicsBackend\\) ${hook}[^{}]*\\{\\}`).test(voplayPhysics));
+  if (emptyHooks.length > 0) {
+    failures.push({
+      code: 'physics.backend_reset_hooks_empty',
+      severity: 'P0',
+      owner: 'voplay/scene3d',
+      message: 'Default physics backend reset/recovery/sleep hooks are empty',
+      evidence: { hooks: emptyHooks, path: 'voplay/scene3d/physics.vo' },
+    });
+  }
+  if (kartController.includes('Track.SurfaceAt') && kartController.includes('Body.Position()')) {
+    failures.push({
+      code: 'physics.surface_authority_body_position',
+      severity: 'P1',
+      owner: 'voplay/scene3d',
+      message: 'Kart controller still derives control surface from body position',
+      evidence: { path: 'voplay/scene3d/kart_controller.vo', line: lineOf(kartController, 'Track.SurfaceAt') },
+    });
+  }
+  const invalidSampleLine = lineOf(vehicleTelemetry, 'InvalidSampleCount: invalidSamples');
+  const rawPositionLine = lineOf(vehicleTelemetry, 'rawPosition');
+  const cleanPositionLine = lineOf(vehicleTelemetry, 'vehicleCleanVec3(rawPosition)');
+  const telemetryCountsRawBeforeClean = rawPositionLine !== null
+    && invalidSampleLine !== null
+    && cleanPositionLine !== null
+    && invalidSampleLine < cleanPositionLine;
+  if (!telemetryCountsRawBeforeClean) {
+    failures.push({
+      code: 'physics.telemetry_invalid_sanitized_first',
+      severity: 'P1',
+      owner: 'voplay/scene3d',
+      message: 'Vehicle telemetry sanitizes invalid raw samples before industrial health accounting',
+      evidence: { path: 'voplay/scene3d/vehicle_telemetry.vo', rawPositionLine, invalidSampleLine, cleanPositionLine },
+    });
+  }
+  const blockKartLowLevelFacts = findBlockKartLowLevelFacts(blockKartFiles);
+  if (blockKartLowLevelFacts.length > 0) {
+    failures.push({
+      code: 'blockkart.low_level_engine_facts',
+      severity: 'P0',
+      owner: 'BlockKart',
+      message: 'BlockKart still reads or mutates low-level physics/render facts',
+      evidence: { hits: blockKartLowLevelFacts },
+    });
+  }
+  if (!voplayDynamics.includes('type PhysicsBackendApplyCommand struct')) {
+    failures.push({
+      code: 'physics.backend_contract_missing',
+      severity: 'P0',
+      owner: 'voplay/scene3d',
+      message: 'PhysicsBackendApplyCommand contract is missing',
+      evidence: { path: 'voplay/scene3d/kart_dynamics.vo' },
+    });
+  }
+  const sessionStepBody = bodyOfFunction(vehiclePhysicsSession, 'func (s *VehiclePhysicsSession) Step');
+  if (/FixedPhysicsStep\s*\(|StepAndSyncPhysics\s*\(/.test(sessionStepBody) || !/s\.(?:StepIndex|Telemetry|Replay|Backend|LastPacket|InvalidSample|Controller|Dynamics)/.test(sessionStepBody)) {
+    failures.push({
+      code: 'physics.session_wrapper_only',
+      severity: 'P1',
+      owner: 'voplay/scene3d',
+      message: 'VehiclePhysicsSession is still a wrapper around scene/controller stepping',
+      evidence: { path: 'voplay/scene3d/vehicle_physics_session.vo', line: lineOf(vehiclePhysicsSession, 'func (s *VehiclePhysicsSession) Step') },
+    });
+  }
+  if (/UpdateIntent\s*\(/.test(physicsStressSource) || /StepAndSyncPhysics\s*\(/.test(physicsStressSource)) {
+    failures.push({
+      code: 'physics.stress_bypasses_session',
+      severity: 'P1',
+      owner: 'voplay/scene3d',
+      message: 'Physics stress bypasses VehiclePhysicsSession with direct controller or Scene fixed-step calls',
+      evidence: {
+        updateIntentLine: lineOf(physicsStressSource, 'UpdateIntent'),
+        stepAndSyncLine: lineOf(physicsStressSource, 'StepAndSyncPhysics'),
+      },
+    });
+  }
+  const packetContractSource = `${sceneSource}\n${voplayPhysics}\n${voplayDynamics}\n${replaySource}`;
+  const packetTokens = ['PhysicsBackendPacketSchemaVersion', 'PhysicsBackendPacketKind', 'PhysicsBackendPacketLength', 'PhysicsBackendPacketHash', 'PhysicsBackendCapability'];
+  const missingPacketTokens = packetTokens.filter((token) => !packetContractSource.includes(token));
+  if (missingPacketTokens.length > 0) {
+    failures.push({
+      code: 'physics.backend_packet_schema_missing',
+      severity: 'P0',
+      owner: 'voplay/scene3d',
+      message: 'Physics backend packet contract lacks schema, kind, length, hash, or capability identifiers',
+      evidence: { missingPacketTokens },
+    });
+  }
+  if (!physicsStressSource.includes('InvalidSampleCount') || !physicsStressSource.includes('ValidationIssues') || /sampleFinite\s*\(/.test(physicsStressSource)) {
+    failures.push({
+      code: 'physics.invalid_telemetry_can_be_sanitized',
+      severity: 'P1',
+      owner: 'voplay/scene3d',
+      message: 'Industrial telemetry can still pass through cleaned finite samples without invalid raw-sample evidence',
+      evidence: {
+        invalidSampleLine: lineOf(physicsStressSource, 'InvalidSampleCount'),
+        validationIssuesLine: lineOf(physicsStressSource, 'ValidationIssues'),
+        sampleFiniteLine: lineOf(physicsStressSource, 'sampleFinite'),
+      },
+    });
+  }
+  const replayTokens = ['PhysicsReplayVerifier', 'StepHash', 'BackendPacketHash', 'ReplayMismatch'];
+  const missingReplayTokens = replayTokens.filter((token) => !replaySource.includes(token) && !physicsStressSource.includes(token));
+  if (missingReplayTokens.length > 0 || /replayDrift|driftMeters|ReplayDrift/.test(physicsStressSource)) {
+    failures.push({
+      code: 'physics.replay_not_executable_contract',
+      severity: 'P1',
+      owner: 'voplay/scene3d',
+      message: 'Physics replay validation is still drift/final-state evidence without an executable per-step contract',
+      evidence: { missingReplayTokens, driftLine: lineOf(physicsStressSource, 'driftMeters') ?? lineOf(physicsStressSource, 'replayDrift') },
+    });
+  }
+  const blockKartGenericAuthoring = [];
+  const genericAuthoring = /ProductPrimitiveAuthoring|PrimitiveBatchAuthoring|PrimitiveInstanceAuthoring|SurfaceMaterialAuthoring|ColliderAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc|ShapeDesc|MaterialPreset)|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|PackWriter|vopack\./;
+  for (const file of blockKartFiles) {
+    const line = file.source.split(/\r?\n/).findIndex((sourceLine) => genericAuthoring.test(sourceLine));
+    if (line >= 0) blockKartGenericAuthoring.push({ path: file.rel, line: line + 1 });
+  }
+  if (blockKartGenericAuthoring.length > 0) {
+    failures.push({
+      code: 'blockkart.generic_authoring_boundary',
+      severity: 'P0',
+      owner: 'BlockKart',
+      message: 'BlockKart still owns generic primitive, collider, map, or pack authoring',
+      evidence: { hits: blockKartGenericAuthoring },
+    });
+  }
+  return failures;
+}
+
+function issue(code, severity, owner, expected, gate, expiry, mitigation, status, evidence = {}) {
+  const item = {
+    code,
+    severity,
+    owner,
+    evidence,
+    expected,
+    gate,
+    expiry,
+    mitigation,
+    status: status ? 'closed' : 'open',
+  };
+  issues.push(item);
+  if (!status && (severity === 'P0' || severity === 'P1')) {
+    failures.push({
+      code,
+      severity,
+      owner,
+      expected,
+      gate,
+      evidence,
+    });
+  }
+}
+
+const issues = [];
+const failures = [];
+
+const ciSystem = readText(path.join(root, 'cmd/vo-dev/src/ci_system.rs'));
+const taskGraph = readText(path.join(root, 'cmd/vo-dev/src/task_graph.rs'));
+const taskRunner = readText(path.join(root, 'cmd/vo-dev/src/task_runner.rs'));
+const projectToml = readText(path.join(root, 'eng/project.toml'));
+const ciToml = readText(path.join(root, 'eng/ci.toml'));
+const tasksToml = readText(path.join(root, 'eng/tasks.toml'));
+const toolchainsToml = readText(path.join(root, 'eng/toolchains.toml'));
+const artifactsToml = readText(path.join(root, 'eng/artifacts.toml'));
+const quickplayProvenance = jsonFile('apps/studio/public/quickplay/blockkart/provenance.json');
+const frameOrchestrator = projectText(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs');
+const frameOrchestratorAudit = projectTexts(voplayRoot, [
+  'rust/src/renderer/frame_orchestrator.rs',
+  'rust/src/renderer/frame_orchestrator_runtime.rs',
+  'rust/src/renderer/frame_2d_upload.rs',
+  'rust/src/renderer/frame_graph_plan.rs',
+  'rust/src/renderer/frame_pass_sequence.rs',
+  'rust/src/renderer/frame_perf_finalize.rs',
+  'rust/src/renderer/frame_surface.rs',
+  'rust/src/renderer/frame_workload_plan.rs',
+]);
+const framePassSequence = projectText(voplayRoot, 'rust/src/renderer/frame_pass_sequence.rs');
+const rendererPassDispatch = projectText(voplayRoot, 'rust/src/renderer/pass_dispatch.rs');
+const renderPassSources = projectTexts(voplayRoot, [
+  'rust/src/renderer/depth_pass.rs',
+  'rust/src/renderer/shadow_pass.rs',
+  'rust/src/renderer/main_opaque_pass.rs',
+  'rust/src/renderer/main_transparent_pass.rs',
+  'rust/src/renderer/water_pass.rs',
+  'rust/src/renderer/post_pass.rs',
+  'rust/src/renderer/overlay_pass.rs',
+  'rust/src/renderer/backend_submit_pass.rs',
+]);
+const transparentPass = projectText(voplayRoot, 'rust/src/renderer/main_transparent_pass.rs');
+const frameGraph = projectText(voplayRoot, 'rust/src/renderer_frame.rs');
+const renderWorld = projectTexts(voplayRoot, [
+  'rust/src/render_world.rs',
+  'rust/src/render_world/store.rs',
+  'rust/src/render_world/tests.rs',
+]);
+const primitivePipeline = projectTexts(voplayRoot, [
+  'rust/src/primitive_pipeline.rs',
+  'rust/src/primitive_pipeline/runtime.rs',
+]);
+const pipelineCache = projectTexts(voplayRoot, [
+  'rust/src/pipeline3d/pipeline_cache.rs',
+  'rust/src/pipeline3d/pipeline_factory.rs',
+  'rust/src/pipeline3d/mesh_submitter.rs',
+]);
+const primitivePipelineBudgetSource = projectText(voplayRoot, 'rust/src/primitive_pipeline.rs');
+const pipelineCacheBudgetSource = projectText(voplayRoot, 'rust/src/pipeline3d/pipeline_cache.rs');
+const voplayPhysics = projectText(voplayRoot, 'scene3d/physics.vo');
+const voplayVehicle = projectText(voplayRoot, 'scene3d/vehicle.vo');
+const voplayDynamics = projectText(voplayRoot, 'scene3d/kart_dynamics.vo');
+const kartController = projectText(voplayRoot, 'scene3d/kart_controller.vo');
+const vehicleTelemetry = projectText(voplayRoot, 'scene3d/vehicle_telemetry.vo');
+const vehiclePhysicsSession = projectText(voplayRoot, 'scene3d/vehicle_physics_session.vo');
+const physicsStressSource = projectText(voplayRoot, 'examples/physics_stress/main.vo');
+const sceneSource = projectText(voplayRoot, 'scene3d/scene.vo');
+const replaySource = projectText(voplayRoot, 'scene3d/replay.vo');
+const blockKartWorld = projectText(blockKartRoot, 'world.vo');
+const blockKartPrimitiveWorld = projectText(blockKartRoot, 'primitive_world.vo');
+const blockKartFiles = listFiles(blockKartRoot, '.vo');
+
+const workflowSources = [
+  '.github/workflows/module-system-enforcement.yml',
+  '.github/workflows/production-readiness.yml',
+  '.github/workflows/deploy-site.yml',
+].map((file) => readText(path.join(root, file))).join('\n');
+
+const hasMultiCheckout =
+  ciSystem.includes('checkouts: Vec<CiCheckout>')
+  && ciSystem.includes('checkout_blockkart')
+  && workflowSources.includes('Checkout BlockKart')
+  && workflowSources.includes('checkout_voplay')
+  && projectToml.includes('name = "BlockKart"')
+  && projectToml.includes('repository = "vo-lang/BlockKart"')
+  && /name = "BlockKart"[\s\S]*?ci_checkout = true/.test(projectToml);
+
+issue(
+  'Q-P0-CI-MULTI-CHECKOUT',
+  'P0',
+  'eng',
+  'PR matrix and site metadata support multi-repo checkout for vogui, voplay, vopack, and BlockKart.',
+  'cargo run -q -p vo-dev -- ci metadata site; cargo run -q -p vo-dev -- ci final-matrix',
+  '2026-07-05',
+  'Centralize checkout list in vo-dev matrix/metadata and consume named checkout fields in workflows.',
+  hasMultiCheckout,
+  { matrixFields: ['checkouts', 'checkout_voplay', 'checkout_vopack', 'checkout_blockkart'] },
+);
+
+const rootInjection =
+  taskRunner.includes('"VOLANG_ROOT"')
+  && taskRunner.includes('task_root_env')
+  && taskRunner.includes('repo_root_env_name')
+  && taskRunner.includes('project_repo_path')
+  && taskGraph.includes('module-cache:')
+  && taskGraph.includes('external:')
+  && ![
+    'scripts/ci/voplay_sample_validate.mjs',
+    'scripts/ci/voplay_scene3d_unit.mjs',
+    'scripts/ci/voplay_physics_stress.mjs',
+    'scripts/ci/quickplay_source_audit.mjs',
+    'scripts/ci/quickplay_validate.mjs',
+    'scripts/ci/voplay_render_architecture_lint.mjs',
+    'scripts/ci/blockkart_engine_boundary_lint.mjs',
+    'scripts/ci/voplay_rust_unit.mjs',
+    'scripts/ci/voplay_industrial_readiness.mjs',
+    'apps/studio/scripts/package_blockkart_quickplay.mjs',
+  ].some((relative) => /\.\.\/(voplay|BlockKart|vogui|vopack)|ci_modules\/(voplay|BlockKart|vogui|vopack)/.test(readText(path.join(root, relative))));
+
+issue(
+  'Q-P0-ROOT-INJECTION',
+  'P0',
+  'eng',
+  'vo-dev injects all first-party and external repo roots and scripts reject implicit sibling fallbacks.',
+  './d.py ci task quickplay-source-audit',
+  '2026-07-05',
+  'Use task graph repo inference plus repo_roots.mjs validation.',
+  rootInjection,
+  { env: ['VOLANG_ROOT', 'VOPLAY_ROOT', 'VOGUI_ROOT', 'VOPACK_ROOT', 'BLOCKKART_ROOT'] },
+);
+
+const routingReady =
+  ciToml.includes('voplay-industrial-readiness')
+  && ciToml.includes('voplay-render-soak-10m')
+  && ciToml.includes('voplay-physics-industrial-stress')
+  && ciToml.includes('apps/studio/scripts/package_blockkart_quickplay.mjs')
+  && ciToml.includes('eng/perf-budgets/**')
+  && ciToml.includes('eng/project.toml');
+issue(
+  'Q-P1-CHANGED-FILES-ROUTING',
+  'P1',
+  'eng',
+  'Changed scripts/configs route to site, app-site, and voplay industrial gates.',
+  'cargo run -q -p vo-dev -- task plan pr --changed --explain',
+  '2026-07-05',
+  'Keep concrete non-internal task routes in eng/ci.toml for app-site and industrial surfaces.',
+  routingReady,
+  { checkedPrefixes: ['scripts/ci/**', 'eng/project.toml', 'eng/perf-budgets/**'] },
+);
+
+const auditReady =
+  tasksToml.includes('name = "voplay-engineering-quality-readiness"')
+  && tasksToml.includes('needs = ["node-audit-current"]')
+  && toolchainsToml.includes('audit = "current"')
+  && !toolchainsToml.includes('audit_level = "critical"');
+issue(
+  'Q-P1-NPM-AUDIT-QUALITY',
+  'P1',
+  'eng',
+  'Quality readiness runs node-audit-current and active npm workspaces fail on high/critical findings.',
+  './d.py ci task node-audit-current',
+  '2026-07-05',
+  'Quality gate depends on node-audit-current; moderate exceptions must be declared in the quality report.',
+  auditReady,
+  { nodeAuditCurrent: tasksToml.includes('node-audit-current') },
+);
+
+const frameSurface = projectText(voplayRoot, 'rust/src/renderer/frame_surface.rs');
+const orchestratorDecodeIndex = frameOrchestrator.indexOf('decode_frame_commands');
+const orchestratorWorkloadPlanIndex = frameOrchestrator.indexOf('prepare_frame_workload_plan');
+const orchestratorAcquireSurfaceIndex = frameOrchestrator.indexOf('acquire_surface_texture');
+const surfaceAcquireAfterDecode =
+  orchestratorDecodeIndex >= 0
+  && orchestratorWorkloadPlanIndex > orchestratorDecodeIndex
+  && orchestratorAcquireSurfaceIndex > orchestratorWorkloadPlanIndex
+  && /SurfaceError::(Lost|Outdated|Timeout|OutOfMemory)/.test(frameSurface);
+issue(
+  'Q-P1-RENDER-SURFACE-RECOVERY',
+  'P1',
+  'voplay/render',
+  'Surface acquire happens after CPU decode/batch planning and has classified recovery for lost/outdated/timeout/OOM.',
+  './d.py ci task voplay-render-core-unit',
+  '2026-07-06',
+  'Move acquire into a late helper and unit-test error classification.',
+  surfaceAcquireAfterDecode,
+  { orchestratorDecodeIndex, orchestratorWorkloadPlanIndex, orchestratorAcquireSurfaceIndex, surfaceErrorClassified: /SurfaceError::(Lost|Outdated|Timeout|OutOfMemory)/.test(frameSurface) },
+);
+
+const transparentReady =
+  transparentPass.includes('Translucent')
+  && transparentPass.includes('depth_write_enabled: false')
+  && transparentPass.includes('sort')
+  && !/fn execute\(\)\s*->\s*Result<f64,\s*String>\s*\{\s*Ok\(0\.0\)\s*\}/.test(transparentPass);
+issue(
+  'Q-P1-RENDER-TRANSPARENT-PASS',
+  'P1',
+  'voplay/render',
+  'MainTransparent pass executes a real translucent path with depth writes disabled and stable ordering.',
+  './d.py ci task voplay-render-core-unit',
+  '2026-07-06',
+  'Route translucent primitive/model draws through a dedicated pass and expose workload telemetry.',
+  transparentReady,
+  { file: 'voplay/rust/src/renderer/main_transparent_pass.rs' },
+);
+
+const frameGraphHardFail =
+  frameGraph.includes('missing required read')
+  && frameGraph.includes('missing required write')
+  && frameGraph.includes('validate_ready_reads')
+  && frameGraph.includes('validate_required_writes');
+issue(
+  'Q-P1-FRAMEGRAPH-HARD-FAIL',
+  'P1',
+  'voplay/render',
+  'FrameGraph fails before execution when required reads or writes are missing.',
+  './d.py ci task voplay-framegraph-unit',
+  '2026-07-06',
+  'Add pre-dispatch validation and regression tests for missing reads/writes.',
+  frameGraphHardFail,
+  { missingReadDiagnostics: frameGraph.includes('missing_read_count') },
+);
+
+const batchPlannerBounds =
+  renderWorld.includes('model_bounds')
+  && renderWorld.includes('ModelManager')
+  && !bodyOfFunction(renderWorld, 'pub fn build').includes('.find(|input| input.draw_index == index)');
+issue(
+  'Q-P1-BATCH-PLANNER-BOUNDS',
+  'P1',
+  'voplay/render',
+  'BatchPlanner uses model/terrain/decal/chunk bounds without hot-path linear lookups.',
+  './d.py ci task voplay-batch-planner-unit',
+  '2026-07-06',
+  'Pre-index terrain/decal inputs and use model manager AABB in planning.',
+  batchPlannerBounds,
+  { file: 'voplay/rust/src/render_world.rs' },
+);
+
+const primitiveChurnReady =
+  primitivePipeline.includes('dirty range')
+  && primitivePipeline.includes('rebuild_queue')
+  && primitivePipeline.includes('staging')
+  && primitivePipeline.includes('residentChunkRebuilds');
+issue(
+  'Q-P1-PRIMITIVE-CHURN-BUDGET',
+  'P1',
+  'voplay/render',
+  'Primitive resident updates expose dirty range, staging/ring buffer, rebuild queue, and churn telemetry.',
+  './d.py ci task voplay-render-stress-budgeted',
+  '2026-07-06',
+  'Avoid whole chunk rebuild on churn paths and budget upload bytes/rebuild queue length.',
+  primitiveChurnReady,
+  { file: 'voplay/rust/src/primitive_pipeline.rs' },
+);
+
+const renderBudgetReady =
+  lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs')) <= 300
+  && lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_decode.rs')) <= 700
+  && lineCount(projectText(voplayRoot, 'rust/src/renderer_frame.rs')) <= 900
+  && lineCount(projectText(voplayRoot, 'rust/src/render_world.rs')) <= 700
+  && lineCount(primitivePipelineBudgetSource) <= 700
+  && lineCount(pipelineCacheBudgetSource) <= 500;
+issue(
+  'Q-P2-RENDER-OWNERSHIP-BUDGET',
+  'P2',
+  'voplay/render',
+  'Render ownership files stay inside file budget with owner tests.',
+  './d.py ci task voplay-render-structure-lint',
+  '2026-07-12',
+  'Keep file-budget lint active; split resident store, batching, upload, cache, and submitters in follow-up slices.',
+  renderBudgetReady,
+  {
+    frameOrchestratorLines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs')),
+    primitivePipelineLines: lineCount(primitivePipelineBudgetSource),
+    renderWorldLines: lineCount(projectText(voplayRoot, 'rust/src/render_world.rs')),
+    pipelineCacheLines: lineCount(pipelineCacheBudgetSource),
+  },
+);
+
+const physicsAuthorityReady =
+  projectText(voplayRoot, 'scene3d/vehicle.vo').includes('type vehicleBackendConstraintCommand struct')
+  && !projectText(voplayRoot, 'scene3d/vehicle.vo').includes('type VehicleConstraintCommand')
+  && projectText(voplayRoot, 'scene3d/vehicle.vo').includes('vehicleWheelMaterialFromPacket')
+  && projectText(voplayRoot, 'scene3d/vehicle.vo').includes('SurfaceID string')
+  && projectText(voplayRoot, 'scene3d/kart_dynamics.vo').includes('type BoostState struct')
+  && projectText(voplayRoot, 'scene3d/contact_event.vo').includes('Surface SurfaceMaterial')
+  && projectText(voplayRoot, 'scene3d/vehicle_telemetry.vo').includes('type WheelTelemetry struct')
+  && projectText(voplayRoot, 'scene3d/vehicle_telemetry.vo').includes('SurfaceID MaterialID')
+  && projectText(voplayRoot, 'scene3d/vehicle_telemetry.vo').includes('BackendApplyHash')
+  && projectText(voplayRoot, 'scene3d/vehicle_physics_session.vo').includes('FixedPhysicsStep');
+issue(
+  'Q-P1-PHYSICS-AUTHORITY',
+  'P1',
+  'voplay/scene3d',
+  'Road-edge constraints, boost state, contact surface, and per-wheel telemetry have a single physics authority path.',
+  './d.py ci task voplay-physics-backend-contract',
+  '2026-07-07',
+  'Move edge assist and boost authority into fixed-step dynamics and expose per-wheel contact telemetry.',
+  physicsAuthorityReady,
+  { files: ['scene3d/vehicle.vo', 'scene3d/kart_dynamics.vo', 'scene3d/contact_event.vo'] },
+);
+
+const blockKartProductReady =
+  ['RaceSession', 'KartRig', 'TrackRuntime', 'HUDPresenter', 'PerfReporter', 'AssetRuntimeCache'].every((token) =>
+    blockKartFiles.some((file) => file.source.includes(token)),
+  )
+  && lineCount(blockKartWorld) <= 850
+  && lineCount(blockKartPrimitiveWorld) <= 850
+  && blockKartFiles.some((file) => file.source.includes('StructuredFailureReport'));
+issue(
+  'Q-P1-BLOCKKART-PRODUCT-OWNERS',
+  'P1',
+  'BlockKart',
+  'BlockKart World and primitive_world are split into product owners with structured failure reports.',
+  './d.py ci task blockkart-product-boundary-strict',
+  '2026-07-07',
+  'Extract race/session/rig/track/HUD/perf/assets owners and keep product panic paths structured.',
+  blockKartProductReady,
+  { worldLines: lineCount(blockKartWorld), primitiveWorldLines: lineCount(blockKartPrimitiveWorld) },
+);
+
+const trackManifestReady =
+  blockKartFiles.some((file) => file.source.includes('BlockKartTrackSpec'))
+  || existsSync(path.join(blockKartRoot, 'track_manifest.json'))
+  || existsSync(path.join(blockKartRoot, 'assets/maps/primitive_track/blockkart.track.json'));
+issue(
+  'Q-P1-BLOCKKART-TRACK-MANIFEST',
+  'P1',
+  'BlockKart',
+  'Track, visual road, terrain, collider, spawn, gates, respawn, and minimap derive from one manifest.',
+  './d.py ci task quickplay-source-audit',
+  '2026-07-07',
+  'Introduce BlockKartTrackSpec manifest and make terrain/collider/capture tools consume its hash.',
+  trackManifestReady,
+  { candidate: 'assets/maps/primitive_track/blockkart.track.json' },
+);
+
+const provenanceV2Ready =
+  artifactsToml.includes('provenance = "apps/studio/public/quickplay/blockkart/provenance.json"')
+  && quickplayProvenance.schemaVersion === 2
+  && Array.isArray(quickplayProvenance.outputs)
+  && quickplayProvenance.outputs.every((output) => output.digest)
+  && quickplayProvenance.generator?.version
+  && quickplayProvenance.toolchain?.voDev
+  && quickplayProvenance.task?.id
+  && quickplayProvenance.sourceRoots;
+issue(
+  'Q-P1-ARTIFACT-PROVENANCE-V2',
+  'P1',
+  'studio/artifacts',
+  'Generated artifacts use provenance schema v2 with output digest, dependency commit, dirty flag, generator/toolchain version, task id, and source roots.',
+  './d.py ci task quickplay-validate',
+  '2026-07-06',
+  'Upgrade quickplay provenance writer, validator, and vo-dev artifact lint to schema v2.',
+  provenanceV2Ready,
+  { schemaVersion: quickplayProvenance.schemaVersion },
+);
+
+const devDocFiles = readdirSync(path.join(root, 'lang/docs/dev'))
+  .filter((file) => file.endsWith('.md'))
+  .map((file) => ({ file, source: readText(path.join(root, 'lang/docs/dev', file)) }));
+const voplayPlanFiles = devDocFiles.filter((file) =>
+  file.file.startsWith('voplay-') && file.file.endsWith('-plan.md')
+);
+const activeVoplayQuality = voplayPlanFiles.filter((file) => /^Status:\s*active\s*$/m.test(file.source));
+const supersededByQualityPlan = (file) =>
+  /^Status:\s*superseded\s*$/m.test(file.source)
+  && /^Superseded-By:\s*lang\/docs\/dev\/voplay-code-engineering-quality-plan\.md\s*$/m.test(file.source)
+  && /^Superseded-Date:\s*\d{4}-\d{2}-\d{2}\s*$/m.test(file.source);
+const docsReady =
+  activeVoplayQuality.length === 1
+  && activeVoplayQuality[0]?.file === 'voplay-code-engineering-quality-plan.md'
+  && voplayPlanFiles
+    .filter((file) => file.file !== 'voplay-code-engineering-quality-plan.md')
+    .every(supersededByQualityPlan);
+const activeQualityPlanSource = activeVoplayQuality[0]?.source ?? '';
+const requiredFinalGateCommands = [
+  './d.py ci task voplay-engineering-quality-readiness',
+  './d.py ci task voplay-industrial-readiness',
+  './d.py ci task voplay-render-core-unit',
+  './d.py ci task voplay-framegraph-unit',
+  './d.py ci task voplay-render-structure-lint',
+  './d.py ci task voplay-batch-planner-unit',
+  './d.py ci task voplay-render-stress-budgeted',
+  './d.py ci task voplay-render-soak-10m',
+  './d.py ci task voplay-physics-backend-contract',
+  './d.py ci task voplay-physics-industrial-stress',
+  './d.py ci task blockkart-product-boundary-strict',
+  './d.py ci task quickplay-source-audit',
+  './d.py ci task quickplay-regenerate-check',
+  './d.py ci task quickplay-validate',
+  './d.py ci task blockkart-baseline',
+  './d.py ci task blockkart-baseline-restart-50',
+  './d.py ci task docs-lint',
+  './d.py ci task eng-lint-tasks',
+  'git diff --check',
+  'git diff --cached --check',
+];
+const planFinalGateCommands = [...activeQualityPlanSource.matchAll(/^\s*(\.\/d\.py ci task [a-z0-9-]+|git diff --(?:cached --)?check)\s*$/gm)]
+  .map((match) => match[1]);
+const missingFinalGateCommands = requiredFinalGateCommands
+  .filter((command) => !planFinalGateCommands.includes(command));
+const missingFinalGateTaskDefinitions = requiredFinalGateCommands
+  .filter((command) => command.startsWith('./d.py ci task '))
+  .map((command) => command.replace('./d.py ci task ', ''))
+  .filter((taskName) => !new RegExp(`^name = "${escapeRegExp(taskName)}"$`, 'm').test(tasksToml));
+const requiredFinalGateConditions = [
+  '`fileBudgets` 全 pass。',
+  '`codeOwnership.status == pass`。',
+  '`stringOnlyChecks == []`。',
+  '`emptyOwnerModules == []`。',
+  '`sourceAuditFailures == []`。',
+  '`failures == []`。',
+  '`dirtyProvenance == false`。',
+  'render stress / soak report fresh。',
+  'physics stress / replay report fresh。',
+  'quickplay artifact 与源码 commit 一致。',
+];
+const missingFinalGateConditions = requiredFinalGateConditions
+  .filter((condition) => !activeQualityPlanSource.includes(condition));
+const docsFinalGateContract = {
+  activePlan: activeVoplayQuality[0]?.file ?? null,
+  commandCount: planFinalGateCommands.length,
+  missingFinalGateCommands,
+  missingFinalGateTaskDefinitions,
+  missingFinalGateConditions,
+};
+issue(
+  'Q-P1-DOCS-PLAN-STATE',
+  'P1',
+  'docs',
+  'Exactly one active voplay quality plan exists; old voplay plans are superseded with metadata.',
+  './d.py ci task docs-lint',
+  '2026-07-05',
+  'Mark old active industrial plan superseded by the quality plan and lint active/proposed conflicts.',
+  docsReady,
+  { activePlans: activeVoplayQuality.map((file) => file.file) },
+);
+
+const unexplainedWarningsReady =
+  !projectText(voplayRoot, 'rust/src/lib.rs').includes('#[allow(dead_code)]')
+  && !tasksToml.includes('allow warning');
+issue(
+  'Q-P1-RUST-WARNING-BUDGET',
+  'P1',
+  'voplay/rust',
+  'Scoped Rust quality suites have no unexplained dead-code or unused warnings.',
+  './d.py ci task voplay-render-core-unit',
+  '2026-07-06',
+  'Remove unused paths or make warning allowances explicit with owner and expiry.',
+  unexplainedWarningsReady,
+  { crate: 'vo-voplay' },
+);
+
+const p2Issues = issues.filter((item) => item.severity === 'P2');
+const p2MetadataReady = p2Issues.every((item) => item.owner && item.expiry && item.mitigation);
+const expectedCommits = parseExpectedCommits(projectToml);
+const currentRepoStates = [
+  repoState('voplay', voplayRoot, expectedCommits.get('voplay') || ''),
+  repoState('BlockKart', blockKartRoot, expectedCommits.get('BlockKart') || ''),
+];
+const crossRepoHeadMismatchesList = crossRepoHeadMismatches(expectedCommits);
+const dirtyProvenanceEntries = dirtyProvenanceEvidence(quickplayProvenance);
+const dirtyProvenance = dirtyProvenanceEntries.length > 0;
+const emptyOwnerModulesList = emptyOwnerModules(voplayRoot);
+const sourceAuditFailures = [
+  ...emptyOwnerModulesList.map((entry) => ({
+    code: 'render.empty_owner_module',
+    severity: 'P0',
+    owner: 'voplay/render',
+    message: 'Render split owner module has no production responsibility or production call path',
+    evidence: entry,
+  })),
+  ...sourceAuditFailuresFromSource({
+    frameGraph,
+    framePassSequence,
+    rendererPassDispatch,
+    renderPassSources,
+    renderWorld,
+    voplayPhysics,
+    voplayVehicle,
+    voplayDynamics,
+    kartController,
+    vehicleTelemetry,
+    vehiclePhysicsSession,
+    physicsStressSource,
+    sceneSource,
+    replaySource,
+    blockKartFiles,
+  }),
+];
+const renderStressReport = jsonMaybe('target/voplay-render-stress-budgeted/report.json');
+const physicsContractReport = jsonMaybe('target/voplay-physics-backend-contract/report.json');
+const renderStressStructuredReady = renderStressReport?.status === 'pass'
+  && renderStressReport?.coverage?.primitive10k === true
+  && renderStressReport?.coverage?.resourceChurnSoak === true
+  && renderStressReport?.coverage?.realPerfSamples === true
+  && renderStressReport?.summary?.p0 === 0
+  && renderStressReport?.summary?.p1 === 0;
+const physicsAuthorityStructuredReady = physicsContractReport?.status === 'pass'
+  && !sourceAuditFailures.some((entry) => entry.code.startsWith('physics.'));
+const blockKartProductStructuredReady = !sourceAuditFailures.some((entry) => entry.code.startsWith('blockkart.'))
+  && blockKartFiles.some((entry) => entry.source.includes('ProductSceneDiagnostics'))
+  && blockKartFiles.some((entry) => entry.source.includes('ProductVehicleTelemetry'));
+const renderFileBudgetEntries = {
+  'rust/src/renderer/frame_orchestrator.rs': {
+    lines: lineCount(frameOrchestrator),
+    budget: 300,
+  },
+  'rust/src/renderer/frame_2d_upload.rs': {
+    lines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_2d_upload.rs')),
+    budget: 160,
+  },
+  'rust/src/renderer/frame_decode.rs': {
+    lines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_decode.rs')),
+    budget: 700,
+  },
+  'rust/src/renderer/frame_graph_plan.rs': {
+    lines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_graph_plan.rs')),
+    budget: 300,
+  },
+  'rust/src/renderer/frame_pass_sequence.rs': {
+    lines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_pass_sequence.rs')),
+    budget: 300,
+  },
+  'rust/src/renderer/frame_perf_finalize.rs': {
+    lines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_perf_finalize.rs')),
+    budget: 300,
+  },
+  'rust/src/renderer/frame_surface.rs': {
+    lines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_surface.rs')),
+    budget: 80,
+  },
+  'rust/src/renderer_frame.rs': {
+    lines: lineCount(frameGraph),
+    budget: 900,
+  },
+  'rust/src/renderer/frame_workload_plan.rs': {
+    lines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_workload_plan.rs')),
+    budget: 300,
+  },
+  'rust/src/render_world.rs': {
+    lines: lineCount(projectText(voplayRoot, 'rust/src/render_world.rs')),
+    budget: 700,
+  },
+  'rust/src/primitive_pipeline.rs': {
+    lines: lineCount(primitivePipelineBudgetSource),
+    budget: 700,
+  },
+  'rust/src/pipeline3d/pipeline_cache.rs': {
+    lines: lineCount(pipelineCacheBudgetSource),
+    budget: 500,
+  },
+};
+const fileBudgets = Object.fromEntries(
+  Object.entries(renderFileBudgetEntries).map(([file, entry]) => [
+    file,
+    {
+      ...entry,
+      status: entry.lines <= entry.budget ? 'pass' : 'fail',
+      overBy: Math.max(0, entry.lines - entry.budget),
+    },
+  ]),
+);
+const fileBudgetFailures = Object.entries(fileBudgets)
+  .filter(([, entry]) => entry.status !== 'pass')
+  .map(([file, entry]) => ({ file, ...entry }));
+const codeOwnershipPass = renderBudgetReady && blockKartProductReady && emptyOwnerModulesList.length === 0;
+const docsSourceFacts = {
+  docsReady,
+  finalGateContractPass: missingFinalGateCommands.length === 0
+    && missingFinalGateTaskDefinitions.length === 0
+    && missingFinalGateConditions.length === 0,
+  fileBudgetsPass: fileBudgetFailures.length === 0,
+  codeOwnershipPass,
+  emptyOwnerModulesEmpty: emptyOwnerModulesList.length === 0,
+  sourceAuditFailuresEmpty: sourceAuditFailures.length === 0,
+  dirtyProvenanceClean: !dirtyProvenance,
+  crossRepoHeadsMatch: crossRepoHeadMismatchesList.length === 0,
+};
+const docsSourceFactsReady = Object.values(docsSourceFacts).every(Boolean);
+const stringOnlyChecks = [
+  !renderStressStructuredReady ? {
+    code: 'Q-P1-PRIMITIVE-CHURN-BUDGET',
+    owner: 'voplay/render',
+    reason: 'uses substring evidence for dirty range, staging, rebuild queue, and resident churn',
+    gate: './d.py ci task voplay-render-stress-budgeted',
+  } : null,
+  !physicsAuthorityStructuredReady ? {
+    code: 'Q-P1-PHYSICS-AUTHORITY',
+    owner: 'voplay/scene3d',
+    reason: 'uses token presence instead of backend consumption behavior',
+    gate: './d.py ci task voplay-physics-backend-contract',
+  } : null,
+  !blockKartProductStructuredReady ? {
+    code: 'Q-P1-BLOCKKART-PRODUCT-OWNERS',
+    owner: 'BlockKart',
+    reason: 'uses owner name tokens and line counts without production call ownership',
+    gate: './d.py ci task blockkart-product-boundary-strict',
+  } : null,
+  !docsSourceFactsReady ? {
+    code: 'Q-P1-DOCS-PLAN-STATE',
+    owner: 'docs',
+    reason: 'active plan final-gate contract must match defined tasks and current source-audit facts',
+    gate: './d.py ci task docs-lint',
+    evidence: {
+      docsFinalGateContract,
+      docsSourceFacts,
+    },
+  } : null,
+].filter(Boolean);
+const today = new Date().toISOString().slice(0, 10);
+const openP0 = issues.filter((item) => item.severity === 'P0' && item.status !== 'closed');
+const openP1 = issues.filter((item) => item.severity === 'P1' && item.status !== 'closed');
+const openP2Expired = p2Issues.filter((item) => item.status !== 'closed' && item.expiry && item.expiry < today);
+const hardFailures = [
+  ...fileBudgetFailures.map((entry) => ({
+    code: 'Q-P0-FILE-BUDGET',
+    severity: 'P0',
+    owner: 'voplay/render',
+    expected: `${entry.file} must stay within its file budget (${entry.lines}/${entry.budget}, over by ${entry.overBy}).`,
+    gate: './d.py ci task voplay-render-structure-lint',
+    evidence: entry,
+  })),
+  ...(!codeOwnershipPass ? [{
+    code: 'Q-P0-CODE-OWNERSHIP',
+    severity: 'P0',
+    owner: 'voplay/render',
+    expected: 'codeOwnership.status must be pass; owner modules must have real production responsibility and budget compliance.',
+    gate: './d.py ci task voplay-render-structure-lint',
+    evidence: {
+      renderBudgetReady,
+      blockKartProductReady,
+      emptyOwnerModules: emptyOwnerModulesList,
+      p2Issues: p2Issues.map((item) => item.code),
+    },
+  }] : []),
+  ...(dirtyProvenance ? [{
+    code: 'Q-P0-DIRTY-PROVENANCE',
+    severity: 'P0',
+    owner: 'studio/artifacts',
+    expected: 'Strict quality readiness requires quickplay project and dependency dirty flags to be false.',
+    gate: './d.py ci task quickplay-validate',
+    evidence: { dirtyProvenanceEntries },
+  }] : []),
+  ...crossRepoHeadMismatchesList.map((entry) => ({
+    code: 'Q-P0-CROSS-REPO-HEAD',
+    severity: 'P0',
+    owner: 'eng',
+    expected: 'Sibling checkout HEAD must match eng/project.toml expected_commit.',
+    gate: 'cargo run -q -p vo-dev -- ci final-matrix',
+    evidence: entry,
+  })),
+  ...sourceAuditFailures.map((entry) => ({
+    code: entry.code,
+    severity: entry.severity,
+    owner: entry.owner,
+    expected: entry.message,
+    gate: 'first-principles source audit',
+    evidence: entry.evidence,
+  })),
+  ...stringOnlyChecks.map((entry) => ({
+    code: 'Q-P1-STRING-ONLY-CHECK',
+    severity: 'P1',
+    owner: entry.owner,
+    expected: 'P0/P1 closure must be backed by structured report, behavior test, stress evidence, or source audit rather than string-only checks.',
+    gate: entry.gate,
+    evidence: entry,
+  })),
+  ...openP2Expired.map((entry) => ({
+    code: 'Q-P2-EXPIRED',
+    severity: 'P2',
+    owner: entry.owner,
+    expected: entry.expected,
+    gate: entry.gate,
+    evidence: { expiry: entry.expiry, mitigation: entry.mitigation },
+  })),
+];
+for (const failure of hardFailures) {
+  failures.push(failure);
+}
+const industrialReportPath = path.join(root, 'target/voplay-industrial-readiness/report.json');
+const industrialReport = existsSync(industrialReportPath)
+  ? JSON.parse(readText(industrialReportPath))
+  : null;
+const industrialReadyDependency =
+  industrialReport?.industrialReady === true
+  && Array.isArray(industrialReport?.failures)
+  && industrialReport.failures.length === 0
+  && Array.isArray(industrialReport?.sourceAuditFailures)
+  && industrialReport.sourceAuditFailures.length === 0
+  && !dirtyProvenance;
+const qualityReady =
+  failures.length === 0
+  && sourceAuditFailures.length === 0
+  && !dirtyProvenance
+  && crossRepoHeadMismatchesList.length === 0
+  && stringOnlyChecks.length === 0
+  && fileBudgetFailures.length === 0
+  && openP0.length === 0
+  && openP1.length === 0
+  && openP2Expired.length === 0
+  && p2MetadataReady
+  && codeOwnershipPass
+  && industrialReadyDependency;
+const generatedAt = new Date().toISOString();
+const freshEvidence = sourceBoundEvidence({
+  gate: 'voplay-engineering-quality-readiness',
+  generatedAt,
+  root,
+  repos: [
+    { name: 'volang', root },
+    { name: 'voplay', root: voplayRoot },
+    { name: 'BlockKart', root: blockKartRoot },
+  ],
+  gateFiles: [
+    'scripts/ci/voplay_engineering_quality_readiness.mjs',
+    'scripts/ci/repo_roots.mjs',
+    'scripts/ci/source_bound_evidence.mjs',
+    'scripts/ci/quickplay_source_audit.mjs',
+    'scripts/ci/voplay_render_architecture_lint.mjs',
+    'scripts/ci/blockkart_product_boundary_strict.mjs',
+    'eng/tasks.toml',
+    'eng/ci.toml',
+    'eng/project.toml',
+  ],
+  artifacts: [
+    'apps/studio/public/quickplay/blockkart/project.json',
+    'apps/studio/public/quickplay/blockkart/deps.json',
+    'apps/studio/public/quickplay/blockkart/provenance.json',
+    'target/voplay-render-stress-budgeted/report.json',
+    'target/voplay-render-soak-10m/report.json',
+    'target/voplay-physics-industrial-stress/report.json',
+    'target/blockkart-baseline/blockkart-baseline.json',
+    'target/blockkart-baseline-restart-50/blockkart-baseline.json',
+  ],
+});
+
+const report = {
+  schema: 'voplay.engineeringQualityReadiness.v1',
+  generatedAt,
+  freshEvidence,
+  qualityReady,
+  industrialReadyDependency,
+  dirtyProvenance,
+  crossRepoHeadMismatches: crossRepoHeadMismatchesList,
+  stringOnlyChecks,
+  emptyOwnerModules: emptyOwnerModulesList,
+  openP0,
+  openP1,
+  openP2Expired,
+  sourceAuditFailures,
+  failures,
+  repoState: currentRepoStates,
+  warningBudget: {
+    status: unexplainedWarningsReady ? 'pass' : 'fail',
+    unexplainedWarningsAllowed: 0,
+  },
+  fileBudgets,
+  dependencyAudit: {
+    status: auditReady ? 'pass' : 'fail',
+    gate: 'node-audit-current',
+    highCriticalAllowed: 0,
+    moderateIssues: [],
+  },
+  ciTopology: {
+    status: hasMultiCheckout && rootInjection && routingReady ? 'pass' : 'fail',
+    requiredRepos: ['volang', 'vogui', 'voplay', 'vopack', 'BlockKart'],
+  },
+  artifactProvenance: {
+    status: provenanceV2Ready && !dirtyProvenance ? 'pass' : 'fail',
+    schemaVersion: quickplayProvenance.schemaVersion,
+    dirtyEntries: dirtyProvenanceEntries,
+  },
+  artifactEvidence: {
+    quickplay: {
+      provenance: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      dirtyProvenance,
+      dirtyEntries: dirtyProvenanceEntries,
+      outputs: quickplayProvenance.outputs ?? [],
+    },
+  },
+  codeOwnership: {
+    status: codeOwnershipPass ? 'pass' : 'fail',
+    p2Issues: p2Issues.map((item) => item.code),
+  },
+  performanceDebt: {
+    status: primitiveChurnReady && batchPlannerBounds ? 'pass' : 'fail',
+  },
+  docsPlanState: {
+    status: docsReady && docsSourceFactsReady ? 'pass' : 'fail',
+    activePlans: activeVoplayQuality.map((file) => file.file),
+    sourceFacts: docsSourceFacts,
+  },
+  docsEvidence: {
+    activePlans: activeVoplayQuality.map((file) => file.file),
+    supersededPlans: voplayPlanFiles
+      .filter((file) => file.file !== 'voplay-code-engineering-quality-plan.md')
+      .map((file) => ({ file: file.file, superseded: supersededByQualityPlan(file) })),
+    finalGateContract: docsFinalGateContract,
+  },
+  trackedIssues: issues,
+};
+
+function markdownReport(value) {
+  const lines = [];
+  lines.push('# voplay Engineering Quality Readiness');
+  lines.push('');
+  lines.push(`- qualityReady: ${value.qualityReady ? 'true' : 'false'}`);
+  lines.push(`- failures: ${value.failures.length}`);
+  lines.push(`- tracked issues: ${value.trackedIssues.length}`);
+  lines.push('');
+  for (const item of value.trackedIssues) {
+    lines.push(`- ${item.status === 'closed' ? 'closed' : 'open'} ${item.severity} ${item.code}: ${item.expected}`);
+  }
+  lines.push('');
+  return `${lines.join('\n')}\n`;
+}
+
+mkdirSync(outDir, { recursive: true });
+writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
+writeFileSync(path.join(outDir, 'report.md'), markdownReport(report));
+
+console.log(`voplay engineering quality readiness: qualityReady=${qualityReady} failures=${failures.length}`);
+console.log(`voplay engineering quality readiness: report ${path.relative(root, path.join(outDir, 'report.json'))}`);
+if (!qualityReady) {
+  for (const failure of failures) {
+    console.error(`voplay engineering quality readiness: ${failure.severity} ${failure.code}: ${failure.expected}`);
+  }
+  process.exit(1);
+}

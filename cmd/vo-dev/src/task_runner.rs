@@ -1,6 +1,8 @@
-use crate::config::{load_tasks, load_toolchains, Task};
-use crate::first_party::ci_checkout_untracked_prefixes;
-use crate::task_graph::{resolve_selector, task_map, task_tools_recursive};
+use crate::config::{load_project, load_tasks, load_toolchains, Task};
+use crate::first_party::{ci_checkout_untracked_prefixes, project_repo_path};
+use crate::task_graph::{
+    resolve_selector, task_map, task_repos_recursive_from_map, task_tools_recursive,
+};
 use crate::tool_lint::lint_toolchain_file;
 use crate::tool_system::check_tools;
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,7 +13,7 @@ use std::fs;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
@@ -49,6 +51,9 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
         for (key, value) in &gate_plan_env {
             command.env(key, value);
         }
+        for (key, value) in task_root_env(root, &task_map, name)? {
+            command.env(key, value);
+        }
         let status = run_command_with_optional_timeout(&mut command, task.timeout_sec)
             .with_context(|| format!("could not run task {name}"))?;
         let elapsed = start.elapsed().as_secs_f32();
@@ -60,6 +65,81 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
         println!("ok: {name} ({elapsed:.1}s)");
     }
     Ok(())
+}
+
+fn task_root_env(
+    root: &Path,
+    task_map: &std::collections::BTreeMap<String, Task>,
+    task_name: &str,
+) -> Result<Vec<(String, String)>> {
+    let required_repos = task_repos_recursive_from_map(task_map, task_name)?;
+    let project = load_project(root)?;
+    let mut env = vec![(
+        "VOLANG_ROOT".to_string(),
+        absolute_path(root)?.display().to_string(),
+    )];
+    for repo in project
+        .first_party
+        .iter()
+        .chain(project.external_project.iter())
+    {
+        let env_name = repo_root_env_name(&repo.name);
+        let path = match project_repo_path(root, &repo.name) {
+            Ok(path) => path,
+            Err(error) if required_repos.contains(&repo.name) => {
+                bail!(
+                    "task {task_name} requires project repo {}; provision a CI checkout or local_hint before running it: {error:#}",
+                    repo.name
+                );
+            }
+            Err(_) => fallback_repo_path(root, &repo.name, repo.local_hint.as_deref()),
+        };
+        env.push((env_name, path.display().to_string()));
+        if let Some(expected_commit) = &repo.expected_commit {
+            env.push((
+                repo_expected_commit_env_name(&repo.name),
+                expected_commit.clone(),
+            ));
+        }
+    }
+    Ok(env)
+}
+
+fn repo_root_env_name(repo: &str) -> String {
+    let mut out = String::new();
+    for ch in repo.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out.push_str("_ROOT");
+    out
+}
+
+fn repo_expected_commit_env_name(repo: &str) -> String {
+    let mut out = String::new();
+    for ch in repo.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out.push_str("_EXPECTED_COMMIT");
+    out
+}
+
+fn fallback_repo_path(root: &Path, repo: &str, local_hint: Option<&str>) -> PathBuf {
+    local_hint
+        .map(|hint| root.join(hint))
+        .unwrap_or_else(|| root.join("ci_modules").join(repo))
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    path.canonicalize()
+        .with_context(|| format!("could not canonicalize {}", path.display()))
 }
 
 fn gate_plan_env(config: &crate::config::TaskFile) -> Result<Vec<(String, String)>> {

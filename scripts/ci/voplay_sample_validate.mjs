@@ -2,10 +2,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const quickplayDeps = path.join(root, 'apps/studio/public/quickplay/blockkart/deps.json');
-const voplayRoot = path.resolve(process.env.VOPLAY_ROOT ?? path.join(root, '..', 'voplay'));
+const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const samplePath = path.join(voplayRoot, 'examples/empty_smoke/main.vo');
 
 function fail(message) {

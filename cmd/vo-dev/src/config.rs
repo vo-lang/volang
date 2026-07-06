@@ -56,6 +56,8 @@ pub(crate) struct Task {
     pub(crate) needs: Vec<String>,
     pub(crate) repo: Option<String>,
     #[serde(default)]
+    pub(crate) repos: Vec<String>,
+    #[serde(default)]
     pub(crate) internal: bool,
     pub(crate) timeout_sec: Option<u64>,
     #[serde(default)]
@@ -126,6 +128,7 @@ pub(crate) struct ProjectRepo {
     pub(crate) name: String,
     pub(crate) repository: Option<String>,
     pub(crate) local_hint: Option<String>,
+    pub(crate) expected_commit: Option<String>,
     pub(crate) ci_checkout: Option<bool>,
     #[serde(default)]
     pub(crate) workspace: Vec<ProjectWorkspace>,

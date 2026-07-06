@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -13,8 +14,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync, inflateSync } from 'node:zlib';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
+const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
+const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const studioDir = path.join(root, 'apps/studio');
 const studioDistIndex = path.join(studioDir, 'dist/index.html');
 const quickplayDir = path.join(root, 'apps/studio/public/quickplay/blockkart');
@@ -103,6 +108,22 @@ function boolOption(name, envValue, fallback) {
     return parseBool(envValue, fallback);
   }
   return fallback;
+}
+
+function baselineGateName() {
+  if (restartCount === 50) {
+    return 'blockkart-baseline-restart-50';
+  }
+  if (restartCount === 10) {
+    return 'blockkart-baseline-restart-10';
+  }
+  if (startRaceRequested) {
+    return 'blockkart-baseline-start-race';
+  }
+  if (verifyStorageReload) {
+    return 'blockkart-baseline-storage-reload';
+  }
+  return 'blockkart-baseline';
 }
 
 function parseBool(value, fallback) {
@@ -205,6 +226,29 @@ function installSimulatedFailure(kind) {
     target: 'assets/blockkart.vpak',
     mutation: 'renamed packaged VFS entry to assets/blockkart_missing.vpak',
   };
+}
+
+function syncDistQuickplayPackage() {
+  if (!existsSync(path.join(quickplayDir, 'project.json')) || !existsSync(path.join(quickplayDir, 'deps.json'))) {
+    fail('apps/studio/public quickplay package is missing; run the quickplay-validate task first');
+  }
+  const distQuickplayDir = path.join(studioDir, 'dist/quickplay/blockkart');
+  const backupRoot = mkdtempSync(path.join(os.tmpdir(), 'blockkart-dist-quickplay-'));
+  const backupDir = path.join(backupRoot, 'blockkart');
+  const hadDistQuickplay = existsSync(distQuickplayDir);
+  if (hadDistQuickplay) {
+    cpSync(distQuickplayDir, backupDir, { recursive: true });
+  }
+  cleanupCallbacks.push(() => {
+    rmSync(distQuickplayDir, { recursive: true, force: true });
+    if (hadDistQuickplay) {
+      cpSync(backupDir, distQuickplayDir, { recursive: true });
+    }
+    rmSync(backupRoot, { recursive: true, force: true });
+  });
+  rmSync(distQuickplayDir, { recursive: true, force: true });
+  mkdirSync(path.dirname(distQuickplayDir), { recursive: true });
+  cpSync(quickplayDir, distQuickplayDir, { recursive: true });
 }
 
 function trimLog(log) {
@@ -2724,6 +2768,7 @@ async function main() {
     fail('apps/studio/dist is missing; run the studio-build task first');
   }
   mkdirSync(outDir, { recursive: true });
+  syncDistQuickplayPackage();
   const projectPackage = readJson(path.join(quickplayDir, 'project.json'));
   const depsPackage = readJson(path.join(quickplayDir, 'deps.json'));
   const provenance = readJson(path.join(quickplayDir, 'provenance.json'));
@@ -3037,9 +3082,37 @@ async function main() {
       performanceAttribution,
     });
     const p0p1 = issues.filter((issue) => issue.severity === 'P0' || issue.severity === 'P1');
+    const generatedAt = new Date().toISOString();
+    const freshEvidence = sourceBoundEvidence({
+      gate: baselineGateName(),
+      generatedAt,
+      root,
+      repos: [
+        { name: 'volang', root },
+        { name: 'voplay', root: voplayRoot },
+        { name: 'BlockKart', root: blockKartRoot },
+      ],
+      gateFiles: [
+        'scripts/ci/blockkart_baseline.mjs',
+        'scripts/ci/quickplay_validate.mjs',
+        'scripts/ci/repo_roots.mjs',
+        'scripts/ci/source_bound_evidence.mjs',
+        'apps/studio/package.json',
+        'apps/studio/vite.config.ts',
+        'eng/tasks.toml',
+        'eng/ci.toml',
+      ],
+      artifacts: [
+        quickplayDir,
+        studioDistIndex,
+        viewportScreenshot,
+        canvasScreenshot,
+      ],
+    });
     const report = {
       schemaVersion: 1,
-      generatedAt: new Date().toISOString(),
+      generatedAt,
+      freshEvidence,
       startedAt,
       durationMs: Date.now() - monotonicStartMs,
       status: p0p1.length > 0 ? 'failed' : status,

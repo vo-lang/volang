@@ -24,9 +24,18 @@ const artifactInputs = [
   'lang/docs/vo-for-gophers.md',
 ];
 const artifactGenerator = ['vo-dev', 'task', 'run', 'task:docs-sync'];
+const artifactTaskId = 'docs-sync';
+const artifactGeneratorVersion = 2;
 
 function digest(text) {
   return `sha256:${createHash('sha256').update(text).digest('hex')}`;
+}
+
+function gitOutput(args) {
+  return execFileSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+  }).trim();
 }
 
 async function sourceTimestamp(file) {
@@ -73,14 +82,28 @@ async function renderGeneratedDoc(entry) {
 
 async function writeTree(outRoot) {
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     artifact: 'playground.generated-docs',
     path: artifactPath,
+    task: {
+      id: artifactTaskId,
+      command: artifactGenerator,
+    },
     generator: {
       command: artifactGenerator,
+      script: 'scripts/ci/docs_sync.mjs',
+      version: artifactGeneratorVersion,
+    },
+    toolchain: {
+      node: process.version,
+      voDev: gitOutput(['rev-parse', 'HEAD']),
+    },
+    sourceRoots: {
+      volang: root,
     },
     inputs: artifactInputs,
     docs: [],
+    outputs: [],
   };
   await fs.rm(outRoot, { recursive: true, force: true });
   await fs.mkdir(outRoot, { recursive: true });
@@ -90,6 +113,11 @@ async function writeTree(outRoot) {
     await fs.mkdir(path.dirname(outPath), { recursive: true });
     await fs.writeFile(outPath, generated.text, 'utf8');
     manifest.docs.push(generated.manifest);
+    manifest.outputs.push({
+      digest: digest(generated.text),
+      path: entry.output,
+      size: Buffer.byteLength(generated.text),
+    });
   }
   await fs.writeFile(path.join(outRoot, '_manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 }

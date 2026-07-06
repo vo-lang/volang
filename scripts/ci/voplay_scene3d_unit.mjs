@@ -3,12 +3,16 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const suite = argValue('--suite') || 'vehicle-dynamics';
 const outDir = path.resolve(argValue('--out-dir') || process.env.VOPLAY_SCENE3D_UNIT_OUT_DIR || path.join(root, `target/voplay-${suite}-unit`));
-const localVoplayRoot = path.join(root, '..', 'voplay');
-const voplayRoot = path.resolve(process.env.VOPLAY_ROOT || (existsSync(path.join(localVoplayRoot, 'vo.mod')) ? localVoplayRoot : path.join(root, 'ci_modules/voplay')));
+const gate = argValue('--gate') || path.basename(outDir);
+const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
+const voguiRoot = requireRepoRoot('VOGUI_ROOT', 'vogui');
+const vopackRoot = requireRepoRoot('VOPACK_ROOT', 'vopack');
 const sourceFile = path.join(voplayRoot, 'tests/main.vo');
 const sourceDir = path.dirname(sourceFile);
 const projectDir = path.join(outDir, 'project');
@@ -59,8 +63,8 @@ function checkSourceCoverage(source) {
 function prepareProject(source) {
   const localModules = [
     { module: 'github.com/vo-lang/voplay', dir: voplayRoot },
-    { module: 'github.com/vo-lang/vogui', dir: path.resolve(root, 'ci_modules/vogui') },
-    { module: 'github.com/vo-lang/vopack', dir: path.resolve(root, 'ci_modules/vopack') },
+    { module: 'github.com/vo-lang/vogui', dir: voguiRoot },
+    { module: 'github.com/vo-lang/vopack', dir: vopackRoot },
   ];
   for (const local of localModules) {
     if (!existsSync(path.join(local.dir, 'vo.mod'))) {
@@ -111,10 +115,34 @@ if (result.status !== 0) {
   fail(`suite ${suite} failed with exit ${result.status}; see ${logPath}\n${tail(result.stdout + result.stderr)}`);
 }
 
+const generatedAt = new Date().toISOString();
 writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify({
+  schemaVersion: 1,
   kind: 'voplay.scene3dUnitReport',
+  gate,
   suite,
   status: 'pass',
+  generatedAt,
+  freshEvidence: sourceBoundEvidence({
+    gate,
+    generatedAt,
+    root,
+    repos: [
+      { name: 'volang', root },
+      { name: 'voplay', root: voplayRoot },
+      { name: 'vogui', root: voguiRoot },
+      { name: 'vopack', root: vopackRoot },
+    ],
+    gateFiles: [
+      'scripts/ci/voplay_scene3d_unit.mjs',
+      'scripts/ci/repo_roots.mjs',
+      'scripts/ci/source_bound_evidence.mjs',
+      sourceFile,
+      'eng/tasks.toml',
+      'eng/ci.toml',
+    ],
+    artifacts: [logPath],
+  }),
   source: path.relative(root, sourceFile),
   project: path.relative(root, projectDir),
   log: path.relative(root, logPath),

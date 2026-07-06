@@ -17,6 +17,10 @@ path = "docs/**"
 tasks = ["docs-lint"]
 
 [[known_prefix]]
+path = "lang/docs/dev/voplay*.md"
+tasks = ["docs-lint", "ci-self-check", "voplay-engineering-quality-readiness"]
+
+[[known_prefix]]
 path = "lang/docs/**"
 tasks = ["docs-lint", "ci-self-check"]
 
@@ -34,7 +38,87 @@ tasks = ["docs-lint", "ci-self-check"]
 
 [[known_prefix]]
 path = "scripts/ci/**"
-tasks = ["eng-lint-tasks", "docs-lint", "ci-self-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline"]
+tasks = [
+  "eng-lint-tasks",
+  "docs-lint",
+  "ci-self-check",
+  "voplay-render-architecture-lint",
+  "blockkart-engine-boundary-lint",
+  "voplay-render-structure-lint",
+  "blockkart-product-boundary-strict",
+  "voplay-framegraph-unit",
+  "voplay-render-core-unit",
+  "voplay-batch-planner-unit",
+  "voplay-vehicle-dynamics-unit",
+  "voplay-vehicle-model-unit",
+  "voplay-physics-backend-unit",
+  "voplay-physics-backend-contract",
+  "voplay-render-stress",
+  "voplay-render-stress-budgeted",
+  "voplay-render-soak-10m",
+  "voplay-physics-stress",
+  "voplay-physics-industrial-stress",
+  "quickplay-validate",
+  "studio-browser-smoke",
+  "blockkart-baseline",
+  "blockkart-baseline-start-race",
+  "blockkart-baseline-storage-reload",
+  "blockkart-baseline-restart-10",
+  "blockkart-baseline-restart-50",
+  "blockkart-smoke-static",
+  "voplay-industrial-readiness",
+  "voplay-engineering-quality-readiness",
+]
+
+[[known_prefix]]
+path = "eng/project.toml"
+tasks = [
+  "eng-lint-tasks",
+  "cargo-test-vo-dev",
+  "vogui-build",
+  "studio-install-local-vogui",
+  "quickplay-validate",
+  "voplay-render-architecture-lint",
+  "blockkart-engine-boundary-lint",
+  "voplay-render-structure-lint",
+  "blockkart-product-boundary-strict",
+  "voplay-framegraph-unit",
+  "voplay-render-core-unit",
+  "voplay-batch-planner-unit",
+  "voplay-vehicle-dynamics-unit",
+  "voplay-vehicle-model-unit",
+  "voplay-physics-backend-unit",
+  "voplay-physics-backend-contract",
+  "voplay-render-stress-budgeted",
+  "voplay-physics-industrial-stress",
+  "voplay-industrial-readiness",
+  "voplay-engineering-quality-readiness",
+]
+
+[[known_prefix]]
+path = "eng/artifacts.toml"
+tasks = [
+  "eng-lint-artifacts",
+  "quickplay-validate",
+  "voplay-engineering-quality-readiness",
+]
+
+[[known_prefix]]
+path = "eng/perf-budgets/**"
+tasks = [
+  "voplay-render-stress",
+  "voplay-render-stress-budgeted",
+  "voplay-render-soak-10m",
+  "voplay-physics-stress",
+  "voplay-physics-industrial-stress",
+]
+
+[[known_prefix]]
+path = "apps/studio/scripts/package_blockkart_quickplay.mjs"
+tasks = [
+  "quickplay-validate",
+  "voplay-engineering-quality-readiness",
+]
 
 [[known_prefix]]
 path = "lang/crates/vo-runtime/**"

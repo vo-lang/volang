@@ -1,6 +1,8 @@
 # voplay Industrial Source-Audit Completion Plan
 
-Status: proposed
+Status: superseded
+Superseded-By: lang/docs/dev/voplay-code-engineering-quality-plan.md
+Superseded-Date: 2026-07-05
 Date: 2026-07-04
 Scope: final completion plan for making voplay's WebGPU render runtime and
 kart physics foundation industrial-grade for the scoped BlockKart validation
@@ -8,10 +10,13 @@ product.
 
 ## Role
 
-This document supersedes:
+This historical document superseded:
 
 - `lang/docs/dev/voplay-industrial-completion-plan.md`
 - `lang/docs/dev/voplay-industrial-first-principles-completion-plan.md`
+
+The active execution plan is now
+`lang/docs/dev/voplay-code-engineering-quality-plan.md`.
 
 The previous readiness report can currently write `industrialReady: true`, but
 source inspection shows that the result is a false positive. This plan turns

@@ -3,17 +3,27 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { requireRepoRoot, requireVolangRoot } from '../../../scripts/ci/repo_roots.mjs';
 
 const STUDIO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
-const REPO_ROOT = path.resolve(STUDIO_ROOT, '../..');
-const BLOCKKART_ROOT = path.resolve(process.env.BLOCKKART_ROOT ?? path.join(REPO_ROOT, '..', 'BlockKart'));
+const VOLANG_ROOT = requireVolangRoot(path.resolve(STUDIO_ROOT, '../..'));
+const BLOCKKART_ROOT = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const MOD_CACHE_ROOT = path.resolve(process.env.VO_MOD_CACHE ?? path.join(os.homedir(), '.vo', 'mod'));
-const VOPLAY_ROOT = path.resolve(process.env.VOPLAY_ROOT ?? path.join(REPO_ROOT, '..', 'voplay'));
+const VOPLAY_ROOT = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const OUT_ROOT = path.resolve(process.env.BLOCKKART_QUICKPLAY_OUT_ROOT ?? path.join(STUDIO_ROOT, 'public', 'quickplay', 'blockkart'));
 const WASM_TARGET = 'wasm32-unknown-unknown';
 const BLOCKKART_RUNTIME_ASSETS = ['assets/blockkart.vpak'];
+const BLOCKKART_SOURCE_ALLOWLIST = [
+  {
+    path: 'tools/pack_primitive_assets.vo',
+    reason: 'Asset-pack generation tool; quickplay runtime embeds the generated assets/blockkart.vpak payload.',
+    expiresAt: '2027-01-31T00:00:00.000Z',
+  },
+];
 const QUICKPLAY_ARTIFACT_NAME = 'studio.quickplay.blockkart';
 const QUICKPLAY_ARTIFACT_PATH = 'apps/studio/public/quickplay/blockkart';
+const QUICKPLAY_GENERATOR_VERSION = 2;
+const QUICKPLAY_TASK_ID = 'quickplay-blockkart-package';
 const QUICKPLAY_GENERATOR_COMMAND = ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'];
 const QUICKPLAY_GENERATOR_INPUTS = [
   'apps/studio/scripts/package_blockkart_quickplay.mjs',
@@ -23,6 +33,7 @@ const QUICKPLAY_GENERATOR_INPUTS = [
   'module-cache:vopack',
   'module-cache:vogui',
 ];
+const CLEAN_DEPENDENCY_SNAPSHOTS = [];
 
 function cacheKey(modulePath) {
   return modulePath.replaceAll('/', '@');
@@ -32,18 +43,24 @@ function gitOutput(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
-function requireCleanGitTree(cwd, label) {
-  const status = gitOutput(['status', '--porcelain'], cwd);
-  if (status) {
-    throw new Error(`${label} has uncommitted changes; refusing to create checked-in quickplay package`);
-  }
+function gitStatus(cwd) {
+  return gitOutput(['status', '--porcelain'], cwd);
 }
 
-function requireGitHead(cwd, label, expected) {
-  if (!expected) return;
-  const head = gitOutput(['rev-parse', 'HEAD'], cwd);
-  if (head !== expected) {
-    throw new Error(`${label} HEAD ${head} does not match locked commit ${expected}`);
+async function cleanGitSnapshot(cwd, label) {
+  const safeLabel = label.replaceAll(/[^A-Za-z0-9_.-]/g, '-');
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `${safeLabel}-git-head-`));
+  const archivePath = path.join(tempDir, 'source.tar');
+  execFileSync('git', ['archive', '--format=tar', '--output', archivePath, 'HEAD'], { cwd });
+  execFileSync('tar', ['-xf', archivePath, '-C', tempDir]);
+  await fs.rm(archivePath, { force: true });
+  CLEAN_DEPENDENCY_SNAPSHOTS.push(tempDir);
+  return tempDir;
+}
+
+async function cleanupCleanGitSnapshots() {
+  for (const tempDir of CLEAN_DEPENDENCY_SNAPSHOTS.splice(0)) {
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -106,6 +123,26 @@ async function walkFiles(root) {
 
 function shouldSkipDependencyDirectory(name) {
   return name.startsWith('.') || name === 'target' || name === 'tmp_checks';
+}
+
+async function walkProjectSourceFiles(root) {
+  const out = [];
+  async function walk(current) {
+    const entries = await fs.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolute = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === '.git' || entry.name === 'target' || entry.name === 'node_modules' || entry.name === 'tmp_checks') {
+          continue;
+        }
+        await walk(absolute);
+      } else if (entry.isFile()) {
+        out.push(absolute);
+      }
+    }
+  }
+  await walk(root);
+  return out.sort();
 }
 
 function parseLockFile(content) {
@@ -215,6 +252,37 @@ function sourceSetDigest(entries) {
   return sha256Digest(Buffer.from(JSON.stringify(entries), 'utf8'));
 }
 
+async function sourceFileEntry(root, absolute) {
+  const bytes = await fs.readFile(absolute);
+  return {
+    path: path.relative(root, absolute).split(path.sep).join('/'),
+    digest: sha256Digest(bytes),
+    size: bytes.byteLength,
+  };
+}
+
+async function blockKartSourceFiles() {
+  const files = [];
+  for (const absolute of await walkProjectSourceFiles(BLOCKKART_ROOT)) {
+    if (!absolute.endsWith('.vo')) continue;
+    files.push(await sourceFileEntry(BLOCKKART_ROOT, absolute));
+  }
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  return files;
+}
+
+async function blockKartSourceAllowlist() {
+  const allowlist = [];
+  for (const entry of BLOCKKART_SOURCE_ALLOWLIST) {
+    const absolute = path.join(BLOCKKART_ROOT, entry.path);
+    if (await pathExists(absolute)) {
+      allowlist.push(entry);
+    }
+  }
+  allowlist.sort((a, b) => a.path.localeCompare(b.path));
+  return allowlist;
+}
+
 function syntheticBrowserReleaseManifest(manifest) {
   const artifacts = (manifest.artifacts ?? [])
     .map((artifact) => ({
@@ -305,13 +373,16 @@ async function rewritePackagedWebManifest(moduleDir, files, artifacts, locked) {
 
 async function dependencyModuleDir(locked) {
   if (locked.path === 'github.com/vo-lang/voplay' && await pathExists(VOPLAY_ROOT)) {
-    requireCleanGitTree(VOPLAY_ROOT, locked.path);
-    requireGitHead(VOPLAY_ROOT, locked.path, locked.commit);
-    return {
-      cacheDir: `${cacheKey(locked.path)}/${locked.version}`,
-      moduleDir: VOPLAY_ROOT,
-      source: 'external',
-    };
+    const head = gitOutput(['rev-parse', 'HEAD'], VOPLAY_ROOT);
+    if (!locked.commit || head === locked.commit) {
+      const clean = gitStatus(VOPLAY_ROOT) === '';
+      return {
+        cacheDir: `${cacheKey(locked.path)}/${locked.version}`,
+        dirty: false,
+        moduleDir: clean ? VOPLAY_ROOT : await cleanGitSnapshot(VOPLAY_ROOT, 'voplay'),
+        source: clean ? 'external' : 'external-git-head',
+      };
+    }
   }
   const key = cacheKey(locked.path);
   const moduleDir = path.join(MOD_CACHE_ROOT, key, locked.version);
@@ -320,6 +391,7 @@ async function dependencyModuleDir(locked) {
   }
   return {
     cacheDir: `${key}/${locked.version}`,
+    dirty: false,
     moduleDir,
     source: 'module-cache',
   };
@@ -341,6 +413,8 @@ async function dependencyArtifactSourcePath(moduleDir, artifact) {
 
 async function buildProjectPackage() {
   const files = [];
+  const sourceFiles = await blockKartSourceFiles();
+  const sourceAllowlist = await blockKartSourceAllowlist();
   const rootEntries = await fs.readdir(BLOCKKART_ROOT, { withFileTypes: true });
   for (const entry of rootEntries) {
     if (!entry.isFile()) continue;
@@ -368,6 +442,9 @@ async function buildProjectPackage() {
     name: 'BlockKart',
     module: 'github.com/vo-lang/blockkart',
     commit: gitOutput(['rev-parse', 'HEAD'], BLOCKKART_ROOT),
+    dirty: gitStatus(BLOCKKART_ROOT) !== '',
+    sourceFiles,
+    sourceAllowlist,
     files,
   };
 }
@@ -376,7 +453,7 @@ async function buildDependencyPackage(lockModules) {
   const modules = [];
   for (const locked of lockModules) {
     const key = cacheKey(locked.path);
-    const { cacheDir, moduleDir } = await dependencyModuleDir(locked);
+    const { cacheDir, dirty, moduleDir, source } = await dependencyModuleDir(locked);
 
     const files = [];
     for (const absolute of await walkFiles(moduleDir)) {
@@ -411,6 +488,8 @@ async function buildDependencyPackage(lockModules) {
       version: locked.version,
       commit: locked.commit ?? null,
       cacheDir,
+      dirty,
+      source,
       files,
       artifacts: artifacts.map(({ sourcePath, ...artifact }) => artifact),
     });
@@ -447,8 +526,10 @@ async function dependencyProvenance(module) {
   return {
     artifacts,
     cacheDir: module.cacheDir,
+    dirty: module.dirty,
     filesDigest: packagedFilesDigest(module.files),
     module: module.module,
+    source: module.source,
     version: module.version,
     commit: module.commit ?? null,
   };
@@ -462,20 +543,37 @@ async function buildProvenance(projectPackage, dependencyPackage, outputBytes) {
   dependencies.sort((a, b) => a.module.localeCompare(b.module));
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     artifact: QUICKPLAY_ARTIFACT_NAME,
     path: QUICKPLAY_ARTIFACT_PATH,
+    task: {
+      id: QUICKPLAY_TASK_ID,
+      command: QUICKPLAY_GENERATOR_COMMAND,
+    },
     generator: {
       command: QUICKPLAY_GENERATOR_COMMAND,
       script: 'apps/studio/scripts/package_blockkart_quickplay.mjs',
-      version: 1,
+      version: QUICKPLAY_GENERATOR_VERSION,
+    },
+    toolchain: {
+      node: process.version,
+      voDev: gitOutput(['rev-parse', 'HEAD'], VOLANG_ROOT),
+      wasmTarget: WASM_TARGET,
+    },
+    sourceRoots: {
+      volang: VOLANG_ROOT,
+      blockKart: BLOCKKART_ROOT,
+      voplay: VOPLAY_ROOT,
     },
     inputs: QUICKPLAY_GENERATOR_INPUTS,
     project: {
       commit: projectPackage.commit,
-      dirty: false,
+      dirty: projectPackage.dirty,
       filesDigest: packagedFilesDigest(projectPackage.files),
       module: projectPackage.module,
+      sourceFiles: projectPackage.sourceFiles,
+      sourceAllowlist: projectPackage.sourceAllowlist,
+      sourceFilesDigest: sourceSetDigest(projectPackage.sourceFiles),
     },
     dependencies,
     outputs: [
@@ -494,32 +592,35 @@ async function buildProvenance(projectPackage, dependencyPackage, outputBytes) {
 }
 
 async function main() {
-  requireCleanGitTree(BLOCKKART_ROOT, 'BlockKart');
-  const lockPath = path.join(BLOCKKART_ROOT, 'vo.lock');
-  const lockModules = parseLockFile(await fs.readFile(lockPath, 'utf8'));
-  if (lockModules.length === 0) {
-    throw new Error(`No resolved dependencies found in ${lockPath}`);
+  try {
+    const lockPath = path.join(BLOCKKART_ROOT, 'vo.lock');
+    const lockModules = parseLockFile(await fs.readFile(lockPath, 'utf8'));
+    if (lockModules.length === 0) {
+      throw new Error(`No resolved dependencies found in ${lockPath}`);
+    }
+
+    await fs.rm(OUT_ROOT, { recursive: true, force: true });
+    await fs.mkdir(OUT_ROOT, { recursive: true });
+
+    const projectPackage = await buildProjectPackage();
+    const dependencyPackage = await buildDependencyPackage(lockModules);
+    const outputBytes = {
+      project: Buffer.from(jsonText(projectPackage), 'utf8'),
+      deps: Buffer.from(jsonText(dependencyPackage), 'utf8'),
+    };
+
+    await fs.writeFile(path.join(OUT_ROOT, 'project.json'), outputBytes.project);
+    await fs.writeFile(path.join(OUT_ROOT, 'deps.json'), outputBytes.deps);
+    const provenance = await buildProvenance(projectPackage, dependencyPackage, outputBytes);
+    await fs.writeFile(path.join(OUT_ROOT, 'provenance.json'), jsonText(provenance));
+
+    console.log(`BlockKart quickplay package written to ${OUT_ROOT}`);
+    console.log(`project json: ${projectPackage.files.length} files, ${outputBytes.project.byteLength} bytes`);
+    console.log(`deps json: ${dependencyPackage.modules.length} modules, ${outputBytes.deps.byteLength} bytes`);
+    console.log(`provenance: BlockKart ${projectPackage.commit}, ${dependencyPackage.modules.length} modules`);
+  } finally {
+    await cleanupCleanGitSnapshots();
   }
-
-  await fs.rm(OUT_ROOT, { recursive: true, force: true });
-  await fs.mkdir(OUT_ROOT, { recursive: true });
-
-  const projectPackage = await buildProjectPackage();
-  const dependencyPackage = await buildDependencyPackage(lockModules);
-  const outputBytes = {
-    project: Buffer.from(jsonText(projectPackage), 'utf8'),
-    deps: Buffer.from(jsonText(dependencyPackage), 'utf8'),
-  };
-
-  await fs.writeFile(path.join(OUT_ROOT, 'project.json'), outputBytes.project);
-  await fs.writeFile(path.join(OUT_ROOT, 'deps.json'), outputBytes.deps);
-  const provenance = await buildProvenance(projectPackage, dependencyPackage, outputBytes);
-  await fs.writeFile(path.join(OUT_ROOT, 'provenance.json'), jsonText(provenance));
-
-  console.log(`BlockKart quickplay package written to ${OUT_ROOT}`);
-  console.log(`project json: ${projectPackage.files.length} files, ${outputBytes.project.byteLength} bytes`);
-  console.log(`deps json: ${dependencyPackage.modules.length} modules, ${outputBytes.deps.byteLength} bytes`);
-  console.log(`provenance: BlockKart ${projectPackage.commit}, ${dependencyPackage.modules.length} modules`);
 }
 
 main().catch((error) => {

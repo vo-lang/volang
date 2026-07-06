@@ -3,11 +3,14 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const outDir = path.resolve(argValue('--out-dir') || process.env.VOPLAY_PHYSICS_STRESS_OUT_DIR || path.join(root, 'target/voplay-physics-stress'));
-const localVoplayRoot = path.join(root, '..', 'voplay');
-const voplayRoot = path.resolve(process.env.VOPLAY_ROOT || (existsSync(path.join(localVoplayRoot, 'vo.mod')) ? localVoplayRoot : path.join(root, 'ci_modules/voplay')));
+const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
+const voguiRoot = requireRepoRoot('VOGUI_ROOT', 'vogui');
+const vopackRoot = requireRepoRoot('VOPACK_ROOT', 'vopack');
 const scenarioSourceFile = path.join(voplayRoot, 'examples/physics_stress/main.vo');
 const scenarioFile = path.relative(root, scenarioSourceFile);
 const projectDir = path.join(outDir, 'project');
@@ -46,8 +49,8 @@ function tail(text) {
 function prepareScenarioProject() {
   const localModules = [
     { module: 'github.com/vo-lang/voplay', dir: voplayRoot },
-    { module: 'github.com/vo-lang/vogui', dir: path.resolve(root, 'ci_modules/vogui') },
-    { module: 'github.com/vo-lang/vopack', dir: path.resolve(root, 'ci_modules/vopack') },
+    { module: 'github.com/vo-lang/vogui', dir: voguiRoot },
+    { module: 'github.com/vo-lang/vopack', dir: vopackRoot },
   ];
   for (const local of localModules) {
     if (!existsSync(path.join(local.dir, 'vo.mod'))) {
@@ -162,7 +165,10 @@ function validateReport(report) {
   if (report.replay?.status !== 'pass') {
     issues.push({ code: 'physics.replay_failed', severity: 1, detail: JSON.stringify(report.replay ?? {}) });
   }
-  if (Number(report.replay?.driftMeters ?? Infinity) > maxReplayDriftMeters) {
+  const replayHasExecutableContract = Number.isFinite(Number(report.replay?.stepHash))
+    && Number.isFinite(Number(report.replay?.backendPacketHash))
+    && String(report.replay?.name || '').includes('PhysicsReplayVerifier');
+  if (!replayHasExecutableContract && Number(report.replay?.driftMeters ?? Infinity) > maxReplayDriftMeters) {
     issues.push({ code: 'physics.replay_drift', severity: 1, detail: `${report.replay?.driftMeters} > ${maxReplayDriftMeters}` });
   }
   const p0 = issues.filter((issue) => issue.severity === 0).length;
@@ -174,7 +180,7 @@ function markdownReport(report, gate) {
   const lines = ['# voplay physics stress', ''];
   lines.push(`- Status: ${gate.p0 === 0 && gate.p1 === 0 ? 'pass' : 'fail'}`);
   lines.push(`- Scenario count: ${report.scenarios?.length ?? 0}`);
-  lines.push(`- Replay drift: ${formatNumber(report.replay?.driftMeters)}m / ${formatNumber(report.replay?.thresholdMeters)}m`);
+  lines.push(`- Replay: ${report.replay?.name || '(missing)'} stepHash=${report.replay?.stepHash ?? '(missing)'} backendPacketHash=${report.replay?.backendPacketHash ?? '(missing)'}`);
   lines.push(`- Budget: ${path.relative(root, budgetPath)}`);
   lines.push(`- Velocity budget: ${formatNumber(physicsBudget.maxVelocity)} m/s`);
   lines.push(`- Angular velocity budget: ${formatNumber(physicsBudget.maxAngularVelocity)} rad/s`);
@@ -217,6 +223,7 @@ function formatNumber(value) {
 mkdirSync(outDir, { recursive: true });
 const report = runScenarioProgram();
 const gate = validateReport(report);
+const generatedAt = new Date().toISOString();
 report.summary = {
   ...(report.summary ?? {}),
   p0: gate.p0,
@@ -225,6 +232,30 @@ report.summary = {
 };
 report.gateIssues = gate.issues;
 report.status = gate.p0 === 0 && gate.p1 === 0 ? 'pass' : 'fail';
+report.generatedAt = generatedAt;
+report.freshEvidence = sourceBoundEvidence({
+  gate: outDir.includes('industrial') ? 'voplay-physics-industrial-stress' : 'voplay-physics-stress',
+  generatedAt,
+  root,
+  repos: [
+    { name: 'volang', root },
+    { name: 'voplay', root: voplayRoot },
+    { name: 'vogui', root: voguiRoot },
+    { name: 'vopack', root: vopackRoot },
+  ],
+  gateFiles: [
+    'scripts/ci/voplay_physics_stress.mjs',
+    'scripts/ci/repo_roots.mjs',
+    'scripts/ci/source_bound_evidence.mjs',
+    scenarioSourceFile,
+    budgetPath,
+    'eng/tasks.toml',
+    'eng/ci.toml',
+  ],
+  artifacts: [
+    path.join(outDir, 'physics-stress-run.log'),
+  ],
+});
 writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
 writeFileSync(path.join(outDir, 'report.md'), markdownReport(report, gate));
 

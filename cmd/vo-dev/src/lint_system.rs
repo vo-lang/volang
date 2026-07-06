@@ -1774,6 +1774,7 @@ fn lint_docs(root: &Path) -> Result<()> {
             bail!("generated doc {required} is missing provenance header");
         }
     }
+    lint_voplay_plan_status(root)?;
 
     let manifest_path = root.join("apps/studio/docs/manifest.toml");
     let manifest_text = fs::read_to_string(&manifest_path)
@@ -1816,6 +1817,69 @@ fn lint_docs(root: &Path) -> Result<()> {
     lint_jit_runtime_path_wording(root)?;
     lint_touched_dev_note_front_matter(root)?;
     Ok(())
+}
+
+fn lint_voplay_plan_status(root: &Path) -> Result<()> {
+    let active_plan = "voplay-code-engineering-quality-plan.md";
+    let expected_superseded_by = format!("lang/docs/dev/{active_plan}");
+    let dev_dir = root.join("lang/docs/dev");
+    let mut saw_active_plan = false;
+    let mut active_plans = Vec::new();
+    for entry in fs::read_dir(&dev_dir)
+        .map_err(|err| anyhow!("could not read {}: {err}", dev_dir.display()))?
+    {
+        let entry = entry.map_err(|err| anyhow!("could not read docs dir entry: {err}"))?;
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if !file_name.starts_with("voplay-") || !file_name.ends_with("-plan.md") {
+            continue;
+        }
+        let path = entry.path();
+        let text = fs::read_to_string(&path)
+            .map_err(|err| anyhow!("could not read voplay plan {file_name}: {err}"))?;
+        let status = doc_metadata_value(&text, "Status").unwrap_or_default();
+        if status == "active" {
+            active_plans.push(file_name.clone());
+        }
+        if file_name == active_plan {
+            saw_active_plan = true;
+            if status != "active" {
+                bail!("{active_plan} must be the active voplay quality plan");
+            }
+            continue;
+        }
+        if status != "superseded" {
+            bail!("old voplay plan {file_name} must be superseded by {expected_superseded_by}");
+        }
+        if doc_metadata_value(&text, "Superseded-By").as_deref()
+            != Some(expected_superseded_by.as_str())
+        {
+            bail!(
+                "old voplay plan {file_name} must declare Superseded-By: {expected_superseded_by}"
+            );
+        }
+        let superseded_date = doc_metadata_value(&text, "Superseded-Date").unwrap_or_default();
+        if superseded_date.trim().is_empty() {
+            bail!("old voplay plan {file_name} must declare Superseded-Date");
+        }
+    }
+    if !saw_active_plan {
+        bail!("{active_plan} is missing");
+    }
+    if active_plans != [active_plan.to_string()] {
+        bail!(
+            "exactly one active voplay plan is allowed; found {}",
+            active_plans.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn doc_metadata_value(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    text.lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(str::trim)
+        .map(ToOwned::to_owned)
 }
 
 fn lint_jit_runtime_path_wording(root: &Path) -> Result<()> {

@@ -1,6 +1,8 @@
 # voplay Industrial First-Principles Completion Plan
 
-Status: proposed
+Status: superseded
+Superseded-By: lang/docs/dev/voplay-code-engineering-quality-plan.md
+Superseded-Date: 2026-07-05
 Date: 2026-07-04
 Scope: corrected completion plan for making voplay's WebGPU render runtime and
 kart physics foundation industrial-grade for the scoped BlockKart validation
@@ -8,8 +10,9 @@ product.
 
 ## Role
 
-This document supersedes the optimistic interpretation of
-`lang/docs/dev/voplay-industrial-completion-plan.md`.
+This historical document superseded the optimistic interpretation of
+`lang/docs/dev/voplay-industrial-completion-plan.md`. The active execution plan
+is now `lang/docs/dev/voplay-code-engineering-quality-plan.md`.
 
 The earlier readiness gate passed after `submit_frame` became a three-line
 proxy, but first-principles inspection found that the real render runtime body

@@ -3,8 +3,12 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
+const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
+const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const outDir = path.resolve(argValue('--out-dir') || process.env.VOPLAY_RENDER_STRESS_OUT_DIR || path.join(root, 'target/voplay-render-stress'));
 const restartCount = nonNegativeInt(argValue('--restart-count') || process.env.VOPLAY_RENDER_STRESS_RESTART_COUNT, 50);
 const captureMs = positiveInt(argValue('--capture-ms') || process.env.VOPLAY_RENDER_STRESS_CAPTURE_MS, 36000);
@@ -131,6 +135,7 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
   const latestSceneReport = baseline.diagnostics?.latestSceneReport ?? null;
   const stressSceneReport = baseline.renderStress?.latestSceneReport ?? null;
   const primitiveUploadBytes = Math.max(
+    numberOr(workload.uploadBytes, 0),
     numberOr(latestSceneReport?.primitiveUploadBytes, 0),
     numberOr(stressSceneReport?.primitiveUploadBytes, 0),
   );
@@ -567,11 +572,39 @@ if (Number.isFinite(summarySlowFrames) && Number.isFinite(summaryBudgetSlowFrame
   summaryIssues.push({ code: 'summary.slow_frames_over_budget', severity: 1, detail: `${summarySlowFrames} > ${summaryBudgetSlowFrames}` });
 }
 p1 += summaryIssues.filter((issue) => issue.severity === 1).length;
+const generatedAt = new Date().toISOString();
+const sceneArtifacts = scenes.flatMap((scene) => Object.values(scene.artifacts ?? {}).filter(Boolean));
+const freshEvidence = sourceBoundEvidence({
+  gate: soakOnly ? 'voplay-render-soak-10m' : (budgetAllScenes ? 'voplay-render-stress-budgeted' : 'voplay-render-stress'),
+  generatedAt,
+  root,
+  repos: [
+    { name: 'volang', root },
+    { name: 'voplay', root: voplayRoot },
+    { name: 'BlockKart', root: blockKartRoot },
+  ],
+  gateFiles: [
+    'scripts/ci/voplay_render_stress.mjs',
+    'scripts/ci/blockkart_baseline.mjs',
+    'scripts/ci/repo_roots.mjs',
+    'scripts/ci/source_bound_evidence.mjs',
+    budgetPath,
+    'eng/tasks.toml',
+    'eng/ci.toml',
+  ],
+  artifacts: [
+    'apps/studio/public/quickplay/blockkart/project.json',
+    'apps/studio/public/quickplay/blockkart/deps.json',
+    'apps/studio/public/quickplay/blockkart/provenance.json',
+    ...sceneArtifacts,
+  ],
+});
 const report = {
   schemaVersion: 1,
   kind: 'voplay.renderStressReport',
   mode: soakOnly ? 'soak-10m' : 'stress',
-  generatedAt: new Date().toISOString(),
+  generatedAt,
+  freshEvidence,
   target: { width: perfBudget?.target?.width ?? 1280, height: perfBudget?.target?.height ?? 720, fps: targetFps, frameBudgetMs: Number(targetFrameMs.toFixed(4)) },
   budget: { path: budgetPath, render: renderBudget },
   budgetAllScenes,

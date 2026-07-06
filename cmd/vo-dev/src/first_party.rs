@@ -34,7 +34,7 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
             if args.is_empty() {
                 bail!("missing command after --");
             }
-            let repo_root = checked_first_party_repo_path(root, &repo)?;
+            let repo_root = first_party_repo_path(root, &repo)?;
             let cwd = repo_root.join(subdir);
             if !cwd.is_dir() {
                 bail!("missing first-party directory: {}", cwd.display());
@@ -61,7 +61,7 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
             if args.is_empty() {
                 bail!("missing command after --");
             }
-            let cwd = checked_first_party_workspace_path(root, &repo, &workspace)?;
+            let cwd = first_party_workspace_path(root, &repo, &workspace)?;
             let status = Command::new(&args[0])
                 .args(&args[1..])
                 .current_dir(&cwd)
@@ -93,6 +93,7 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
                     ("repo", checkout.repo),
                     ("repository", checkout.repository),
                     ("path", checkout.path),
+                    ("expected_commit", checkout.expected_commit),
                     ("enabled", checkout.enabled.to_string()),
                 ])
             } else {
@@ -102,6 +103,7 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
                         "repo": checkout.repo,
                         "repository": checkout.repository,
                         "path": checkout.path,
+                        "expected_commit": checkout.expected_commit,
                         "enabled": checkout.enabled,
                     }))?
                 );
@@ -134,7 +136,7 @@ pub(crate) fn cmd_first_party(root: &Path, mut args: Vec<String>) -> Result<()> 
 }
 
 pub(crate) fn cmd_studio_install_local_vogui(root: &Path) -> Result<()> {
-    let package_path = checked_first_party_workspace_path(root, "vogui", "js")?;
+    let package_path = first_party_workspace_path(root, "vogui", "js")?;
     let status = Command::new("npm")
         .args(["install", "--no-save"])
         .arg(&package_path)
@@ -148,33 +150,14 @@ pub(crate) fn cmd_studio_install_local_vogui(root: &Path) -> Result<()> {
 }
 
 fn checked_first_party_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
-    let path = first_party_repo_path(root, repo)?;
-    ensure_clean_first_party_root(root, repo, &path)?;
-    Ok(path)
-}
-
-fn checked_first_party_workspace_path(root: &Path, repo: &str, workspace: &str) -> Result<PathBuf> {
-    let repo_root = checked_first_party_repo_path(root, repo)?;
     let project = load_project(root)?;
     let entry = project
         .first_party
         .iter()
         .find(|item| item.name == repo)
         .ok_or_else(|| anyhow!("unknown first-party repo: {repo}"))?;
-    let workspace_path = entry
-        .workspace
-        .iter()
-        .find(|item| item.name == workspace)
-        .ok_or_else(|| anyhow!("unknown first-party workspace: {repo}:{workspace}"))?
-        .path
-        .clone();
-    let path = repo_root.join(&workspace_path);
-    if !path.is_dir() {
-        bail!(
-            "missing first-party workspace directory {repo}:{workspace}: {}",
-            path.display()
-        );
-    }
+    let path = repo_path_from_entry(root, repo, entry, true, RepoPathPreference::CiFirst)?;
+    ensure_clean_first_party_root(root, repo, &path)?;
     Ok(path)
 }
 
@@ -288,7 +271,7 @@ fn first_party_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
         .iter()
         .find(|item| item.name == repo)
         .ok_or_else(|| anyhow!("unknown first-party repo: {repo}"))?;
-    repo_path_from_entry(root, repo, entry, true)
+    repo_path_from_entry(root, repo, entry, true, default_repo_path_preference())
 }
 
 pub(crate) fn first_party_workspace_path(
@@ -319,11 +302,12 @@ pub(crate) fn first_party_workspace_path(
     Ok(path)
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub(crate) struct CiCheckout {
     pub(crate) repo: String,
     pub(crate) repository: String,
     pub(crate) path: String,
+    pub(crate) expected_commit: String,
     pub(crate) enabled: bool,
 }
 
@@ -336,6 +320,7 @@ pub(crate) fn ci_checkout_for(root: &Path, repo: &str) -> Result<CiCheckout> {
             repo: repo.to_string(),
             repository: String::new(),
             path: String::new(),
+            expected_commit: String::new(),
             enabled: false,
         });
     }
@@ -343,10 +328,14 @@ pub(crate) fn ci_checkout_for(root: &Path, repo: &str) -> Result<CiCheckout> {
         .repository
         .clone()
         .ok_or_else(|| anyhow!("project repo {repo} has ci_checkout=true but no repository"))?;
+    let expected_commit = entry.expected_commit.clone().ok_or_else(|| {
+        anyhow!("project repo {repo} has ci_checkout=true but no expected_commit")
+    })?;
     Ok(CiCheckout {
         repo: repo.to_string(),
         repository,
         path: format!("ci_modules/{repo}"),
+        expected_commit,
         enabled: true,
     })
 }
@@ -376,7 +365,13 @@ pub(crate) fn project_repo_path(root: &Path, repo: &str) -> Result<PathBuf> {
     let project = load_project(root)?;
     let entry = project_repo_entry(&project, repo)
         .ok_or_else(|| anyhow!("unknown project repo: {repo}"))?;
-    repo_path_from_entry(root, repo, entry, entry.ci_checkout == Some(true))
+    repo_path_from_entry(
+        root,
+        repo,
+        entry,
+        entry.ci_checkout == Some(true),
+        default_repo_path_preference(),
+    )
 }
 
 pub(crate) fn project_repo_entry<'a>(
@@ -395,8 +390,14 @@ fn repo_path_from_entry(
     repo: &str,
     entry: &ProjectRepo,
     include_ci_paths: bool,
+    preference: RepoPathPreference,
 ) -> Result<PathBuf> {
     let mut candidates = Vec::new();
+    if preference == RepoPathPreference::LocalHintFirst {
+        if let Some(local_hint) = &entry.local_hint {
+            candidates.push(root.join(local_hint));
+        }
+    }
     if include_ci_paths {
         if let Ok(module_root) = env::var("CI_MODULE_ROOT") {
             if !module_root.trim().is_empty() {
@@ -405,8 +406,10 @@ fn repo_path_from_entry(
         }
         candidates.push(root.join("ci_modules").join(repo));
     }
-    if let Some(local_hint) = &entry.local_hint {
-        candidates.push(root.join(local_hint));
+    if preference == RepoPathPreference::CiFirst {
+        if let Some(local_hint) = &entry.local_hint {
+            candidates.push(root.join(local_hint));
+        }
     }
 
     for candidate in &candidates {
@@ -424,6 +427,26 @@ fn repo_path_from_entry(
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepoPathPreference {
+    LocalHintFirst,
+    CiFirst,
+}
+
+fn default_repo_path_preference() -> RepoPathPreference {
+    if env::var("CI_MODULE_ROOT")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        || env::var("CI")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    {
+        RepoPathPreference::CiFirst
+    } else {
+        RepoPathPreference::LocalHintFirst
+    }
 }
 
 #[cfg(test)]
@@ -470,6 +493,55 @@ mod tests {
                 "init",
             ],
         );
+    }
+
+    fn project_repo(name: &str, local_hint: &str) -> ProjectRepo {
+        ProjectRepo {
+            name: name.to_string(),
+            repository: Some(format!("vo-lang/{name}")),
+            local_hint: Some(local_hint.to_string()),
+            expected_commit: None,
+            ci_checkout: Some(true),
+            workspace: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn project_repo_path_prefers_local_hint_for_local_tasks_063() {
+        let root = temp_root("local-first");
+        let entry = project_repo("voplay", "siblings/voplay");
+        let local = root.join("siblings/voplay");
+        let ci = root.join("ci_modules/voplay");
+        fs::create_dir_all(&local).expect("local repo");
+        fs::create_dir_all(&ci).expect("ci repo");
+
+        let path = repo_path_from_entry(
+            &root,
+            "voplay",
+            &entry,
+            true,
+            RepoPathPreference::LocalHintFirst,
+        )
+        .expect("repo path");
+
+        assert_eq!(path, local.canonicalize().expect("canonical local"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn project_repo_path_prefers_ci_module_for_release_proof_063() {
+        let root = temp_root("ci-first");
+        let entry = project_repo("vogui", "siblings/vogui");
+        let local = root.join("siblings/vogui");
+        let ci = root.join("ci_modules/vogui");
+        fs::create_dir_all(&local).expect("local repo");
+        fs::create_dir_all(&ci).expect("ci repo");
+
+        let path = repo_path_from_entry(&root, "vogui", &entry, true, RepoPathPreference::CiFirst)
+            .expect("repo path");
+
+        assert_eq!(path, ci.canonicalize().expect("canonical ci"));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

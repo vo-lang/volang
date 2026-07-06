@@ -258,9 +258,9 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
         .with_context(|| format!("could not read artifact provenance {}", provenance))?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("could not parse artifact provenance {}", provenance))?;
-    if value.get("schemaVersion").and_then(|item| item.as_u64()) != Some(1) {
+    if value.get("schemaVersion").and_then(|item| item.as_u64()) != Some(2) {
         bail!(
-            "artifact {} provenance schemaVersion must be 1",
+            "artifact {} provenance schemaVersion must be 2",
             artifact.name
         );
     }
@@ -291,6 +291,132 @@ fn validate_artifact_provenance(root: &Path, artifact: &Artifact) -> Result<()> 
                 "artifact {} provenance generator command differs from eng/artifacts.toml",
                 artifact.name
             );
+        }
+        let provenance_task_command = json_string_array_field(&value, &["task", "command"])?;
+        if &provenance_task_command != generator {
+            bail!(
+                "artifact {} provenance task command differs from eng/artifacts.toml",
+                artifact.name
+            );
+        }
+    }
+    if json_string_field(&value, &["task", "id"])?
+        .trim()
+        .is_empty()
+    {
+        bail!(
+            "artifact {} provenance task id cannot be empty",
+            artifact.name
+        );
+    }
+    if json_field(&value, &["generator", "version"])
+        .and_then(|item| item.as_u64())
+        .unwrap_or(0)
+        == 0
+    {
+        bail!(
+            "artifact {} provenance generator version must be a positive integer",
+            artifact.name
+        );
+    }
+    if json_field(&value, &["toolchain"])
+        .and_then(|item| item.as_object())
+        .map(|object| object.is_empty())
+        .unwrap_or(true)
+    {
+        bail!(
+            "artifact {} provenance toolchain cannot be empty",
+            artifact.name
+        );
+    }
+    if json_field(&value, &["sourceRoots"])
+        .and_then(|item| item.as_object())
+        .map(|object| object.is_empty())
+        .unwrap_or(true)
+    {
+        bail!(
+            "artifact {} provenance sourceRoots cannot be empty",
+            artifact.name
+        );
+    }
+    if let Some(project) = json_field(&value, &["project"]).and_then(|item| item.as_object()) {
+        if project.get("dirty").and_then(|item| item.as_bool()) != Some(false) {
+            bail!(
+                "artifact {} provenance project dirty flag must be false",
+                artifact.name
+            );
+        }
+    }
+    let outputs = json_field(&value, &["outputs"])
+        .and_then(|item| item.as_array())
+        .ok_or_else(|| {
+            anyhow!(
+                "artifact {} provenance outputs must be an array",
+                artifact.name
+            )
+        })?;
+    if outputs.is_empty() {
+        bail!(
+            "artifact {} provenance outputs cannot be empty",
+            artifact.name
+        );
+    }
+    for output in outputs {
+        let path = output
+            .get("path")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        let digest = output
+            .get("digest")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        let size = output.get("size").and_then(|item| item.as_u64());
+        if path.trim().is_empty() || !digest.starts_with("sha256:") || size.is_none() {
+            bail!(
+                "artifact {} provenance output entries must include path, sha256 digest, and size",
+                artifact.name
+            );
+        }
+    }
+    if let Some(dependencies) =
+        json_field(&value, &["dependencies"]).and_then(|item| item.as_array())
+    {
+        for dependency in dependencies {
+            let module = dependency
+                .get("module")
+                .and_then(|item| item.as_str())
+                .unwrap_or("(unknown)");
+            if dependency
+                .get("commit")
+                .and_then(|item| item.as_str())
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                bail!(
+                    "artifact {} provenance dependency {} must record commit",
+                    artifact.name,
+                    module
+                );
+            }
+            if dependency
+                .get("dirty")
+                .and_then(|item| item.as_bool())
+                .is_none()
+            {
+                bail!(
+                    "artifact {} provenance dependency {} must record dirty flag",
+                    artifact.name,
+                    module
+                );
+            }
+            if dependency.get("dirty").and_then(|item| item.as_bool()) != Some(false) {
+                bail!(
+                    "artifact {} provenance dependency {} dirty flag must be false",
+                    artifact.name,
+                    module
+                );
+            }
         }
     }
     Ok(())

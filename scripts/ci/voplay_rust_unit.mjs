@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireRepoRoot } from './repo_roots.mjs';
+import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const suite = argValue('--suite') || 'renderer_frame';
-const localVoplayRoot = path.resolve(root, '..', 'voplay');
-const voplayRoot = path.resolve(process.env.VOPLAY_ROOT || (existsSync(path.join(localVoplayRoot, 'vo.mod')) ? localVoplayRoot : path.join(root, 'ci_modules/voplay')));
+const gate = argValue('--gate') || (suite === 'render_world' ? 'voplay-batch-planner-unit' : 'voplay-rust-unit');
+const outDir = path.resolve(argValue('--out-dir') || process.env.VOPLAY_RUST_UNIT_OUT_DIR || path.join(root, 'target', gate));
+const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const rustRoot = path.join(voplayRoot, 'rust');
 const filters = {
   renderer_frame: 'renderer_frame',
@@ -32,12 +35,48 @@ if (!existsSync(path.join(rustRoot, 'Cargo.toml'))) {
 }
 
 const args = ['test', '-p', 'vo-voplay', filters[suite]];
+mkdirSync(outDir, { recursive: true });
+const logPath = path.join(outDir, 'rust-unit.log');
 const result = spawnSync('cargo', args, {
   cwd: rustRoot,
   env: { ...process.env },
-  stdio: 'inherit',
+  encoding: 'utf8',
+  stdio: ['ignore', 'pipe', 'pipe'],
 });
+process.stdout.write(result.stdout ?? '');
+process.stderr.write(result.stderr ?? '');
+writeFileSync(logPath, `${result.stdout ?? ''}${result.stderr ?? ''}`);
 if (result.status !== 0) {
   fail(`cargo ${args.join(' ')} failed with exit ${result.status}`);
 }
+const generatedAt = new Date().toISOString();
+writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify({
+  schemaVersion: 1,
+  kind: 'voplay.rustUnitReport',
+  gate,
+  suite,
+  status: 'pass',
+  generatedAt,
+  freshEvidence: sourceBoundEvidence({
+    gate,
+    generatedAt,
+    root,
+    repos: [
+      { name: 'volang', root },
+      { name: 'voplay', root: voplayRoot },
+    ],
+    gateFiles: [
+      'scripts/ci/voplay_rust_unit.mjs',
+      'scripts/ci/repo_roots.mjs',
+      'scripts/ci/source_bound_evidence.mjs',
+      path.join(voplayRoot, 'rust/src/renderer_frame.rs'),
+      path.join(voplayRoot, 'rust/src/render_world.rs'),
+      'eng/tasks.toml',
+      'eng/ci.toml',
+    ],
+    artifacts: [logPath],
+  }),
+  command: ['cargo', ...args],
+  log: path.relative(root, logPath),
+}, null, 2)}\n`);
 console.log(`voplay rust unit: ok suite=${suite} root=${voplayRoot}`);

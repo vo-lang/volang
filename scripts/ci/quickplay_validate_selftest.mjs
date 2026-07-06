@@ -52,6 +52,11 @@ function sourceEntry(path, content) {
   return { digest: sha256Digest(bytes), path, size: bytes.byteLength };
 }
 
+function projectSourceEntry(path, content) {
+  const bytes = Buffer.from(content, 'utf8');
+  return { path, digest: sha256Digest(bytes), size: bytes.byteLength };
+}
+
 function writeFile(filePath, bytes) {
   mkdirSync(path.dirname(filePath), { recursive: true });
   writeFileSync(filePath, bytes);
@@ -266,12 +271,18 @@ digest = "${sha256Digest(voplayWasm)}"
   git(blockKartRoot, ['add', '.']);
   git(blockKartRoot, ['commit', '-m', 'selftest fixture']);
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: blockKartRoot, encoding: 'utf8' }).trim();
+  const projectSourceFiles = [
+    projectSourceEntry('main.vo', readFileSync(path.join(blockKartRoot, 'main.vo'), 'utf8')),
+  ];
 
   const project = {
     schemaVersion: 1,
     name: 'BlockKart',
     module: 'github.com/vo-lang/blockkart',
     commit,
+    dirty: false,
+    sourceFiles: projectSourceFiles,
+    sourceAllowlist: [],
     files: [
       { path: 'assets/blockkart.vpak', contentBase64: assetBytes.toString('base64') },
       { path: 'main.vo', content: readFileSync(path.join(blockKartRoot, 'main.vo'), 'utf8') },
@@ -291,13 +302,27 @@ digest = "${sha256Digest(voplayWasm)}"
   writeFile(path.join(tempQuickplay, 'deps.json'), depsBytes);
 
   const provenance = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     artifact: 'studio.quickplay.blockkart',
     path: 'apps/studio/public/quickplay/blockkart',
+    task: {
+      id: 'quickplay-blockkart-package',
+      command: ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'],
+    },
     generator: {
       command: ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'],
       script: 'apps/studio/scripts/package_blockkart_quickplay.mjs',
-      version: 1,
+      version: 2,
+    },
+    toolchain: {
+      node: process.version,
+      voDev: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
+      wasmTarget: 'wasm32-unknown-unknown',
+    },
+    sourceRoots: {
+      volang: root,
+      blockKart: blockKartRoot,
+      voplay: root,
     },
     inputs: [
       'apps/studio/scripts/package_blockkart_quickplay.mjs',
@@ -312,6 +337,9 @@ digest = "${sha256Digest(voplayWasm)}"
       dirty: false,
       filesDigest: packagedFilesDigest(project.files),
       module: project.module,
+      sourceFiles: projectSourceFiles,
+      sourceAllowlist: [],
+      sourceFilesDigest: sourceSetDigest(projectSourceFiles),
     },
     dependencies: deps.modules.map((mod) => ({
       artifacts: (mod.artifacts ?? []).map((artifact) => {
@@ -320,8 +348,11 @@ digest = "${sha256Digest(voplayWasm)}"
         return { digest: sha256Digest(bytes), path: artifact.path, size: bytes.byteLength, url: artifact.url };
       }),
       cacheDir: mod.cacheDir,
+      commit: mod.commit,
+      dirty: false,
       filesDigest: packagedFilesDigest(mod.files),
       module: mod.module,
+      source: 'module-cache',
       version: mod.version,
     })),
     outputs: [
@@ -333,9 +364,18 @@ digest = "${sha256Digest(voplayWasm)}"
 }
 
 function runValidator(dir, blockKartRoot) {
+  const blockKartExpectedCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: blockKartRoot,
+    encoding: 'utf8',
+  }).trim();
   return spawnSync(process.execPath, [validator], {
     cwd: root,
-    env: { ...process.env, QUICKPLAY_DIR: dir, BLOCKKART_ROOT: blockKartRoot },
+    env: {
+      ...process.env,
+      QUICKPLAY_DIR: dir,
+      BLOCKKART_ROOT: blockKartRoot,
+      BLOCKKART_EXPECTED_COMMIT: blockKartExpectedCommit,
+    },
     encoding: 'utf8',
     maxBuffer: 20 * 1024 * 1024,
   });
