@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:e83b7ff07a769cc37c52f00a8f284be949971d3a182323fe75b027405c4c8e3e",
+    "voDevSourceDigest": "sha256:9a3072184ef3d96c597281576c80f145b8138e6691b8ce8bdc70f6eb1e111ca9",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -40,9 +40,9 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "a2978709920bb9b62078ca9563246cc581603076",
+    "commit": "ae547ffb4178929c76d11514b6bfa4c99298de1d",
     "dirty": false,
-    "filesDigest": "sha256:5cf819d68d67a2814a35abff907a2ca7a5b047ac46007ab33fb147ef8dba35fc",
+    "filesDigest": "sha256:89a86714839ef07e9fd4628e802d08d5c5e802172ccd848e955319ed3e8c50e9",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
@@ -172,18 +172,18 @@
       },
       {
         "path": "race_session_runtime.vo",
-        "digest": "sha256:da74ab40014838a559594b91b575a3e44449c9abc70194003a36e75a3d7ec78b",
-        "size": 6050
+        "digest": "sha256:b4ac5e75069fd9babdc8790bf1084e294769fad33ef0e8c6ed3b9c9a066136c0",
+        "size": 6097
       },
       {
         "path": "render_stress.vo",
-        "digest": "sha256:d8269a1da6798631e068fa25153dd58ec6f9cadc01364fbeab80c61b96c60e84",
-        "size": 7038
+        "digest": "sha256:a5ea6671d4eb3e798e81b0ea63ed8f3279274e6309a1a920c763832e27bd5d93",
+        "size": 8883
       },
       {
         "path": "runtime_owners.vo",
-        "digest": "sha256:65738eac9164e72a9b8dab7c7dc61c6c5edd5c7628a9f9f3f47cb1ace379b9be",
-        "size": 2042
+        "digest": "sha256:25fa3e85a8622894dab1796ee92469b219ea7551d3f5caea842c14995c43eff0",
+        "size": 2280
       },
       {
         "path": "theme.vo",
@@ -223,7 +223,7 @@
         "expiresAt": "2027-01-31T00:00:00.000Z"
       }
     ],
-    "sourceFilesDigest": "sha256:64c1509d883f0aafe5b12b8a7ba32a5f448cf9a9bb1658c6f40458c4c5ac3b5b"
+    "sourceFilesDigest": "sha256:21d9c5b2d9eaf60876d945b9fb8f5f6e1facbfa0c9378644691567f88838fd85"
   },
   "dependencies": [
     {
@@ -279,9 +279,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:c8cb75eddb5a2c7649b025e3d5b8753916f689fceec8ed784b599d2b754c579e",
+      "digest": "sha256:06f4271256842f20c13109bafafcb9e8fecfc81ac2d80647b9daa5747f3c0fbd",
       "path": "project.json",
-      "size": 22750723
+      "size": 22752908
     },
     {
       "digest": "sha256:bc4162bf7c24db957413a87084b00627361c2c116ede5a0811c9653e6de88dd8",
