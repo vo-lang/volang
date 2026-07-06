@@ -25,17 +25,38 @@ const artifactInputs = [
 ];
 const artifactGenerator = ['vo-dev', 'task', 'run', 'task:docs-sync'];
 const artifactTaskId = 'docs-sync';
-const artifactGeneratorVersion = 2;
+const artifactGeneratorVersion = 3;
 
-function digest(text) {
-  return `sha256:${createHash('sha256').update(text).digest('hex')}`;
+function sha256Digest(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
-function gitOutput(args) {
-  return execFileSync('git', args, {
-    cwd: root,
-    encoding: 'utf8',
-  }).trim();
+function digest(text) {
+  return sha256Digest(Buffer.from(text, 'utf8'));
+}
+
+function sourceSetDigest(entries) {
+  return sha256Digest(Buffer.from(JSON.stringify(entries), 'utf8'));
+}
+
+async function volangGeneratorSourceDigest() {
+  const inputs = [
+    'scripts/ci/docs_sync.mjs',
+    'scripts/ci/docs_lint.mjs',
+    'eng/project.toml',
+    'eng/tasks.toml',
+    'eng/ci.toml',
+  ];
+  const entries = [];
+  for (const relative of inputs) {
+    const bytes = await fs.readFile(path.join(root, relative));
+    entries.push({
+      digest: sha256Digest(bytes),
+      path: relative,
+      size: bytes.byteLength,
+    });
+  }
+  return sourceSetDigest(entries.sort((a, b) => a.path.localeCompare(b.path)));
 }
 
 async function sourceTimestamp(file) {
@@ -96,7 +117,7 @@ async function writeTree(outRoot) {
     },
     toolchain: {
       node: process.version,
-      voDev: gitOutput(['rev-parse', 'HEAD']),
+      voDevSourceDigest: await volangGeneratorSourceDigest(),
     },
     sourceRoots: {
       volang: root,
