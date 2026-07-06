@@ -377,6 +377,16 @@ git diff --cached --check
 
 额外断言：
 
+- `fileBudgets` 全 pass。
+- `codeOwnership.status == pass`。
+- `stringOnlyChecks == []`。
+- `emptyOwnerModules == []`。
+- `sourceAuditFailures == []`。
+- `failures == []`。
+- `dirtyProvenance == false`。
+- render stress / soak report fresh。
+- physics stress / replay report fresh。
+- quickplay artifact 与源码 commit 一致。
 - `sourceFirstPrinciplesReview == pass`
 - `fileBudgets == all-pass`
 - `runtimeSidecarBudgets == all-pass`
