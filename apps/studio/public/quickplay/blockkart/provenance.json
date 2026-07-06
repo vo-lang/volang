@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:5135b07d1f9a637efab98ee8e65f4d706126ca86da977e187b5f964a35d45b30",
+    "voDevSourceDigest": "sha256:9e62059c7b0aff4a07943cdda5cc8f4aa9b53053bb9f40518636a731ec5fbb8c",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -40,9 +40,9 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "98f175ff498341b5e48281bb35c65a8fb29d8e60",
+    "commit": "36c116ef8f269930577ceffc35ec678889f99e49",
     "dirty": false,
-    "filesDigest": "sha256:6257454d39a5b07d872dfdf774f38e8dee1e532a62336f785d208a2413313dab",
+    "filesDigest": "sha256:0a4b73c64decf3d5e847ead663cb37ba89f16cf8b6fa4488ed6ee5e47aeb2e14",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
@@ -127,8 +127,8 @@
       },
       {
         "path": "hud_presenter.vo",
-        "digest": "sha256:5204896c83dbfbaf844d80712d73261c2701e7136f5ae59059a4986f3cfac3dc",
-        "size": 15418
+        "digest": "sha256:d68ca173b6af952602fc335549f32718d5e5703779290438555ca8830d23a103",
+        "size": 15590
       },
       {
         "path": "kart_render_pose.vo",
@@ -152,8 +152,8 @@
       },
       {
         "path": "performance_budget.vo",
-        "digest": "sha256:74944822bf124c9bec05151831768ea35361e6cca91b50c80d09b0e2bec84538",
-        "size": 19251
+        "digest": "sha256:fefec2c22ebb2f0bf196fc68065f35fef2bcf9504ba1d421c6cf9b4099f2aa4e",
+        "size": 19288
       },
       {
         "path": "play_state.vo",
@@ -177,8 +177,8 @@
       },
       {
         "path": "render_stress.vo",
-        "digest": "sha256:dd885df898325a34633ada8d124ede66dc4bdd4910de90919935634337df22a1",
-        "size": 9502
+        "digest": "sha256:72e5a29324455e6c25f99d182347d39953ad59920e258c2d9daa63d0ba02232a",
+        "size": 9565
       },
       {
         "path": "runtime_owners.vo",
@@ -212,8 +212,8 @@
       },
       {
         "path": "world.vo",
-        "digest": "sha256:7308aadd526353d80c37b84afa7e0b6824ab2b58d251d5130a716caea1cc1e94",
-        "size": 24924
+        "digest": "sha256:6bbfb5d06bf8c032be3f5c6ac902b608fcc2314edc85fcf837f9993520dfa9b0",
+        "size": 24951
       }
     ],
     "sourceAllowlist": [
@@ -223,7 +223,7 @@
         "expiresAt": "2027-01-31T00:00:00.000Z"
       }
     ],
-    "sourceFilesDigest": "sha256:73e34027db6bc7145de42e6da868b60d8f822cdb53df8a827bf5dd19fb161de7"
+    "sourceFilesDigest": "sha256:151547cf447582f839b52ec6a2775ee5ecb1a681940915ec664910b5a1c627d4"
   },
   "dependencies": [
     {
@@ -279,9 +279,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:b96cde0d5be55b16f0a4615e9954da001b21404aa1e04eb6048b269c9d1537a2",
+      "digest": "sha256:ee70032cba573fe6b1a2ddfc1c3bb92fd83b68082e50cbad6a376c394f213257",
       "path": "project.json",
-      "size": 22753731
+      "size": 22754046
     },
     {
       "digest": "sha256:21e3ff54371cf4c978fedd0ee9d8de533620592d04d59e6dd777a6ad07df9194",
