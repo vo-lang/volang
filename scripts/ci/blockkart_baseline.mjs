@@ -351,19 +351,58 @@ function stopProcess(child) {
   if (!child || child.exitCode != null || child.signalCode != null) {
     return;
   }
-  if (process.platform !== 'win32' && child.pid) {
-    try {
-      process.kill(-child.pid, 'SIGTERM');
-    } catch {
-      // Fall through to direct kill.
-      child.kill('SIGTERM');
-    }
-  } else {
-    child.kill('SIGTERM');
-  }
+  signalProcess(child, 'SIGTERM');
   child.stdout?.destroy();
   child.stderr?.destroy();
   child.stdin?.destroy?.();
+  child.unref?.();
+}
+
+function signalProcess(child, signal) {
+  if (!child || child.exitCode != null || child.signalCode != null) {
+    return;
+  }
+  if (process.platform !== 'win32' && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall through to direct kill when the child is not a process group leader.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The process may have exited between the status check and the signal.
+  }
+}
+
+async function stopProcessAndWait(child, timeoutMs = 3000) {
+  if (!child) {
+    return;
+  }
+  if (child.exitCode != null || child.signalCode != null) {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.stdin?.destroy?.();
+    return;
+  }
+  let exited = false;
+  const exitPromise = new Promise((resolve) => {
+    child.once('exit', () => {
+      exited = true;
+      resolve();
+    });
+  });
+  signalProcess(child, 'SIGTERM');
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.stdin?.destroy?.();
+  await Promise.race([exitPromise, sleep(timeoutMs)]);
+  if (!exited && child.exitCode == null && child.signalCode == null) {
+    signalProcess(child, 'SIGKILL');
+    await Promise.race([exitPromise, sleep(500)]);
+  }
   child.unref?.();
 }
 
@@ -1466,7 +1505,10 @@ async function captureViewportBrowserCliAttempt(url, file, browserBin) {
       '--virtual-time-budget=12000',
       url,
     ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
   );
   child.stdout.on('data', (chunk) => {
     log = appendLog(log, chunk);
@@ -1477,7 +1519,7 @@ async function captureViewportBrowserCliAttempt(url, file, browserBin) {
   try {
     return await waitForScreenshotFile(file, child, 30000, () => log);
   } finally {
-    stopProcess(child);
+    await stopProcessAndWait(child);
     try {
       rmSync(profileDir, { recursive: true, force: true });
     } catch {
