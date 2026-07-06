@@ -41,6 +41,10 @@ function lineCount(source) {
   return source.length === 0 ? 0 : source.split(/\r?\n/).length;
 }
 
+function sha256Field(value) {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
 function listFiles(projectRoot, extension) {
   const files = [];
   const visit = (dir) => {
@@ -286,10 +290,11 @@ function sourceAuditFailuresFromSource({
   const failures = [];
   const manualFrameGraphSequence =
     framePassSequence.includes('FrameGraphPlanNodes')
-    || framePassSequence.includes('FramePassDispatcher')
     || /\.execute_node\(&context\.nodes\./.test(framePassSequence)
     || frameGraph.includes('struct FrameGraphPlanNodes');
-  if (!/\bfn\s+execute_all\b/.test(frameGraph) || manualFrameGraphSequence) {
+  const framePassSequenceUsesExecuteAll =
+    /\.executor\(\)\s*\.\s*execute_all\(&mut dispatcher\)/s.test(framePassSequence);
+  if (!/\bfn\s+execute_all\b/.test(frameGraph) || !framePassSequenceUsesExecuteAll || manualFrameGraphSequence) {
     failures.push({
       code: 'render.framegraph_manual_sequence',
       severity: 'P1',
@@ -297,6 +302,7 @@ function sourceAuditFailuresFromSource({
       message: 'FrameGraph does not own full pass execution order through execute_all',
       evidence: {
         hasExecuteAll: /\bfn\s+execute_all\b/.test(frameGraph),
+        framePassSequenceUsesExecuteAll,
         manualFrameGraphSequence,
         frameGraphPlanNodesLine: lineOf(framePassSequence, 'FrameGraphPlanNodes') ?? lineOf(frameGraph, 'struct FrameGraphPlanNodes'),
       },
@@ -845,7 +851,7 @@ const provenanceV2Ready =
   && Array.isArray(quickplayProvenance.outputs)
   && quickplayProvenance.outputs.every((output) => output.digest)
   && quickplayProvenance.generator?.version
-  && quickplayProvenance.toolchain?.voDev
+  && sha256Field(quickplayProvenance.toolchain?.voDevSourceDigest)
   && quickplayProvenance.task?.id
   && quickplayProvenance.sourceRoots;
 issue(

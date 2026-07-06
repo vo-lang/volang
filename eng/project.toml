@@ -8,7 +8,7 @@ module = "github.com/vo-lang/volang"
 name = "vogui"
 repository = "vo-lang/vogui"
 local_hint = "../vogui"
-expected_commit = "ff002b168f37aec63a22497039afabf67fe8e97c"
+expected_commit = "0be8cd1b8abab4aabd510b6e2b9f74510f27f837"
 ci_checkout = true
 
 [[first_party.workspace]]
