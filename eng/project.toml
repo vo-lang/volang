@@ -20,7 +20,7 @@ path = "js"
 name = "voplay"
 repository = "vo-lang/voplay"
 local_hint = "../voplay"
-expected_commit = "9e2b4154664e6a8c38a2591a7d9b9e8b119d31c2"
+expected_commit = "7aadb5e28ca94428a54bab55368b486e8c73db02"
 ci_checkout = true
 
 [[first_party]]
@@ -41,5 +41,5 @@ ci_checkout = true
 name = "BlockKart"
 repository = "vo-lang/BlockKart"
 local_hint = "../BlockKart"
-expected_commit = "1e952122a10227756c4726ca66892107212cf8e5"
+expected_commit = "b819dba4c038ff1e7f6a2cb3518fde24cc42ca1a"
 ci_checkout = true
