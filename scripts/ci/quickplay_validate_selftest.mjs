@@ -312,11 +312,11 @@ digest = "${sha256Digest(voplayWasm)}"
     generator: {
       command: ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'],
       script: 'apps/studio/scripts/package_blockkart_quickplay.mjs',
-      version: 2,
+      version: 3,
     },
     toolchain: {
       node: process.version,
-      voDev: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
+      voDevSourceDigest: sha256Digest(Buffer.from('quickplay-validate-selftest-generator')),
       wasmTarget: 'wasm32-unknown-unknown',
     },
     sourceRoots: {

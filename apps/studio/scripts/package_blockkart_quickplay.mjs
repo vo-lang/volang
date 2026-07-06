@@ -22,7 +22,7 @@ const BLOCKKART_SOURCE_ALLOWLIST = [
 ];
 const QUICKPLAY_ARTIFACT_NAME = 'studio.quickplay.blockkart';
 const QUICKPLAY_ARTIFACT_PATH = 'apps/studio/public/quickplay/blockkart';
-const QUICKPLAY_GENERATOR_VERSION = 2;
+const QUICKPLAY_GENERATOR_VERSION = 3;
 const QUICKPLAY_TASK_ID = 'quickplay-blockkart-package';
 const QUICKPLAY_GENERATOR_COMMAND = ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'];
 const QUICKPLAY_GENERATOR_INPUTS = [
@@ -66,6 +66,26 @@ async function cleanupCleanGitSnapshots() {
 
 function sha256Digest(bytes) {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+async function volangGeneratorSourceDigest() {
+  const inputs = [
+    'apps/studio/scripts/package_blockkart_quickplay.mjs',
+    'eng/project.toml',
+    'eng/tasks.toml',
+    'eng/ci.toml',
+    'scripts/ci/repo_roots.mjs',
+  ];
+  const entries = [];
+  for (const relative of inputs) {
+    const bytes = await fs.readFile(path.join(VOLANG_ROOT, relative));
+    entries.push({
+      digest: sha256Digest(bytes),
+      path: relative,
+      size: bytes.byteLength,
+    });
+  }
+  return sourceSetDigest(entries.sort((a, b) => a.path.localeCompare(b.path)));
 }
 
 function jsonText(value) {
@@ -557,7 +577,7 @@ async function buildProvenance(projectPackage, dependencyPackage, outputBytes) {
     },
     toolchain: {
       node: process.version,
-      voDev: gitOutput(['rev-parse', 'HEAD'], VOLANG_ROOT),
+      voDevSourceDigest: await volangGeneratorSourceDigest(),
       wasmTarget: WASM_TARGET,
     },
     sourceRoots: {

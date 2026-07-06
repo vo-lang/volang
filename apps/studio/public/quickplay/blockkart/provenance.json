@@ -19,11 +19,11 @@
       "task:quickplay-blockkart-package"
     ],
     "script": "apps/studio/scripts/package_blockkart_quickplay.mjs",
-    "version": 2
+    "version": 3
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDev": "baf71bdbc4cdc729f7e384dffb312819695a81bf",
+    "voDevSourceDigest": "sha256:0785f5d86ac5adb4a76d8539945f485f6d31c4887648976ba4acf59a6bbed459",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {

@@ -660,7 +660,7 @@ function validateProvenance(project, deps) {
   );
   assert(Number(provenance.generator?.version) >= 2, 'provenance generator version must be at least 2');
   assert(typeof provenance.toolchain?.node === 'string' && provenance.toolchain.node.length > 0, 'provenance node toolchain version missing');
-  assert(typeof provenance.toolchain?.voDev === 'string' && provenance.toolchain.voDev.length >= 7, 'provenance vo-dev toolchain version missing');
+  assert(sha256Field(provenance.toolchain?.voDevSourceDigest), 'provenance vo-dev generator source digest missing');
   assert(provenance.toolchain?.wasmTarget === 'wasm32-unknown-unknown', 'provenance wasm target mismatch');
   assert(typeof provenance.sourceRoots?.volang === 'string' && provenance.sourceRoots.volang.length > 0, 'provenance volang source root missing');
   assert(typeof provenance.sourceRoots?.blockKart === 'string' && provenance.sourceRoots.blockKart.length > 0, 'provenance BlockKart source root missing');
