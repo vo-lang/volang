@@ -74,6 +74,7 @@ const blockKartRaceReportMarker = '__BLOCKKART_RACE_REPORT__';
 
 const cleanupCallbacks = [];
 let cleanedUp = false;
+let cleanupCallbacksRun = false;
 
 function fail(message) {
   console.error(`BlockKart baseline: ${message}`);
@@ -198,10 +199,18 @@ function withTimeout(promise, timeoutMs, label) {
 }
 
 function cleanup() {
-  if (cleanedUp) {
+  if (cleanedUp && cleanupCallbacksRun) {
     return;
   }
   cleanedUp = true;
+  runCleanupCallbacks();
+}
+
+function runCleanupCallbacks() {
+  if (cleanupCallbacksRun) {
+    return;
+  }
+  cleanupCallbacksRun = true;
   for (const callback of cleanupCallbacks.reverse()) {
     try {
       callback();
@@ -3252,11 +3261,12 @@ async function main() {
     console.log(`BlockKart baseline: diagnostics assetReports=${diagnostics.assetReports.length} sceneReports=${diagnostics.sceneReports.length} vehicleReports=${diagnostics.vehicleReports.length} raceReports=${diagnostics.raceReports.length} startRace=${startRaceScenario.completed ? 'yes' : 'no'} storageReload=${storageReloadScenario.completed ? 'yes' : 'no'} restarts=${restartScenario.completed}/${restartScenario.requested}`);
     console.log(`BlockKart baseline: startup phases ${startupPhases.length}, perf reports ${perf.count}, slow frames ${voplaySlowFrames.length}, warnings ${warnings.length}, errors ${errors.length}, resource failures ${resourceFailures.length}`);
 
+    cleanedUp = true;
     client.close();
     await closePage(debugPort, targetId);
-    stopProcess(browser.child);
-    stopProcess(preview.child);
-    cleanup();
+    await stopProcessAndWait(browser.child);
+    await stopProcessAndWait(preview.child);
+    runCleanupCallbacks();
 
     if (failOnIssues && p0p1.length > 0) {
       for (const issue of p0p1) {

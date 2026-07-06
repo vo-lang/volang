@@ -511,6 +511,7 @@ function formatMs(value) {
   return Number.isFinite(number) ? `${number.toFixed(2)}ms` : 'n/a';
 }
 
+rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 const baselinePerfArgs = ['--perf-mode', 'stats', '--perf-console', '0', '--perf-gpu-probe', '0', '--perf-diag', 'pulseHybrid'];
 const coverageArgs = ['--no-fail-on-issues', ...baselinePerfArgs];
