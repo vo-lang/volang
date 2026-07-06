@@ -38,6 +38,10 @@ const startupWarnMs = positiveInt(process.env.BLOCKKART_BASELINE_STARTUP_WARN_MS
 const maxSlowFrames = positiveInt(process.env.BLOCKKART_BASELINE_MAX_SLOW_FRAMES, 2);
 const restartCount = nonNegativeInt(argValue('--restart-count') || process.env.BLOCKKART_BASELINE_RESTART_COUNT, 0);
 const restartWaitTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_RESTART_TIMEOUT_MS, 30000);
+const baselineTimeoutMs = positiveInt(
+  process.env.BLOCKKART_BASELINE_TIMEOUT_MS,
+  Math.max(300000, firstFrameTimeoutMs + captureMs + restartCount * restartWaitTimeoutMs + 180000),
+);
 const resetKey = { key: 'r', code: 'KeyR', keyCode: 82 };
 const startRaceKey = { key: 'w', code: 'KeyW', keyCode: 87 };
 const renderStressKeys = {
@@ -177,6 +181,20 @@ function readJson(file) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
 }
 
 function cleanup() {
@@ -3259,6 +3277,6 @@ async function main() {
   }
 }
 
-await main().catch((error) => {
+await withTimeout(main(), baselineTimeoutMs, 'BlockKart baseline').catch((error) => {
   fail(error instanceof Error ? error.message : String(error));
 });
