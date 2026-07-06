@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:133415cec127ea030915af2802dbdcaeed87d0ce04d6e1a5c4ef7746547c3883",
+    "voDevSourceDigest": "sha256:0860c4cb3d2f5c928d9b8aff32a24d5b8209a5d16a68cc9ccd158a4246c424c4",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -42,12 +42,12 @@
   "project": {
     "commit": "381d2579c1226dd62002178dee1814a7a4aa1e03",
     "dirty": false,
-    "filesDigest": "sha256:2a1d9f07089aea90b66b1fc4573cc571953ebc6b6a3f1d74d417ee613e5da19c",
+    "filesDigest": "sha256:267c2d5f0a7c2f260f2a844e899f03c1ab6d39dca227b70d2e367bfebb335609",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
       "sourceDigest": "sha256:3121cb8c9d16f3a4372a9ef8f3ba9cff9086289bd0437fc59ede032dd8c2ad6d",
-      "packagedDigest": "sha256:b35d519c04ca9734ed159fd267f277294d64b52b8c35b8d5533c94ed70f0dbb4",
+      "packagedDigest": "sha256:528c997e9d420d21ec13d5fd770b064924e6fee8f3b2ce8d3e629a5ff63e0f2c",
       "modules": [
         {
           "module": "github.com/vo-lang/vogui",
@@ -76,8 +76,8 @@
         {
           "module": "github.com/vo-lang/voplay",
           "version": "v0.1.34",
-          "commit": "c5b9cfa6e955d0365da3ba000cdb583728df8fff",
-          "releaseManifestDigest": "sha256:fe376811fab641e3aaa39ffbdb5746f5eddb46aaf2cdefb2ec2f78f62236ea0b",
+          "commit": "fbcd7100f9f92c10625fca1b250e565db281c03b",
+          "releaseManifestDigest": "sha256:7b062e654d00e2b4aca5e604f163f09a5358b3bc7e7cc6096a9a7a7253bdf88b",
           "sourceDigest": "sha256:e8c08cbcd300b587600cba33353887e9758f87aea8031d6217ef934a47cef4f8",
           "artifacts": [
             {
@@ -270,21 +270,21 @@
       ],
       "cacheDir": "github.com@vo-lang@voplay/v0.1.34",
       "dirty": false,
-      "filesDigest": "sha256:d352bdbfb7dbb6af3b385723e4434ab6ebc956166736d3f63bbd767fa8b216dd",
+      "filesDigest": "sha256:bdc0ee036cf4f373682698d55711e5dbdd6265872074055e1993ccbdbb92f569",
       "module": "github.com/vo-lang/voplay",
       "source": "external",
       "version": "v0.1.34",
-      "commit": "c5b9cfa6e955d0365da3ba000cdb583728df8fff"
+      "commit": "fbcd7100f9f92c10625fca1b250e565db281c03b"
     }
   ],
   "outputs": [
     {
-      "digest": "sha256:36cc0c0ff0fa5fc2f5c010c84451e19277e80e03bfa0137d09999382f56bec37",
+      "digest": "sha256:77bd7858ca1b0e278fa0ff81fd90a8ff5c650b8870de154ff54b1928963c82d8",
       "path": "project.json",
       "size": 22752859
     },
     {
-      "digest": "sha256:bc4162bf7c24db957413a87084b00627361c2c116ede5a0811c9653e6de88dd8",
+      "digest": "sha256:54ec36eb714e6b1a5f4ceca21fcb42142e5c8deeb4c1c45430c8b1dd7e7fe9ed",
       "path": "deps.json",
       "size": 2583632
     }
