@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:0785f5d86ac5adb4a76d8539945f485f6d31c4887648976ba4acf59a6bbed459",
+    "voDevSourceDigest": "sha256:f1896d043fb3875f338b6ccf82e18fc747b7f1ae8f850381f015ad864ef3eab8",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -40,15 +40,15 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "123771a3065c1935bbd14a6e54b689fe6a9a69b3",
+    "commit": "90f780377946dedac60ebdb951dc723d67677085",
     "dirty": false,
-    "filesDigest": "sha256:800c31708e9d1a7e023f42e346c19c55e1d2f18a5581dcd9eaca04c53666f831",
+    "filesDigest": "sha256:1a01f23bdc79a867a8ece44924493917bcb801ee8fa4c50ecb82c6bb90ca5cd2",
     "module": "github.com/vo-lang/blockkart",
     "sourceFiles": [
       {
         "path": "asset_scene_diagnostics.vo",
-        "digest": "sha256:be7c90183cd2ca5667606ff2bd7211bd174fe438a8a2553284305f694c163bad",
-        "size": 8068
+        "digest": "sha256:c34dad8115d0c9e65220d9b3f3b722ed6f0804087e2f6661342da15646da102b",
+        "size": 8405
       },
       {
         "path": "blocks.vo",
@@ -72,8 +72,8 @@
       },
       {
         "path": "hud_presenter.vo",
-        "digest": "sha256:8a9251c79914f067ed3b3888d52872f6d550a9b547481c7d5e25794c1583ff18",
-        "size": 14817
+        "digest": "sha256:31efd7c67ad31e0774f2bee35f24035cf4ba1cead5fdf951f57705bfee84ab70",
+        "size": 14889
       },
       {
         "path": "kart_render_pose.vo",
@@ -102,8 +102,8 @@
       },
       {
         "path": "play_state.vo",
-        "digest": "sha256:3e9de70b9738a8e8ee275f5c181333396b4b55f6c96fa8f505b48a8f4b141d00",
-        "size": 9922
+        "digest": "sha256:036dee96b5a427c9abde09997fde9d842abfd797ca7c84da894718afc93b6d22",
+        "size": 9946
       },
       {
         "path": "primitive_world.vo",
@@ -112,18 +112,18 @@
       },
       {
         "path": "product_foundation.vo",
-        "digest": "sha256:1594404107ea3e16f0bfb7e4d41951e78156eff1af5afd7c076ad873b69664f6",
-        "size": 12247
+        "digest": "sha256:a8c11f3b1868aea3f661c8a237236985396cd51eb40f6d4065cab6961920ef25",
+        "size": 12301
       },
       {
         "path": "race_session_runtime.vo",
-        "digest": "sha256:083bd63bfc46377cb2c410e54f2c9320891d84890c477958a54aeadc1e77a189",
-        "size": 5594
+        "digest": "sha256:6e14eb85ea519fb3ca79a5c9f11e65f35b623c2afef71b501debeb4f30b6f513",
+        "size": 5642
       },
       {
         "path": "render_stress.vo",
-        "digest": "sha256:558c70b71bf0344b22e8ea2728e9efbbb2896449a4ad3bc9829ab9fad21f9782",
-        "size": 6527
+        "digest": "sha256:0e3ff60e148a4ccb9824a830a2899f7a2f79f1020bd662b64e9ca5b4a917b128",
+        "size": 6647
       },
       {
         "path": "runtime_owners.vo",
@@ -157,8 +157,8 @@
       },
       {
         "path": "world.vo",
-        "digest": "sha256:2ff7ac2c12547353f954870dcd17caf8c49a4276bfb63aea2955bb4ac73288be",
-        "size": 22623
+        "digest": "sha256:4e6a64b5ffebacc36d8a4a8ebdfc95c763fcffc5a24999087bf25e6f9b62b997",
+        "size": 23299
       }
     ],
     "sourceAllowlist": [
@@ -168,7 +168,7 @@
         "expiresAt": "2027-01-31T00:00:00.000Z"
       }
     ],
-    "sourceFilesDigest": "sha256:41ccfc4a562d66851a0ede5ec0159bd33556a6ca07cfd0d19036438eb6ac92b8"
+    "sourceFilesDigest": "sha256:384e893ffba5630df8e5d214f143c30266c7e60945086d721683de57a44c4b85"
   },
   "dependencies": [
     {
@@ -224,9 +224,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:3d03db500450324a6b5e1878638bbfbc006934d73498f56261d9ba03d2fede1a",
+      "digest": "sha256:95db7ced3388048ec04cb32efca8fcc6b237c9d3d807b6f125394bdceb3e4c93",
       "path": "project.json",
-      "size": 22741057
+      "size": 22742402
     },
     {
       "digest": "sha256:b14323a006a676006cdf3d7f47f29a7b67297323233fa0f483660ba0e5c989f9",
