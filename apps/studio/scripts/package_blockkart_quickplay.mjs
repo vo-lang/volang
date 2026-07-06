@@ -259,6 +259,19 @@ function dropNativeExtensionTables(voModSource) {
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
 }
 
+function parseVoModRequirements(voModSource) {
+  const require = [];
+  for (const rawLine of voModSource.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = line.match(/^require\s+(\S+)\s+(\S+)$/);
+    if (match) {
+      require.push({ module: match[1], constraint: match[2] });
+    }
+  }
+  return require.sort((a, b) => a.module.localeCompare(b.module));
+}
+
 function packagedSourceEntry(file) {
   const bytes = Buffer.from(file.content, 'utf8');
   return {
@@ -355,6 +368,9 @@ async function rewritePackagedWebManifest(moduleDir, files, artifacts, locked) {
   const manifest = JSON.parse(manifestFile.content);
   manifest.module = locked.path;
   manifest.version = locked.version;
+  if (modFile) {
+    manifest.require = parseVoModRequirements(modFile.content);
+  }
   if (locked.commit) {
     manifest.commit = locked.commit;
   }
