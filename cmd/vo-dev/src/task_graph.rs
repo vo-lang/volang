@@ -202,6 +202,7 @@ fn input_required_repo(input: &str) -> Option<&str> {
     input
         .strip_prefix("external:")
         .or_else(|| input.strip_prefix("module-cache:"))
+        .or_else(|| input.strip_prefix("first-party:"))
         .filter(|repo| !repo.trim().is_empty())
 }
 

@@ -19,11 +19,11 @@
       "task:quickplay-blockkart-package"
     ],
     "script": "apps/studio/scripts/package_blockkart_quickplay.mjs",
-    "version": 3
+    "version": 5
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:ea4c3715958f05224ea41d53f039635f526389e499bb9a531112589d7bab6a67",
+    "voDevSourceDigest": "sha256:638a1804d2e9eeafa5b5f1c41f08e2117943f577d5d61464db652fc148bd2a5b",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -35,25 +35,80 @@
     "apps/studio/scripts/package_blockkart_quickplay.mjs",
     "eng/project.toml",
     "external:BlockKart",
-    "module-cache:voplay",
+    "first-party:voplay",
     "module-cache:vopack",
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "85d6afa78315c3d06d159d24fb045d4424865e0e",
+    "commit": "f5b9a9e1d4b071bdb269093671265c987f9842aa",
     "dirty": false,
-    "filesDigest": "sha256:e1d08fdc71342c2041944693c74c2e91f93220e5367f3b043eb3f459d47cbb2b",
+    "filesDigest": "sha256:dcb1c5ac6b25803daac8efe8d1a7d89489b44050b0e008361a38011be1895dad",
+    "lockRewrite": {
+      "schemaVersion": 1,
+      "path": "vo.lock",
+      "sourceDigest": "sha256:3121cb8c9d16f3a4372a9ef8f3ba9cff9086289bd0437fc59ede032dd8c2ad6d",
+      "packagedDigest": "sha256:f6da6753a3d8a0446437fb16ba194bde6f88f8de48b8d01ee4a9b9c9ebbf581b",
+      "modules": [
+        {
+          "module": "github.com/vo-lang/vogui",
+          "version": "v0.1.15",
+          "commit": "4f53eb2674fa8e9c35e068fe0f88f0f2b39c1055",
+          "releaseManifestDigest": "sha256:be690cfccedbad1ec0709835b68ebb05ae92acd34c69210b42ad9d5ac9984823",
+          "sourceDigest": "sha256:8aa13b9a21ec40df723bc6612f5375e84e82ceeb3e0dd18b4fab1550b9d54bd6",
+          "artifacts": [
+            {
+              "kind": "extension-wasm",
+              "target": "wasm32-unknown-unknown",
+              "name": "vogui.wasm",
+              "size": 29805,
+              "digest": "sha256:83d90c148f58851ffed12ceec24cc641889456c1ffcab3ea40b8f66d4e3aab83"
+            }
+          ]
+        },
+        {
+          "module": "github.com/vo-lang/vopack",
+          "version": "v0.1.3",
+          "commit": "63a82992d8b75bbf9e5d0267e8ad6e8ad0c01bb8",
+          "releaseManifestDigest": "sha256:84cb48cc0c5ccace34dd9ed9c44adaf3b0ed1b958a1f1837be8d05148566f144",
+          "sourceDigest": "sha256:0ce5aef812b1bc388566b132d1800bff4a91e7cc2b7671b87d56d70aec1fa6b7",
+          "artifacts": []
+        },
+        {
+          "module": "github.com/vo-lang/voplay",
+          "version": "v0.1.34",
+          "commit": "fb0148beba16605a4820e6262bcda866b258424e",
+          "releaseManifestDigest": "sha256:5276cea59c27f5f7a251ae1303dde851d3eba7d18014401bbecfe46d871e471b",
+          "sourceDigest": "sha256:68972852cb532b7b45a391b56754b3284c6f85634ea2ab462c09a384d6c5079a",
+          "artifacts": [
+            {
+              "kind": "extension-js-glue",
+              "target": "wasm32-unknown-unknown",
+              "name": "voplay_island.js",
+              "size": 110536,
+              "digest": "sha256:4c7db91eae8fd7cdd491660f9a91559e61064a23e8f7982d3fb06da0364fc72e"
+            },
+            {
+              "kind": "extension-wasm",
+              "target": "wasm32-unknown-unknown",
+              "name": "voplay_island_bg.wasm",
+              "size": 3702816,
+              "digest": "sha256:181c60fcdb13093a40080b1a592ddc4bd2208884418cf9c3cafc73d98ba278ea"
+            }
+          ]
+        }
+      ]
+    },
     "module": "github.com/vo-lang/blockkart",
     "sourceFiles": [
       {
         "path": "asset_scene_diagnostics.vo",
-        "digest": "sha256:c34dad8115d0c9e65220d9b3f3b722ed6f0804087e2f6661342da15646da102b",
-        "size": 8405
+        "digest": "sha256:8ed9d4d1da634abf3399b1b9683a20d94567b3f20883d3f5c73d0a1d82576172",
+        "size": 8562
       },
       {
         "path": "blocks.vo",
-        "digest": "sha256:4587ffc67da52fb3377f02ffc0f153cdfcfdcc9ee04662aac3ff660ac3b1d6f5",
-        "size": 485
+        "digest": "sha256:c7748becafc46108764475bbecc17954e89e84ff6c57939387e8cbfa8a3d928e",
+        "size": 488
       },
       {
         "path": "camera_telemetry.vo",
@@ -67,13 +122,13 @@
       },
       {
         "path": "gameplay.vo",
-        "digest": "sha256:d93912c5e89c4e83d6ff3f831eabade9a10da5085e3d10a0a55dbe3a9ac7fef1",
-        "size": 9106
+        "digest": "sha256:d2e3dd7eef8bb086bec18e435b548a63a5b08f3221b2818ab19681d60454c66e",
+        "size": 9798
       },
       {
         "path": "hud_presenter.vo",
-        "digest": "sha256:31efd7c67ad31e0774f2bee35f24035cf4ba1cead5fdf951f57705bfee84ab70",
-        "size": 14889
+        "digest": "sha256:a503bd742b6b29e5e6ba7b6681249022e022532112bcb8ccf27772d80430cf57",
+        "size": 15284
       },
       {
         "path": "kart_render_pose.vo",
@@ -82,8 +137,8 @@
       },
       {
         "path": "kart_rig.vo",
-        "digest": "sha256:ead0896103010699698600d7034c1cc705c5e62998545434c1317704eff053aa",
-        "size": 5883
+        "digest": "sha256:3a43776a77742bb87fb49ca2058b56a3d8faa8c7c8e84ab43f4ae5f116b84559",
+        "size": 6257
       },
       {
         "path": "lifecycle.vo",
@@ -102,28 +157,28 @@
       },
       {
         "path": "play_state.vo",
-        "digest": "sha256:036dee96b5a427c9abde09997fde9d842abfd797ca7c84da894718afc93b6d22",
-        "size": 9946
+        "digest": "sha256:5da3d0fb4a2c1405127aaa5672d87fe4737f6d2fa6c6d959f3b0d0af6c598bd6",
+        "size": 10000
       },
       {
         "path": "primitive_world.vo",
-        "digest": "sha256:f8fe9d5666f66cf9d3eb8518db0fdb7a19b1d1bffe3f7dab863d23247b6e8340",
-        "size": 23325
+        "digest": "sha256:6b1b5fd9a9aa6c2f67e759ae35fa8c6d043adfcc8d029f7b5db1a65050fc4051",
+        "size": 24064
       },
       {
         "path": "product_foundation.vo",
-        "digest": "sha256:a8c11f3b1868aea3f661c8a237236985396cd51eb40f6d4065cab6961920ef25",
-        "size": 12301
+        "digest": "sha256:333ce1a459dd4176da16f5fb26542bb65f7422db488d37470fb2cb8b078d8549",
+        "size": 12428
       },
       {
         "path": "race_session_runtime.vo",
-        "digest": "sha256:6e14eb85ea519fb3ca79a5c9f11e65f35b623c2afef71b501debeb4f30b6f513",
-        "size": 5642
+        "digest": "sha256:da74ab40014838a559594b91b575a3e44449c9abc70194003a36e75a3d7ec78b",
+        "size": 6050
       },
       {
         "path": "render_stress.vo",
-        "digest": "sha256:0e3ff60e148a4ccb9824a830a2899f7a2f79f1020bd662b64e9ca5b4a917b128",
-        "size": 6647
+        "digest": "sha256:4e65c1ed4abd158993bf7ca1c3bddf70cc4aec4ca2942800ece703a5b3353ae7",
+        "size": 6815
       },
       {
         "path": "runtime_owners.vo",
@@ -147,8 +202,8 @@
       },
       {
         "path": "track_runtime.vo",
-        "digest": "sha256:1b1f29403e07dd642a2843d893a88835d47f8664041a792bcfb439b9b12fbc61",
-        "size": 33384
+        "digest": "sha256:95b0d58dd7a509a7ae97b18b888693ada4b4cc57782eae124ed9693b36011d1a",
+        "size": 35077
       },
       {
         "path": "track_spec.vo",
@@ -157,8 +212,8 @@
       },
       {
         "path": "world.vo",
-        "digest": "sha256:4e6a64b5ffebacc36d8a4a8ebdfc95c763fcffc5a24999087bf25e6f9b62b997",
-        "size": 23299
+        "digest": "sha256:7308aadd526353d80c37b84afa7e0b6824ab2b58d251d5130a716caea1cc1e94",
+        "size": 24924
       }
     ],
     "sourceAllowlist": [
@@ -168,7 +223,7 @@
         "expiresAt": "2027-01-31T00:00:00.000Z"
       }
     ],
-    "sourceFilesDigest": "sha256:384e893ffba5630df8e5d214f143c30266c7e60945086d721683de57a44c4b85"
+    "sourceFilesDigest": "sha256:c77c05f3edeff2c9238eccfc18a6d6efdcc125cda80b9c956d9e2dcc576eb190"
   },
   "dependencies": [
     {
@@ -215,23 +270,23 @@
       ],
       "cacheDir": "github.com@vo-lang@voplay/v0.1.34",
       "dirty": false,
-      "filesDigest": "sha256:e3d447700c136c129c82950f876914cc460f23be0f94d6083c88e50b056232c1",
+      "filesDigest": "sha256:5bb5e668a2baa9c2c3875c7344d5ba5219e3630d4a84a6ac047ab35d1c13560c",
       "module": "github.com/vo-lang/voplay",
       "source": "external",
       "version": "v0.1.34",
-      "commit": "01af332202734c3b3a3ad128d742304d8e9f5c8a"
+      "commit": "fb0148beba16605a4820e6262bcda866b258424e"
     }
   ],
   "outputs": [
     {
-      "digest": "sha256:1bd160f00d6ac101453ab2b76087220ac878150aa223f55d97278ddf5716c54b",
+      "digest": "sha256:9f79d9f2dde79067e2bf23fec91da8ce6901e158b4e9838074abc16826f10904",
       "path": "project.json",
-      "size": 22742402
+      "size": 22750483
     },
     {
-      "digest": "sha256:79c14ddb7052d2b444621e45287536cf2b4d0cdfa5f4160c16166d80deff9bc2",
+      "digest": "sha256:4f4b821efdbf2cb28197081f8ef3c56deff1da1e470a96556cca091338ea2fbc",
       "path": "deps.json",
-      "size": 2572383
+      "size": 2583141
     }
   ]
 }

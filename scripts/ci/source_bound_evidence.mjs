@@ -137,21 +137,48 @@ export function sourceBoundEvidence({
     dirty: gitDirty(repo.root),
     sourceDigest: sourceTreeDigest(repo.root),
   }));
+  const testedCommits = Object.fromEntries(repoEntries.map((repo) => [repo.name, repo.commit]));
+  const dirtyFlags = Object.fromEntries(repoEntries.map((repo) => [repo.name, repo.dirty]));
+  const sourceDigest = digestJson(repoEntries.map(({ name, commit, dirty, sourceDigest }) => ({
+    name,
+    commit,
+    dirty,
+    sourceDigest,
+  })));
+  const gateDigest = fileSetDigest(root, gateFiles);
+  const artifactDigest = artifactSetDigest(root, artifacts);
+  const missingCommitRepos = repoEntries
+    .filter((repo) => !repo.commit)
+    .map((repo) => repo.name);
+  const dirtyRepos = repoEntries
+    .filter((repo) => repo.dirty)
+    .map((repo) => repo.name);
+  const verdictStatus = missingCommitRepos.length === 0 && dirtyRepos.length === 0 ? 'pass' : 'fail';
+  const runBindingDigest = digestJson({
+    gate,
+    sourceDigest,
+    gateDigest,
+    artifactDigest,
+    testedCommits,
+    dirtyFlags,
+  });
   return {
     schemaVersion: 1,
     taskRunId: `${gate}:${randomUUID()}`,
     gate,
     generatedAt,
-    sourceDigest: digestJson(repoEntries.map(({ name, commit, dirty, sourceDigest }) => ({
-      name,
-      commit,
-      dirty,
-      sourceDigest,
-    }))),
-    gateDigest: fileSetDigest(root, gateFiles),
-    artifactDigest: artifactSetDigest(root, artifacts),
-    testedCommits: Object.fromEntries(repoEntries.map((repo) => [repo.name, repo.commit])),
-    dirtyFlags: Object.fromEntries(repoEntries.map((repo) => [repo.name, repo.dirty])),
+    sourceDigest,
+    gateDigest,
+    artifactDigest,
+    runBindingDigest,
+    testedCommits,
+    dirtyFlags,
+    verdict: {
+      status: verdictStatus,
+      dirtyProvenance: dirtyRepos.length > 0,
+      missingCommitRepos,
+      dirtyRepos,
+    },
     repos: repoEntries,
   };
 }

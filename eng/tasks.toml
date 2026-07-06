@@ -1594,7 +1594,7 @@ tools = ["node", "npm"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "module-cache:voplay", "module-cache:vopack", "module-cache:vogui"]
+inputs = ["apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui"]
 outputs = ["apps/studio/public/quickplay/blockkart"]
 tier = "manual"
 tags = ["app-smoke", "manual"]
@@ -1608,7 +1608,7 @@ tools = ["node", "npm"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/quickplay_regenerate_check.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "module-cache:voplay", "module-cache:vopack", "module-cache:vogui", "apps/studio/public/quickplay/blockkart/**"]
+inputs = ["scripts/ci/quickplay_regenerate_check.mjs", "apps/studio/scripts/package_blockkart_quickplay.mjs", "eng/project.toml", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui", "apps/studio/public/quickplay/blockkart/**"]
 outputs = ["target/quickplay-regenerate-check"]
 tier = "site"
 tags = ["app-smoke", "provenance"]
@@ -1623,7 +1623,7 @@ tools = ["node"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/quickplay_source_audit.mjs", "apps/studio/public/quickplay/blockkart/**", "external:BlockKart", "module-cache:voplay", "module-cache:vopack", "module-cache:vogui"]
+inputs = ["scripts/ci/quickplay_source_audit.mjs", "apps/studio/public/quickplay/blockkart/**", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui"]
 outputs = ["target/quickplay-source-audit"]
 tier = "site"
 tags = ["app-smoke", "provenance"]
@@ -1921,6 +1921,7 @@ timeout_sec = 120
 name = "voplay-industrial-readiness"
 title = "verify voplay industrial readiness final gate"
 command = ["node", "scripts/ci/voplay_industrial_readiness.mjs", "--out-dir", "target/voplay-industrial-readiness"]
+needs = ["voplay-framegraph-unit", "voplay-render-core-unit", "voplay-render-structure-lint", "voplay-batch-planner-unit", "voplay-physics-backend-contract", "blockkart-product-boundary-strict", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
 tools = ["node"]
 node_workspaces = ["studio"]
 repo = "voplay"
@@ -1935,7 +1936,7 @@ timeout_sec = 120
 name = "voplay-engineering-quality-readiness"
 title = "verify voplay engineering quality readiness final gate"
 command = ["node", "scripts/ci/voplay_engineering_quality_readiness.mjs", "--out-dir", "target/voplay-engineering-quality-readiness"]
-needs = ["node-audit-current"]
+needs = ["node-audit-current", "voplay-industrial-readiness", "voplay-render-core-unit", "voplay-framegraph-unit", "voplay-render-structure-lint", "voplay-batch-planner-unit", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-backend-contract", "voplay-physics-industrial-stress", "blockkart-product-boundary-strict", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
 tools = ["node", "npm"]
 node_workspaces = ["studio", "vogui-js"]
 repo = "voplay"
@@ -1949,7 +1950,7 @@ inputs = [
   "eng/artifacts.toml",
   "cmd/vo-dev/**",
   ".github/workflows/**",
-  "module-cache:voplay",
+  "first-party:voplay",
   "module-cache:vogui",
   "module-cache:vopack",
   "external:BlockKart",

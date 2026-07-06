@@ -98,6 +98,22 @@ function bodyOfFunction(source, signature) {
   return '';
 }
 
+function bodyOfType(source, typeName) {
+  const start = source.indexOf(`type ${typeName} struct`);
+  if (start < 0) return '';
+  const brace = source.indexOf('{', start);
+  if (brace < 0) return '';
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(brace + 1, i);
+    }
+  }
+  return '';
+}
+
 function gitOutput(args, cwd) {
   try {
     return { ok: true, stdout: execFileSync('git', args, { cwd, encoding: 'utf8' }).trim() };
@@ -283,6 +299,7 @@ function sourceAuditFailuresFromSource({
   vehicleTelemetry,
   vehiclePhysicsSession,
   physicsStressSource,
+  voplayToolSources,
   sceneSource,
   replaySource,
   blockKartFiles,
@@ -435,16 +452,39 @@ function sourceAuditFailuresFromSource({
       },
     });
   }
+  if (/UpdateIntent\s*\(/.test(voplayToolSources) || /StepAndSyncPhysics\s*\(/.test(voplayToolSources)) {
+    failures.push({
+      code: 'physics.tools_bypass_session',
+      severity: 'P1',
+      owner: 'voplay/scene3d',
+      message: 'Voplay tools still bypass VehiclePhysicsSession with direct vehicle/controller update or Scene fixed-step calls',
+      evidence: {
+        updateIntentLine: lineOf(voplayToolSources, 'UpdateIntent'),
+        stepAndSyncLine: lineOf(voplayToolSources, 'StepAndSyncPhysics'),
+      },
+    });
+  }
   const packetContractSource = `${sceneSource}\n${voplayPhysics}\n${voplayDynamics}\n${replaySource}`;
   const packetTokens = ['PhysicsBackendPacketSchemaVersion', 'PhysicsBackendPacketKind', 'PhysicsBackendPacketLength', 'PhysicsBackendPacketHash', 'PhysicsBackendCapability'];
   const missingPacketTokens = packetTokens.filter((token) => !packetContractSource.includes(token));
-  if (missingPacketTokens.length > 0) {
+  const enforcedPacketTokens = ['WritePhysicsBackendPacketHeader', 'ReadPhysicsBackendPacketHeader', 'ValidatePhysicsBackendPacketHeader'];
+  const missingEnforcedPacketTokens = enforcedPacketTokens.filter((token) => !packetContractSource.includes(token) && !sceneSource.includes(token));
+  if (missingPacketTokens.length > 0 || missingEnforcedPacketTokens.length > 0 || /Remaining\(\)\s*>=\s*count\s*\*/.test(sceneSource)) {
     failures.push({
       code: 'physics.backend_packet_schema_missing',
       severity: 'P0',
       owner: 'voplay/scene3d',
-      message: 'Physics backend packet contract lacks schema, kind, length, hash, or capability identifiers',
-      evidence: { missingPacketTokens },
+      message: 'Physics backend packet contract lacks enforced schema header, version, length, hash, or capability validation',
+      evidence: { missingPacketTokens, missingEnforcedPacketTokens, remainingCountLine: lineOf(sceneSource, 'Remaining() >= count') },
+    });
+  }
+  if (!voplayVehicle.includes('RawInvalidSampleCount') || !vehicleTelemetry.includes('RawInvalidSampleCount')) {
+    failures.push({
+      code: 'physics.invalid_wheel_packet_sanitized',
+      severity: 'P1',
+      owner: 'voplay/scene3d',
+      message: 'Raycast wheel packet invalid raw samples can be sanitized before telemetry accounts for them',
+      evidence: { vehicleSyncLine: lineOf(voplayVehicle, 'func (v *Vehicle) syncState') },
     });
   }
   if (!physicsStressSource.includes('InvalidSampleCount') || !physicsStressSource.includes('ValidationIssues') || /sampleFinite\s*\(/.test(physicsStressSource)) {
@@ -476,24 +516,62 @@ function sourceAuditFailuresFromSource({
     && /sample\.BackendApplyHash/.test(physicsStressSource)
     && /sample\.PoseHash/.test(physicsStressSource)
     && /sample\.TelemetryHash/.test(physicsStressSource);
-  if (missingReplayTokens.length > 0 || !replayUsesRecordedTrace || /replayDrift|driftMeters|ReplayDrift/.test(physicsStressSource)) {
+  const freshProcessReplayReady = physicsStressSource.includes('RunPhysicsReplayVerifierProcess')
+    || physicsStressSource.includes('execPhysicsReplayVerifier')
+    || physicsStressSource.includes('--verify-replay-trace');
+  if (missingReplayTokens.length > 0 || !replayUsesRecordedTrace || !freshProcessReplayReady || /replayDrift|driftMeters|ReplayDrift/.test(physicsStressSource)) {
     failures.push({
       code: 'physics.replay_not_executable_contract',
       severity: 'P1',
       owner: 'voplay/scene3d',
-      message: 'Physics replay validation is still drift/final-state evidence without an executable per-step contract',
+      message: 'Physics replay validation lacks a fresh-process executable per-step contract',
       evidence: {
         missingReplayTokens,
         replayUsesRecordedTrace,
+        freshProcessReplayReady,
         driftLine: lineOf(physicsStressSource, 'driftMeters') ?? lineOf(physicsStressSource, 'replayDrift'),
       },
     });
   }
   const blockKartGenericAuthoring = [];
   const genericAuthoring = /ProductPrimitiveAuthoring|PrimitiveBatchAuthoring|PrimitiveInstanceAuthoring|SurfaceMaterialAuthoring|ColliderAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc|ShapeDesc|MaterialPreset)|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|PackWriter|vopack\./;
+  const blockKartNamedAuthoring = [];
+  const blockKartNamedAuthoringRegex = /NewBlockKartPrimitiveContent|PrepareBlockKartMapAsset|SpawnBlockKartMap|SpawnBlockKartRoadsideBakedContent|AddDynamicWithFlags|PlaceStatic|PlaceDetail|SetBlockKartPrimitivePose|attachPrimitiveTrackColliderEntities|spawnBlockKartTrackCollider|primitiveTerrainSurfacePosition/;
+  const blockKartDirectIntentBypass = [];
+  const blockKartDirectIntentRegex = /UpdateIntentFromSyncedState\s*\(|\b[A-Za-z_][A-Za-z0-9_]*\.UpdateIntent\s*\(/;
+  const blockKartRuntimeContextMegaOwner = [];
+  const blockKartOwnerContextMethods = [];
   for (const file of blockKartFiles) {
     const line = file.source.split(/\r?\n/).findIndex((sourceLine) => genericAuthoring.test(sourceLine));
     if (line >= 0) blockKartGenericAuthoring.push({ path: file.rel, line: line + 1 });
+    const namedLine = file.source.split(/\r?\n/).findIndex((sourceLine) => blockKartNamedAuthoringRegex.test(sourceLine));
+    if (namedLine >= 0) blockKartNamedAuthoring.push({ path: file.rel, line: namedLine + 1 });
+    const directIntentLine = file.source.split(/\r?\n/).findIndex((sourceLine) => blockKartDirectIntentRegex.test(sourceLine));
+    if (directIntentLine >= 0) blockKartDirectIntentBypass.push({ path: file.rel, line: directIntentLine + 1 });
+    if (file.rel === 'world.vo') {
+      const contextBody = bodyOfType(file.source, 'BlockKartRuntimeContext');
+      const contextFields = contextBody
+        .split(/\r?\n/)
+        .map((sourceLine, index) => ({ line: index + 1, text: sourceLine.trim() }))
+        .filter((entry) => /^[A-Za-z_][A-Za-z0-9_]*\s+/.test(entry.text));
+      const allowedContextGroups = new Set([
+        'core BlockKartRuntimeCore',
+        'input BlockKartRuntimeInputState',
+        'race BlockKartRuntimeRaceState',
+        'kart BlockKartRuntimeKartState',
+        'hud BlockKartRuntimeHudState',
+      ]);
+      const forbiddenContextFields = contextFields.filter((entry) => (
+        !allowedContextGroups.has(entry.text)
+        && /\b(scene|camera|player|vehicle|kartController|racingInput|touch|vehicleAudio|assets|primitive|track|checkpoint|raceState|courseTime|finishTime|collected|lap|kart|boost|drift|collectibles|checkpoints|boostPads|obstacles|debugHud|perf|physics)/i.test(entry.text)
+      ));
+      if (contextFields.length > 8 || forbiddenContextFields.length > 0 || !contextFields.every((entry) => allowedContextGroups.has(entry.text))) {
+        blockKartRuntimeContextMegaOwner.push({ path: file.rel, line: lineOf(file.source, 'type BlockKartRuntimeContext struct'), fieldCount: contextFields.length, forbiddenFields: forbiddenContextFields.slice(0, 20) });
+      }
+    }
+    for (const match of file.source.matchAll(/^func \([^)]*\*(RaceSession|KartRig|TrackRuntime|HUDPresenter|PerfReporter|AssetRuntimeCache)\) ([A-Za-z_][A-Za-z0-9_]*)\([^)]*\*BlockKartRuntimeContext/gm)) {
+      blockKartOwnerContextMethods.push({ path: file.rel, owner: match[1], name: match[2], line: lineOf(file.source, `func (`) });
+    }
   }
   if (blockKartGenericAuthoring.length > 0) {
     failures.push({
@@ -502,6 +580,33 @@ function sourceAuditFailuresFromSource({
       owner: 'BlockKart',
       message: 'BlockKart still owns generic primitive, collider, map, or pack authoring',
       evidence: { hits: blockKartGenericAuthoring },
+    });
+  }
+  if (blockKartNamedAuthoring.length > 0) {
+    failures.push({
+      code: 'blockkart.named_authoring_boundary',
+      severity: 'P0',
+      owner: 'BlockKart',
+      message: 'BlockKart still owns BlockKart-named primitive, map, collider, or dynamic visual authoring wrappers',
+      evidence: { hits: blockKartNamedAuthoring },
+    });
+  }
+  if (blockKartDirectIntentBypass.length > 0) {
+    failures.push({
+      code: 'blockkart.direct_vehicle_intent_bypass',
+      severity: 'P0',
+      owner: 'BlockKart',
+      message: 'BlockKart updates controller or vehicle intent outside VehiclePhysicsSession',
+      evidence: { hits: blockKartDirectIntentBypass },
+    });
+  }
+  if (blockKartRuntimeContextMegaOwner.length > 0 || blockKartOwnerContextMethods.length > 0) {
+    failures.push({
+      code: 'blockkart.runtime_context_mega_owner',
+      severity: 'P0',
+      owner: 'BlockKart',
+      message: 'BlockKartRuntimeContext or owner methods still preserve a hidden mega-owner mutation context',
+      evidence: { blockKartRuntimeContextMegaOwner, blockKartOwnerContextMethods: blockKartOwnerContextMethods.slice(0, 40) },
     });
   }
   return failures;
@@ -592,6 +697,10 @@ const kartController = projectText(voplayRoot, 'scene3d/kart_controller.vo');
 const vehicleTelemetry = projectText(voplayRoot, 'scene3d/vehicle_telemetry.vo');
 const vehiclePhysicsSession = projectText(voplayRoot, 'scene3d/vehicle_physics_session.vo');
 const physicsStressSource = projectText(voplayRoot, 'examples/physics_stress/main.vo');
+const voplayToolSources = projectTexts(voplayRoot, [
+  'tools/vehicle_telemetry_parity.vo',
+  'tools/racing_reference_demos.vo',
+]);
 const sceneSource = projectText(voplayRoot, 'scene3d/scene.vo');
 const replaySource = projectText(voplayRoot, 'scene3d/replay.vo');
 const blockKartWorld = projectText(blockKartRoot, 'world.vo');
@@ -1012,6 +1121,7 @@ const sourceAuditFailures = [
     vehicleTelemetry,
     vehiclePhysicsSession,
     physicsStressSource,
+    voplayToolSources,
     sceneSource,
     replaySource,
     blockKartFiles,

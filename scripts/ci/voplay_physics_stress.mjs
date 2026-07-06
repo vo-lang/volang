@@ -80,7 +80,11 @@ function runScenarioProgram() {
   const command = ['./d.py', 'run', path.relative(root, projectEntry)];
   const result = spawnSync(command[0], command.slice(1), {
     cwd: root,
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      VOPLAY_PHYSICS_STRESS_ROOT: root,
+      VOPLAY_PHYSICS_STRESS_ENTRY: path.relative(root, projectEntry),
+    },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -169,6 +173,7 @@ function validateReport(report) {
     && Number.isFinite(Number(report.replay?.backendPacketHash))
     && Number(report.replay?.samples ?? 0) > 0
     && Number(report.replay?.mismatches ?? Infinity) === 0
+    && report.replay?.freshProcess === true
     && String(report.replay?.name || '').includes('PhysicsReplayVerifier');
   if (!replayHasExecutableContract) {
     issues.push({ code: 'physics.replay_contract_missing', severity: 1, detail: JSON.stringify(report.replay ?? {}) });

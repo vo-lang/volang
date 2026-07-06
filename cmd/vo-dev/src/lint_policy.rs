@@ -12,7 +12,7 @@ pub(crate) fn validate_repo_path_like(
 ) -> Result<()> {
     if allow_artifact_input_scheme {
         if let Some((scheme, rest)) = value.split_once(':') {
-            if matches!(scheme, "external" | "module-cache") {
+            if matches!(scheme, "external" | "module-cache" | "first-party") {
                 if rest.trim().is_empty() || rest.trim() != rest {
                     bail!("{owner_kind} {owner_name} {field} has invalid {scheme}: reference");
                 }
@@ -75,6 +75,13 @@ pub(crate) fn validate_structured_input_reference(
             if !project.first_party.iter().any(|item| item.name == repo) {
                 bail!(
                     "{owner_kind} {owner_name} input module-cache:{repo} must reference a first-party repo"
+                );
+            }
+        }
+        "first-party" => {
+            if !project.first_party.iter().any(|item| item.name == repo) {
+                bail!(
+                    "{owner_kind} {owner_name} input first-party:{repo} must reference a first-party repo"
                 );
             }
         }

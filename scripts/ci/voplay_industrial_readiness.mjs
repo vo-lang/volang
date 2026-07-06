@@ -263,6 +263,29 @@ function bodyOfFunction(source, signature) {
   return '';
 }
 
+function bodyOfType(source, typeName) {
+  const start = source.indexOf(`type ${typeName} struct`);
+  if (start < 0) {
+    return '';
+  }
+  const brace = source.indexOf('{', start);
+  if (brace < 0) {
+    return '';
+  }
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') {
+      depth++;
+    } else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) {
+        return source.slice(brace + 1, i);
+      }
+    }
+  }
+  return '';
+}
+
 function listFiles(projectRoot, extension) {
   const files = [];
   const visit = (dir) => {
@@ -347,6 +370,7 @@ function freshEvidenceIssues(report, expectedGate) {
     ['sourceDigest', 'sha256:'],
     ['gateDigest', 'sha256:'],
     ['artifactDigest', 'sha256:'],
+    ['runBindingDigest', 'sha256:'],
   ]) {
     if (typeof evidence[field] !== 'string' || evidence[field].length === 0) {
       issues.push(`${field} missing`);
@@ -362,6 +386,9 @@ function freshEvidenceIssues(report, expectedGate) {
   }
   if (!evidence.dirtyFlags || typeof evidence.dirtyFlags !== 'object' || Object.keys(evidence.dirtyFlags).length === 0) {
     issues.push('dirtyFlags missing');
+  }
+  if (!evidence.verdict || evidence.verdict.status !== 'pass') {
+    issues.push('freshEvidence verdict is missing or not pass');
   }
   return issues;
 }
@@ -455,6 +482,10 @@ const contactEvent = readProjectFile(voplayRoot, 'scene3d/contact_event.vo', 'ph
 const replay = readProjectFile(voplayRoot, 'scene3d/replay.vo', 'phase-0', 'source.replay_exists');
 const vehiclePhysicsSession = readProjectFile(voplayRoot, 'scene3d/vehicle_physics_session.vo', 'phase-0', 'source.vehicle_physics_session_exists');
 const physicsStressSource = readProjectFile(voplayRoot, 'examples/physics_stress/main.vo', 'phase-0', 'source.physics_stress_exists');
+const voplayToolSources = [
+  readText(path.join(voplayRoot, 'tools/vehicle_telemetry_parity.vo')) || '',
+  readText(path.join(voplayRoot, 'tools/racing_reference_demos.vo')) || '',
+].join('\n');
 const sceneSource = readProjectFile(voplayRoot, 'scene3d/scene.vo', 'phase-0', 'source.scene_exists');
 const vehicleTelemetry = readProjectFile(voplayRoot, 'scene3d/vehicle_telemetry.vo', 'phase-0', 'source.vehicle_telemetry_exists');
 const blockKartWorld = readProjectFile(blockKartRoot, 'world.vo', 'phase-0', 'source.blockkart_world_exists');
@@ -720,6 +751,8 @@ const sessionIsWrapperOnly = /FixedPhysicsStep\s*\(|StepAndSyncPhysics\s*\(/.tes
   || !/s\.(?:StepIndex|Telemetry|Replay|Backend|LastPacket|InvalidSample|Controller|Dynamics)/.test(sessionStepBody);
 const physicsStressBypassesSession = /UpdateIntent\s*\(/.test(physicsStressSource)
   || /StepAndSyncPhysics\s*\(/.test(physicsStressSource);
+const physicsToolsBypassSession = /UpdateIntent\s*\(/.test(voplayToolSources)
+  || /StepAndSyncPhysics\s*\(/.test(voplayToolSources);
 const backendPacketSchemaTokens = [
   'PhysicsBackendPacketSchemaVersion',
   'PhysicsBackendPacketKind',
@@ -729,6 +762,15 @@ const backendPacketSchemaTokens = [
 ];
 const backendPacketContractSource = [sceneSource, physics, dynamics, replay].join('\n');
 const backendPacketMissingTokens = backendPacketSchemaTokens.filter((token) => !backendPacketContractSource.includes(token));
+const backendPacketEnforcementTokens = [
+  'WritePhysicsBackendPacketHeader',
+  'ReadPhysicsBackendPacketHeader',
+  'ValidatePhysicsBackendPacketHeader',
+];
+const backendPacketMissingEnforcementTokens = backendPacketEnforcementTokens.filter((token) => !backendPacketContractSource.includes(token));
+const backendPacketStillCountDelimited = /Remaining\(\)\s*>=\s*count\s*\*/.test(sceneSource);
+const invalidWheelPacketSanitized = !vehicle.includes('RawInvalidSampleCount')
+  || !(readText(path.join(voplayRoot, 'scene3d/vehicle_telemetry.vo')) || '').includes('RawInvalidSampleCount');
 const invalidTelemetryStressBypass = !physicsStressSource.includes('InvalidSampleCount')
   || !physicsStressSource.includes('ValidationIssues')
   || /sampleFinite\s*\(/.test(physicsStressSource);
@@ -748,11 +790,43 @@ const replayUsesRecordedTrace = /runScenarioWithReplay\s*\([^)]*true/.test(physi
   && /sample\.BackendApplyHash/.test(physicsStressSource)
   && /sample\.PoseHash/.test(physicsStressSource)
   && /sample\.TelemetryHash/.test(physicsStressSource);
+const freshProcessReplayReady = physicsStressSource.includes('RunPhysicsReplayVerifierProcess')
+  || physicsStressSource.includes('execPhysicsReplayVerifier')
+  || physicsStressSource.includes('--verify-replay-trace');
 const sameRuntimeReplayDriftOnly = /replayDrift|driftMeters|ReplayDrift/.test(physicsStressSource)
-  || !replayUsesRecordedTrace;
+  || !replayUsesRecordedTrace
+  || !freshProcessReplayReady;
 const blockKartGenericAuthoringHits = sourceRegexHits(
   blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
   /ProductPrimitiveAuthoring|PrimitiveBatchAuthoring|PrimitiveInstanceAuthoring|SurfaceMaterialAuthoring|ColliderAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc|ShapeDesc|MaterialPreset)|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|PackWriter|vopack\./,
+);
+const blockKartNamedAuthoringHits = sourceRegexHits(
+  blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
+  /NewBlockKartPrimitiveContent|PrepareBlockKartMapAsset|SpawnBlockKartMap|SpawnBlockKartRoadsideBakedContent|AddDynamicWithFlags|PlaceStatic|PlaceDetail|SetBlockKartPrimitivePose|attachPrimitiveTrackColliderEntities|spawnBlockKartTrackCollider|primitiveTerrainSurfacePosition/,
+);
+const blockKartDirectIntentBypassHits = sourceRegexHits(
+  blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
+  /UpdateIntentFromSyncedState\s*\(|\b[A-Za-z_][A-Za-z0-9_]*\.UpdateIntent\s*\(/,
+);
+const blockKartRuntimeContextBody = bodyOfType(blockKartWorld, 'BlockKartRuntimeContext');
+const blockKartRuntimeContextFields = blockKartRuntimeContextBody
+  .split(/\r?\n/)
+  .map((line, index) => ({ line: index + 1, text: line.trim() }))
+  .filter((entry) => /^[A-Za-z_][A-Za-z0-9_]*\s+/.test(entry.text));
+const blockKartRuntimeContextAllowedGroups = new Set([
+  'core BlockKartRuntimeCore',
+  'input BlockKartRuntimeInputState',
+  'race BlockKartRuntimeRaceState',
+  'kart BlockKartRuntimeKartState',
+  'hud BlockKartRuntimeHudState',
+]);
+const blockKartRuntimeContextForbiddenFields = blockKartRuntimeContextFields.filter((entry) => (
+  !blockKartRuntimeContextAllowedGroups.has(entry.text)
+  && /\b(scene|camera|player|vehicle|kartController|racingInput|touch|vehicleAudio|assets|primitive|track|checkpoint|raceState|courseTime|finishTime|collected|lap|kart|boost|drift|collectibles|checkpoints|boostPads|obstacles|debugHud|perf|physics)/i.test(entry.text)
+));
+const blockKartOwnerRuntimeContextHits = sourceRegexHits(
+  blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
+  /^func \([^)]*\*(RaceSession|KartRig|TrackRuntime|HUDPresenter|PerfReporter|AssetRuntimeCache)\) [A-Za-z_][A-Za-z0-9_]*\([^)]*\*BlockKartRuntimeContext/,
 );
 
 addCheck('phase-0', 'report.phase_claims_guarded', scanScriptIndustrialClaims().length === 0, 'phase scripts do not claim industrial readiness', { offenders: scanScriptIndustrialClaims() });
@@ -973,38 +1047,45 @@ addRequiredSourceFact(
 );
 addRequiredSourceFact(
   'physics_session_is_runtime_authority',
-  !sessionIsWrapperOnly && !physicsStressBypassesSession,
-  'VehiclePhysicsSession is the fixed-step runtime authority and stress scenarios do not bypass it with direct scene/controller stepping',
+  !sessionIsWrapperOnly && !physicsStressBypassesSession && !physicsToolsBypassSession,
+  'VehiclePhysicsSession is the fixed-step runtime authority and stress/tools do not bypass it with direct scene/controller stepping',
   {
     sessionIsWrapperOnly,
     physicsStressBypassesSession,
+    physicsToolsBypassSession,
     sessionStep: lineEvidence(path.join(voplayRoot, 'scene3d/vehicle_physics_session.vo'), vehiclePhysicsSession, 'func (s *VehiclePhysicsSession) Step'),
     stressDirectSceneStep: lineEvidence(path.join(voplayRoot, 'examples/physics_stress/main.vo'), physicsStressSource, 'StepAndSyncPhysics'),
     stressUpdateIntent: lineEvidence(path.join(voplayRoot, 'examples/physics_stress/main.vo'), physicsStressSource, 'UpdateIntent'),
+    toolDirectSceneStep: lineEvidence(path.join(voplayRoot, 'tools/vehicle_telemetry_parity.vo'), voplayToolSources, 'StepAndSyncPhysics'),
+    toolUpdateIntent: lineEvidence(path.join(voplayRoot, 'tools/vehicle_telemetry_parity.vo'), voplayToolSources, 'UpdateIntent'),
   },
 );
 addRequiredSourceFact(
   'physics_backend_packet_schema_contract',
-  backendPacketMissingTokens.length === 0,
-  'backend packets expose schema version, packet kind, byte length, packet hash, and capability contract identifiers',
-  { backendPacketMissingTokens, expectedTokens: backendPacketSchemaTokens },
+  backendPacketMissingTokens.length === 0
+    && backendPacketMissingEnforcementTokens.length === 0
+    && !backendPacketStillCountDelimited,
+  'backend packets expose and enforce schema version, packet kind, byte length, packet hash, and capability contract identifiers',
+  { backendPacketMissingTokens, backendPacketMissingEnforcementTokens, backendPacketStillCountDelimited, expectedTokens: backendPacketSchemaTokens },
 );
 addRequiredSourceFact(
   'physics_invalid_telemetry_is_not_sanitized_away',
-  !invalidTelemetryStressBypass,
+  !invalidTelemetryStressBypass && !invalidWheelPacketSanitized,
   'industrial physics stress reports invalid raw samples and validation issues without accepting cleaned samples as pass evidence',
   {
     invalidTelemetryStressBypass,
+    invalidWheelPacketSanitized,
     invalidSample: lineEvidence(path.join(voplayRoot, 'examples/physics_stress/main.vo'), physicsStressSource, 'InvalidSampleCount'),
     validationIssues: lineEvidence(path.join(voplayRoot, 'examples/physics_stress/main.vo'), physicsStressSource, 'ValidationIssues'),
     sampleFinite: lineEvidence(path.join(voplayRoot, 'examples/physics_stress/main.vo'), physicsStressSource, 'sampleFinite'),
+    rawWheelInvalid: lineEvidence(path.join(voplayRoot, 'scene3d/vehicle.vo'), vehicle, 'RawInvalidSampleCount'),
   },
 );
 addRequiredSourceFact(
   'physics_replay_is_executable_step_contract',
   executableReplayMissingTokens.length === 0 && !sameRuntimeReplayDriftOnly,
   'physics replay validation executes a recorded step contract with per-step hashes and mismatch evidence',
-  { executableReplayMissingTokens, replayUsesRecordedTrace, sameRuntimeReplayDriftOnly },
+  { executableReplayMissingTokens, replayUsesRecordedTrace, freshProcessReplayReady, sameRuntimeReplayDriftOnly },
 );
 addRequiredSourceFact(
   'blockkart_product_boundary',
@@ -1023,6 +1104,36 @@ addRequiredSourceFact(
     directSetPose: lineEvidence(path.join(blockKartRoot, 'world.vo'), blockKartWorld, 'w.vehicle.SetPose'),
     directPlayerMutation: evidenceForFirstToken(path.join(blockKartRoot, 'world.vo'), blockKartWorld, ['w.player.SetPosition(', 'w.player.SetVelocity(', 'w.player.SetAngularVelocity(']),
     directEntityMutation: evidenceForFirstRegex(blockKartVoFiles, directEntityMutationRegex, '.SetPosition('),
+  },
+);
+addRequiredSourceFact(
+  'blockkart_no_named_authoring_wrappers',
+  blockKartNamedAuthoringHits.length === 0,
+  'BlockKart does not preserve generic primitive, map, collider, or dynamic visual authoring behind BlockKart-named runtime wrappers',
+  {
+    namedAuthoringHits: blockKartNamedAuthoringHits.slice(0, 40),
+  },
+);
+addRequiredSourceFact(
+  'blockkart_vehicle_session_is_runtime_authority',
+  blockKartDirectIntentBypassHits.length === 0,
+  'BlockKart default runtime sends vehicle intent through VehiclePhysicsSession and does not update controller/vehicle intent directly',
+  {
+    directIntentBypassHits: blockKartDirectIntentBypassHits.slice(0, 40),
+    stepPhysics: lineEvidence(path.join(blockKartRoot, 'runtime_owners.vo'), readText(path.join(blockKartRoot, 'runtime_owners.vo')) || '', 'func (k *KartRig) StepPhysics'),
+  },
+);
+addRequiredSourceFact(
+  'blockkart_runtime_context_not_mega_owner',
+  blockKartRuntimeContextFields.length <= 8
+    && blockKartRuntimeContextForbiddenFields.length === 0
+    && blockKartRuntimeContextFields.every((entry) => blockKartRuntimeContextAllowedGroups.has(entry.text))
+    && blockKartOwnerRuntimeContextHits.length === 0,
+  'BlockKartRuntimeContext does not replace World as a hidden mega-owner and owner methods do not mutate through a broad runtime context',
+  {
+    fieldCount: blockKartRuntimeContextFields.length,
+    forbiddenFields: blockKartRuntimeContextForbiddenFields.slice(0, 40),
+    ownerRuntimeContextHits: blockKartOwnerRuntimeContextHits.slice(0, 40),
   },
 );
 addRequiredSourceFact(
@@ -1369,6 +1480,7 @@ checkReport(path.join(root, 'target/voplay-physics-industrial-stress/report.json
   const replayOk = report.replay?.status === 'pass'
     && Number(report.replay?.samples ?? 0) > 0
     && Number(report.replay?.mismatches ?? Infinity) === 0
+    && report.replay?.freshProcess === true
     && Number.isFinite(Number(report.replay?.stepHash))
     && Number.isFinite(Number(report.replay?.backendPacketHash))
     && (!Number.isFinite(Number(report.replay?.driftMeters)) || Number(report.replay?.driftMeters) <= 0.01);

@@ -35,7 +35,7 @@ const expected = {
     'apps/studio/scripts/package_blockkart_quickplay.mjs',
     'eng/project.toml',
     'external:BlockKart',
-    'module-cache:voplay',
+    'first-party:voplay',
     'module-cache:vopack',
     'module-cache:vogui',
   ],
@@ -184,6 +184,15 @@ function packagedFilesDigest(files) {
     })
     .sort((a, b) => a.path.localeCompare(b.path));
   return sourceSetDigest(entries);
+}
+
+function validateProjectLockRewrite(project, sourceBytes, packagedBytes) {
+  const rewrite = project.lockRewrite;
+  assert(rewrite?.schemaVersion === 1, 'project lockRewrite schemaVersion must be 1 when packaged vo.lock differs from source');
+  assert(rewrite.path === 'vo.lock', 'project lockRewrite path must be vo.lock');
+  assert(rewrite.sourceDigest === sha256Digest(sourceBytes), 'project lockRewrite sourceDigest must match source vo.lock');
+  assert(rewrite.packagedDigest === sha256Digest(packagedBytes), 'project lockRewrite packagedDigest must match packaged vo.lock');
+  assert(Array.isArray(rewrite.modules) && rewrite.modules.length > 0, 'project lockRewrite must list dependency modules');
 }
 
 function sameStringArray(actual, wanted) {
@@ -528,8 +537,14 @@ function validateProjectSourceCheckout(project, provenance) {
     assert(existsSync(sourcePath), `BlockKart source checkout is missing packaged file ${file.path}`);
     const sourceBytes = readFileSync(sourcePath);
     const packagedBytes = moduleFileBytes(file);
-    assert(sourceBytes.byteLength === packagedBytes.byteLength, `BlockKart source size mismatch for ${file.path}`);
-    assert(sha256Digest(sourceBytes) === sha256Digest(packagedBytes), `BlockKart source digest mismatch for ${file.path}`);
+    if (sourceBytes.byteLength !== packagedBytes.byteLength || sha256Digest(sourceBytes) !== sha256Digest(packagedBytes)) {
+      if (file.path === 'vo.lock') {
+        validateProjectLockRewrite(project, sourceBytes, packagedBytes);
+        continue;
+      }
+      assert(sourceBytes.byteLength === packagedBytes.byteLength, `BlockKart source size mismatch for ${file.path}`);
+      assert(sha256Digest(sourceBytes) === sha256Digest(packagedBytes), `BlockKart source digest mismatch for ${file.path}`);
+    }
   }
 
   const sourceFiles = listProjectSourceFiles(blockKartRoot, '.vo');
@@ -676,6 +691,10 @@ function validateProvenance(project, deps) {
   assert(
     provenance.project?.filesDigest === packagedFilesDigest(project.files),
     'provenance project files digest mismatch',
+  );
+  assert(
+    JSON.stringify(provenance.project?.lockRewrite ?? null) === JSON.stringify(project.lockRewrite ?? null),
+    'provenance project lockRewrite mismatch',
   );
   assert(
     sourceSetDigest(provenance.project?.sourceFiles ?? []) === sourceSetDigest(project.sourceFiles ?? []),

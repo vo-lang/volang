@@ -328,7 +328,7 @@ digest = "${sha256Digest(voplayWasm)}"
       'apps/studio/scripts/package_blockkart_quickplay.mjs',
       'eng/project.toml',
       'external:BlockKart',
-      'module-cache:voplay',
+      'first-party:voplay',
       'module-cache:vopack',
       'module-cache:vogui',
     ],

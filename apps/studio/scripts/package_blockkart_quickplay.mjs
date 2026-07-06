@@ -22,14 +22,14 @@ const BLOCKKART_SOURCE_ALLOWLIST = [
 ];
 const QUICKPLAY_ARTIFACT_NAME = 'studio.quickplay.blockkart';
 const QUICKPLAY_ARTIFACT_PATH = 'apps/studio/public/quickplay/blockkart';
-const QUICKPLAY_GENERATOR_VERSION = 3;
+const QUICKPLAY_GENERATOR_VERSION = 5;
 const QUICKPLAY_TASK_ID = 'quickplay-blockkart-package';
 const QUICKPLAY_GENERATOR_COMMAND = ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'];
 const QUICKPLAY_GENERATOR_INPUTS = [
   'apps/studio/scripts/package_blockkart_quickplay.mjs',
   'eng/project.toml',
   'external:BlockKart',
-  'module-cache:voplay',
+  'first-party:voplay',
   'module-cache:vopack',
   'module-cache:vogui',
 ];
@@ -186,17 +186,187 @@ function parseLockFile(content) {
       artifact = { kind: '', target: '', name: '' };
       continue;
     }
-    const match = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*"([^"]*)"$/);
+    const match = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/);
     if (!match) continue;
     const [, key, value] = match;
     if (artifact) {
-      artifact[key] = value;
+      artifact[key] = parseLockValue(value);
     } else if (current) {
-      current[key] = value;
+      current[key] = parseLockValue(value);
     }
   }
   if (artifact && current) current.artifacts.push(artifact);
   return modules.filter((module) => module.path && module.version);
+}
+
+function parseLockValue(value) {
+  if (value.startsWith('"') || value.startsWith('[')) {
+    return JSON.parse(value);
+  }
+  if (/^\d+$/.test(value)) {
+    return Number(value);
+  }
+  return value;
+}
+
+function formatLockValue(value) {
+  if (Array.isArray(value)) return JSON.stringify(value);
+  if (typeof value === 'number') return String(value);
+  return JSON.stringify(String(value ?? ''));
+}
+
+function artifactKey(artifact) {
+  return `${artifact.kind}\u0000${artifact.target}\u0000${artifact.name}`;
+}
+
+function fileEntry(files, filePath) {
+  const file = files.find((entry) => entry.path === filePath);
+  if (!file) {
+    throw new Error(`Packaged module is missing ${filePath}`);
+  }
+  return file;
+}
+
+function fileText(files, filePath) {
+  return packagedFileBytes(fileEntry(files, filePath)).toString('utf8');
+}
+
+function fileJson(files, filePath) {
+  return JSON.parse(fileText(files, filePath));
+}
+
+function lockEntryForPackagedModule(module, originalLock) {
+  const releaseFile = fileEntry(module.files, 'vo.release.json');
+  const release = JSON.parse(packagedFileBytes(releaseFile).toString('utf8'));
+  const web = fileJson(module.files, 'vo.web.json');
+  const source = fileText(module.files, '.vo-source-digest').trim();
+  const artifactsByKey = new Map((web.artifacts ?? []).map((artifact) => [artifactKey(artifact), artifact]));
+  const artifacts = [];
+  for (const artifact of module.artifacts ?? []) {
+    const webArtifact = artifactsByKey.get(artifactKey(artifact));
+    if (!webArtifact) {
+      throw new Error(`Packaged ${module.module} artifact ${artifact.name} is missing from vo.web.json`);
+    }
+    artifacts.push({
+      kind: artifact.kind,
+      target: artifact.target,
+      name: artifact.name,
+      size: webArtifact.size,
+      digest: webArtifact.digest,
+    });
+  }
+  artifacts.sort((a, b) => artifactKey(a).localeCompare(artifactKey(b)));
+  return {
+    path: module.module,
+    version: module.version,
+    vo: originalLock?.vo ?? '^0.1.0',
+    commit: release.commit ?? module.commit,
+    release_manifest: sha256Digest(packagedFileBytes(releaseFile)),
+    source,
+    deps: Array.isArray(originalLock?.deps)
+      ? originalLock.deps
+      : (release.require ?? []).map((entry) => entry.module).sort(),
+    artifacts,
+  };
+}
+
+function serializeLockEntry(entry) {
+  const lines = [
+    '[[resolved]]',
+    `path = ${formatLockValue(entry.path)}`,
+    `version = ${formatLockValue(entry.version)}`,
+    `vo = ${formatLockValue(entry.vo)}`,
+    `commit = ${formatLockValue(entry.commit)}`,
+    `release_manifest = ${formatLockValue(entry.release_manifest)}`,
+    `source = ${formatLockValue(entry.source)}`,
+    `deps = ${formatLockValue(entry.deps ?? [])}`,
+  ];
+  for (const artifact of entry.artifacts ?? []) {
+    lines.push(
+      '',
+      '[[resolved.artifact]]',
+      `kind = ${formatLockValue(artifact.kind)}`,
+      `target = ${formatLockValue(artifact.target)}`,
+      `name = ${formatLockValue(artifact.name)}`,
+      `size = ${formatLockValue(artifact.size)}`,
+      `digest = ${formatLockValue(artifact.digest)}`,
+    );
+  }
+  return lines.join('\n');
+}
+
+function lockRewriteEvidence(entry) {
+  return {
+    module: entry.path,
+    version: entry.version,
+    commit: entry.commit,
+    releaseManifestDigest: entry.release_manifest,
+    sourceDigest: entry.source,
+    artifacts: (entry.artifacts ?? []).map((artifact) => ({
+      kind: artifact.kind,
+      target: artifact.target,
+      name: artifact.name,
+      size: artifact.size,
+      digest: artifact.digest,
+    })),
+  };
+}
+
+function replaceResolvedLockEntries(source, replacements) {
+  const lines = source.split(/\r?\n/);
+  const out = [];
+  let block = null;
+
+  function flushBlock() {
+    if (!block) return;
+    const pathLine = block.find((line) => line.trim().startsWith('path = '));
+    const match = pathLine?.trim().match(/^path\s*=\s*"([^"]+)"$/);
+    const replacement = match ? replacements.get(match[1]) : null;
+    if (replacement) {
+      out.push(serializeLockEntry(replacement));
+    } else {
+      out.push(block.join('\n').replace(/\n*$/, ''));
+    }
+    block = null;
+  }
+
+  for (const line of lines) {
+    if (line.trim() === '[[resolved]]') {
+      flushBlock();
+      block = [line];
+      continue;
+    }
+    if (block) {
+      block.push(line);
+    } else {
+      out.push(line);
+    }
+  }
+  flushBlock();
+  return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
+}
+
+function rewriteProjectLockForPackagedDependencies(projectPackage, dependencyPackage, originalLocks) {
+  const lockFile = projectPackage.files.find((file) => file.path === 'vo.lock');
+  if (!lockFile?.content) {
+    throw new Error('Project package is missing vo.lock');
+  }
+  const sourceLockDigest = sha256Digest(Buffer.from(lockFile.content, 'utf8'));
+  const originalByPath = new Map(originalLocks.map((entry) => [entry.path, entry]));
+  const replacements = new Map();
+  for (const module of dependencyPackage.modules) {
+    replacements.set(module.module, lockEntryForPackagedModule(module, originalByPath.get(module.module)));
+  }
+  lockFile.content = replaceResolvedLockEntries(lockFile.content, replacements);
+  projectPackage.lockRewrite = {
+    schemaVersion: 1,
+    path: 'vo.lock',
+    sourceDigest: sourceLockDigest,
+    packagedDigest: sha256Digest(Buffer.from(lockFile.content, 'utf8')),
+    modules: [...replacements.values()]
+      .map(lockRewriteEvidence)
+      .sort((a, b) => a.module.localeCompare(b.module)),
+  };
 }
 
 function shouldPackageDependencyFile(relativePath) {
@@ -410,15 +580,14 @@ async function rewritePackagedWebManifest(moduleDir, files, artifacts, locked) {
 async function dependencyModuleDir(locked) {
   if (locked.path === 'github.com/vo-lang/voplay' && await pathExists(VOPLAY_ROOT)) {
     const head = gitOutput(['rev-parse', 'HEAD'], VOPLAY_ROOT);
-    if (!locked.commit || head === locked.commit) {
-      const clean = gitStatus(VOPLAY_ROOT) === '';
-      return {
-        cacheDir: `${cacheKey(locked.path)}/${locked.version}`,
-        dirty: false,
-        moduleDir: clean ? VOPLAY_ROOT : await cleanGitSnapshot(VOPLAY_ROOT, 'voplay'),
-        source: clean ? 'external' : 'external-git-head',
-      };
-    }
+    const clean = gitStatus(VOPLAY_ROOT) === '';
+    return {
+      cacheDir: `${cacheKey(locked.path)}/${locked.version}`,
+      commit: head,
+      dirty: false,
+      moduleDir: clean ? VOPLAY_ROOT : await cleanGitSnapshot(VOPLAY_ROOT, 'voplay'),
+      source: clean ? 'external' : 'external-git-head',
+    };
   }
   const key = cacheKey(locked.path);
   const moduleDir = path.join(MOD_CACHE_ROOT, key, locked.version);
@@ -427,6 +596,7 @@ async function dependencyModuleDir(locked) {
   }
   return {
     cacheDir: `${key}/${locked.version}`,
+    commit: locked.commit ?? null,
     dirty: false,
     moduleDir,
     source: 'module-cache',
@@ -489,7 +659,8 @@ async function buildDependencyPackage(lockModules) {
   const modules = [];
   for (const locked of lockModules) {
     const key = cacheKey(locked.path);
-    const { cacheDir, dirty, moduleDir, source } = await dependencyModuleDir(locked);
+    const { cacheDir, commit, dirty, moduleDir, source } = await dependencyModuleDir(locked);
+    const packagedLock = { ...locked, commit: commit ?? locked.commit };
 
     const files = [];
     for (const absolute of await walkFiles(moduleDir)) {
@@ -506,8 +677,14 @@ async function buildDependencyPackage(lockModules) {
       if (artifact.target !== WASM_TARGET) continue;
       if (artifact.kind !== 'extension-wasm' && artifact.kind !== 'extension-js-glue') continue;
       const sourcePath = await dependencyArtifactSourcePath(moduleDir, artifact);
+      const bytes = await fs.readFile(sourcePath);
       const outRelative = path.posix.join('artifacts', key, locked.version, artifact.name);
       artifacts.push({
+        kind: artifact.kind,
+        target: artifact.target,
+        name: artifact.name,
+        size: bytes.byteLength,
+        digest: sha256Digest(bytes),
         path: path.posix.join('artifacts', artifact.name),
         sourcePath,
         url: `/quickplay/blockkart/${outRelative}`,
@@ -516,13 +693,13 @@ async function buildDependencyPackage(lockModules) {
       await fs.copyFile(sourcePath, path.join(OUT_ROOT, outRelative));
     }
 
-    await rewritePackagedWebManifest(moduleDir, files, artifacts, locked);
+    await rewritePackagedWebManifest(moduleDir, files, artifacts, packagedLock);
     files.sort((a, b) => a.path.localeCompare(b.path));
     artifacts.sort((a, b) => a.path.localeCompare(b.path));
     modules.push({
       module: locked.path,
       version: locked.version,
-      commit: locked.commit ?? null,
+      commit: packagedLock.commit ?? null,
       cacheDir,
       dirty,
       source,
@@ -606,6 +783,7 @@ async function buildProvenance(projectPackage, dependencyPackage, outputBytes) {
       commit: projectPackage.commit,
       dirty: projectPackage.dirty,
       filesDigest: packagedFilesDigest(projectPackage.files),
+      lockRewrite: projectPackage.lockRewrite ?? null,
       module: projectPackage.module,
       sourceFiles: projectPackage.sourceFiles,
       sourceAllowlist: projectPackage.sourceAllowlist,
@@ -640,6 +818,7 @@ async function main() {
 
     const projectPackage = await buildProjectPackage();
     const dependencyPackage = await buildDependencyPackage(lockModules);
+    rewriteProjectLockForPackagedDependencies(projectPackage, dependencyPackage, lockModules);
     const outputBytes = {
       project: Buffer.from(jsonText(projectPackage), 'utf8'),
       deps: Buffer.from(jsonText(dependencyPackage), 'utf8'),

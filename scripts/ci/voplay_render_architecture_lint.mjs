@@ -335,6 +335,24 @@ const facadeOwnerModuleFacts = [
   };
 });
 const invalidBatchIndexSkipHits = sourceHits(renderWorldAuditSource, 'rust/src/render_world.rs', /\.filter_map\(\|index\|.*\.get\(\*index\)|\.filter_map\(\|\(draw_index, draw\)\|/);
+const frameGraphDependencyOrderingReady = frameGraph.includes('dependency_ordered_nodes')
+  && frameGraph.includes('producer_by_resource')
+  && frameGraph.includes('visit_node');
+const resourceRegistryProvenanceReady = frameGraph.includes('backing_owner')
+  && frameGraph.includes('ready_cause')
+  && frameGraph.includes('mark_ready_with_cause');
+const dirtyRebuildPolicyReady = primitivePipelineAuditSource.includes('ResidentRebuildPolicy')
+  && primitivePipelineAuditSource.includes('full_rebuild_count')
+  && primitivePipelineAuditSource.includes('dirty_upload_bytes')
+  && primitivePipelineAuditSource.includes('rebuild_reason');
+const facadeSubmitterReturnHits = [
+  ...sourceHits(readProjectFile(voplayRoot, 'rust/src/pipeline3d/primitive_submitter.rs'), 'rust/src/pipeline3d/primitive_submitter.rs', /->\s*crate::primitive_pipeline::PrimitiveRenderFilter|^\s*filter\s*$/),
+  ...sourceHits(readProjectFile(voplayRoot, 'rust/src/pipeline3d/water_submitter.rs'), 'rust/src/pipeline3d/water_submitter.rs', /->\s*crate::primitive_pipeline::PrimitiveRenderFilter|^\s*crate::primitive_pipeline::PrimitiveRenderFilter::Water\s*$/),
+  ...sourceHits(readProjectFile(voplayRoot, 'rust/src/pipeline3d/decal_submitter.rs'), 'rust/src/pipeline3d/decal_submitter.rs', /->\s*usize|decals\.len\(\)/),
+];
+const structuredSkipCountersReady = renderWorldAuditSource.includes('invalid_batch_indices')
+  && renderWorldAuditSource.includes('missing_chunk_info')
+  && renderWorldAuditSource.includes('skip_reasons');
 
 for (const pass of ['DepthPrepass', 'Shadow', 'MainOpaque', 'MainTransparent', 'Water', 'Post', 'Overlay', 'BackendSubmit']) {
   check(rendererRuntime.includes(`RenderPassKind::${pass}`), 'renderer.pass_missing', `${pass} is missing from renderer frame graph planning`);
@@ -344,6 +362,7 @@ check(decodeOwnerMutationHits.length === 0, 'frame_decode.direct_owner_mutation'
 check(rendererRuntime.includes('execute_node(') || rendererRuntime.includes('execute_all('), 'renderer.node_execution_missing', 'renderer runtime does not route passes through RenderPassNode execution');
 check(frameGraph.includes('fn execute_all'), 'framegraph.execute_all_missing', 'FrameGraphExecutor.execute_all is missing; graph traversal is not owned by FrameGraph');
 check(rendererRuntime.includes('execute_all('), 'renderer.execute_all_not_wired', 'renderer runtime does not submit the compiled frame graph to execute_all');
+check(frameGraphDependencyOrderingReady, 'framegraph.dependency_order_missing', 'FrameGraphExecutor does not own dependency-ordered node traversal');
 check(framePassManualSequenceHits.length === 0, 'renderer.manual_pass_sequence', `renderer still drives pass order through hand-written node sequence: ${JSON.stringify(framePassManualSequenceHits.slice(0, 12))}`);
 check(dispatcherRendererHits.length === 0, 'renderer.dispatcher_global_renderer', `frame pass dispatch/context still captures &mut Renderer instead of explicit resources: ${JSON.stringify(dispatcherRendererHits.slice(0, 12))}`);
 check(!rendererRuntime.includes('execute_render_node!'), 'renderer.execute_render_node_macro', 'renderer runtime still routes passes through execute_render_node! macro closures');
@@ -357,6 +376,7 @@ for (const [file, entry] of Object.entries(renderFileBudgets)) {
 }
 check(ownerModuleFacts.every((entry) => entry.hasProductionMethod && entry.calledByProduction), 'render.empty_owner_module', `owner module lacks production responsibility: ${JSON.stringify(ownerModuleFacts.filter((entry) => !entry.hasProductionMethod || !entry.calledByProduction))}`);
 check(facadeOwnerModuleFacts.every((entry) => entry.meaningful), 'render.facade_owner_module', `submitter owner module only returns counts/filters or has no draw/upload/report side effect: ${JSON.stringify(facadeOwnerModuleFacts.filter((entry) => !entry.meaningful))}`);
+check(facadeSubmitterReturnHits.length === 0, 'render.facade_submitter_return', `pipeline submitter owner returns only filters/counts instead of a submit/report contract: ${JSON.stringify(facadeSubmitterReturnHits.slice(0, 12))}`);
 check(!(receiverMaskDeclaredConditionally && mainOpaqueWritesAuxResources), 'framegraph.conditional_receiver_mask_contract', 'MainOpaque writes RES_RECEIVER_MASK while the resource is only declared for post-depth frames');
 check(!(surfacePropsDeclaredConditionally && mainOpaqueWritesAuxResources), 'framegraph.conditional_surface_props_contract', 'MainOpaque writes RES_SURFACE_PROPS while the resource is only declared for post-depth frames');
 check(!(receiverMaskDeclaredConditionally && postReadsAuxResources), 'framegraph.conditional_receiver_mask_post_read', 'Post reads RES_RECEIVER_MASK while the resource is only declared for post-depth frames');
@@ -364,7 +384,9 @@ check(!(surfacePropsDeclaredConditionally && postReadsAuxResources), 'framegraph
 check(transparentSortReady, 'transparent.depth_stable_sort_missing', 'transparent pass does not build depth-aware stable RenderDrawItem ordering');
 check(residentVisibilityRemovesHidden, 'primitive.resident_visible_false_stale_instance', 'upsert_instance visible=false returns without removing resident instance');
 check(dirtyRangeDrivesUpload, 'primitive.dirty_range_not_used_for_upload', 'resident dirty range is recorded but discarded before upload/rebuild work');
+check(dirtyRebuildPolicyReady, 'primitive.dirty_rebuild_policy_missing', 'dirty range full-rebuild fallback lacks an explicit resident rebuild policy, byte accounting, full rebuild count, and rebuild reason');
 check(invalidBatchIndexSkipHits.length === 0 || /invalid.*batch|batch.*invalid|skip_reason|skipped_indices|structured/i.test(renderWorldAuditSource), 'render_world.invalid_batch_index_silent_skip', `RenderBatchPlan silently drops invalid batch indices instead of emitting structured skip/error evidence: ${JSON.stringify(invalidBatchIndexSkipHits.slice(0, 12))}`);
+check(structuredSkipCountersReady, 'render_world.structured_skip_counters_missing', 'RenderBatchPlan lacks structured counters for invalid batch indices, missing chunk info, and skip reasons');
 check(hotPathPanicHits.length === 0, 'render.hot_path_panic', `render runtime hot path contains panic-prone assert/expect: ${JSON.stringify(hotPathPanicHits.slice(0, 8))}`);
 for (const token of ['RenderFrameDecode', 'RenderSceneSnapshot', 'FrameGraphBuild', 'FrameGraphExecute', 'PerfPacketEncode', 'RenderFramePipeline']) {
   check(frameGraph.includes(`struct ${token}`), 'framegraph.pipeline_contract_missing', `${token} is missing`);
@@ -372,6 +394,7 @@ for (const token of ['RenderFrameDecode', 'RenderSceneSnapshot', 'FrameGraphBuil
 }
 check(frameGraph.includes('struct RenderResourceRegistry'), 'framegraph.registry_missing', 'RenderResourceRegistry is missing');
 check(frameGraph.includes('enum RenderResourceLifetime'), 'framegraph.lifetime_missing', 'RenderResourceLifetime is missing');
+check(resourceRegistryProvenanceReady, 'framegraph.registry_provenance_missing', 'RenderResourceRegistry target status lacks backing owner and ready-cause provenance');
 check(frameGraph.includes('fn execute_node'), 'framegraph.node_executor_missing', 'FrameGraphExecutor.execute_node is missing');
 check(frameGraph.includes('struct RenderPassWorkload'), 'framegraph.workload_missing', 'RenderPassWorkload is missing');
 check(frameGraph.includes('transient_writes'), 'framegraph.transient_writes_missing', 'RenderPassNode transient writes are missing');

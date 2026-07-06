@@ -140,14 +140,32 @@ const handwrittenJsonHits = scan(/"\{"\s*\+|jsonString\(|jsonBool\(|jsonFloat\(/
 const manualMarkerJsonHits = scan(/\bblockKartEmitJSON\s*\(|\bprintln\s*\(\s*blockKart[A-Za-z0-9_]*Marker\s*\+|blockKart[A-Za-z0-9_]*ReportMarker/, (entry) => entry.rel === 'diagnostics_json.vo');
 const lowLevelHudHits = scan(/\bPrimitiveStats\(|\bWheelState\(|VehicleGrounded|WheelMaxSlip|primitiveUploadBytes|primitiveDrawCalls|diag\.Primitive\.DrawCalls|content\.UploadBytes|primitiveStats\.DrawCalls|primitiveStats\.UploadBytes/);
 const genericAuthoringHits = scan(/ProductPrimitiveAuthoring|PrimitiveBatchAuthoring|PrimitiveInstanceAuthoring|SurfaceMaterialAuthoring|ColliderAuthoring|NewProductPrimitiveRuntime|NewProductPrimitiveAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|Authoring\.Add|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc|ShapeDesc|MaterialPreset)|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|PackWriter|vopack\./);
+const blockKartNamedAuthoringHits = scan(/NewBlockKartPrimitiveContent|PrepareBlockKartMapAsset|SpawnBlockKartMap|SpawnBlockKartRoadsideBakedContent|AddDynamicWithFlags|PlaceStatic|PlaceDetail|SetBlockKartPrimitivePose|attachPrimitiveTrackColliderEntities|spawnBlockKartTrackCollider|primitiveTerrainSurfacePosition/);
+const directIntentBypassHits = scan(/UpdateIntentFromSyncedState\s*\(|\b[A-Za-z_][A-Za-z0-9_]*\.UpdateIntent\s*\(/);
 const directConstraintHits = scan(/\b(ApplyEntityPhysicsTarget|ApplyEntityPhysicsConstraint|ApplyVehicleConstraint|VehicleConstraintCommand)\b/);
 const rawRenderKnobHits = scan(/\b[A-Za-z_][A-Za-z0-9_]*\.scene\.RenderDebugMode\b|\.RenderDebugMode\s*=(?!=)|\b(SetRenderDebug3D|PostProcessConfig|ShadowResolution)\b/);
 const worldBody = bodyOfType(world, 'World');
+const runtimeContextBody = bodyOfType(world, 'BlockKartRuntimeContext');
 const worldFields = worldBody
   .split(/\r?\n/)
   .map((line, index) => ({ line: index + 1, text: line.trim() }))
   .filter((entry) => /^[A-Za-z_][A-Za-z0-9_]*\s+/.test(entry.text));
 const worldForbiddenFieldHits = worldFields.filter((entry) => /\b(scene|camera|player|vehicle|kartController|racingInput|touch|vehicleAudio|assets|primitive|track|checkpoint|raceState|courseTime|finishTime|collected|lap|kart|boost|drift|collectibles|checkpoints|boostPads|obstacles|debugHud|perf|physics)/i.test(entry.text));
+const runtimeContextFields = runtimeContextBody
+  .split(/\r?\n/)
+  .map((line, index) => ({ line: index + 1, text: line.trim() }))
+  .filter((entry) => /^[A-Za-z_][A-Za-z0-9_]*\s+/.test(entry.text));
+const runtimeContextAllowedGroups = new Set([
+  'core BlockKartRuntimeCore',
+  'input BlockKartRuntimeInputState',
+  'race BlockKartRuntimeRaceState',
+  'kart BlockKartRuntimeKartState',
+  'hud BlockKartRuntimeHudState',
+]);
+const runtimeContextForbiddenFieldHits = runtimeContextFields.filter((entry) => (
+  !runtimeContextAllowedGroups.has(entry.text)
+  && /\b(scene|camera|player|vehicle|kartController|racingInput|touch|vehicleAudio|assets|primitive|track|checkpoint|raceState|courseTime|finishTime|collected|lap|kart|boost|drift|collectibles|checkpoints|boostPads|obstacles|debugHud|perf|physics)/i.test(entry.text)
+));
 const worldReceiverAllowlist = new Set([
   'Update',
   'Draw',
@@ -167,6 +185,10 @@ const worldReceiverHits = blockKartVoFiles.flatMap((entry) => (
   .filter((entry) => !worldReceiverAllowlist.has(entry.name));
 const ownerWorldContextHits = blockKartVoFiles.flatMap((entry) => (
   [...entry.source.matchAll(/^func \([^)]*\*(RaceSession|KartRig|TrackRuntime|HUDPresenter|PerfReporter|AssetRuntimeCache)\) ([A-Za-z_][A-Za-z0-9_]*)\([^)]*\*World/gm)]
+    .map((match) => ({ path: entry.rel, owner: match[1], name: match[2], line: firstLineMatching(entry.source, new RegExp(`^func \\([^)]*\\*${escapeRegExp(match[1])}\\) ${escapeRegExp(match[2])}\\(`)) }))
+));
+const ownerRuntimeContextHits = blockKartVoFiles.flatMap((entry) => (
+  [...entry.source.matchAll(/^func \([^)]*\*(RaceSession|KartRig|TrackRuntime|HUDPresenter|PerfReporter|AssetRuntimeCache)\) ([A-Za-z_][A-Za-z0-9_]*)\([^)]*\*BlockKartRuntimeContext/gm)]
     .map((match) => ({ path: entry.rel, owner: match[1], name: match[2], line: firstLineMatching(entry.source, new RegExp(`^func \\([^)]*\\*${escapeRegExp(match[1])}\\) ${escapeRegExp(match[2])}\\(`)) }))
 ));
 const runtimeOwners = readProjectFile(blockKartRoot, 'runtime_owners.vo');
@@ -189,11 +211,15 @@ check(handwrittenJsonHits.length === 0, 'blockkart.handwritten_json_report', 'Bl
 check(manualMarkerJsonHits.length === 0, 'blockkart.manual_marker_json_report', 'BlockKart business/runtime files emit marker-prefixed JSON instead of using a schema-owned report encoder', { manualMarkerJsonHits });
 check(lowLevelHudHits.length === 0, 'blockkart.low_level_hud_fact', 'BlockKart HUD/diagnostics assemble low-level render, primitive, GPU, or vehicle facts', { lowLevelHudHits });
 check(genericAuthoringHits.length === 0, 'blockkart.generic_primitive_authoring', 'BlockKart product runtime owns generic primitive/layer/material/chunk authoring', { genericAuthoringHits });
+check(blockKartNamedAuthoringHits.length === 0, 'blockkart.blockkart_named_authoring_wrapper', 'BlockKart product runtime owns BlockKart-named primitive/map/collider authoring wrappers instead of consuming voplay-owned product content APIs', { blockKartNamedAuthoringHits });
+check(directIntentBypassHits.length === 0, 'blockkart.direct_vehicle_intent_bypass', 'BlockKart product runtime updates controller/vehicle intent outside VehiclePhysicsSession', { directIntentBypassHits });
 check(directConstraintHits.length === 0, 'blockkart.direct_physics_constraint', 'BlockKart product runtime applies low-level physics constraints directly', { directConstraintHits });
 check(rawRenderKnobHits.length === 0, 'blockkart.raw_render_knob', 'BlockKart product runtime writes or exposes low-level render knobs directly', { rawRenderKnobHits });
 check(worldFields.length <= 28 && worldForbiddenFieldHits.length === 0, 'blockkart.world_mega_owner', 'World must stay a lifecycle composition root with product owner state held by RaceSession/KartRig/TrackRuntime/HUDPresenter/PerfReporter', { fieldCount: worldFields.length, worldForbiddenFieldHits });
+check(runtimeContextFields.length <= 8 && runtimeContextForbiddenFieldHits.length === 0 && runtimeContextFields.every((entry) => runtimeContextAllowedGroups.has(entry.text)), 'blockkart.runtime_context_mega_owner', 'BlockKartRuntimeContext must not replace World as the hidden mega-owner for scene, vehicle, assets, track, race, kart, HUD, perf, or debug state', { fieldCount: runtimeContextFields.length, runtimeContextForbiddenFieldHits, runtimeContextFields });
 check(worldReceiverHits.length === 0, 'blockkart.world_receiver_too_wide', 'World receiver methods must stay at lifecycle/composition boundary', { worldReceiverHits });
 check(ownerWorldContextHits.length === 0, 'blockkart.owner_methods_take_world', 'Runtime owner methods must not use *World as the mutation context for cross-domain state', { ownerWorldContextHits: ownerWorldContextHits.slice(0, 80) });
+check(ownerRuntimeContextHits.length === 0, 'blockkart.owner_methods_take_runtime_context', 'Runtime owner methods must not use *BlockKartRuntimeContext as the mutation context for cross-domain state', { ownerRuntimeContextHits: ownerRuntimeContextHits.slice(0, 80) });
 check(runtimeOwnerFacts.every((entry) => entry.methods.length > 0 && entry.calledByProduct), 'blockkart.empty_runtime_owner', 'runtime_owners.vo owners must own production methods and be called by runtime', { runtimeOwnerFacts });
 
 check(vehicle.includes('ProductVehicleTelemetry') || blockKartVoFiles.some((entry) => entry.source.includes('ProductVehicleTelemetry')), 'blockkart.product_vehicle_telemetry_missing', 'BlockKart strict boundary needs structured voplay product vehicle telemetry', {

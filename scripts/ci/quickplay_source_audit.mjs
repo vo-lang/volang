@@ -120,6 +120,32 @@ function packagedFilesDigest(files) {
   return sourceSetDigest(entries);
 }
 
+function validatePackagedLockRewrite(project, sourceBytes, packagedBytes, issues) {
+  const rewrite = project.lockRewrite;
+  if (!rewrite || rewrite.schemaVersion !== 1 || rewrite.path !== 'vo.lock') {
+    issue(issues, 'BlockKart', 'LockRewrite', 'P0', 'Packaged vo.lock differs from source without a structured lockRewrite contract', {
+      expected: 'project.lockRewrite schemaVersion=1 path=vo.lock',
+    });
+    return false;
+  }
+  const sourceDigest = sha256(sourceBytes);
+  const packagedDigest = sha256(packagedBytes);
+  let ok = true;
+  if (rewrite.sourceDigest !== sourceDigest) {
+    issue(issues, 'BlockKart', 'LockRewrite', 'P0', 'lockRewrite sourceDigest does not match source vo.lock', { expected: sourceDigest, found: rewrite.sourceDigest ?? null });
+    ok = false;
+  }
+  if (rewrite.packagedDigest !== packagedDigest) {
+    issue(issues, 'BlockKart', 'LockRewrite', 'P0', 'lockRewrite packagedDigest does not match packaged vo.lock', { expected: packagedDigest, found: rewrite.packagedDigest ?? null });
+    ok = false;
+  }
+  if (!Array.isArray(rewrite.modules) || rewrite.modules.length === 0) {
+    issue(issues, 'BlockKart', 'LockRewrite', 'P0', 'lockRewrite must list rewritten dependency modules', { modules: rewrite.modules ?? null });
+    ok = false;
+  }
+  return ok;
+}
+
 function listSourceFiles(projectRoot, extension) {
   const files = [];
   const visit = (dir) => {
@@ -194,6 +220,12 @@ function auditBlockKart(project, provenance, issues) {
   }
   if (provenance?.project?.filesDigest && provenance.project.filesDigest !== packagedFilesDigest(project.files)) {
     issue(issues, 'BlockKart', 'Provenance', 'P0', 'Project provenance filesDigest does not match project package files', { expected: packagedFilesDigest(project.files), found: provenance.project.filesDigest });
+  }
+  if (JSON.stringify(provenance?.project?.lockRewrite ?? null) !== JSON.stringify(project.lockRewrite ?? null)) {
+    issue(issues, 'BlockKart', 'Provenance', 'P0', 'Project provenance lockRewrite must match project package lockRewrite', {
+      provenance: provenance?.project?.lockRewrite ?? null,
+      project: project.lockRewrite ?? null,
+    });
   }
   const inside = tryGit(['rev-parse', '--is-inside-work-tree'], blockKartRoot);
   if (!inside.ok || inside.stdout !== 'true') {
@@ -270,6 +302,9 @@ function auditBlockKart(project, provenance, issues) {
       continue;
     }
     if (source.byteLength !== packagedBytes.byteLength || sha256(source) !== sha256(packagedBytes)) {
+      if (path === 'vo.lock' && validatePackagedLockRewrite(project, source, packagedBytes, issues)) {
+        continue;
+      }
       issue(issues, 'BlockKart', 'Source', 'P0', 'Packaged BlockKart file differs from source checkout', {
         path,
         source: { digest: sha256(source), size: source.byteLength },
