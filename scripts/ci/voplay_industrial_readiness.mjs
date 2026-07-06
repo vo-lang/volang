@@ -732,10 +732,24 @@ const backendPacketMissingTokens = backendPacketSchemaTokens.filter((token) => !
 const invalidTelemetryStressBypass = !physicsStressSource.includes('InvalidSampleCount')
   || !physicsStressSource.includes('ValidationIssues')
   || /sampleFinite\s*\(/.test(physicsStressSource);
-const executableReplayTokens = ['PhysicsReplayVerifier', 'StepHash', 'BackendPacketHash', 'ReplayMismatch'];
+const executableReplayTokens = [
+  'PhysicsReplayVerifier',
+  'StepHash',
+  'BackendPacketHash',
+  'ReplayMismatch',
+  'ValidatePhysicsReplayTrace',
+  'PhysicsPoseHash',
+  'PhysicsTelemetryHash',
+  'Mismatches',
+];
 const executableReplayMissingTokens = executableReplayTokens.filter((token) => !replay.includes(token) && !physicsStressSource.includes(token));
+const replayUsesRecordedTrace = /runScenarioWithReplay\s*\([^)]*true/.test(physicsStressSource)
+  && /for[^\n]*sample[^\n]*range\s+trace\.Samples/.test(physicsStressSource)
+  && /sample\.BackendApplyHash/.test(physicsStressSource)
+  && /sample\.PoseHash/.test(physicsStressSource)
+  && /sample\.TelemetryHash/.test(physicsStressSource);
 const sameRuntimeReplayDriftOnly = /replayDrift|driftMeters|ReplayDrift/.test(physicsStressSource)
-  && executableReplayMissingTokens.length > 0;
+  || !replayUsesRecordedTrace;
 const blockKartGenericAuthoringHits = sourceRegexHits(
   blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
   /ProductPrimitiveAuthoring|PrimitiveBatchAuthoring|PrimitiveInstanceAuthoring|SurfaceMaterialAuthoring|ColliderAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc|ShapeDesc|MaterialPreset)|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|PackWriter|vopack\./,
@@ -990,7 +1004,7 @@ addRequiredSourceFact(
   'physics_replay_is_executable_step_contract',
   executableReplayMissingTokens.length === 0 && !sameRuntimeReplayDriftOnly,
   'physics replay validation executes a recorded step contract with per-step hashes and mismatch evidence',
-  { executableReplayMissingTokens, sameRuntimeReplayDriftOnly },
+  { executableReplayMissingTokens, replayUsesRecordedTrace, sameRuntimeReplayDriftOnly },
 );
 addRequiredSourceFact(
   'blockkart_product_boundary',
@@ -1352,11 +1366,16 @@ checkReport(path.join(root, 'target/voplay-physics-industrial-stress/report.json
   const required = ['skidpad', 'slalom', 'drift-turbo', 'boost-pad', 'offroad-transition', 'surface-transition', 'jump-landing', 'wall-impact', 'rail-ride', 'wall-ride', 'water-skim', 'recovery', 'multi-vehicle-scripted-soak'];
   const names = scenarioNames(report);
   const missing = required.filter((name) => !names.has(name));
-  const replayOk = report.replay?.status === 'pass' && Number(report.replay?.driftMeters || 0) <= 0.01;
+  const replayOk = report.replay?.status === 'pass'
+    && Number(report.replay?.samples ?? 0) > 0
+    && Number(report.replay?.mismatches ?? Infinity) === 0
+    && Number.isFinite(Number(report.replay?.stepHash))
+    && Number.isFinite(Number(report.replay?.backendPacketHash))
+    && (!Number.isFinite(Number(report.replay?.driftMeters)) || Number(report.replay?.driftMeters) <= 0.01);
   const ok = report.status === 'pass' && allIndustrialPhysicsSamplesClean(report) && missing.length === 0 && replayOk;
   return {
     ok,
-    detail: 'industrial physics stress passes scenario, fallback, invalid sample, and replay drift gates',
+    detail: 'industrial physics stress passes scenario, fallback, invalid sample, and executable replay gates',
     evidence: {
       status: report.status,
       missingScenarios: missing,

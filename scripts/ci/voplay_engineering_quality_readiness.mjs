@@ -460,15 +460,33 @@ function sourceAuditFailuresFromSource({
       },
     });
   }
-  const replayTokens = ['PhysicsReplayVerifier', 'StepHash', 'BackendPacketHash', 'ReplayMismatch'];
+  const replayTokens = [
+    'PhysicsReplayVerifier',
+    'StepHash',
+    'BackendPacketHash',
+    'ReplayMismatch',
+    'ValidatePhysicsReplayTrace',
+    'PhysicsPoseHash',
+    'PhysicsTelemetryHash',
+    'Mismatches',
+  ];
   const missingReplayTokens = replayTokens.filter((token) => !replaySource.includes(token) && !physicsStressSource.includes(token));
-  if (missingReplayTokens.length > 0 || /replayDrift|driftMeters|ReplayDrift/.test(physicsStressSource)) {
+  const replayUsesRecordedTrace = /runScenarioWithReplay\s*\([^)]*true/.test(physicsStressSource)
+    && /for[^\n]*sample[^\n]*range\s+trace\.Samples/.test(physicsStressSource)
+    && /sample\.BackendApplyHash/.test(physicsStressSource)
+    && /sample\.PoseHash/.test(physicsStressSource)
+    && /sample\.TelemetryHash/.test(physicsStressSource);
+  if (missingReplayTokens.length > 0 || !replayUsesRecordedTrace || /replayDrift|driftMeters|ReplayDrift/.test(physicsStressSource)) {
     failures.push({
       code: 'physics.replay_not_executable_contract',
       severity: 'P1',
       owner: 'voplay/scene3d',
       message: 'Physics replay validation is still drift/final-state evidence without an executable per-step contract',
-      evidence: { missingReplayTokens, driftLine: lineOf(physicsStressSource, 'driftMeters') ?? lineOf(physicsStressSource, 'replayDrift') },
+      evidence: {
+        missingReplayTokens,
+        replayUsesRecordedTrace,
+        driftLine: lineOf(physicsStressSource, 'driftMeters') ?? lineOf(physicsStressSource, 'replayDrift'),
+      },
     });
   }
   const blockKartGenericAuthoring = [];

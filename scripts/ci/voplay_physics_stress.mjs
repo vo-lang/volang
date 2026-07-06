@@ -167,8 +167,16 @@ function validateReport(report) {
   }
   const replayHasExecutableContract = Number.isFinite(Number(report.replay?.stepHash))
     && Number.isFinite(Number(report.replay?.backendPacketHash))
+    && Number(report.replay?.samples ?? 0) > 0
+    && Number(report.replay?.mismatches ?? Infinity) === 0
     && String(report.replay?.name || '').includes('PhysicsReplayVerifier');
-  if (!replayHasExecutableContract && Number(report.replay?.driftMeters ?? Infinity) > maxReplayDriftMeters) {
+  if (!replayHasExecutableContract) {
+    issues.push({ code: 'physics.replay_contract_missing', severity: 1, detail: JSON.stringify(report.replay ?? {}) });
+  }
+  if (Number(report.replay?.mismatches ?? 0) > 0) {
+    issues.push({ code: 'physics.replay_mismatch', severity: 1, detail: `${report.replay?.mismatches} mismatches` });
+  }
+  if (Number.isFinite(Number(report.replay?.driftMeters)) && Number(report.replay?.driftMeters) > maxReplayDriftMeters) {
     issues.push({ code: 'physics.replay_drift', severity: 1, detail: `${report.replay?.driftMeters} > ${maxReplayDriftMeters}` });
   }
   const p0 = issues.filter((issue) => issue.severity === 0).length;
@@ -180,7 +188,7 @@ function markdownReport(report, gate) {
   const lines = ['# voplay physics stress', ''];
   lines.push(`- Status: ${gate.p0 === 0 && gate.p1 === 0 ? 'pass' : 'fail'}`);
   lines.push(`- Scenario count: ${report.scenarios?.length ?? 0}`);
-  lines.push(`- Replay: ${report.replay?.name || '(missing)'} stepHash=${report.replay?.stepHash ?? '(missing)'} backendPacketHash=${report.replay?.backendPacketHash ?? '(missing)'}`);
+  lines.push(`- Replay: ${report.replay?.name || '(missing)'} samples=${report.replay?.samples ?? '(missing)'} mismatches=${report.replay?.mismatches ?? '(missing)'} stepHash=${report.replay?.stepHash ?? '(missing)'} backendPacketHash=${report.replay?.backendPacketHash ?? '(missing)'}`);
   lines.push(`- Budget: ${path.relative(root, budgetPath)}`);
   lines.push(`- Velocity budget: ${formatNumber(physicsBudget.maxVelocity)} m/s`);
   lines.push(`- Angular velocity budget: ${formatNumber(physicsBudget.maxAngularVelocity)} rad/s`);
