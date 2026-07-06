@@ -20,7 +20,7 @@ path = "js"
 name = "voplay"
 repository = "vo-lang/voplay"
 local_hint = "../voplay"
-expected_commit = "509414e7a512e2adca51f7167ce721c6c6ad5bf6"
+expected_commit = "9e2b4154664e6a8c38a2591a7d9b9e8b119d31c2"
 ci_checkout = true
 
 [[first_party]]
