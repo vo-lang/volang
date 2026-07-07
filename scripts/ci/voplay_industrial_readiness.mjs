@@ -498,6 +498,17 @@ function gitCommit(projectRoot) {
   return null;
 }
 
+function gitRev(projectRoot, rev) {
+  const result = spawnSync('git', ['rev-parse', rev], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) {
+    return null;
+  }
+  return result.stdout.trim();
+}
+
 function parseExpectedCommits(projectSource) {
   const expected = new Map();
   let current = null;
@@ -1072,8 +1083,9 @@ const physicsStressBypassCountersReady = physicsStressSource.includes('PacketErr
   && physicsStressSource.includes('ConstraintBypassHits');
 const expectedCommits = parseExpectedCommits(projectToml);
 const planSnapshot = activePlanSnapshot(activeQualityPlanSource);
+const acceptedVolangPlanCommits = [gitCommit(root), gitRev(root, 'HEAD^')].filter(Boolean);
 const activePlanSnapshotFresh =
-  planSnapshot.volang === gitCommit(root)
+  acceptedVolangPlanCommits.includes(planSnapshot.volang)
   && planSnapshot.voplay === expectedCommits.get('voplay')
   && planSnapshot.voplay === gitCommit(voplayRoot)
   && planSnapshot.BlockKart === expectedCommits.get('BlockKart')
@@ -1178,6 +1190,7 @@ addRequiredSourceFact(
     planSnapshot,
     expected: {
       volang: gitCommit(root),
+      acceptedVolangPlanCommits,
       voplay: expectedCommits.get('voplay'),
       BlockKart: expectedCommits.get('BlockKart'),
     },

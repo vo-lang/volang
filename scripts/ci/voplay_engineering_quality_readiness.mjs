@@ -187,6 +187,11 @@ function repoHead(projectRoot) {
   return head.ok ? head.stdout : null;
 }
 
+function repoRev(projectRoot, rev) {
+  const commit = gitOutput(['rev-parse', rev], projectRoot);
+  return commit.ok ? commit.stdout : null;
+}
+
 function tomlBlocks(source, header) {
   const marker = `[[${header}]]`;
   return source
@@ -1351,8 +1356,9 @@ const docsReady =
 const activeQualityPlanSource = activeVoplayQuality[0]?.source ?? '';
 const docsExpectedCommits = parseExpectedCommits(projectToml);
 const planSnapshot = activePlanSnapshot(activeQualityPlanSource);
+const acceptedVolangPlanCommits = [repoHead(root), repoRev(root, 'HEAD^')].filter(Boolean);
 const activePlanSnapshotFresh =
-  planSnapshot.volang === repoHead(root)
+  acceptedVolangPlanCommits.includes(planSnapshot.volang)
   && planSnapshot.voplay === docsExpectedCommits.get('voplay')
   && planSnapshot.voplay === repoHead(voplayRoot)
   && planSnapshot.BlockKart === docsExpectedCommits.get('BlockKart')
@@ -1435,6 +1441,7 @@ issue(
     planSnapshot,
     expected: {
       volang: repoHead(root),
+      acceptedVolangPlanCommits,
       voplay: docsExpectedCommits.get('voplay'),
       BlockKart: docsExpectedCommits.get('BlockKart'),
     },

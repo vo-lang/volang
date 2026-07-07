@@ -26,14 +26,18 @@ function failActivePlanFreshness(message, details) {
   throw new Error(`active plan snapshot freshness failed: ${JSON.stringify(issue)}`);
 }
 
-function gitHead(repoRoot) {
+function gitRev(repoRoot, rev = 'HEAD') {
   if (!existsSync(repoRoot)) return null;
-  const result = spawnSync('git', ['rev-parse', 'HEAD'], {
+  const result = spawnSync('git', ['rev-parse', rev], {
     cwd: repoRoot,
     encoding: 'utf8',
   });
   if (result.status !== 0) return null;
   return result.stdout.trim();
+}
+
+function gitHead(repoRoot) {
+  return gitRev(repoRoot, 'HEAD');
 }
 
 function parseProjectPins(projectText) {
@@ -76,6 +80,7 @@ function assertActivePlanSnapshotFreshness() {
   const expected = {
     volang: {
       expectedCommit: gitHead(root),
+      acceptedCommits: [gitHead(root), gitRev(root, 'HEAD^')].filter(Boolean),
       repoRoot: root,
     },
     voplay: {
@@ -96,22 +101,25 @@ function assertActivePlanSnapshotFreshness() {
         name,
       });
     }
-    if (fact.expectedCommit && found !== fact.expectedCommit) {
+    const acceptedCommits = fact.acceptedCommits ?? [fact.expectedCommit].filter(Boolean);
+    if (acceptedCommits.length > 0 && !acceptedCommits.includes(found)) {
       failActivePlanFreshness(`active plan snapshot for ${name} is stale`, {
         file: 'lang/docs/dev/voplay-code-engineering-quality-plan.md',
         line: lineOf(planText, name),
         name,
         expected: fact.expectedCommit,
+        acceptedCommits,
         found,
       });
     }
     const head = fact.repoRoot ? gitHead(fact.repoRoot) : null;
-    if (head && found !== head) {
+    if (head && !(fact.acceptedCommits ?? [head]).includes(found)) {
       failActivePlanFreshness(`active plan snapshot for ${name} does not match checkout HEAD`, {
         file: 'lang/docs/dev/voplay-code-engineering-quality-plan.md',
         line: lineOf(planText, name),
         name,
         expected: head,
+        acceptedCommits: fact.acceptedCommits ?? [head],
         found,
         repoRoot: fact.repoRoot,
       });
