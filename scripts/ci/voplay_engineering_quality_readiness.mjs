@@ -153,6 +153,41 @@ function parseExpectedCommits(projectSource) {
   return expected;
 }
 
+function tomlBlocks(source, header) {
+  const marker = `[[${header}]]`;
+  return source
+    .split(marker)
+    .slice(1)
+    .map((block) => block.split(/\n\[\[/)[0]);
+}
+
+function tomlStringValue(block, key) {
+  const match = block.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, 'm'));
+  return match ? match[1] : '';
+}
+
+function tomlStringArrayValue(block, key) {
+  const match = block.match(new RegExp(`^${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'm'));
+  if (!match) return [];
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+}
+
+function taskNeeds(source, taskName) {
+  const block = tomlBlocks(source, 'task').find((entry) => tomlStringValue(entry, 'name') === taskName);
+  return block ? tomlStringArrayValue(block, 'needs') : [];
+}
+
+function currentNodeAuditWorkspaces(source) {
+  return tomlBlocks(source, 'node_workspace')
+    .map((block) => ({
+      name: tomlStringValue(block, 'name'),
+      audit: tomlStringValue(block, 'audit'),
+      auditLevel: tomlStringValue(block, 'audit_level'),
+      status: tomlStringValue(block, 'status'),
+    }))
+    .filter((workspace) => workspace.audit === 'current');
+}
+
 function crossRepoHeadMismatches(expectedCommits) {
   const mismatches = [];
   for (const [repo, expected] of expectedCommits.entries()) {
@@ -786,10 +821,9 @@ issue(
 );
 
 const auditReady =
-  tasksToml.includes('name = "voplay-engineering-quality-readiness"')
-  && tasksToml.includes('needs = ["node-audit-current"]')
-  && toolchainsToml.includes('audit = "current"')
-  && !toolchainsToml.includes('audit_level = "critical"');
+  taskNeeds(tasksToml, 'voplay-engineering-quality-readiness').includes('node-audit-current')
+  && currentNodeAuditWorkspaces(toolchainsToml).length > 0
+  && currentNodeAuditWorkspaces(toolchainsToml).every((workspace) => workspace.auditLevel === 'high');
 issue(
   'Q-P1-NPM-AUDIT-QUALITY',
   'P1',
@@ -799,7 +833,10 @@ issue(
   '2026-07-05',
   'Quality gate depends on node-audit-current; moderate exceptions must be declared in the quality report.',
   auditReady,
-  { nodeAuditCurrent: tasksToml.includes('node-audit-current') },
+  {
+    engineeringNeeds: taskNeeds(tasksToml, 'voplay-engineering-quality-readiness'),
+    currentNodeAuditWorkspaces: currentNodeAuditWorkspaces(toolchainsToml),
+  },
 );
 
 const frameSurface = projectText(voplayRoot, 'rust/src/renderer/frame_surface.rs');
@@ -873,11 +910,25 @@ issue(
   { file: 'voplay/rust/src/render_world.rs' },
 );
 
-const primitiveChurnReady =
-  primitivePipeline.includes('dirty range')
+const renderStressReport = jsonMaybe('target/voplay-render-stress-budgeted/report.json');
+const renderStressScenes = Array.isArray(renderStressReport?.scenes) ? renderStressReport.scenes : [];
+const primitiveChurnSourceReady =
+  primitivePipeline.includes('dirty_start')
+  && primitivePipeline.includes('dirty_count')
   && primitivePipeline.includes('rebuild_queue')
-  && primitivePipeline.includes('staging')
-  && primitivePipeline.includes('residentChunkRebuilds');
+  && primitivePipeline.includes('staging_instances')
+  && primitivePipeline.includes('dirty_upload_bytes')
+  && primitivePipeline.includes('dirty-range-resident-chunk-rebuild');
+const primitiveChurnReportReady =
+  renderStressReport?.status === 'pass'
+  && renderStressReport?.coverage?.resourceChurnSoak === true
+  && renderStressScenes.some((scene) => (
+    scene?.name === 'blockkart-resource-churn-soak'
+    && Number(scene?.workload?.primitiveUploadBytes ?? 0) > 0
+    && Number.isFinite(Number(scene?.workload?.residentChunkRebuilds ?? 0))
+    && Number(scene?.workload?.resourceChurnEvents ?? 0) > 0
+  ));
+const primitiveChurnReady = primitiveChurnSourceReady && primitiveChurnReportReady;
 issue(
   'Q-P1-PRIMITIVE-CHURN-BUDGET',
   'P1',
@@ -887,7 +938,12 @@ issue(
   '2026-07-06',
   'Avoid whole chunk rebuild on churn paths and budget upload bytes/rebuild queue length.',
   primitiveChurnReady,
-  { file: 'voplay/rust/src/primitive_pipeline.rs' },
+  {
+    file: 'voplay/rust/src/primitive_pipeline.rs',
+    sourceReady: primitiveChurnSourceReady,
+    reportReady: primitiveChurnReportReady,
+    resourceChurnSoak: renderStressScenes.find((scene) => scene?.name === 'blockkart-resource-churn-soak')?.workload ?? null,
+  },
 );
 
 const renderBudgetReady =
@@ -1127,7 +1183,6 @@ const sourceAuditFailures = [
     blockKartFiles,
   }),
 ];
-const renderStressReport = jsonMaybe('target/voplay-render-stress-budgeted/report.json');
 const physicsContractReport = jsonMaybe('target/voplay-physics-backend-contract/report.json');
 const renderStressStructuredReady = renderStressReport?.status === 'pass'
   && renderStressReport?.coverage?.primitive10k === true
