@@ -184,6 +184,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function progress(message) {
+  console.error(`BlockKart baseline progress: ${message}`);
+}
+
 function withTimeout(promise, timeoutMs, label) {
   let timer = null;
   const timeout = new Promise((_, reject) => {
@@ -375,7 +379,7 @@ function findBrowserBinary() {
 }
 
 function stopProcess(child) {
-  if (!child || child.exitCode != null || child.signalCode != null) {
+  if (!child) {
     return;
   }
   signalProcess(child, 'SIGTERM');
@@ -386,7 +390,7 @@ function stopProcess(child) {
 }
 
 function signalProcess(child, signal) {
-  if (!child || child.exitCode != null || child.signalCode != null) {
+  if (!child) {
     return;
   }
   if (process.platform !== 'win32' && child.pid) {
@@ -396,6 +400,9 @@ function signalProcess(child, signal) {
     } catch {
       // Fall through to direct kill when the child is not a process group leader.
     }
+  }
+  if (child.exitCode != null || child.signalCode != null) {
+    return;
   }
   try {
     child.kill(signal);
@@ -409,6 +416,7 @@ async function stopProcessAndWait(child, timeoutMs = 3000) {
     return;
   }
   if (child.exitCode != null || child.signalCode != null) {
+    signalProcess(child, 'SIGTERM');
     child.stdout?.destroy();
     child.stderr?.destroy();
     child.stdin?.destroy?.();
@@ -1400,6 +1408,8 @@ async function captureFreshBrowserCanvas(url, viewportFile, canvasFile, browserB
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
+  cleanupCallbacks.push(() => rmSync(profileDir, { recursive: true, force: true }));
+  cleanupCallbacks.push(() => stopProcess(child));
   child.stdout.on('data', (chunk) => {
     log = appendLog(log, chunk);
   });
@@ -2851,10 +2861,12 @@ async function main() {
   let client = null;
   let targetId = null;
   try {
+    progress(`preview starting port=${previewPort}`);
     await fetchOk(baseUrl).catch((error) => {
       fail(`vite preview did not start: ${error.message}\n${preview.log()}`);
     });
 
+    progress(`browser starting debugPort=${debugPort}`);
     browser = await startBrowser(debugPort);
     ({ targetId, client } = await openPage(debugPort));
     cleanupCallbacks.push(() => client.close());
@@ -2906,7 +2918,9 @@ async function main() {
 
     const startedAt = new Date().toISOString();
     const monotonicStartMs = Date.now();
+    progress(`navigate ${quickplayUrl.toString()}`);
     await navigate(client, quickplayUrl.toString());
+    progress('navigate complete');
     const hookState = await waitForPredicate(
       client,
       'BlockKart debug hook',
@@ -2914,7 +2928,9 @@ async function main() {
       (state) => state.ready,
       firstFrameTimeoutMs,
     );
+    progress(`hook ready entry=${hookState.entryPath ?? 'unknown'}`);
     const firstFrame = await waitForQuickplayFirstFrame(client, firstFrameTimeoutMs);
+    progress(`first frame ok=${firstFrame.ok} skipped=${firstFrame.skipped}`);
     let renderStressScenario = {
       requested: renderStressProfile !== '',
       profile: renderStressProfile,
@@ -2926,6 +2942,7 @@ async function main() {
       latestSceneReport: collectBlockKartDiagnostics(events.console, []).latestSceneReport,
     };
     if (renderStressProfile !== '') {
+      progress(`render stress start profile=${renderStressProfile}`);
       if (!firstFrame.ok || firstFrame.skipped) {
         renderStressScenario.skipped = true;
         renderStressScenario.skipReason = firstFrame.reason ?? 'first frame did not complete';
@@ -2935,6 +2952,7 @@ async function main() {
       } else {
         renderStressScenario = await runRenderStressScenario(client, events, renderStressProfile, restartWaitTimeoutMs);
       }
+      progress(`render stress done profile=${renderStressProfile} completed=${renderStressScenario.completed}`);
     }
     let resizeScenario = {
       requested: resizeCycleRequested,
@@ -2944,6 +2962,7 @@ async function main() {
       steps: [],
     };
     if (resizeCycleRequested) {
+      progress('resize cycle start');
       if (!firstFrame.ok || firstFrame.skipped) {
         resizeScenario.skipped = true;
         resizeScenario.skipReason = firstFrame.reason ?? 'first frame did not complete';
@@ -2953,6 +2972,7 @@ async function main() {
       } else {
         resizeScenario = await runResizeCycleScenario(client, true);
       }
+      progress(`resize cycle done completed=${resizeScenario.completed}`);
     }
     let startRaceScenario = {
       requested: startRaceRequested,
@@ -2963,6 +2983,7 @@ async function main() {
       finalRunningRaceReports: countRaceState(events, 'Running'),
     };
     if (startRaceRequested) {
+      progress('start race scenario start');
       if (!firstFrame.ok || firstFrame.skipped) {
         startRaceScenario.skipped = true;
         startRaceScenario.skipReason = firstFrame.reason ?? 'first frame did not complete';
@@ -2972,6 +2993,7 @@ async function main() {
       } else {
         startRaceScenario = await runStartRaceScenario(client, events, true, restartWaitTimeoutMs);
       }
+      progress(`start race scenario done completed=${startRaceScenario.completed}`);
     }
     let restartScenario = {
       requested: restartCount,
@@ -2983,6 +3005,7 @@ async function main() {
       iterations: [],
     };
     if (restartCount > 0) {
+      progress(`restart scenario start count=${restartCount}`);
       if (!firstFrame.ok || firstFrame.skipped) {
         restartScenario.skipped = true;
         restartScenario.skipReason = firstFrame.reason ?? 'first frame did not complete';
@@ -2992,6 +3015,7 @@ async function main() {
       } else {
         restartScenario = await runRestartScenario(client, events, restartCount, restartWaitTimeoutMs);
       }
+      progress(`restart scenario done completed=${restartScenario.completed}/${restartCount}`);
     }
     let storageReloadScenario = {
       requested: verifyStorageReload,
@@ -3005,6 +3029,7 @@ async function main() {
       latestRaceReport: collectBlockKartDiagnostics(events.console, []).latestRaceReport,
     };
     if (verifyStorageReload) {
+      progress('storage reload scenario start');
       if (!firstFrame.ok || firstFrame.skipped) {
         storageReloadScenario.skipped = true;
         storageReloadScenario.skipReason = firstFrame.reason ?? 'first frame did not complete';
@@ -3014,23 +3039,61 @@ async function main() {
       } else {
         storageReloadScenario = await runStorageReloadScenario(client, events, quickplayUrl, true, restartWaitTimeoutMs);
       }
+      progress(`storage reload scenario done completed=${storageReloadScenario.completed}`);
     }
     if (firstFrame.ok && !firstFrame.skipped && captureMs > 0) {
+      progress(`capture sleep start ms=${captureMs}`);
       await sleep(captureMs);
+      progress('capture sleep done');
     }
+    progress('final state evaluate start');
     const finalState = await client.evaluate(quickplayStateExpression(), 30000).catch(() => firstFrame.state ?? {});
+    progress('renderer state evaluate start');
+    const rendererState = await client.evaluate(`(() => {
+      const hook = globalThis.__voStudioBrowserSmoke ?? globalThis.__voStudioBrowserSmokeRenderer;
+      if (!hook || typeof hook.rendererState !== 'function') {
+        return { active: false, reason: 'debug hook rendererState missing', renderers: [], sessionId: null };
+      }
+      return hook.rendererState();
+    })()`, 5000).catch((error) => ({
+      active: false,
+      reason: error instanceof Error ? error.message : String(error),
+      renderers: [],
+      sessionId: null,
+    }));
+    progress(`renderer state active=${rendererState.active === true} renderers=${rendererState.renderers?.length ?? 0} quiesce=${(rendererState.renderers ?? []).filter((entry) => entry?.quiesceForCapture === true).length} reason=${rendererState.reason ?? ''}`);
+    progress('renderer quiesce start');
+    const rendererQuiesce = await client.evaluate(`(() => {
+      const hook = globalThis.__voStudioBrowserSmoke ?? globalThis.__voStudioBrowserSmokeRenderer;
+      if (!hook || typeof hook.quiesceRenderLoop !== 'function') {
+        return { ok: false, reason: 'debug hook missing' };
+      }
+      try {
+        return { ok: true, ...hook.quiesceRenderLoop() };
+      } catch (error) {
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      }
+    })()`, 10000).catch((error) => ({
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    progress(`renderer quiesce done ok=${rendererQuiesce.ok === true} stopped=${rendererQuiesce.stopped ?? 0} reason=${rendererQuiesce.reason ?? ''}`);
+    progress('debug snapshot evaluate start');
     const debugSnapshot = await client.evaluate(debugSnapshotExpression(), 15000).catch(() => ({
       entryPath: hookState.entryPath,
       consoleLines: [],
       runtimeState: null,
       perfReports: [],
     }));
+    progress('debug snapshot evaluate done');
     await sleep(250);
+    progress('perf endpoint fetch start');
     const perfEndpoint = await fetchVoplayPerfEndpoint(baseUrl).catch((error) => ({
       count: 0,
       reports: [],
       error: error instanceof Error ? error.message : String(error),
     }));
+    progress(`perf endpoint fetch done count=${perfEndpoint.count ?? 0}`);
     const perfReports = normalizePerfReports(debugSnapshot.perfReports, perfEndpoint.reports);
 
     const viewportScreenshot = path.join(outDir, 'blockkart-baseline-viewport.png');
@@ -3039,57 +3102,85 @@ async function main() {
     const captureWarnings = [];
     let viewportAnalysis = null;
     let viewportCapture = null;
-    let viewportCaptureMode = 'browser-cli';
+    let viewportCaptureMode = 'cdp-page';
+    let viewportCdpFailed = false;
     try {
-      viewportCapture = await captureViewportBrowserCli(quickplayUrl.toString(), viewportScreenshot, browser?.browserBin);
-      viewportAnalysis = viewportCapture.analysis;
+      progress('viewport capture cdp start');
+      viewportAnalysis = await captureScreenshot(client, viewportScreenshot);
+      viewportCapture = {
+        bytes: readFileSync(viewportScreenshot),
+        analysis: viewportAnalysis,
+        metadata: { source: 'cdp-page' },
+      };
+      if (!viewportAnalysis.nonEmpty) {
+        throw new Error(`CDP viewport screenshot was visually blank: ${JSON.stringify(viewportAnalysis)}`);
+      }
+      progress('viewport capture cdp done');
     } catch (error) {
+      viewportCdpFailed = true;
+      viewportCapture = null;
+      viewportAnalysis = null;
       viewportCaptureMode = 'screencast';
-      captureWarnings.push(`viewport browser CLI screenshot failed: ${error instanceof Error ? error.message : String(error)}`);
+      captureWarnings.push(`viewport CDP screenshot failed: ${error instanceof Error ? error.message : String(error)}`);
       try {
+        progress('viewport capture screencast start');
         viewportCapture = await captureViewportScreencast(client, viewportScreenshot);
         viewportAnalysis = viewportCapture.analysis;
+        progress('viewport capture screencast done');
       } catch (screencastError) {
         viewportCaptureMode = 'failed';
         captureWarnings.push(`viewport screencast failed: ${screencastError instanceof Error ? screencastError.message : String(screencastError)}`);
+        progress('viewport capture failed');
       }
     }
     let canvasAnalysis = null;
     let canvasCaptureMode = 'viewport-crop';
     if (viewportCapture && finalState.canvasRect && finalState.canvasRect.width > 0 && finalState.canvasRect.height > 0) {
       try {
+        progress('canvas viewport crop start');
         const canvasBytes = cropPng(viewportCapture.bytes, finalState.canvasRect, viewportWidth, viewportHeight);
         writeFileSync(canvasScreenshot, canvasBytes);
         canvasAnalysis = analyzePng(canvasBytes);
+        progress(`canvas viewport crop done nonEmpty=${canvasAnalysis.nonEmpty}`);
       } catch (error) {
         canvasCaptureMode = 'failed';
         captureWarnings.push(`canvas viewport crop failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-    } else if (finalState.canvasRect && finalState.canvasRect.width > 0 && finalState.canvasRect.height > 0) {
+    } else if (!viewportCdpFailed && finalState.canvasRect && finalState.canvasRect.width > 0 && finalState.canvasRect.height > 0) {
       try {
+        progress('canvas cdp crop start');
         canvasAnalysis = await captureScreenshot(client, canvasScreenshot, finalState.canvasRect);
         canvasCaptureMode = 'cdp-canvas-crop';
+        progress(`canvas cdp crop done nonEmpty=${canvasAnalysis.nonEmpty}`);
       } catch (error) {
         canvasCaptureMode = 'failed';
         captureWarnings.push(`canvas CDP crop failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     } else if (!viewportCapture) {
       canvasCaptureMode = 'not-captured';
+      if (viewportCdpFailed) {
+        captureWarnings.push('canvas CDP crop skipped because viewport CDP screenshot timed out or failed');
+      }
     } else {
       canvasCaptureMode = 'not-found';
       captureWarnings.push('canvas crop skipped because no canvas rect was available');
     }
-    if (!canvasAnalysis?.nonEmpty) {
+    if (!canvasAnalysis?.nonEmpty && !viewportCdpFailed) {
       try {
+        progress('canvas data-url capture start');
         const dataUrlAnalysis = await captureCanvasDataUrl(client, canvasScreenshot);
         canvasAnalysis = dataUrlAnalysis;
         canvasCaptureMode = 'canvas-data-url';
+        progress(`canvas data-url capture done nonEmpty=${canvasAnalysis.nonEmpty}`);
       } catch (error) {
         captureWarnings.push(`canvas data-url capture failed: ${error instanceof Error ? error.message : String(error)}`);
       }
+    } else if (!canvasAnalysis?.nonEmpty && viewportCdpFailed) {
+      captureWarnings.push('canvas data-url capture skipped because viewport CDP screenshot timed out or failed');
     }
     if (!canvasAnalysis?.nonEmpty) {
       try {
+        progress('fresh browser capture start');
         const freshCapture = await captureFreshBrowserCanvas(quickplayUrl.toString(), viewportScreenshot, canvasScreenshot, browser?.browserBin);
         if (!viewportAnalysis?.nonEmpty) {
           viewportAnalysis = freshCapture.viewportAnalysis;
@@ -3098,6 +3189,7 @@ async function main() {
         }
         canvasAnalysis = freshCapture.canvasAnalysis;
         canvasCaptureMode = freshCapture.canvasMode;
+        progress(`fresh browser capture done canvasNonEmpty=${canvasAnalysis?.nonEmpty === true}`);
       } catch (error) {
         captureWarnings.push(`fresh browser canvas capture failed: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -3225,6 +3317,8 @@ async function main() {
         capture: {
           viewportMode: viewportCaptureMode,
           canvasMode: canvasCaptureMode,
+          rendererState,
+          rendererQuiesce,
           warnings: captureWarnings,
         },
       },

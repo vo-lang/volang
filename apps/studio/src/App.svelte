@@ -12,6 +12,7 @@
   import { runtime } from './stores/runtime';
   import { buildShareInfo } from './lib/session_share';
   import { BLOCKKART_GITHUB_URL, BLOCKKART_QUICKPLAY_SPEC } from './lib/quickplay';
+  import { quiesceRendererBridgeForSmoke, rendererBridgeSmokeState } from './lib/gui/renderer_bridge';
   import Sidebar from './components/Sidebar.svelte';
   import DevWorkbench from './components/DevWorkbench.svelte';
   import Home from './components/Home.svelte';
@@ -25,6 +26,8 @@
     runtimeState(): unknown;
     dumpCurrent(): Promise<string>;
     dump(path: string): Promise<string>;
+    quiesceRenderLoop(): { renderers: unknown[]; stopped: number; sessionId: number | null };
+    rendererState(): { active: boolean; renderers: unknown[]; sessionId: number | null };
   };
 
   type StudioBrowserSmokeDebugBackend = {
@@ -237,6 +240,8 @@
         return dumpStudioBrowserSmokeEntry(entryPath);
       },
       dump: async (path: string) => dumpStudioBrowserSmokeEntry(path),
+      quiesceRenderLoop: () => quiesceRendererBridgeForSmoke(),
+      rendererState: () => rendererBridgeSmokeState(),
     };
   }
 
