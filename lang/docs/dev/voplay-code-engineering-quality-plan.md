@@ -51,7 +51,7 @@ artifact 的任务。
 当前 checkout snapshot:
 
 ```text
-volang    e2de168fab5a0536db7d42d3ba16d2d9257fde2e
+volang    d23b3a54795132ea367861de772564917cfa72cf
 voplay    f3c8296b634d5b7d28353d6c8d3b09daff4968a1
 BlockKart b819dba4c038ff1e7f6a2cb3518fde24cc42ca1a
 ```
