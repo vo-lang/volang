@@ -52,8 +52,8 @@ artifact 的任务。
 
 ```text
 volang    d23b3a54795132ea367861de772564917cfa72cf
-voplay    f3c8296b634d5b7d28353d6c8d3b09daff4968a1
-BlockKart b819dba4c038ff1e7f6a2cb3518fde24cc42ca1a
+voplay    34982a631b1883bf2d0d9c489801fcdcc2592e72
+BlockKart 92ace6a9bdf1ab261226f7e9ab5589e758a8a0d0
 ```
 
 当前报告显示过绿结论，但源码审查仍有反证：
