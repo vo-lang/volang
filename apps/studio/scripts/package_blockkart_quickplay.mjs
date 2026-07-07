@@ -22,18 +22,62 @@ const BLOCKKART_SOURCE_ALLOWLIST = [
 ];
 const QUICKPLAY_ARTIFACT_NAME = 'studio.quickplay.blockkart';
 const QUICKPLAY_ARTIFACT_PATH = 'apps/studio/public/quickplay/blockkart';
-const QUICKPLAY_GENERATOR_VERSION = 5;
+const QUICKPLAY_GENERATOR_VERSION = 6;
 const QUICKPLAY_TASK_ID = 'quickplay-blockkart-package';
 const QUICKPLAY_GENERATOR_COMMAND = ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'];
 const QUICKPLAY_GENERATOR_INPUTS = [
   'apps/studio/scripts/package_blockkart_quickplay.mjs',
   'eng/project.toml',
   'external:BlockKart',
+  'external:BlockKart/tools/pack_primitive_assets.vo',
+  'external:BlockKart/tools/generate_primitive_terrain.mjs',
+  'external:BlockKart/tools/paint_terrain_textures.mjs',
+  'external:BlockKart/tools/terrain_heightfield_spec.mjs',
+  'external:BlockKart/tools/terrain_recipe.mjs',
+  'external:BlockKart/terrain/recipes/primitive_concept_v1.json',
   'first-party:voplay',
   'module-cache:vopack',
   'module-cache:vogui',
 ];
 const CLEAN_DEPENDENCY_SNAPSHOTS = [];
+const BLOCKKART_RUNTIME_EXTRA_ASSETS = [
+  'assets/effects/grass_card_atlas.png',
+  'assets/skybox/right.png',
+  'assets/skybox/left.png',
+  'assets/skybox/top.png',
+  'assets/skybox/bottom.png',
+  'assets/skybox/front.png',
+  'assets/skybox/back.png',
+  'assets/audio/kart_engine.wav',
+  'assets/audio/kart_skid.wav',
+  'assets/audio/kart_boost.wav',
+  'assets/audio/kart_grass.wav',
+  'assets/audio/kart_hit.wav',
+];
+const BLOCKKART_TERRAIN_PAINT_INPUTS = [
+  'tools/paint_terrain_textures.mjs',
+  'docs/images/terrain-upgrade-concept-v1.png',
+];
+const BLOCKKART_TERRAIN_PAINT_OUTPUTS = [
+  'assets/source/terrain_painted/grass_painted_v1.png',
+  'assets/source/terrain_painted/meadow_painted_v1.png',
+  'assets/source/terrain_painted/dirt_painted_v1.png',
+  'assets/source/terrain_painted/rock_painted_v1.png',
+  'assets/effects/grass_card_atlas.png',
+];
+const BLOCKKART_TERRAIN_GENERATOR_INPUTS = [
+  'tools/generate_primitive_terrain.mjs',
+  'tools/terrain_heightfield_spec.mjs',
+  'tools/terrain_recipe.mjs',
+  'terrain/recipes/primitive_concept_v1.json',
+  ...BLOCKKART_TERRAIN_PAINT_OUTPUTS,
+];
+const BLOCKKART_TERRAIN_REQUIRED_OUTPUTS = [
+  'assets/maps/primitive_track/lowpoly_terrain.glb',
+  'assets/maps/primitive_track/lowpoly_terrain_lod.glb',
+  'assets/maps/primitive_track/lowpoly_terrain_height_grid.bin',
+  'assets/maps/primitive_track/terrain_splat_large.png',
+];
 
 function cacheKey(modulePath) {
   return modulePath.replaceAll('/', '@');
@@ -139,6 +183,37 @@ async function walkFiles(root) {
   }
   await walk(root);
   return out.sort();
+}
+
+function toPosixRelative(root, absolute) {
+  return path.relative(root, absolute).split(path.sep).join('/');
+}
+
+async function digestBlockKartPath(relative) {
+  const absolute = path.join(BLOCKKART_ROOT, relative);
+  const bytes = await fs.readFile(absolute);
+  return {
+    digest: sha256Digest(bytes),
+    path: relative,
+    size: bytes.byteLength,
+  };
+}
+
+async function digestBlockKartPaths(paths) {
+  const seen = new Set();
+  const entries = [];
+  for (const relative of paths) {
+    if (seen.has(relative)) continue;
+    seen.add(relative);
+    entries.push(await digestBlockKartPath(relative));
+  }
+  return entries.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+async function digestBlockKartDirectory(relativeDir) {
+  const absoluteDir = path.join(BLOCKKART_ROOT, relativeDir);
+  const files = await walkFiles(absoluteDir);
+  return digestBlockKartPaths(files.map((absolute) => toPosixRelative(BLOCKKART_ROOT, absolute)));
 }
 
 function shouldSkipDependencyDirectory(name) {
@@ -748,6 +823,51 @@ async function dependencyProvenance(module) {
   };
 }
 
+async function buildRuntimeAssetProducerProvenance() {
+  const terrainDirectoryOutputs = await digestBlockKartDirectory('assets/maps/primitive_track');
+  const terrainOutputPaths = new Set(terrainDirectoryOutputs.map((entry) => entry.path));
+  for (const required of BLOCKKART_TERRAIN_REQUIRED_OUTPUTS) {
+    if (!terrainOutputPaths.has(required)) {
+      throw new Error(`Missing required generated terrain output for provenance: ${required}`);
+    }
+  }
+  const vpakInputPaths = [
+    'tools/pack_primitive_assets.vo',
+    'assets/maps/primitive_track/blockkart.map.json',
+    ...terrainDirectoryOutputs.map((entry) => entry.path),
+    ...BLOCKKART_RUNTIME_EXTRA_ASSETS,
+  ];
+  return [
+    {
+      id: 'blockkart-runtime-vpak',
+      owner: 'BlockKart',
+      kind: 'vpak',
+      output: 'assets/blockkart.vpak',
+      command: ['vo', 'run', 'tools/pack_primitive_assets.vo'],
+      inputs: await digestBlockKartPaths(vpakInputPaths),
+      outputs: await digestBlockKartPaths(['assets/blockkart.vpak']),
+      upstream: [
+        {
+          id: 'painted-terrain-textures',
+          owner: 'BlockKart',
+          kind: 'offline-texture-generation',
+          command: ['node', 'tools/paint_terrain_textures.mjs'],
+          inputs: await digestBlockKartPaths(BLOCKKART_TERRAIN_PAINT_INPUTS),
+          outputs: await digestBlockKartPaths(BLOCKKART_TERRAIN_PAINT_OUTPUTS),
+        },
+        {
+          id: 'primitive-terrain-assets',
+          owner: 'BlockKart',
+          kind: 'offline-terrain-generation',
+          command: ['node', 'tools/generate_primitive_terrain.mjs'],
+          inputs: await digestBlockKartPaths(BLOCKKART_TERRAIN_GENERATOR_INPUTS),
+          outputs: terrainDirectoryOutputs,
+        },
+      ],
+    },
+  ];
+}
+
 async function buildProvenance(projectPackage, dependencyPackage, outputBytes) {
   const dependencies = [];
   for (const module of dependencyPackage.modules) {
@@ -789,6 +909,7 @@ async function buildProvenance(projectPackage, dependencyPackage, outputBytes) {
       sourceAllowlist: projectPackage.sourceAllowlist,
       sourceFilesDigest: sourceSetDigest(projectPackage.sourceFiles),
     },
+    producers: await buildRuntimeAssetProducerProvenance(),
     dependencies,
     outputs: [
       {

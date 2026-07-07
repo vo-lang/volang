@@ -1,30 +1,26 @@
 # voplay / BlockKart 代码与工程质量破釜沉舟计划
 
 Status: active
-Date: 2026-07-06
+Date: 2026-07-07
 Scope: voplay render, voplay scene3d physics, BlockKart product runtime,
 Volang quickplay, provenance, readiness, CI, artifact tooling.
 
 ## 文档使命
 
-本文件是当前 active 的代码与工程质量设计规划。它面向一个很直接的目标：让
-voplay / BlockKart 的源码结构、运行路径、压力报告、artifact、provenance 和 CI gate
-同时站稳，最终可以经得起第一性审查。
+本文件是当前 active 的代码与工程质量设计规划。目标只有一个：让 voplay /
+BlockKart 的源码结构、运行路径、压力报告、artifact、provenance、CI gate 和人工第一性审查
+同时成立。任何单项 gate 通过、ready flag 变绿、旧 report 复用、空 owner 拆文件、字符串 token
+命中，都不能替代源码和行为证据。
 
-当前结论固定为：
+当前签字结论固定为：
 
 ```text
 qualityReady=false
 industrialReady=false
+sourceFirstPrinciplesReview=fail
 ```
 
-任何阶段 gate 通过前后，都只能写：
-
-```text
-phase pass; qualityReady=false; industrialReady=false.
-```
-
-只有 Final Gate 通过，并且源码审查确认没有 P0/P1 反证，才允许 readiness report 输出：
+只有 Final Gate 全部通过，并且主审查员读当前源码后没有 P0/P1 反证，readiness report 才允许输出：
 
 ```json
 {
@@ -35,211 +31,218 @@ phase pass; qualityReady=false; industrialReady=false.
   "artifactSourceAgreement": true,
   "failures": [],
   "sourceAuditFailures": [],
-  "stringOnlyChecks": [],
-  "emptyOwnerModules": [],
   "dirtyProvenance": false
 }
 ```
 
-本计划的态度很简单：先让 gate 长牙，再让代码配得上通过。任何 ready flag、旧 report、
-token 检查、空 owner、facade owner、fake telemetry、fallback contact、host pacing waiver、
-未绑定源码的 artifact，都不能作为完成证据。
+## 本轮审计输入
 
-## 审计来源
+本计划由主 agent 和 3 个只读 subagent 通读当前代码后更新。subagent 未编辑文件，未运行会写
+artifact 的任务。
 
-本轮文档由主 agent 第一性审查和 3 个只读 subagent 通读代码后编写。subagent 均未编辑
-文件，均未运行会写 artifact 的任务。
+- Render/Rust subagent: 审查 `voplay/rust/src/renderer*`、`renderer/*.rs`、
+  `renderer_frame.rs`、`render_world.rs`、`primitive_pipeline.rs`、`pipeline3d*`、
+  render architecture/readiness scripts。
+- Physics/scene3d subagent: 审查 `voplay/scene3d/*.vo`、
+  `voplay/examples/physics_stress/main.vo`、physics stress/readiness scripts。
+- BlockKart/CI subagent: 审查 `BlockKart/**/*.vo`、quickplay/provenance/source-audit、
+  boundary lint、`eng/*.toml`、`cmd/vo-dev` task graph。
 
-- Render/Rust audit: `voplay/rust/src/renderer*`, `renderer/*.rs`,
-  `renderer_frame.rs`, `render_world.rs`, `primitive_pipeline.rs`, `pipeline3d*`,
-  render architecture/readiness scripts.
-- Physics audit: `voplay/scene3d/*.vo`, `voplay/examples/physics_stress/main.vo`,
-  physics stress/readiness scripts.
-- BlockKart/Engineering audit: `BlockKart/**/*.vo`, quickplay/provenance/source-audit,
-  boundary lint, `eng/*.toml`, `cmd/vo-dev` task graph.
-
-当前源码 snapshot:
+当前 checkout snapshot:
 
 ```text
-voplay    e4589641a9b22e2667caccf534401ddf4b5ec614
-BlockKart 1d2d61fb5e43a243295c2b8190b7bf781f53835d
+volang    e2de168fab5a0536db7d42d3ba16d2d9257fde2e
+voplay    f3c8296b634d5b7d28353d6c8d3b09daff4968a1
+BlockKart b819dba4c038ff1e7f6a2cb3518fde24cc42ca1a
 ```
 
-当前关键文件规模:
+当前报告显示过绿结论，但源码审查仍有反证：
 
 ```text
-voplay/rust/src/renderer/frame_orchestrator.rs          299
-voplay/rust/src/renderer/frame_pass_sequence.rs         276
-voplay/rust/src/renderer/frame_decode.rs                 46
-voplay/rust/src/renderer/frame_decode_runtime.rs          27
-voplay/rust/src/renderer_frame.rs                       839
-voplay/rust/src/render_world.rs                         656
-voplay/rust/src/primitive_pipeline.rs                   682
-voplay/rust/src/pipeline3d/pipeline_cache.rs            474
-BlockKart/world.vo                                      719
-BlockKart/primitive_world.vo                            755
-BlockKart/runtime_owners.vo                             105
-BlockKart/diagnostics_json.vo                           110
-BlockKart/performance_budget.vo                         365
+target/voplay-engineering-quality-readiness/report.json qualityReady=true
+target/voplay-industrial-readiness/report.json industrialReady=true
+target/voplay-render-stress-budgeted/report.json status=pass
+target/voplay-render-soak-10m/report.json status=pass
+target/voplay-physics-stress/report.json status=pass
 ```
 
-## 当前真实状态
+因此本计划的第一目标是让 gate 能拒绝当前反证，再修源码到 gate 和人工审查一致。
 
-### 已有进步
+## 第一性判定
 
-- `Renderer.submit_frame` 已经拆成 submit shell、orchestrator、decode、workload plan、
-  frame graph plan、pass sequence、perf finalize。
-- FrameGraph 有真实单节点 execution 和 resource read/write 校验。
-- backend submit 已集中到 pass。
-- BatchPlanner 已参与真实提交路径，mesh/primitive/water/decal 等 workload 进入 plan。
-- `Vehicle.UpdateIntent -> KartDynamics.Step -> PhysicsBackendApplyCommand -> backend apply`
-  主链已成形。
-- wheel material 已从 backend wheel packet 回传。
-- contact fallback 已显式标记，industrial contact 会拒绝 fallback、缺 impulse、缺 material。
-- BlockKart 已出现 `RaceSession`、`KartRig`、`TrackRuntime`、`HUDPresenter`、`PerfReporter`
-  等 owner shell，部分行为已迁入 owner receiver。
-- quickplay provenance、source audit、regenerate check、task graph needs 已具备基础闭环。
+### 已经站住的基础
 
-### 必须正视的反证
+- FrameGraph 已经有 `execute_all` traversal，并在节点执行前做 reads/writes 校验：
+  `voplay/rust/src/renderer_frame.rs:598`、`voplay/rust/src/renderer_frame.rs:617`。
+- runtime pass 已走 `execute_all`，backend submit 成为 pass:
+  `voplay/rust/src/renderer/frame_pass_sequence.rs:150`、
+  `voplay/rust/src/renderer/backend_submit_pass.rs:21`。
+- BatchPlanner 已进入真实提交路径，并记录 invalid index / missing chunk skip:
+  `voplay/rust/src/renderer/frame_workload_plan.rs:69`、
+  `voplay/rust/src/render_world.rs:132`、`voplay/rust/src/render_world.rs:210`。
+- `pipeline3d.rs` 已缩到约 380 行，并拆出多个 owner 模块:
+  `voplay/rust/src/pipeline3d.rs:20`、`voplay/rust/src/pipeline3d.rs:339`。
+- BlockKart 主产品链路从 `VehicleIntent` 进入 `VehiclePhysicsSession`，再进 controller /
+  dynamics / backend / telemetry:
+  `BlockKart/world.vo:517`、`BlockKart/runtime_owners.vo:73`、
+  `voplay/scene3d/vehicle_physics_session.vo:49`。
+- backend packet 已有 version、kind、payload length、schema hash:
+  `voplay/scene3d/physics.vo:133`、`voplay/scene3d/physics.vo:184`、
+  `voplay/rust/src/physics3d.rs:803`。
+- BlockKart 运行时边界明显收窄，primitive authoring 主体已迁入 voplay:
+  `BlockKart/primitive_world.vo:114`、`voplay/scene3d/blockkart_primitives.vo:104`、
+  `voplay/scene3d/blockkart_pack.vo:14`。
 
-- FrameGraph 只有单节点执行权，整体 pass 顺序仍由 `frame_pass_sequence.rs` 手写。
-- `FramePassDispatcher` 仍持有 `&mut Renderer`，pass context 可抓全局 renderer。
-- RenderResourceRegistry 仍有声明和真实 backing owner 脱节风险。
-- dirty range 仍偏统计输入，实际路径还会 full chunk rebuild。
-- pipeline3d 仍有 facade owner，例如 primitive/water/decal submitter 只返回 filter/count。
-- render hot path 仍有 panic/expect/silent skip。
-- `VehiclePhysicsSession` 只是 fixed accumulator，未把 intent/controller/dynamics 纳入 session。
-- physics stress 仍有 `controller.UpdateIntent` 后直接 `Scene.StepAndSyncPhysics` 的路径。
-- backend body/contact/wheel packet 仍靠固定字节和 `Remaining()` 推断，缺版本/长度/schema hash。
-- invalid telemetry gate 仍可只看清洗后的 finite fields，漏掉 `InvalidSampleCount`。
-- replay 仍偏同 runtime 两次跑 scenario 比最终位置，尚未成为可执行 trace contract。
-- BlockKart `World` 仍是 mega-owner，字段和流程覆盖多域状态。
-- generic primitive/collider/map/pack authoring 仍大量留在产品层。
-- diagnostics JSON 仍是手写 encoder 和 marker 拼接。
-- readiness report 已出现自相矛盾事实：`industrialReady=true` 与关键 source fact 未硬失败可同时出现。
+### 一票否决反证
+
+P0/P1 未关闭前，任何 ready flag 均无效。
+
+- Render hot path 仍有 panic-prone 路径。`renderer.rs` resize 后直接 `expect` depth/post/
+  receiver/surface-props target，`renderer_runtime.rs` 仍用 mutex `unwrap`:
+  `voplay/rust/src/renderer.rs:624`、`voplay/rust/src/renderer.rs:628`、
+  `voplay/rust/src/renderer_runtime.rs:57`、`voplay/rust/src/renderer_runtime.rs:71`。
+- Render dirty range 仍缺真实 partial upload 证明。代码记录 dirty range / upload bytes 后，
+  仍可能 full rebuild chunk 并从 offset 0 写全量 instance:
+  `voplay/rust/src/primitive_pipeline/runtime.rs:1134`、
+  `voplay/rust/src/primitive_pipeline/runtime.rs:1165`、
+  `voplay/rust/src/primitive_pipeline/runtime.rs:1204`、
+  `voplay/rust/src/primitive_pipeline/runtime.rs:1278`。
+- Render pass context 过宽。`RenderPassResources` 携带 device、queue、all pipelines、
+  managers、render_world，pass 仍能触达大块全局资源:
+  `voplay/rust/src/renderer/pass_dispatch.rs:13`、`voplay/rust/src/renderer/pass_dispatch.rs:42`。
+- ResourceRegistry 仍有双层事实。`Renderer.resources` 持真实 target，FrameGraph registry
+  记录本帧 logical readiness，二者缺 generation 同源硬约束:
+  `voplay/rust/src/renderer.rs:225`、`voplay/rust/src/renderer_frame.rs:301`、
+  `voplay/rust/src/renderer/frame_graph_plan.rs:33`。
+- pipeline3d owner 迁移未完成。`Pipeline3D::draw_models` 仍承载主体逻辑，部分 submitter
+  仍偏 prepare/count/filter/report facade:
+  `voplay/rust/src/pipeline3d/mesh_submitter.rs:39`、
+  `voplay/rust/src/pipeline3d/skinned_submitter.rs:4`、
+  `voplay/rust/src/pipeline3d/primitive_submitter.rs:11`、
+  `voplay/rust/src/pipeline3d/water_submitter.rs:11`。
+- Physics body/contact malformed packet 静默吞掉。坏 header、短包、长度不符会 `return` 或
+  `nil`，没有结构化 error、invalid sample、gate failure:
+  `voplay/scene3d/scene.vo:843`、`voplay/scene3d/scene.vo:848`、
+  `voplay/scene3d/scene.vo:929`、`voplay/scene3d/scene.vo:934`。
+- Physics backend contract 仍有绕过面。`Vehicle.ApplyForceCommand` 可公开绕过 intent/dynamics；
+  `Entity.SetPosition/SetVelocity` 等 raw physics command 仍可被 `ProductStepAndSyncPhysics`
+  提交:
+  `voplay/scene3d/vehicle.vo:208`、`voplay/scene3d/physics.vo:264`、
+  `voplay/scene3d/scene.vo:828`、`voplay/scene3d/scene.vo:839`。
+- Road-edge assist 仍可通过 constraint command 改车辆位置/速度，绕开
+  `VehicleForceCommand -> PhysicsBackendApplyCommand`:
+  `voplay/scene3d/vehicle_road_edge_assist.vo:88`、
+  `voplay/scene3d/vehicle_road_edge_assist.vo:136`、
+  `BlockKart/kart_rig.vo:25`、`BlockKart/kart_rig.vo:38`。
+- Quickplay/provenance 能证明当前 `.vo` 与 artifact 字节，但 `assets/blockkart.vpak` 的离线生成链
+  还缺当前脚本输入到产物的完整 provenance:
+  `volang/apps/studio/public/quickplay/blockkart/project.json:137`、
+  `BlockKart/tools/generate_primitive_terrain.mjs:2125`、
+  `BlockKart/tools/pack_primitive_assets.vo:16`。
+- Active plan freshness 曾失效。旧文档写旧 voplay / BlockKart commit，docs lint 未捕获。计划文档
+  snapshot 需要进入 freshness gate。
 
 ## 破釜沉舟原则
 
-1. Gate 首先要能拒绝当前源码中的真实反证。
+1. 先让 gate 能打掉当前源码反证，再谈源码修复完成。
 2. 源码第一性审查优先于 ready flag。
 3. 行为测试优先于字符串 token。
 4. 空 owner、facade owner、只转调 owner、只计数 owner 全部失败。
-5. 每个 P0/P1 关闭必须同时具备源码证据、行为测试、stress report、fresh source-bound report。
-6. 旧 report、旧 artifact、dirty provenance、未绑定当前 commit 的证据全部无效。
-7. 产品层直接拥有底层 render/physics/resource workaround 时，Final Gate 失败。
-8. Hot path panic、silent skip、implicit fallback、compat pass-through 都要进入结构化 error/report。
-9. CI 脚本可以保留 ready flag，但 ready flag 只能由 hard evidence 推导。
-10. 如果 readiness report 内部自相矛盾，最终结论强制失败。
+5. Hot path panic、silent skip、implicit fallback、compat pass-through 进入结构化 error/report。
+6. 每个 P0/P1 关闭必须同时具备源码证据、行为测试、stress report、fresh source-bound report。
+7. 旧 report、旧 artifact、dirty provenance、未绑定当前 commit 的证据全部无效。
+8. readiness report 内部自相矛盾时，最终结论强制失败。
+9. product 层拥有底层 render/physics/resource workaround 时，Final Gate 失败。
+10. 任何阶段只能写 phase pass；Final Gate 之前不能写工业级完成。
 
-## 第一性审查协议
-
-每次声明完成前都必须执行以下审查，并把结果写入 report:
-
-- 读取 `volang`、`voplay`、`BlockKart` HEAD、dirty status、source digest。
-- 读取 active plan、gate script digest、artifact digest、target report digest。
-- 用 AST 或结构化扫描检查 call graph、owner receiver、method body、mutation owner、
-  packet schema、runtime path。
-- 用行为测试验证源码检查结论，regex 只做防回退 guard。
-- 对所有 target report 做 freshness 校验：源码、gate、artifact、expected commit 任一变化后
-  旧 report 失效。
-- 主 reviewer 必须读关键源码样本并写出独立结论，不能只读取 `qualityReady` /
-  `industrialReady` 字段。
-
-## Workstream A: Gate 可信度重建
+## Workstream A: Gate 诚实度重建
 
 ### 目标结果
 
-当前源码中的 P0/P1 反证必须让 readiness 明确失败，并报告文件、行号、原因、修复 owner。
+当前 P0/P1 反证必须让 readiness 失败，并报告文件、行号、原因、修复 owner。`qualityReady=true`
+或 `industrialReady=true` 与源码反证同时出现时，报告直接失败。
 
 ### 必须改造
 
-- `voplay_industrial_readiness.mjs`
-  - 将 `runtimeUsesExecuteNode=false`、manual pass sequence、missing `execute_all`、
-    hot path panic、facade owner、invalid telemetry blind spot 变成 hard failure。
-  - 任何 source fact 和 ready flag 冲突时 hard failure。
-  - required physics scenarios 补齐 `surface-transition`、`recovery`。
-- `voplay_engineering_quality_readiness.mjs`
-  - string-only evidence 降为未完成。
-  - owner 检查要求真实副作用：draw、write、bind、cache mutation、structured report。
-  - report freshness 校验 task-run id、source digest、gate digest、artifact digest、dirty flags。
 - `voplay_render_architecture_lint.mjs`
-  - 检查 `frame_pass_sequence.rs` 手写 `execute_node` 顺序。
-  - 检查 `FramePassDispatcher` 是否持有 `&mut Renderer`。
-  - 扩大 hot path panic/expect/unwrap/assert 扫描到 renderer pass/runtime/pipeline。
-  - dirty range gate 从 token 检查升级到 behavior report 检查。
+  - hot path 扫描覆盖 `renderer.rs`、`renderer_runtime.rs`、pass modules、pipeline3d、
+    primitive runtime。
+  - dirty range gate 从 token 检查升级为行为证明：单实例更新不得触发 full rebuild；partial
+    upload offset 必须与 dirty range 对齐。
+  - dispatcher gate 检查 pass context 资源宽度，禁止 pass 获取整包 all pipelines / managers。
+  - facade submitter gate 检查真实 draw/upload/bind/report 副作用。
+- `voplay_industrial_readiness.mjs`
+  - `renderHotPathPanicHits` 必须包含当前 `renderer.rs` resize `expect` 与
+    `renderer_runtime.rs` mutex `unwrap`，或源码已消除它们。
+  - packet gate 必须检查 malformed body/contact 的失败路径，不能只检查 schema token。
+  - direct public physics bypass、raw command bypass、constraint bypass 都进入 P0/P1 source facts。
+  - active plan snapshot freshness 进入 source-bound evidence。
+- `voplay_engineering_quality_readiness.mjs`
+  - string-only checks 降为 incomplete。
+  - report freshness 校验 task-run id、source digest、gate digest、artifact digest、dirty flags。
+  - owner 检查要求真实副作用和单测覆盖。
 - `blockkart_product_boundary_strict.mjs`
-  - 增加 World 字段/receiver allowlist。
-  - 覆盖 current primitive/collider/map/pack API token。
-  - 覆盖 `.SetPose(`、runtime product physics mutation、manual JSON marker 输出。
-- quickplay/source-bound scripts
-  - 所有 allowlist 需要 owner、reason、expiresAt。
-  - readiness 读取的 report 必须和当前 checkout 同源同跑。
-
-### 验收
-
-- 当前源码在 P0/P1 修复前会被 gate 打成 failure。
-- 每个 failure 有 code、severity、file、line、reason、required fix。
-- synthetic selftest 能证明每个 forbidden token 和 stale report 都会失败。
-
-## Workstream B: Render Graph 真正接管渲染执行
-
-### 目标结果
-
-渲染主路径固定为：
-
-```text
-decode -> transaction -> snapshot -> batch plan -> frame graph compile
--> frame graph execute_all -> backend submit -> telemetry
-```
-
-`FrameGraphExecutor` 拥有 pass traversal、依赖排序、enabled pruning、resource validation、
-timing、workload。外部代码只能提交 graph 和 context，不能手写 pass 顺序。
-
-### 必须改造
-
-- 新增 `FrameGraphExecutor.execute_all(ctx)` 或等价入口。
-- `frame_pass_sequence.rs` 退出逐字段手写 `execute_node`。
-- `FrameGraphPlanNodes` 由固定字段结构改为 ordered node list。
-- `FramePassDispatcher` 不再持有 `&mut Renderer`。
-- pass context 只接收显式 resource handles、snapshot、batch plan、telemetry writer。
-- post setup、shadow defaults、aux target preparation 进入 graph pass setup 或 registry lifecycle。
-- `RenderResourceRegistry` 为每个 target 记录 backing owner、generation、lifetime、ready cause、
-  resize/recreate/alias/churn。
+  - 保留 content-level surface/collider 描述的明确 allowlist。
+  - vpak/terrain 离线生成链需要 producer、inputs、digest、script commit 的 provenance。
 
 ### 验收
 
 ```sh
-rg -n "execute_node\\(&context\\.nodes|FrameGraphPlanNodes|renderer: &'a mut Renderer" /Users/macm1/code/github/voplay/rust/src/renderer /Users/macm1/code/github/voplay/rust/src/renderer_frame.rs
+./d.py ci task voplay-render-structure-lint
+./d.py ci task voplay-industrial-readiness --allow-not-ready
+./d.py ci task voplay-engineering-quality-readiness --allow-not-ready
 ```
 
-必须无未授权命中。新增单测覆盖 pass order、disabled pruning、missing read、missing write、
-resize generation、transient reuse、backend submit timing。
+在 P0/P1 修复前，上述 readiness 必须报告失败，且 failure 指向本文件列出的反证。
 
-## Workstream C: Render Batch、dirty range、pipeline owner 质量
+## Workstream B: Render 热路径和资源生命周期硬化
 
 ### 目标结果
 
-BatchPlanner 既驱动真实 draw，也能解释 skip、dirty upload、resident rebuild、transparent order。
-pipeline3d owner 均有真实职责。
+render hot path 无 panic-prone 调用；target lifecycle 由同一个 registry / generation 事实驱动；
+所有 missing target、missing model、missing mesh、missing bind group、invalid index 都进入结构化
+error、warning 或 skip telemetry。
 
 ### 必须改造
 
-- `render_world` 的 invalid index 不能被 `filter_map` 静默吞掉，需进入 error/counter。
-- `scene_id`、chunk id、LOD、dirty range、resident generation 贯穿 model/terrain/decal/chunk plan。
-- dirty range 驱动 partial upload，或触发显式 rebuild policy 并报告原因。
-- `primitive_submitter.rs`、`water_submitter.rs`、`decal_submitter.rs` 获得真实 prepare/upload/draw/report
-  职责。
-- render hot path 清理 `panic`、`expect`、`unwrap`、`assert`，改成 structured render error。
-- workload telemetry 覆盖 depth/shadow/backend submit，不再返回纯 default workload。
+- `Renderer::resize` 中 target 获取改为 `Result`，错误进入 `RendererTelemetry.resourceFailures`。
+- `renderer_runtime.rs` mutex poison 改为结构化 host renderer error。
+- `RenderResourceRegistry` 增加 backing generation、target owner、actual texture/view id、ready cause。
+- FrameGraph logical target readiness 与实际 backing target generation 对账。
+- missing model/mesh/texture bind group 的 draw skip 进入统一 `RenderSkipStats`。
+- render stress report 输出 `resourceFailures`、`structuredSkipCounts`、`panicProneHitCount=0`。
 
 ### 验收
 
-- 单实例更新测试证明未触发 full chunk rebuild。
-- invalid batch index 测试返回结构化 warning/error。
-- facade submitter gate 能拒绝只返回 filter/count 的 owner。
-- render stress report 包含 dirty upload bytes、full rebuild count、skip reason、owner workload。
+- `rg -n "expect\\(|unwrap\\(|panic!\\(|assert!\\("` 在 render hot path 白名单外无命中。
+- resize/recreate negative test 能返回 structured error，不能崩溃。
+- render stress / soak 报告 `resourceFailures=0`、`structuredSkipCounts` 可解释。
 
-## Workstream D: Physics session 和 backend contract
+## Workstream C: Dirty Range、BatchPlanner、Pipeline Owner 收口
+
+### 目标结果
+
+BatchPlanner 既驱动真实 draw，也能解释 visibility、LOD、dirty upload、resident rebuild、skip reason。
+pipeline3d owner 均有真实生产职责。
+
+### 必须改造
+
+- 单实例 transform/material 更新走 partial buffer upload。
+- full rebuild 只允许在容量变化、layout 变化、chunk resident generation 变化时触发，并写入原因。
+- `dirty_upload_bytes` 与真实 queue write offset/length 对账。
+- `MeshSubmitter`、`SkinnedSubmitter`、`TerrainSubmitter` 接管 draw 主体，`Pipeline3D` 降为 façade-free
+  composition。
+- `PrimitiveSubmitter`、`WaterSubmitter`、`DecalSubmitter` 至少拥有真实 prepare/upload/draw/report
+  其中一项生产副作用。
+- `RenderBatchPlan` 输出 visible chunks、LOD、dirty ranges、resident rebuilds、skip reason、owner workload。
+
+### 验收
+
+- 单实例更新测试证明 `fullRebuildCount=0` 且 write offset 与 dirty range 对齐。
+- facade submitter selftest 能拒绝只返回 count/filter 的 owner。
+- stress report 能解释 primitive10k、chunked-world-drive、water/wake 的 workload 和 churn。
+
+## Workstream D: Physics Packet 和 Backend Contract 收口
 
 ### 目标结果
 
@@ -251,106 +254,79 @@ VehicleIntentFrame -> VehiclePhysicsSession -> KartController/KartDynamics
 -> VehicleTelemetry -> PhysicsReplayTrace
 ```
 
-产品、stress、controller、assist、recovery、sleep 都走同一 session。
+坏 packet、raw bypass、constraint bypass、compat helper 都不能穿过工业 gate。
 
 ### 必须改造
 
-- `VehiclePhysicsSession.Step` 在每个 fixed tick 应用 normalized intent。
-- session 内调用 controller/dynamics/backend apply，记录 applied intent count 和 backend apply count。
-- stress 和 BlockKart 默认路径均使用 session。
-- 删除或限制 `controller.UpdateIntent(...); Scene.StepAndSyncPhysics(...)` 的 runtime/CI 路径。
-- reset、sleep、recovery、road-edge assist 统一进入 session command buffer。
-- recovery 避免 pose/motion 重复 apply。
-- 移除 hardcoded post-reset `1.0 / 60.0` brake tick。
+- `StepAndSyncPhysics` 和 `Contacts` 对 bad header、short packet、length mismatch、unknown schema、
+  extra bytes 生成结构化 `PhysicsBackendPacketError`。
+- malformed packet error 汇入 scene/session telemetry、invalid sample count、stress report。
+- `Vehicle.ApplyForceCommand` 降为 internal/backend adapter helper，产品和工具不可直接调用。
+- `ProductStepAndSyncPhysics` 标记 compat/debug 并被 gate 禁止进入 product/stress/default path。
+- `Entity.SetPosition/SetVelocity/SetAngularVelocity` raw command 进入 backend command contract，或明确迁入
+  debug/compat allowlist。
+- road-edge assist、reset、sleep、recovery 统一表达为 backend contract command，并进入 replay hash。
+- 增加 short body packet、bad contact packet、unknown schema、extra bytes、constraint bypass 负例测试。
 
 ### 验收
 
-- physics stress report 包含 session tick count、applied intent count、backend apply count，逐 step 对齐。
-- source audit 无未授权 direct step 链路。
-- recovery/sleep/assist 进入 backend apply hash 和 telemetry。
+- malformed packet 任一负例都会让 physics backend contract 或 industrial stress 失败。
+- industrial stress report:
 
-## Workstream E: Physics packet、telemetry、replay 可信度
-
-### 目标结果
-
-backend packet、invalid telemetry、contact material、replay 都具备可执行合同。
-
-### 必须改造
-
-- body/contact/wheel packet 增加 packet kind、schema version、length、capability、schema hash。
-- 短包、unknown schema、extra bytes 结构化失败。
-- contact/wheel material 直接来自 backend packet，contact event 不依赖 `vehicle.Track` 绑定。
-- stress `invalidSamples` 同时统计 `VehicleTelemetry.InvalidSampleCount` 和
-  `ValidationIssues`。
-- 增加 NaN/invalid quat 专用负例。
-- `PhysicsReplayTrace` 成为可执行 trace：record trace -> fresh process replay ->
-  per-step `BackendApplyHash/PoseHash/TelemetryHash` 对账。
-- industrial stress required scenarios 覆盖 `surface-transition`、`recovery`。
-
-### 验收
-
-- old pair-only contact、short wheel packet、unknown schema 三个负例全部失败。
-- replay 篡改 fixed dt、input、schema、material id 任一项都会失败。
-- `fallbackContactEvents == 0`、`invalidSamples == 0`、replay drift `<= 0.01m` 同时成立。
-
-## Workstream F: BlockKart 产品层瘦身
-
-### 目标结果
-
-BlockKart 只保留 content、race rules、tuning、HUD presentation、product flow 和只读 diagnostics。
-generic primitive/collider/map/pack authoring、底层 physics/render/resource workaround 归 voplay
-或工具链 owner。
-
-### 必须改造
-
-- `World` 降为 lifecycle composition root。
-- `RaceSession` 自持 race/checkpoint/collectible/progress 状态。
-- `KartRig` 自持 kart/player/vehicle/audio/assist state。
-- `TrackRuntime` 自持 track spawn、visuals、collider、primitive content references。
-- `HUDPresenter` 和 `PerfReporter` 自持 diagnostics/debug/perf 输出状态。
-- owner 方法不再以 `*World` 作为主上下文修改跨域状态。
-- `primitive_world.vo` 中通用 primitive runtime、shape/material preset、map/collider authoring
-  迁入 voplay product authoring API 或工具链。
-- `pack_primitive_assets.vo` 等工具产物纳入 provenance producer 输入，运行时产品包不能拥有 pack writer。
-- diagnostics JSON 改为 schema-owned encoder，业务文件禁止拼 marker + object。
-
-### 验收
-
-```sh
-rg -n "primitive3d\\.|ProductPrimitive|PrimitiveBatchAuthoring|ShapeDesc|MaterialPreset|BeginBulkAdd|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|vopack|PackWriter" /Users/macm1/code/github/BlockKart -g "*.vo"
-rg -n "^func \\(w \\*World\\)" /Users/macm1/code/github/BlockKart
+```text
+fallbackContacts=0
+invalidSamples=0
+packetErrors=0
+directBypassHits=0
+constraintBypassHits=0
+replayDrift<=0.01m
 ```
 
-第一条在 runtime 产品代码无命中；工具路径必须有 provenance producer 记录。第二条只允许
-lifecycle/composition/debug facade 白名单。
-
-## Workstream G: Artifact、freshness、CI 路由
+## Workstream E: Replay、Telemetry、Stress 可信度
 
 ### 目标结果
 
-CI 能证明当前源码、当前 gate、当前 report、当前 quickplay artifact、当前 sibling commits
-来自同一次工程事实。
+replay 是可执行 trace contract，能够发现 fixed dt、input、surface/material、packet schema、
+backend apply、pose、telemetry 任一项漂移。
 
 ### 必须改造
 
-- 每份 readiness report 写入 task-run id、source digest、gate digest、artifact digest、
-  dependency report digest、tested commits、dirty flags、generatedAt。
-- `source_bound_evidence.mjs` 单独生成证据时也要有可用于 failure 的 verdict。
-- `quickplay_validate`、source audit、regenerate check、readiness 全部绑定同一组 commits/digests。
-- `vo-dev task run quickplay-validate` 成为 CI 入口，禁止直接 node 脚本绕过 task needs。
-- 改 `eng/project.toml`、quickplay artifact、CI scripts 任一项，matrix 必须包含 quickplay
-  validate/source audit/regenerate/readiness 链。
+- `PhysicsReplayTrace` 逐 step 记录 fixed dt、intent hash、surface/contact summary、backend apply hash、
+  pose hash、telemetry hash。
+- fresh process replay 对逐 step hash，不只比最终位置。
+- 篡改 fixed dt、intent、material id、schema hash、contact impulse 任一项必须失败。
+- stress required scenarios 覆盖 skidpad、slalom、drift turbo、boost、offroad、surface-transition、
+  jump landing、wall impact、rail ride、wall ride、water skim、recovery、24 vehicle soak。
 
 ### 验收
 
-- 修改源码但复用旧 report 会失败。
-- 修改 gate 脚本但复用旧 report 会失败。
-- dirty flag 为 true 时 Final Gate 失败。
-- 新增 BlockKart `.vo` 未进入 package 或 allowlist 时失败。
+- replay tamper tests 全部失败到预期 code。
+- 24 vehicle soak 无 invalid sample、无 fallback、无 long stuck、无爆速、无无限旋转。
+
+## Workstream F: BlockKart 产品层和 Artifact Provenance 收口
+
+### 目标结果
+
+BlockKart 只保留 content、race rules、tuning、quality profile、HUD、product flow、read-only diagnostics。
+离线内容生成链与 quickplay artifact 同源可重建。
+
+### 必须改造
+
+- `vpak` / terrain 生成链写入 producer provenance：script path、script digest、input digest、output digest、
+  source commit、toolchain command。
+- `quickplay_source_audit` 覆盖 `.vo` 之外的 declared content producers。
+- `quickplay_regenerate_check` 对 vpak/terrain 生成链做脚本级重建或 source-bound digest 对账。
+- BlockKart product-level surface/collider 描述建立 allowlist：content data 可以保留，engine workaround 禁止。
+- diagnostics JSON 继续只通过 voplay structured encoder 输出。
+
+### 验收
+
+- 修改 terrain generator、pack script、input asset 任一项时 quickplay source audit 或 regenerate check 失败。
+- BlockKart runtime 无 direct physics step、raw render knobs、primitive authoring runtime、manual engine fact JSON。
 
 ## Final Gate
 
-Final Gate 必须全部通过，且主 reviewer 第一性审查无 P0/P1 反证：
+Final Gate 必须全部通过，并且主 reviewer 第一性审查无 P0/P1 反证：
 
 ```sh
 ./d.py ci task voplay-engineering-quality-readiness
@@ -377,31 +353,37 @@ git diff --cached --check
 
 额外断言：
 
+- `sourceFirstPrinciplesReview == pass`
 - `fileBudgets` 全 pass。
 - `codeOwnership.status == pass`。
 - `stringOnlyChecks == []`。
 - `emptyOwnerModules == []`。
 - `sourceAuditFailures == []`。
 - `failures == []`。
-- `dirtyProvenance == false`。
+- `renderHotPathPanicHits == []`
+- `dirtyRangePartialUploadVerified == true`
+- `resourceRegistryBackingAgreement == true`
+- `submitterOwnership.status == pass`
+- `malformedPhysicsPacketFailures == all-pass`
+- `directPhysicsBypassHits == []`
+- `constraintBypassHits == []`
+- `physicsReplayTamperTests == all-pass`
+- `vpakProducerProvenance == pass`
+- `activePlanSnapshotFresh == true`
 - render stress / soak report fresh。
 - physics stress / replay report fresh。
-- quickplay artifact 与源码 commit 一致。
-- `sourceFirstPrinciplesReview == pass`
-- `fileBudgets == all-pass`
-- `runtimeSidecarBudgets == all-pass`
-- `codeOwnership.status == pass`
-- `stringOnlyChecks == []`
-- `emptyOwnerModules == []`
-- `sourceAuditFailures == []`
 - `freshSourceBoundReports == true`
 - `artifactSourceAgreement == true`
-- `dirtyProvenance == false`
-- readiness report 内部无冲突 source fact
+- quickplay artifact 与源码 commit 一致。
+- `dirtyProvenance == false`。
 
 ## 执行纪律
 
-这份计划要有破釜沉舟的勇气和决心：任何换名字、降阈值、删检查、保留 façade、
-复用旧报告、用 token 代替行为、把 fallback 包成兼容、把复杂度藏进 sidecar 的做法，
-都计为失败。下一轮实施必须先让当前反证被 gate 打出来，再逐项改源码，直到源码、
-行为、压力、artifact、provenance、CI 同时一致。
+这份计划要有破釜沉舟的勇气和决心：先让当前反证被 gate 打出来，再逐项修源码，再跑长测和
+artifact/provenance 闭环。任何换名字、降阈值、删检查、复用旧报告、把复杂度藏到 sidecar、
+用 token 代替行为、把 fallback 包成兼容的做法，都计为失败。Final Gate 通过之前，所有结论
+统一写：
+
+```text
+phase pass; qualityReady=false; industrialReady=false.
+```

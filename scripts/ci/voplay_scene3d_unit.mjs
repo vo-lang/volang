@@ -48,6 +48,8 @@ function checkSourceCoverage(source) {
       'scene3d vehicle suspension compression',
       'scene3d vehicle longitudinal slip uses body local velocity',
       'scene3d contact events decode backend pair',
+      'scene3d malformed body packet records backend packet error',
+      'scene3d malformed contact packet records backend packet error',
     ],
   };
   const required = suites[suite];

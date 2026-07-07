@@ -35,49 +35,128 @@ const expected = {
     'apps/studio/scripts/package_blockkart_quickplay.mjs',
     'eng/project.toml',
     'external:BlockKart',
+    'external:BlockKart/tools/pack_primitive_assets.vo',
+    'external:BlockKart/tools/generate_primitive_terrain.mjs',
+    'external:BlockKart/tools/paint_terrain_textures.mjs',
+    'external:BlockKart/tools/terrain_heightfield_spec.mjs',
+    'external:BlockKart/tools/terrain_recipe.mjs',
+    'external:BlockKart/terrain/recipes/primitive_concept_v1.json',
     'first-party:voplay',
     'module-cache:vopack',
     'module-cache:vogui',
   ],
 };
 
+const requiredVpakProducerOutput = 'assets/blockkart.vpak';
+const requiredVpakProducerInputPaths = [
+  'tools/pack_primitive_assets.vo',
+  'assets/maps/primitive_track/blockkart.map.json',
+];
+const requiredTerrainProducerInputs = [
+  'tools/generate_primitive_terrain.mjs',
+  'tools/terrain_heightfield_spec.mjs',
+  'tools/terrain_recipe.mjs',
+  'terrain/recipes/primitive_concept_v1.json',
+  'assets/source/terrain_painted/grass_painted_v1.png',
+  'assets/source/terrain_painted/meadow_painted_v1.png',
+  'assets/source/terrain_painted/dirt_painted_v1.png',
+  'assets/source/terrain_painted/rock_painted_v1.png',
+  'assets/effects/grass_card_atlas.png',
+];
+const requiredTerrainProducerOutputs = [
+  'assets/maps/primitive_track/lowpoly_terrain.glb',
+  'assets/maps/primitive_track/lowpoly_terrain_lod.glb',
+  'assets/maps/primitive_track/lowpoly_terrain_height_grid.bin',
+  'assets/maps/primitive_track/terrain_splat_large.png',
+];
+const requiredPaintProducerInputs = [
+  'tools/paint_terrain_textures.mjs',
+  'docs/images/terrain-upgrade-concept-v1.png',
+];
+const requiredPaintProducerOutputs = [
+  'assets/source/terrain_painted/grass_painted_v1.png',
+  'assets/source/terrain_painted/meadow_painted_v1.png',
+  'assets/source/terrain_painted/dirt_painted_v1.png',
+  'assets/source/terrain_painted/rock_painted_v1.png',
+  'assets/effects/grass_card_atlas.png',
+];
+
+function structuredIssue(message, evidence = {}) {
+  return {
+    owner: evidence.owner ?? 'Volang',
+    subsystem: evidence.subsystem ?? 'Quickplay',
+    severity: evidence.severity ?? 'P0',
+    message,
+    file: evidence.file ?? null,
+    line: evidence.line ?? 1,
+    reason: evidence.reason ?? message,
+    requiredFix: evidence.requiredFix ?? 'Update the current source/provenance and rerun this gate from fresh checked-out sources.',
+    evidence,
+  };
+}
+
+function lineInFile(filePath, needle) {
+  if (!existsSync(filePath)) return 1;
+  const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+  const index = lines.findIndex((line) => line.includes(needle));
+  return index === -1 ? 1 : index + 1;
+}
+
 function writeReport(status, details = {}) {
   const generatedAt = new Date().toISOString();
-  mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, 'report.json'), `${JSON.stringify({
+  const freshEvidence = sourceBoundEvidence({
+    gate: 'quickplay-validate',
+    generatedAt,
+    root,
+    repos: [
+      { name: 'volang', root },
+      { name: 'BlockKart', root: blockKartRoot },
+      ...dependencyRepos,
+    ],
+    gateFiles: [
+      'scripts/ci/quickplay_validate.mjs',
+      'scripts/ci/repo_roots.mjs',
+      'scripts/ci/source_bound_evidence.mjs',
+      'apps/studio/scripts/package_blockkart_quickplay.mjs',
+      'apps/studio/src/lib/quickplay.ts',
+      'eng/artifacts.toml',
+      'eng/tasks.toml',
+      'eng/project.toml',
+    ],
+    artifacts: [quickplayDir],
+  });
+  const issues = [...(details.issues ?? [])];
+  if (status === 'ok' && freshEvidence.verdict.status !== 'pass') {
+    issues.push(structuredIssue('quickplay validate freshEvidence verdict must pass', {
+      owner: 'Volang',
+      subsystem: 'FreshEvidence',
+      file: 'scripts/ci/quickplay_validate.mjs',
+      line: 73,
+      reason: 'Current quickplay validate report was produced from dirty or missing-commit repositories.',
+      dirtyRepos: freshEvidence.verdict.dirtyRepos,
+      missingCommitRepos: freshEvidence.verdict.missingCommitRepos,
+      requiredFix: 'Commit or clean all source/provenance changes, then rerun quickplay-validate so its report binds to fresh source digests.',
+    }));
+  }
+  const finalStatus = issues.length > 0 ? 'failed' : status;
+  const report = {
     schemaVersion: 1,
     kind: 'quickplay.validateReport',
     gate: 'quickplay-validate',
-    status,
+    status: finalStatus,
     generatedAt,
-    freshEvidence: sourceBoundEvidence({
-      gate: 'quickplay-validate',
-      generatedAt,
-      root,
-      repos: [
-        { name: 'volang', root },
-        { name: 'BlockKart', root: blockKartRoot },
-        ...dependencyRepos,
-      ],
-      gateFiles: [
-        'scripts/ci/quickplay_validate.mjs',
-        'scripts/ci/repo_roots.mjs',
-        'scripts/ci/source_bound_evidence.mjs',
-        'apps/studio/scripts/package_blockkart_quickplay.mjs',
-        'apps/studio/src/lib/quickplay.ts',
-        'eng/artifacts.toml',
-        'eng/tasks.toml',
-        'eng/project.toml',
-      ],
-      artifacts: [quickplayDir],
-    }),
+    freshEvidence,
     quickplayDir,
     ...details,
-  }, null, 2)}\n`);
+    issues,
+  };
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
+  return report;
 }
 
-function fail(message) {
-  writeReport('failed', { message });
+function fail(message, evidence = {}) {
+  writeReport('failed', { message, issues: [structuredIssue(message, evidence)] });
   console.error(`quickplay validate: ${message}`);
   process.exit(1);
 }
@@ -103,9 +182,9 @@ function gitDirty(cwd) {
   return gitOutput(['status', '--porcelain'], cwd) !== '';
 }
 
-function assert(condition, message) {
+function assert(condition, message, evidence = {}) {
   if (!condition) {
-    fail(message);
+    fail(message, evidence);
   }
 }
 
@@ -184,6 +263,133 @@ function packagedFilesDigest(files) {
     })
     .sort((a, b) => a.path.localeCompare(b.path));
   return sourceSetDigest(entries);
+}
+
+function entryMap(entries) {
+  return new Map((entries ?? []).map((entry) => [entry.path, entry]));
+}
+
+function sourceDigestEntry(relative) {
+  const absolute = join(blockKartRoot, relative);
+  assert(existsSync(absolute), `BlockKart producer source is missing: ${relative}`, {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: relative,
+    reason: 'A required producer input/output path is absent from the BlockKart checkout.',
+    requiredFix: 'Regenerate or restore the producer source/output before packaging quickplay.',
+  });
+  const bytes = readFileSync(absolute);
+  return { path: relative, digest: sha256Digest(bytes), size: bytes.byteLength };
+}
+
+function validateProducerDigestEntries(entries, requiredPaths, label) {
+  const entriesByPath = entryMap(entries);
+  for (const requiredPath of requiredPaths) {
+    const found = entriesByPath.get(requiredPath);
+    assert(found, `${label} producer provenance missing digest entry for ${requiredPath}`, {
+      owner: 'BlockKart',
+      subsystem: 'ProducerProvenance',
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      reason: 'The quickplay provenance does not record a required producer input/output digest.',
+      requiredFix: 'Regenerate quickplay provenance with full vpak and terrain producer inputs/outputs.',
+      requiredPath,
+    });
+    const expectedEntry = sourceDigestEntry(requiredPath);
+    assert(
+      found.digest === expectedEntry.digest && found.size === expectedEntry.size,
+      `${label} producer provenance stale for ${requiredPath}`,
+      {
+        owner: 'BlockKart',
+        subsystem: 'ProducerProvenance',
+        file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+        reason: 'A recorded producer digest no longer matches the current source checkout.',
+        requiredFix: 'Regenerate quickplay provenance from the current BlockKart producer files.',
+        requiredPath,
+        expected: expectedEntry,
+        found,
+      },
+    );
+  }
+}
+
+function validateBlockKartRuntimeProducer(project, provenance) {
+  const projectFiles = new Map((project.files ?? []).map((file) => [file.path, file]));
+  const packagedVpak = projectFiles.get(requiredVpakProducerOutput);
+  assert(packagedVpak, 'project package missing assets/blockkart.vpak', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/project.json',
+    reason: 'The runtime vpak must be embedded and source-bound.',
+    requiredFix: 'Regenerate the quickplay package with assets/blockkart.vpak included.',
+  });
+  const packagedVpakBytes = moduleFileBytes(packagedVpak);
+  const producer = (provenance.producers ?? []).find((entry) => entry?.output === requiredVpakProducerOutput);
+  assert(producer, 'provenance missing assets/blockkart.vpak producer record', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The runtime vpak is packaged without first-party producer lineage.',
+    requiredFix: 'Regenerate quickplay provenance with tools/pack_primitive_assets.vo, terrain generation inputs, output digests, and commands.',
+  });
+  assert(producer.owner === 'BlockKart', 'assets/blockkart.vpak producer owner mismatch', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The producer owner must identify the accountable first-party source.',
+    requiredFix: 'Set producer.owner to BlockKart for the runtime vpak producer.',
+  });
+  assert(producer.kind === 'vpak', 'assets/blockkart.vpak producer kind mismatch', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The producer kind must identify the runtime asset pack contract.',
+    requiredFix: 'Set producer.kind to vpak for assets/blockkart.vpak.',
+  });
+  assert(Array.isArray(producer.command) && producer.command.includes('tools/pack_primitive_assets.vo'), 'assets/blockkart.vpak producer command must name tools/pack_primitive_assets.vo', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The provenance must name the command that generated the vpak.',
+    requiredFix: 'Record the vpak pack command in producer.command.',
+  });
+  validateProducerDigestEntries(producer.inputs, requiredVpakProducerInputPaths, 'assets/blockkart.vpak');
+  validateProducerDigestEntries(producer.outputs, [requiredVpakProducerOutput], 'assets/blockkart.vpak');
+  const outputEntry = entryMap(producer.outputs).get(requiredVpakProducerOutput);
+  assert(
+    outputEntry.digest === sha256Digest(packagedVpakBytes) && outputEntry.size === packagedVpakBytes.byteLength,
+    'assets/blockkart.vpak producer output digest must match packaged bytes',
+    {
+      owner: 'BlockKart',
+      subsystem: 'ProducerProvenance',
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      reason: 'The recorded vpak output digest does not match the quickplay package bytes.',
+      requiredFix: 'Regenerate quickplay provenance from the same vpak bytes embedded in project.json.',
+      expected: { digest: sha256Digest(packagedVpakBytes), size: packagedVpakBytes.byteLength },
+      found: outputEntry,
+    },
+  );
+
+  const upstream = Array.isArray(producer.upstream) ? producer.upstream : [];
+  const terrainProducer = upstream.find((entry) => entry?.id === 'primitive-terrain-assets');
+  const paintProducer = upstream.find((entry) => entry?.id === 'painted-terrain-textures');
+  assert(terrainProducer, 'assets/blockkart.vpak provenance missing primitive terrain producer', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The vpak producer must include the generated terrain asset lineage.',
+    requiredFix: 'Record tools/generate_primitive_terrain.mjs inputs and generated terrain output digests.',
+  });
+  validateProducerDigestEntries(terrainProducer.inputs, requiredTerrainProducerInputs, 'primitive-terrain-assets');
+  validateProducerDigestEntries(terrainProducer.outputs, requiredTerrainProducerOutputs, 'primitive-terrain-assets');
+  assert(paintProducer, 'assets/blockkart.vpak provenance missing painted terrain producer', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The vpak producer must include the baked terrain texture lineage.',
+    requiredFix: 'Record tools/paint_terrain_textures.mjs inputs and baked texture output digests.',
+  });
+  validateProducerDigestEntries(paintProducer.inputs, requiredPaintProducerInputs, 'painted-terrain-textures');
+  validateProducerDigestEntries(paintProducer.outputs, requiredPaintProducerOutputs, 'painted-terrain-textures');
 }
 
 function validateProjectLockRewrite(project, sourceBytes, packagedBytes) {
@@ -683,6 +889,16 @@ function validateProvenance(project, deps) {
   assert(
     sameStringArray(provenance.inputs, expected.generatorInputs),
     'provenance generator inputs mismatch',
+    {
+      owner: 'studio/artifacts',
+      subsystem: 'ProducerProvenance',
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      line: lineInFile(provenancePath, '"inputs"'),
+      reason: 'The current quickplay provenance was produced by an older generator input contract.',
+      requiredFix: 'Regenerate quickplay provenance so generator.inputs includes the BlockKart vpak and terrain producer files.',
+      expected: expected.generatorInputs,
+      found: provenance.inputs ?? null,
+    },
   );
   assert(provenance.project?.module === project.module, 'provenance project module mismatch');
   assert(provenance.project?.commit === project.commit, 'provenance project commit mismatch');
@@ -704,6 +920,7 @@ function validateProvenance(project, deps) {
     provenance.project?.sourceFilesDigest === sourceSetDigest(project.sourceFiles ?? []),
     'provenance project sourceFilesDigest mismatch',
   );
+  validateBlockKartRuntimeProducer(project, provenance);
 
   const outputMap = new Map((provenance.outputs ?? []).map((output) => [output.path, output]));
   const projectOutput = outputMap.get('project.json');
@@ -799,7 +1016,7 @@ for (const artifact of requiredVoplayArtifacts(voplay)) {
   assert(declaredArtifactUrls.has(artifact.url), `voplay artifact is not declared: ${artifact.url}`);
 }
 
-writeReport('ok', {
+const finalReport = writeReport('ok', {
   project: {
     module: project.module,
     commit: project.commit ?? null,
@@ -811,4 +1028,8 @@ writeReport('ok', {
     commit: mod.commit ?? null,
   })),
 });
+if (finalReport.status !== 'ok') {
+  console.error(`quickplay validate: failed with ${finalReport.issues.length} issue(s); wrote ${outDir}`);
+  process.exit(1);
+}
 console.log('quickplay validate: ok');

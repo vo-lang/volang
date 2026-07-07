@@ -41,6 +41,10 @@ function lineCount(source) {
   return source.length === 0 ? 0 : source.split(/\r?\n/).length;
 }
 
+function productionSource(source) {
+  return source.split('#[cfg(test)]')[0] || source;
+}
+
 function sha256Field(value) {
   return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
 }
@@ -84,6 +88,22 @@ function jsonMaybe(relativePath) {
 
 function bodyOfFunction(source, signature) {
   const start = source.indexOf(signature);
+  if (start < 0) return '';
+  const brace = source.indexOf('{', start);
+  if (brace < 0) return '';
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(brace + 1, i);
+    }
+  }
+  return '';
+}
+
+function blockAfterToken(source, token) {
+  const start = source.indexOf(token);
   if (start < 0) return '';
   const brace = source.indexOf('{', start);
   if (brace < 0) return '';
@@ -151,6 +171,20 @@ function parseExpectedCommits(projectSource) {
     }
   }
   return expected;
+}
+
+function activePlanSnapshot(activePlanSource) {
+  const snapshot = {};
+  for (const rawLine of activePlanSource.split(/\r?\n/)) {
+    const match = rawLine.match(/^(volang|voplay|BlockKart)\s+([0-9a-f]{40})$/);
+    if (match) snapshot[match[1]] = match[2];
+  }
+  return snapshot;
+}
+
+function repoHead(projectRoot) {
+  const head = gitOutput(['rev-parse', 'HEAD'], projectRoot);
+  return head.ok ? head.stdout : null;
 }
 
 function tomlBlocks(source, header) {
@@ -257,6 +291,90 @@ function lineOf(source, token) {
   return null;
 }
 
+function lineOfAfter(source, startToken, token) {
+  const start = source.indexOf(startToken);
+  if (start < 0) return lineOf(source, token);
+  const line = lineOf(source.slice(start), token);
+  if (line === null) return null;
+  return source.slice(0, start).split(/\r?\n/).length + line - 1;
+}
+
+function packetDecodeBranchFailures(sceneSource) {
+  const specs = [
+    {
+      signature: 'func (s *Scene) StepAndSyncPhysics',
+      token: 'if !ok',
+      source: 'body',
+      reason: 'invalid_header',
+      expectedReturn: 'return',
+    },
+    {
+      signature: 'func (s *Scene) StepAndSyncPhysics',
+      token: 'if r.Remaining() < 4',
+      source: 'body',
+      reason: 'missing_count',
+      expectedReturn: 'return',
+    },
+    {
+      signature: 'func (s *Scene) StepAndSyncPhysics',
+      token: 'if r.Remaining() != count * physics3DBodyStateBytes',
+      source: 'body',
+      reason: 'body_payload_length_mismatch',
+      expectedReturn: 'return',
+    },
+    {
+      signature: 'func (s *Scene) Contacts',
+      token: 'if !ok',
+      source: 'contact',
+      reason: 'invalid_header',
+      expectedReturn: 'return []Contact{}',
+    },
+    {
+      signature: 'func (s *Scene) Contacts',
+      token: 'if r.Remaining() < 4',
+      source: 'contact',
+      reason: 'missing_count',
+      expectedReturn: 'return []Contact{}',
+    },
+    {
+      signature: 'func (s *Scene) Contacts',
+      token: 'if r.Remaining() != count * physicsContactDetailBytes',
+      source: 'contact',
+      reason: 'contact_payload_length_mismatch',
+      expectedReturn: 'return []Contact{}',
+    },
+  ];
+  const failures = [];
+  for (const spec of specs) {
+    const body = bodyOfFunction(sceneSource, spec.signature);
+    const branch = blockAfterToken(body, spec.token);
+    const structured = branch.includes('recordPhysicsBackendPacketError')
+      && branch.includes(`Source: "${spec.source}"`)
+      && branch.includes(`Reason: "${spec.reason}"`)
+      && branch.includes('ExpectedBytes:')
+      && branch.includes('ActualBytes:')
+      && branch.includes(spec.expectedReturn);
+    if (!structured) {
+      failures.push({
+        path: 'voplay/scene3d/scene.vo',
+        line: lineOfAfter(sceneSource, spec.signature, spec.token) ?? lineOf(sceneSource, spec.signature),
+        text: `${spec.signature} ${spec.token}`,
+        reason: `malformed ${spec.source} packet branch must record PhysicsBackendPacketError reason ${spec.reason} before returning`,
+      });
+    }
+  }
+  const contactsBody = bodyOfFunction(sceneSource, 'func (s *Scene) Contacts');
+  if (/^\s*return nil\s*$/m.test(contactsBody)) {
+    failures.push({
+      path: 'voplay/scene3d/scene.vo',
+      line: lineOfAfter(sceneSource, 'func (s *Scene) Contacts', 'return nil'),
+      text: 'return nil',
+      reason: 'Contacts must return an empty slice with packet error telemetry on malformed packets',
+    });
+  }
+  return failures;
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -321,7 +439,21 @@ function findBlockKartLowLevelFacts(files) {
   return hits;
 }
 
+function regexHits(entries, regex) {
+  const hits = [];
+  for (const entry of entries) {
+    const lines = entry.source.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (regex.test(lines[i])) {
+        hits.push({ path: entry.rel || entry.path, line: i + 1, text: lines[i].trim() });
+      }
+    }
+  }
+  return hits;
+}
+
 function sourceAuditFailuresFromSource({
+  rendererHotPathEntries,
   frameGraph,
   framePassSequence,
   rendererPassDispatch,
@@ -369,19 +501,46 @@ function sourceAuditFailuresFromSource({
       evidence: { path: 'voplay/rust/src/renderer/pass_dispatch.rs', line: lineOf(rendererPassDispatch, 'renderer:') },
     });
   }
-  const hotPathPanic =
-    /\b(panic!|expect\s*\(|unwrap\s*\(|todo!|unimplemented!)/.test(renderPassSources)
-    || /\.filter_map\(\|[^|]*(?:index|draw_index|chunk_index)[^|]*\|[\s\S]*?\.get\(/.test(renderWorld);
-  if (hotPathPanic) {
+  const hotPathPanicHits = regexHits(rendererHotPathEntries, /\b(panic!|expect\s*\(|unwrap\s*\(|assert!\s*\(|assert_eq!\s*\(|assert_ne!\s*\(|todo!|unimplemented!)/);
+  const dirtyRangeFullRebuildHits = regexHits(rendererHotPathEntries, /rebuild_resident_chunk\(device,\s*queue,\s*range\.chunk_ref,\s*models\)/);
+  const silentBatchSkip = /\.filter_map\(\|[^|]*(?:index|draw_index|chunk_index)[^|]*\|[\s\S]*?\.get\(/.test(renderWorld);
+  if (hotPathPanicHits.length > 0 || silentBatchSkip) {
     failures.push({
       code: 'render.hot_path_panic_or_silent_skip',
       severity: 'P1',
       owner: 'voplay/render',
       message: 'Render hot paths still contain panic-prone calls or silent invalid batch index drops',
       evidence: {
-        passExpectLine: lineOf(renderPassSources, 'expect('),
+        hotPathPanicHits: hotPathPanicHits.slice(0, 40),
         silentSkipLine: lineOf(renderWorld, '.filter_map('),
       },
+    });
+  }
+  if (dirtyRangeFullRebuildHits.length > 0) {
+    failures.push({
+      code: 'render.dirty_range_full_rebuild',
+      severity: 'P0',
+      owner: 'voplay/render',
+      message: 'Dirty resident instance ranges still rebuild or rewrite full resident buffers instead of partial uploads',
+      evidence: { hits: dirtyRangeFullRebuildHits },
+    });
+  }
+  if (/struct RenderPassResources[\s\S]*\b(device|queue|pipeline3d|primitive_pipeline|model_manager|texture_manager|render_world):/.test(rendererPassDispatch)) {
+    failures.push({
+      code: 'render.pass_context_too_wide',
+      severity: 'P1',
+      owner: 'voplay/render',
+      message: 'RenderPassResources still exposes broad renderer resource bundles to pass executors',
+      evidence: { path: 'voplay/rust/src/renderer/pass_dispatch.rs', line: lineOf(rendererPassDispatch, 'struct RenderPassResources') },
+    });
+  }
+  if (!(frameGraph.includes('backing_generation') && frameGraph.includes('actual_texture_view') && frameGraph.includes('validate_backing_generation'))) {
+    failures.push({
+      code: 'render.resource_registry_generation_unverified',
+      severity: 'P1',
+      owner: 'voplay/render',
+      message: 'FrameGraph resource readiness lacks current backing target generation and actual view identity agreement',
+      evidence: { path: 'voplay/rust/src/renderer_frame.rs', line: lineOf(frameGraph, 'struct RenderTargetStatus') },
     });
   }
   const backendBody = bodyOfFunction(voplayPhysics, 'func (defaultPhysicsBackend) ApplyVehicleForces');
@@ -428,6 +587,36 @@ function sourceAuditFailuresFromSource({
       owner: 'voplay/scene3d',
       message: 'Kart controller still derives control surface from body position',
       evidence: { path: 'voplay/scene3d/kart_controller.vo', line: lineOf(kartController, 'Track.SurfaceAt') },
+    });
+  }
+  if (/^func \(v \*Vehicle\) ApplyForceCommand\(/m.test(voplayVehicle)) {
+    failures.push({
+      code: 'physics.public_force_command_bypass',
+      severity: 'P0',
+      owner: 'voplay/scene3d',
+      message: 'Vehicle.ApplyForceCommand remains public and can bypass VehiclePhysicsSession intent authority',
+      evidence: { path: 'voplay/scene3d/vehicle.vo', line: lineOf(voplayVehicle, 'func (v *Vehicle) ApplyForceCommand') },
+    });
+  }
+  const rawPhysicsBypassHits = regexHits([{ path: 'voplay/scene3d/physics.vo', source: voplayPhysics }], /^func \(e \*Entity\) (SetPosition|SetVelocity|SetAngularVelocity)\(/)
+    .filter((hit) => !bodyOfFunction(voplayPhysics, hit.text.replace(/\s*\{\s*$/, '')).includes('ApplyPhysicsTarget(PhysicsBackendTargetCommand'));
+  if (rawPhysicsBypassHits.length > 0 || /^func ProductStepAndSyncPhysics\(/m.test(sceneSource)) {
+    failures.push({
+      code: 'physics.raw_public_bypass',
+      severity: 'P0',
+      owner: 'voplay/scene3d',
+      message: 'Raw entity physics mutation or ProductStepAndSyncPhysics can bypass backend contract authority',
+      evidence: { rawPhysicsBypassHits, productStepLine: lineOf(sceneSource, 'func ProductStepAndSyncPhysics') },
+    });
+  }
+  const malformedPacketBranchFailures = packetDecodeBranchFailures(sceneSource);
+  if (malformedPacketBranchFailures.length > 0 || !physicsStressSource.includes('PacketErrors')) {
+    failures.push({
+      code: 'physics.malformed_packet_silent',
+      severity: 'P0',
+      owner: 'voplay/scene3d',
+      message: 'Malformed body/contact backend packets can return silently and stress lacks packet error accounting',
+      evidence: { malformedPacketBranchFailures: malformedPacketBranchFailures.slice(0, 40), packetErrorsLine: lineOf(physicsStressSource, 'PacketErrors') },
     });
   }
   const invalidSampleLine = lineOf(vehicleTelemetry, 'InvalidSampleCount: invalidSamples');
@@ -685,6 +874,9 @@ const toolchainsToml = readText(path.join(root, 'eng/toolchains.toml'));
 const artifactsToml = readText(path.join(root, 'eng/artifacts.toml'));
 const quickplayProvenance = jsonFile('apps/studio/public/quickplay/blockkart/provenance.json');
 const frameOrchestrator = projectText(voplayRoot, 'rust/src/renderer/frame_orchestrator.rs');
+const rendererRoot = projectText(voplayRoot, 'rust/src/renderer.rs');
+const rendererRuntimeRoot = projectText(voplayRoot, 'rust/src/renderer_runtime.rs');
+const pipeline3dRoot = projectText(voplayRoot, 'rust/src/pipeline3d.rs');
 const frameOrchestratorAudit = projectTexts(voplayRoot, [
   'rust/src/renderer/frame_orchestrator.rs',
   'rust/src/renderer/frame_orchestrator_runtime.rs',
@@ -709,6 +901,8 @@ const renderPassSources = projectTexts(voplayRoot, [
 ]);
 const transparentPass = projectText(voplayRoot, 'rust/src/renderer/main_transparent_pass.rs');
 const frameGraph = projectText(voplayRoot, 'rust/src/renderer_frame.rs');
+const frameGraphResourceRegistry = projectText(voplayRoot, 'rust/src/renderer_frame/resource_registry.rs');
+const frameGraphAuditSource = `${frameGraph}\n${frameGraphResourceRegistry}`;
 const renderWorld = projectTexts(voplayRoot, [
   'rust/src/render_world.rs',
   'rust/src/render_world/store.rs',
@@ -717,7 +911,29 @@ const renderWorld = projectTexts(voplayRoot, [
 const primitivePipeline = projectTexts(voplayRoot, [
   'rust/src/primitive_pipeline.rs',
   'rust/src/primitive_pipeline/runtime.rs',
+  'rust/src/primitive_pipeline/tests.rs',
 ]);
+const rendererHotPathEntries = [
+  { path: 'voplay/rust/src/renderer.rs', source: productionSource(rendererRoot) },
+  { path: 'voplay/rust/src/renderer_runtime.rs', source: productionSource(rendererRuntimeRoot) },
+  { path: 'voplay/rust/src/pipeline3d.rs', source: productionSource(pipeline3dRoot) },
+  { path: 'voplay/rust/src/primitive_pipeline.rs', source: productionSource(projectText(voplayRoot, 'rust/src/primitive_pipeline.rs')) },
+  { path: 'voplay/rust/src/primitive_pipeline/runtime.rs', source: projectText(voplayRoot, 'rust/src/primitive_pipeline/runtime.rs') },
+  { path: 'voplay/rust/src/renderer_frame.rs', source: productionSource(frameGraph) },
+  { path: 'voplay/rust/src/renderer_frame/resource_registry.rs', source: productionSource(frameGraphResourceRegistry) },
+  { path: 'voplay/rust/src/render_world.rs', source: productionSource(projectText(voplayRoot, 'rust/src/render_world.rs')) },
+  { path: 'voplay/rust/src/renderer/pass_dispatch.rs', source: rendererPassDispatch },
+  ...[
+    'depth_pass.rs',
+    'shadow_pass.rs',
+    'main_opaque_pass.rs',
+    'main_transparent_pass.rs',
+    'water_pass.rs',
+    'post_pass.rs',
+    'overlay_pass.rs',
+    'backend_submit_pass.rs',
+  ].map((file) => ({ path: `voplay/rust/src/renderer/${file}`, source: productionSource(projectText(voplayRoot, `rust/src/renderer/${file}`)) })),
+];
 const pipelineCache = projectTexts(voplayRoot, [
   'rust/src/pipeline3d/pipeline_cache.rs',
   'rust/src/pipeline3d/pipeline_factory.rs',
@@ -918,7 +1134,10 @@ const primitiveChurnSourceReady =
   && primitivePipeline.includes('rebuild_queue')
   && primitivePipeline.includes('staging_instances')
   && primitivePipeline.includes('dirty_upload_bytes')
-  && primitivePipeline.includes('dirty-range-resident-chunk-rebuild');
+  && primitivePipeline.includes('full_rebuild_count')
+  && primitivePipeline.includes('upload_resident_dirty_range')
+  && primitivePipeline.includes('rebuild_resident_chunk_full')
+  && primitivePipeline.includes('dirty-range-partial-upload');
 const primitiveChurnReportReady =
   renderStressReport?.status === 'pass'
   && renderStressReport?.coverage?.resourceChurnSoak === true
@@ -970,17 +1189,28 @@ issue(
   },
 );
 
+const physicsSource = projectText(voplayRoot, 'scene3d/physics.vo');
+const vehicleSource = projectText(voplayRoot, 'scene3d/vehicle.vo');
+const roadEdgeAssistSource = projectText(voplayRoot, 'scene3d/vehicle_road_edge_assist.vo');
 const physicsAuthorityReady =
-  projectText(voplayRoot, 'scene3d/vehicle.vo').includes('type vehicleBackendConstraintCommand struct')
-  && !projectText(voplayRoot, 'scene3d/vehicle.vo').includes('type VehicleConstraintCommand')
-  && projectText(voplayRoot, 'scene3d/vehicle.vo').includes('vehicleWheelMaterialFromPacket')
-  && projectText(voplayRoot, 'scene3d/vehicle.vo').includes('SurfaceID string')
+  physicsSource.includes('type PhysicsBackendTargetCommand struct')
+  && bodyOfFunction(physicsSource, 'func (e *Entity) SetPosition').includes('ApplyPhysicsTarget(PhysicsBackendTargetCommand')
+  && bodyOfFunction(physicsSource, 'func (e *Entity) SetVelocity').includes('ApplyPhysicsTarget(PhysicsBackendTargetCommand')
+  && bodyOfFunction(physicsSource, 'func (e *Entity) SetAngularVelocity').includes('ApplyPhysicsTarget(PhysicsBackendTargetCommand')
+  && bodyOfFunction(physicsSource, 'func (e *Entity) ApplyPhysicsTarget').includes('applyEntityPhysicsTarget')
+  && !/^func \(v \*Vehicle\) ApplyForceCommand\(/m.test(vehicleSource)
+  && vehicleSource.includes('func (v *Vehicle) applyForceCommand')
+  && vehicleSource.includes('func applyVehicleBackendTarget')
+  && vehicleSource.includes('func (v *Vehicle) applyBackendTarget')
+  && roadEdgeAssistSource.includes('applyVehicleBackendTarget(vehicle, PhysicsBackendTargetCommand')
   && projectText(voplayRoot, 'scene3d/kart_dynamics.vo').includes('type BoostState struct')
   && projectText(voplayRoot, 'scene3d/contact_event.vo').includes('Surface SurfaceMaterial')
   && projectText(voplayRoot, 'scene3d/vehicle_telemetry.vo').includes('type WheelTelemetry struct')
   && projectText(voplayRoot, 'scene3d/vehicle_telemetry.vo').includes('SurfaceID MaterialID')
   && projectText(voplayRoot, 'scene3d/vehicle_telemetry.vo').includes('BackendApplyHash')
-  && projectText(voplayRoot, 'scene3d/vehicle_physics_session.vo').includes('FixedPhysicsStep');
+  && projectText(voplayRoot, 'scene3d/replay.vo').includes('BackendApplyHash')
+  && projectText(voplayRoot, 'scene3d/vehicle_physics_session.vo').includes('FixedPhysicsStep')
+  && projectText(voplayRoot, 'tests/main.vo').includes('scene3d vehicle telemetry records backend apply hash');
 issue(
   'Q-P1-PHYSICS-AUTHORITY',
   'P1',
@@ -990,7 +1220,12 @@ issue(
   '2026-07-07',
   'Move edge assist and boost authority into fixed-step dynamics and expose per-wheel contact telemetry.',
   physicsAuthorityReady,
-  { files: ['scene3d/vehicle.vo', 'scene3d/kart_dynamics.vo', 'scene3d/contact_event.vo'] },
+  {
+    files: ['scene3d/physics.vo', 'scene3d/vehicle.vo', 'scene3d/vehicle_road_edge_assist.vo', 'scene3d/vehicle_telemetry.vo', 'scene3d/replay.vo'],
+    targetCommandLine: lineOf(physicsSource, 'type PhysicsBackendTargetCommand struct'),
+    privateForceCommandLine: lineOf(vehicleSource, 'func (v *Vehicle) applyForceCommand'),
+    roadEdgeTargetLine: lineOf(roadEdgeAssistSource, 'applyVehicleBackendTarget(vehicle, PhysicsBackendTargetCommand'),
+  },
 );
 
 const blockKartProductReady =
@@ -1049,6 +1284,53 @@ issue(
   { schemaVersion: quickplayProvenance.schemaVersion },
 );
 
+const vpakProducer = (quickplayProvenance.producers ?? [])
+  .find((entry) => entry?.output === 'assets/blockkart.vpak');
+const producerPaths = (entries) => new Set((entries ?? []).map((entry) => entry.path));
+const terrainProducer = (vpakProducer?.upstream ?? [])
+  .find((entry) => entry?.id === 'primitive-terrain-assets');
+const paintProducer = (vpakProducer?.upstream ?? [])
+  .find((entry) => entry?.id === 'painted-terrain-textures');
+const vpakProducerInputPaths = producerPaths(vpakProducer?.inputs);
+const vpakProducerOutputPaths = producerPaths(vpakProducer?.outputs);
+const terrainProducerInputPaths = producerPaths(terrainProducer?.inputs);
+const terrainProducerOutputPaths = producerPaths(terrainProducer?.outputs);
+const paintProducerInputPaths = producerPaths(paintProducer?.inputs);
+const paintProducerOutputPaths = producerPaths(paintProducer?.outputs);
+const quickplayProducerProvenanceReady =
+  vpakProducer?.owner === 'BlockKart'
+  && vpakProducer?.kind === 'vpak'
+  && Array.isArray(vpakProducer.command)
+  && vpakProducer.command.includes('tools/pack_primitive_assets.vo')
+  && vpakProducerInputPaths.has('tools/pack_primitive_assets.vo')
+  && vpakProducerInputPaths.has('assets/maps/primitive_track/blockkart.map.json')
+  && vpakProducerOutputPaths.has('assets/blockkart.vpak')
+  && terrainProducerInputPaths.has('tools/generate_primitive_terrain.mjs')
+  && terrainProducerInputPaths.has('tools/terrain_heightfield_spec.mjs')
+  && terrainProducerInputPaths.has('terrain/recipes/primitive_concept_v1.json')
+  && terrainProducerOutputPaths.has('assets/maps/primitive_track/lowpoly_terrain.glb')
+  && terrainProducerOutputPaths.has('assets/maps/primitive_track/lowpoly_terrain_lod.glb')
+  && terrainProducerOutputPaths.has('assets/maps/primitive_track/lowpoly_terrain_height_grid.bin')
+  && terrainProducerOutputPaths.has('assets/maps/primitive_track/terrain_splat_large.png')
+  && paintProducerInputPaths.has('tools/paint_terrain_textures.mjs')
+  && paintProducerInputPaths.has('docs/images/terrain-upgrade-concept-v1.png')
+  && paintProducerOutputPaths.has('assets/effects/grass_card_atlas.png');
+issue(
+  'Q-P0-QUICKPLAY-PRODUCER-PROVENANCE',
+  'P0',
+  'studio/artifacts',
+  'assets/blockkart.vpak records first-party vpak, terrain, and painted-texture producer lineage with source/output digests.',
+  './d.py ci task quickplay-source-audit',
+  '2026-07-07',
+  'Regenerate quickplay provenance with producer records for tools/pack_primitive_assets.vo, tools/generate_primitive_terrain.mjs, and tools/paint_terrain_textures.mjs.',
+  quickplayProducerProvenanceReady,
+  {
+    path: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    line: lineOf(JSON.stringify(quickplayProvenance, null, 2), '"producers"') ?? 1,
+    producer: vpakProducer ?? null,
+  },
+);
+
 const devDocFiles = readdirSync(path.join(root, 'lang/docs/dev'))
   .filter((file) => file.endsWith('.md'))
   .map((file) => ({ file, source: readText(path.join(root, 'lang/docs/dev', file)) }));
@@ -1067,6 +1349,14 @@ const docsReady =
     .filter((file) => file.file !== 'voplay-code-engineering-quality-plan.md')
     .every(supersededByQualityPlan);
 const activeQualityPlanSource = activeVoplayQuality[0]?.source ?? '';
+const docsExpectedCommits = parseExpectedCommits(projectToml);
+const planSnapshot = activePlanSnapshot(activeQualityPlanSource);
+const activePlanSnapshotFresh =
+  planSnapshot.volang === repoHead(root)
+  && planSnapshot.voplay === docsExpectedCommits.get('voplay')
+  && planSnapshot.voplay === repoHead(voplayRoot)
+  && planSnapshot.BlockKart === docsExpectedCommits.get('BlockKart')
+  && planSnapshot.BlockKart === repoHead(blockKartRoot);
 const requiredFinalGateCommands = [
   './d.py ci task voplay-engineering-quality-readiness',
   './d.py ci task voplay-industrial-readiness',
@@ -1117,6 +1407,7 @@ const docsFinalGateContract = {
   missingFinalGateCommands,
   missingFinalGateTaskDefinitions,
   missingFinalGateConditions,
+  planSnapshot,
 };
 issue(
   'Q-P1-DOCS-PLAN-STATE',
@@ -1128,6 +1419,26 @@ issue(
   'Mark old active industrial plan superseded by the quality plan and lint active/proposed conflicts.',
   docsReady,
   { activePlans: activeVoplayQuality.map((file) => file.file) },
+);
+issue(
+  'Q-P1-DOCS-ACTIVE-PLAN-SNAPSHOT-FRESH',
+  'P1',
+  'docs',
+  'The active voplay quality plan checkout snapshot matches current volang/voplay/BlockKart source commits.',
+  './d.py ci task docs-lint',
+  '2026-07-07',
+  'Update the active plan snapshot whenever any pinned source checkout changes.',
+  activePlanSnapshotFresh,
+  {
+    path: 'lang/docs/dev/voplay-code-engineering-quality-plan.md',
+    line: lineOf(activeQualityPlanSource, '当前 checkout snapshot') ?? 1,
+    planSnapshot,
+    expected: {
+      volang: repoHead(root),
+      voplay: docsExpectedCommits.get('voplay'),
+      BlockKart: docsExpectedCommits.get('BlockKart'),
+    },
+  },
 );
 
 const unexplainedWarningsReady =
@@ -1165,7 +1476,8 @@ const sourceAuditFailures = [
     evidence: entry,
   })),
   ...sourceAuditFailuresFromSource({
-    frameGraph,
+    rendererHotPathEntries,
+    frameGraph: frameGraphAuditSource,
     framePassSequence,
     rendererPassDispatch,
     renderPassSources,
@@ -1228,6 +1540,10 @@ const renderFileBudgetEntries = {
     lines: lineCount(frameGraph),
     budget: 900,
   },
+  'rust/src/renderer_frame/resource_registry.rs': {
+    lines: lineCount(frameGraphResourceRegistry),
+    budget: 360,
+  },
   'rust/src/renderer/frame_workload_plan.rs': {
     lines: lineCount(projectText(voplayRoot, 'rust/src/renderer/frame_workload_plan.rs')),
     budget: 300,
@@ -1261,6 +1577,7 @@ const fileBudgetFailures = Object.entries(fileBudgets)
 const codeOwnershipPass = renderBudgetReady && blockKartProductReady && emptyOwnerModulesList.length === 0;
 const docsSourceFacts = {
   docsReady,
+  activePlanSnapshotFresh,
   finalGateContractPass: missingFinalGateCommands.length === 0
     && missingFinalGateTaskDefinitions.length === 0
     && missingFinalGateConditions.length === 0,

@@ -36,10 +36,36 @@ function fail(message) {
   process.exit(1);
 }
 
-function check(condition, code, detail) {
+function normalizeIssue(code, detail, metadata = {}) {
+  const evidence = metadata.evidence ?? {};
+  return {
+    code,
+    severity: metadata.severity ?? 'P1',
+    owner: metadata.owner ?? 'voplay/render',
+    file: metadata.file ?? evidence.file ?? evidence.path ?? null,
+    line: metadata.line ?? evidence.line ?? null,
+    reason: metadata.reason ?? detail,
+    requiredFix: metadata.requiredFix ?? 'Move this behavior behind the owning subsystem contract and add source-bound behavior coverage.',
+    detail,
+    evidence,
+  };
+}
+
+function check(condition, code, detail, metadata = {}) {
   if (!condition) {
-    issues.push({ code, detail });
+    issues.push(normalizeIssue(code, detail, metadata));
   }
+}
+
+function addSourceIssue(code, severity, owner, hit, reason, requiredFix) {
+  issues.push(normalizeIssue(code, reason, {
+    severity,
+    owner,
+    file: hit.path ?? hit.file ?? null,
+    line: hit.line ?? null,
+    requiredFix,
+    evidence: hit,
+  }));
 }
 
 function writeReport(status) {
@@ -144,12 +170,14 @@ const rendererFramePerfFinalize = readProjectFile(voplayRoot, 'rust/src/renderer
 const rendererFrameSurface = readProjectFile(voplayRoot, 'rust/src/renderer/frame_surface.rs');
 const rendererFrameWorkloadPlan = readProjectFile(voplayRoot, 'rust/src/renderer/frame_workload_plan.rs');
 const frameGraph = readProjectFile(voplayRoot, 'rust/src/renderer_frame.rs');
+const frameGraphResourceRegistry = readProjectFileIfExists(voplayRoot, 'rust/src/renderer_frame/resource_registry.rs');
 const renderWorld = readProjectFile(voplayRoot, 'rust/src/render_world.rs');
 const renderWorldStore = readProjectFileIfExists(voplayRoot, 'rust/src/render_world/store.rs');
 const renderWorldTests = readProjectFileIfExists(voplayRoot, 'rust/src/render_world/tests.rs');
 const pipeline3d = readProjectFile(voplayRoot, 'rust/src/pipeline3d.rs');
 const primitivePipeline = readProjectFile(voplayRoot, 'rust/src/primitive_pipeline.rs');
 const primitivePipelineRuntime = readProjectFileIfExists(voplayRoot, 'rust/src/primitive_pipeline/runtime.rs');
+const primitivePipelineTests = readProjectFileIfExists(voplayRoot, 'rust/src/primitive_pipeline/tests.rs');
 const pipelineCache = readProjectFile(voplayRoot, 'rust/src/pipeline3d/pipeline_cache.rs');
 const pipeline3dOwnerSource = listFiles(path.join(voplayRoot, 'rust/src/pipeline3d'), '.rs')
   .map((file) => readFileSync(file, 'utf8'))
@@ -187,9 +215,10 @@ const rendererRuntime = [
   rendererFrameSurface,
   rendererFrameWorkloadPlan,
 ].join('\n');
-const rendererAuditSource = [rendererRuntime, frameGraph].join('\n');
+const frameGraphAuditSource = [frameGraph, frameGraphResourceRegistry].join('\n');
+const rendererAuditSource = [rendererRuntime, frameGraphAuditSource].join('\n');
 const renderWorldAuditSource = [renderWorld, renderWorldStore, renderWorldTests].join('\n');
-const primitivePipelineAuditSource = [primitivePipeline, primitivePipelineRuntime].join('\n');
+const primitivePipelineAuditSource = [primitivePipeline, primitivePipelineRuntime, primitivePipelineTests].join('\n');
 const rendererDecodeAuditSource = [
   rendererFrameDecode,
   rendererFrameDecodeRuntime,
@@ -254,6 +283,7 @@ const renderFileBudgets = {
   'rust/src/renderer/frame_transaction_builder.rs': { lines: rendererFrameTransactionBuilder.split(/\r?\n/).length, budget: 900 },
   'rust/src/renderer/frame_workload_plan.rs': { lines: rendererFrameWorkloadPlan.split(/\r?\n/).length, budget: 300 },
   'rust/src/renderer_frame.rs': { lines: frameGraph.split(/\r?\n/).length, budget: 900 },
+  'rust/src/renderer_frame/resource_registry.rs': { lines: frameGraphResourceRegistry.split(/\r?\n/).length, budget: 360 },
   'rust/src/render_world.rs': { lines: renderWorld.split(/\r?\n/).length, budget: 700 },
   'rust/src/primitive_pipeline.rs': { lines: primitivePipeline.split(/\r?\n/).length, budget: 700 },
   'rust/src/pipeline3d/pipeline_cache.rs': { lines: pipelineCache.split(/\r?\n/).length, budget: 500 },
@@ -292,8 +322,9 @@ const transparentSortReady = mainTransparentPass.includes('RenderDrawItem')
   && /stable/i.test(mainTransparentPass);
 const residentVisibilityRemovesHidden = !/if\s+!update\.visible\s*\{\s*return;\s*\}/.test(bodyOfFunction(primitivePipelineAuditSource, 'pub fn upsert_instance'));
 const flushResidentRebuildBody = bodyOfFunction(primitivePipelineAuditSource, 'pub fn flush_resident_rebuild_queue');
-const dirtyRangeDrivesUpload = !flushResidentRebuildBody.includes('_dirty_range')
-  && (/write_buffer|copy_buffer|upload.*range|dirtyUploadBytes|dirty_upload_bytes/i.test(flushResidentRebuildBody));
+const dirtyRangeDrivesUpload = /range\.dirty_start[\s\S]*range\.dirty_count[\s\S]*upload_resident_dirty_range/s.test(flushResidentRebuildBody)
+  && /fn\s+upload_resident_dirty_range[\s\S]*queue\.write_buffer\([\s\S]*byte_offset[\s\S]*bytemuck::bytes_of/s.test(primitivePipelineAuditSource)
+  && /range\.requires_full_rebuild[\s\S]*rebuild_resident_chunk_full/s.test(flushResidentRebuildBody);
 const framePassManualSequenceHits = [
   ...sourceHits(rendererFramePassSequence, 'rust/src/renderer/frame_pass_sequence.rs', /execute_node\(&context\.nodes|FrameGraphPlanNodes/),
   ...sourceHits(rendererFrameGraphPlan, 'rust/src/renderer/frame_graph_plan.rs', /struct FrameGraphPlanNodes|nodes:\s*FrameGraphPlanNodes/),
@@ -303,17 +334,19 @@ const dispatcherRendererHits = [
   ...sourceHitsInFiles(listFiles(path.join(voplayRoot, 'rust/src/renderer'), '.rs'), /renderer:\s*&'[^,]*\s+mut\s+Renderer/),
 ];
 const renderHotPathFiles = [
+  path.join(voplayRoot, 'rust/src/renderer.rs'),
+  path.join(voplayRoot, 'rust/src/renderer_runtime.rs'),
+  path.join(voplayRoot, 'rust/src/pipeline3d.rs'),
+  path.join(voplayRoot, 'rust/src/primitive_pipeline/runtime.rs'),
   ...listFiles(path.join(voplayRoot, 'rust/src/renderer'), '.rs'),
   path.join(voplayRoot, 'rust/src/renderer_frame.rs'),
+  path.join(voplayRoot, 'rust/src/renderer_frame/resource_registry.rs'),
   path.join(voplayRoot, 'rust/src/render_world.rs'),
   path.join(voplayRoot, 'rust/src/primitive_pipeline.rs'),
   ...listFiles(path.join(voplayRoot, 'rust/src/pipeline3d'), '.rs'),
 ];
-const hotPathPanicHits = [
-  ...Array.from(runtimePart(pipelineCache).matchAll(/\b(assert!|expect\()/g)).map((match) => ({ file: 'rust/src/pipeline3d/pipeline_cache.rs', token: match[1] })),
-  ...Array.from(runtimePart(primitivePipelineAuditSource).matchAll(/\bexpect\(/g)).map((match) => ({ file: 'rust/src/primitive_pipeline.rs', token: match[0] })),
-  ...sourceHitsInFiles(renderHotPathFiles, /\b(panic!|expect\(|unwrap\(|assert!|assert_eq!|assert_ne!|todo!|unimplemented!)\b/),
-];
+const hotPathPanicPattern = /\b(panic!|expect\s*\(|unwrap\s*\(|assert!\s*\(|assert_eq!\s*\(|assert_ne!\s*\(|todo!|unimplemented!)/;
+const hotPathPanicHits = sourceHitsInFiles(renderHotPathFiles, hotPathPanicPattern);
 const legacyExecutePassHits = sourceHits(frameGraph, 'rust/src/renderer_frame.rs', /\b(execute_pass|FnOnce)\b/);
 const decodeOwnerMutationHits = sourceHits(
   rendererDecodeAuditSource,
@@ -335,16 +368,25 @@ const facadeOwnerModuleFacts = [
   };
 });
 const invalidBatchIndexSkipHits = sourceHits(renderWorldAuditSource, 'rust/src/render_world.rs', /\.filter_map\(\|index\|.*\.get\(\*index\)|\.filter_map\(\|\(draw_index, draw\)\|/);
-const frameGraphDependencyOrderingReady = frameGraph.includes('dependency_ordered_nodes')
-  && frameGraph.includes('producer_by_resource')
-  && frameGraph.includes('visit_node');
-const resourceRegistryProvenanceReady = frameGraph.includes('backing_owner')
-  && frameGraph.includes('ready_cause')
-  && frameGraph.includes('mark_ready_with_cause');
+const frameGraphDependencyOrderingReady = frameGraphAuditSource.includes('dependency_ordered_nodes')
+  && frameGraphAuditSource.includes('producer_by_resource')
+  && frameGraphAuditSource.includes('visit_node');
+const resourceRegistryProvenanceReady = frameGraphAuditSource.includes('struct RenderResourceRegistry')
+  && frameGraphAuditSource.includes('backing_owner')
+  && frameGraphAuditSource.includes('ready_cause')
+  && frameGraphAuditSource.includes('validate_backing_generation')
+  && frameGraphAuditSource.includes('actual_texture_view')
+  && frameGraphAuditSource.includes('mark_ready_with_cause');
 const dirtyRebuildPolicyReady = primitivePipelineAuditSource.includes('ResidentRebuildPolicy')
   && primitivePipelineAuditSource.includes('full_rebuild_count')
   && primitivePipelineAuditSource.includes('dirty_upload_bytes')
   && primitivePipelineAuditSource.includes('rebuild_reason');
+const dirtyRangeFullRebuildHits = [
+  ...sourceHits(primitivePipelineRuntime, 'rust/src/primitive_pipeline/runtime.rs', /rebuild_resident_chunk\(device,\s*queue,\s*range\.chunk_ref,\s*models\)/),
+];
+const dirtyRangePartialUploadVerified = /partial.*upload|upload.*partial/i.test(primitivePipelineAuditSource)
+  && /fn\s+upload_resident_dirty_range[\s\S]*queue\.write_buffer\([\s\S]*byte_offset[\s\S]*bytemuck::bytes_of/s.test(primitivePipelineAuditSource)
+  && /full_rebuild_count\s*(?:[:=]|,)\s*0|fullRebuildCount\s*=\s*0/.test(primitivePipelineAuditSource);
 const facadeSubmitterReturnHits = [
   ...sourceHits(readProjectFile(voplayRoot, 'rust/src/pipeline3d/primitive_submitter.rs'), 'rust/src/pipeline3d/primitive_submitter.rs', /->\s*crate::primitive_pipeline::PrimitiveRenderFilter|^\s*filter\s*$/),
   ...sourceHits(readProjectFile(voplayRoot, 'rust/src/pipeline3d/water_submitter.rs'), 'rust/src/pipeline3d/water_submitter.rs', /->\s*crate::primitive_pipeline::PrimitiveRenderFilter|^\s*crate::primitive_pipeline::PrimitiveRenderFilter::Water\s*$/),
@@ -360,7 +402,7 @@ for (const pass of ['DepthPrepass', 'Shadow', 'MainOpaque', 'MainTransparent', '
 check(legacyExecutePassHits.length === 0, 'framegraph.legacy_execute_pass_api', `FrameGraph still exposes closure-based execute_pass/FnOnce: ${JSON.stringify(legacyExecutePassHits.slice(0, 8))}`);
 check(decodeOwnerMutationHits.length === 0, 'frame_decode.direct_owner_mutation', `FrameDecode runtime still mutates render owners directly instead of producing a FrameTransaction: ${JSON.stringify(decodeOwnerMutationHits.slice(0, 12))}`);
 check(rendererRuntime.includes('execute_node(') || rendererRuntime.includes('execute_all('), 'renderer.node_execution_missing', 'renderer runtime does not route passes through RenderPassNode execution');
-check(frameGraph.includes('fn execute_all'), 'framegraph.execute_all_missing', 'FrameGraphExecutor.execute_all is missing; graph traversal is not owned by FrameGraph');
+check(frameGraphAuditSource.includes('fn execute_all'), 'framegraph.execute_all_missing', 'FrameGraphExecutor.execute_all is missing; graph traversal is not owned by FrameGraph');
 check(rendererRuntime.includes('execute_all('), 'renderer.execute_all_not_wired', 'renderer runtime does not submit the compiled frame graph to execute_all');
 check(frameGraphDependencyOrderingReady, 'framegraph.dependency_order_missing', 'FrameGraphExecutor does not own dependency-ordered node traversal');
 check(framePassManualSequenceHits.length === 0, 'renderer.manual_pass_sequence', `renderer still drives pass order through hand-written node sequence: ${JSON.stringify(framePassManualSequenceHits.slice(0, 12))}`);
@@ -385,20 +427,47 @@ check(transparentSortReady, 'transparent.depth_stable_sort_missing', 'transparen
 check(residentVisibilityRemovesHidden, 'primitive.resident_visible_false_stale_instance', 'upsert_instance visible=false returns without removing resident instance');
 check(dirtyRangeDrivesUpload, 'primitive.dirty_range_not_used_for_upload', 'resident dirty range is recorded but discarded before upload/rebuild work');
 check(dirtyRebuildPolicyReady, 'primitive.dirty_rebuild_policy_missing', 'dirty range full-rebuild fallback lacks an explicit resident rebuild policy, byte accounting, full rebuild count, and rebuild reason');
+for (const hit of dirtyRangeFullRebuildHits) {
+  addSourceIssue(
+    'primitive.dirty_range_full_rebuild',
+    'P0',
+    'voplay/render',
+    hit,
+    'resident dirty range still triggers full resident chunk rebuild or offset-0 full buffer upload',
+    'Implement real partial resident instance buffer upload for single-instance updates and keep full rebuilds only for capacity, layout, or resident generation changes.',
+  );
+}
+check(dirtyRangePartialUploadVerified, 'primitive.dirty_range_partial_upload_unverified', 'single-instance resident update lacks source-bound proof for partial upload with fullRebuildCount=0', {
+  severity: 'P0',
+  owner: 'voplay/render',
+  file: 'rust/src/primitive_pipeline/runtime.rs',
+  line: dirtyRangeFullRebuildHits[0]?.line ?? null,
+  requiredFix: 'Add behavior coverage proving one-instance dirty updates write the matching offset/length and do not rebuild the whole resident chunk.',
+  evidence: { dirtyRangeFullRebuildHits, dirtyRangePartialUploadVerified },
+});
 check(invalidBatchIndexSkipHits.length === 0 || /invalid.*batch|batch.*invalid|skip_reason|skipped_indices|structured/i.test(renderWorldAuditSource), 'render_world.invalid_batch_index_silent_skip', `RenderBatchPlan silently drops invalid batch indices instead of emitting structured skip/error evidence: ${JSON.stringify(invalidBatchIndexSkipHits.slice(0, 12))}`);
 check(structuredSkipCountersReady, 'render_world.structured_skip_counters_missing', 'RenderBatchPlan lacks structured counters for invalid batch indices, missing chunk info, and skip reasons');
-check(hotPathPanicHits.length === 0, 'render.hot_path_panic', `render runtime hot path contains panic-prone assert/expect: ${JSON.stringify(hotPathPanicHits.slice(0, 8))}`);
+for (const hit of hotPathPanicHits) {
+  addSourceIssue(
+    'render.hot_path_panic',
+    'P0',
+    'voplay/render',
+    hit,
+    'render runtime hot path contains panic-prone call',
+    'Replace panic-prone calls in render runtime paths with Result-returning structured renderer errors or test-only scoped assertions.',
+  );
+}
 for (const token of ['RenderFrameDecode', 'RenderSceneSnapshot', 'FrameGraphBuild', 'FrameGraphExecute', 'PerfPacketEncode', 'RenderFramePipeline']) {
-  check(frameGraph.includes(`struct ${token}`), 'framegraph.pipeline_contract_missing', `${token} is missing`);
+  check(frameGraphAuditSource.includes(`struct ${token}`), 'framegraph.pipeline_contract_missing', `${token} is missing`);
   check(constructsRuntimeStage(rendererAuditSource, token), 'framegraph.pipeline_stage_unused', `${token} is declared but is not constructed by runtime code`);
 }
-check(frameGraph.includes('struct RenderResourceRegistry'), 'framegraph.registry_missing', 'RenderResourceRegistry is missing');
-check(frameGraph.includes('enum RenderResourceLifetime'), 'framegraph.lifetime_missing', 'RenderResourceLifetime is missing');
+check(frameGraphAuditSource.includes('struct RenderResourceRegistry'), 'framegraph.registry_missing', 'RenderResourceRegistry is missing');
+check(frameGraphAuditSource.includes('enum RenderResourceLifetime'), 'framegraph.lifetime_missing', 'RenderResourceLifetime is missing');
 check(resourceRegistryProvenanceReady, 'framegraph.registry_provenance_missing', 'RenderResourceRegistry target status lacks backing owner and ready-cause provenance');
-check(frameGraph.includes('fn execute_node'), 'framegraph.node_executor_missing', 'FrameGraphExecutor.execute_node is missing');
-check(frameGraph.includes('struct RenderPassWorkload'), 'framegraph.workload_missing', 'RenderPassWorkload is missing');
-check(frameGraph.includes('transient_writes'), 'framegraph.transient_writes_missing', 'RenderPassNode transient writes are missing');
-check(frameGraph.includes('missing_read_count'), 'framegraph.missing_reads_missing', 'FrameGraph missing-read diagnostics are missing');
+check(frameGraphAuditSource.includes('fn execute_node'), 'framegraph.node_executor_missing', 'FrameGraphExecutor.execute_node is missing');
+check(frameGraphAuditSource.includes('struct RenderPassWorkload'), 'framegraph.workload_missing', 'RenderPassWorkload is missing');
+check(frameGraphAuditSource.includes('transient_writes'), 'framegraph.transient_writes_missing', 'RenderPassNode transient writes are missing');
+check(frameGraphAuditSource.includes('missing_read_count'), 'framegraph.missing_reads_missing', 'FrameGraph missing-read diagnostics are missing');
 for (const token of ['struct RenderWorldChunk', 'struct RenderBatchPlan', 'struct RenderBatchPlanner', 'fn build_batch_plan']) {
   check(renderWorldAuditSource.includes(token), 'render_world.batch_planner_missing', `${token} is missing`);
 }

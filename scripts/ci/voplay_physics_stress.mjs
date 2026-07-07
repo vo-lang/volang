@@ -150,6 +150,15 @@ function validateReport(report) {
     if ((scenario.fallbackContactEvents ?? 0) > 0) {
       issues.push({ code: 'physics.contact_fallback', severity: 0, detail: String(scenario.fallbackContactEvents), scenario: scenario.name });
     }
+    if ((scenario.packetErrors ?? 0) > 0) {
+      issues.push({ code: 'physics.packet_errors', severity: 0, detail: String(scenario.packetErrors), scenario: scenario.name });
+    }
+    if ((scenario.directBypassHits ?? 0) > 0) {
+      issues.push({ code: 'physics.direct_bypass', severity: 0, detail: String(scenario.directBypassHits), scenario: scenario.name });
+    }
+    if ((scenario.constraintBypassHits ?? 0) > 0) {
+      issues.push({ code: 'physics.constraint_bypass', severity: 0, detail: String(scenario.constraintBypassHits), scenario: scenario.name });
+    }
     if (Number.isFinite(maxVelocity) && Number(scenario.maxSpeed ?? 0) > maxVelocity) {
       issues.push({ code: 'physics.excessive_velocity_budget', severity: 0, detail: `${scenario.maxSpeed} > ${maxVelocity}`, scenario: scenario.name });
     }
@@ -211,6 +220,7 @@ function markdownReport(report, gate) {
     lines.push(`- Max angular velocity: ${formatNumber(scenario.maxAngularVelocity)} rad/s`);
     lines.push(`- Max landing impulse proxy: ${formatNumber(scenario.maxLandingImpulse)}`);
     lines.push(`- Contacts: wheels=${scenario.maxContactCount} bodyEvents=${scenario.maxContactEvents} fallback=${scenario.fallbackContactEvents ?? 0} normalImpulse=${formatNumber(scenario.maxNormalImpulse)} tangentImpulse=${formatNumber(scenario.maxTangentImpulse)}`);
+    lines.push(`- Backend safety: packetErrors=${scenario.packetErrors ?? 0} directBypassHits=${scenario.directBypassHits ?? 0} constraintBypassHits=${scenario.constraintBypassHits ?? 0}`);
     lines.push(`- Surfaces: ${JSON.stringify(scenario.surfaceSamples ?? {})}`);
     lines.push(`- Recovery requests: ${scenario.recoveryRequests}`);
     for (const issue of scenario.issues ?? []) {

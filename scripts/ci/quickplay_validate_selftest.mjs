@@ -57,6 +57,17 @@ function projectSourceEntry(path, content) {
   return { path, digest: sha256Digest(bytes), size: bytes.byteLength };
 }
 
+function repoFileEntry(repoRoot, relative) {
+  const bytes = readFileSync(path.join(repoRoot, relative));
+  return { path: relative, digest: sha256Digest(bytes), size: bytes.byteLength };
+}
+
+function repoFileEntries(repoRoot, relatives) {
+  return relatives
+    .map((relative) => repoFileEntry(repoRoot, relative))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
 function writeFile(filePath, bytes) {
   mkdirSync(path.dirname(filePath), { recursive: true });
   writeFileSync(filePath, bytes);
@@ -72,6 +83,27 @@ function initBlockKartRepo(repoRoot) {
   writeFile(path.join(repoRoot, 'main.vo'), 'package main\n\nfunc main() {}\n');
   writeFile(path.join(repoRoot, 'vo.mod'), 'module github.com/vo-lang/blockkart\nvo ^0.1.0\n\nrequire github.com/vo-lang/vogui v0.1.15\nrequire github.com/vo-lang/voplay v0.1.28\n');
   writeFile(path.join(repoRoot, 'assets/blockkart.vpak'), asset);
+  writeFile(path.join(repoRoot, 'tools/pack_primitive_assets.vo'), 'package main\n\nfunc main() {}\n');
+  writeFile(path.join(repoRoot, 'tools/generate_primitive_terrain.mjs'), 'export const generated = true;\n');
+  writeFile(path.join(repoRoot, 'tools/paint_terrain_textures.mjs'), 'export const painted = true;\n');
+  writeFile(path.join(repoRoot, 'tools/terrain_heightfield_spec.mjs'), 'export const heightmapSize = 8;\n');
+  writeFile(path.join(repoRoot, 'tools/terrain_recipe.mjs'), 'export const recipe = {};\n');
+  writeFile(path.join(repoRoot, 'terrain/recipes/primitive_concept_v1.json'), '{"name":"selftest"}\n');
+  writeFile(path.join(repoRoot, 'docs/images/terrain-upgrade-concept-v1.png'), Buffer.from('concept'));
+  for (const relative of [
+    'assets/source/terrain_painted/grass_painted_v1.png',
+    'assets/source/terrain_painted/meadow_painted_v1.png',
+    'assets/source/terrain_painted/dirt_painted_v1.png',
+    'assets/source/terrain_painted/rock_painted_v1.png',
+    'assets/effects/grass_card_atlas.png',
+    'assets/maps/primitive_track/blockkart.map.json',
+    'assets/maps/primitive_track/lowpoly_terrain.glb',
+    'assets/maps/primitive_track/lowpoly_terrain_lod.glb',
+    'assets/maps/primitive_track/lowpoly_terrain_height_grid.bin',
+    'assets/maps/primitive_track/terrain_splat_large.png',
+  ]) {
+    writeFile(path.join(repoRoot, relative), Buffer.from(`selftest ${relative}\n`, 'utf8'));
+  }
   git(repoRoot, ['init']);
   git(repoRoot, ['config', 'user.email', 'quickplay-selftest@example.invalid']);
   git(repoRoot, ['config', 'user.name', 'Quickplay Selftest']);
@@ -271,8 +303,50 @@ digest = "${sha256Digest(voplayWasm)}"
   git(blockKartRoot, ['add', '.']);
   git(blockKartRoot, ['commit', '-m', 'selftest fixture']);
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: blockKartRoot, encoding: 'utf8' }).trim();
+  const sourceAllowlist = [
+    {
+      path: 'tools/pack_primitive_assets.vo',
+      reason: 'Asset-pack generation tool; quickplay runtime embeds the generated assets/blockkart.vpak payload.',
+      expiresAt: '2027-01-31T00:00:00.000Z',
+    },
+  ];
   const projectSourceFiles = [
     projectSourceEntry('main.vo', readFileSync(path.join(blockKartRoot, 'main.vo'), 'utf8')),
+    projectSourceEntry('tools/pack_primitive_assets.vo', readFileSync(path.join(blockKartRoot, 'tools/pack_primitive_assets.vo'), 'utf8')),
+  ];
+  const vpakInputs = [
+    'tools/pack_primitive_assets.vo',
+    'assets/maps/primitive_track/blockkart.map.json',
+    'assets/maps/primitive_track/lowpoly_terrain.glb',
+    'assets/maps/primitive_track/lowpoly_terrain_lod.glb',
+    'assets/maps/primitive_track/lowpoly_terrain_height_grid.bin',
+    'assets/maps/primitive_track/terrain_splat_large.png',
+    'assets/effects/grass_card_atlas.png',
+  ];
+  const paintInputs = [
+    'tools/paint_terrain_textures.mjs',
+    'docs/images/terrain-upgrade-concept-v1.png',
+  ];
+  const paintOutputs = [
+    'assets/source/terrain_painted/grass_painted_v1.png',
+    'assets/source/terrain_painted/meadow_painted_v1.png',
+    'assets/source/terrain_painted/dirt_painted_v1.png',
+    'assets/source/terrain_painted/rock_painted_v1.png',
+    'assets/effects/grass_card_atlas.png',
+  ];
+  const terrainInputs = [
+    'tools/generate_primitive_terrain.mjs',
+    'tools/terrain_heightfield_spec.mjs',
+    'tools/terrain_recipe.mjs',
+    'terrain/recipes/primitive_concept_v1.json',
+    ...paintOutputs,
+  ];
+  const terrainOutputs = [
+    'assets/maps/primitive_track/blockkart.map.json',
+    'assets/maps/primitive_track/lowpoly_terrain.glb',
+    'assets/maps/primitive_track/lowpoly_terrain_lod.glb',
+    'assets/maps/primitive_track/lowpoly_terrain_height_grid.bin',
+    'assets/maps/primitive_track/terrain_splat_large.png',
   ];
 
   const project = {
@@ -282,7 +356,7 @@ digest = "${sha256Digest(voplayWasm)}"
     commit,
     dirty: false,
     sourceFiles: projectSourceFiles,
-    sourceAllowlist: [],
+    sourceAllowlist,
     files: [
       { path: 'assets/blockkart.vpak', contentBase64: assetBytes.toString('base64') },
       { path: 'main.vo', content: readFileSync(path.join(blockKartRoot, 'main.vo'), 'utf8') },
@@ -328,6 +402,12 @@ digest = "${sha256Digest(voplayWasm)}"
       'apps/studio/scripts/package_blockkart_quickplay.mjs',
       'eng/project.toml',
       'external:BlockKart',
+      'external:BlockKart/tools/pack_primitive_assets.vo',
+      'external:BlockKart/tools/generate_primitive_terrain.mjs',
+      'external:BlockKart/tools/paint_terrain_textures.mjs',
+      'external:BlockKart/tools/terrain_heightfield_spec.mjs',
+      'external:BlockKart/tools/terrain_recipe.mjs',
+      'external:BlockKart/terrain/recipes/primitive_concept_v1.json',
       'first-party:voplay',
       'module-cache:vopack',
       'module-cache:vogui',
@@ -338,9 +418,38 @@ digest = "${sha256Digest(voplayWasm)}"
       filesDigest: packagedFilesDigest(project.files),
       module: project.module,
       sourceFiles: projectSourceFiles,
-      sourceAllowlist: [],
+      sourceAllowlist,
       sourceFilesDigest: sourceSetDigest(projectSourceFiles),
     },
+    producers: [
+      {
+        id: 'blockkart-runtime-vpak',
+        owner: 'BlockKart',
+        kind: 'vpak',
+        output: 'assets/blockkart.vpak',
+        command: ['vo', 'run', 'tools/pack_primitive_assets.vo'],
+        inputs: repoFileEntries(blockKartRoot, vpakInputs),
+        outputs: repoFileEntries(blockKartRoot, ['assets/blockkart.vpak']),
+        upstream: [
+          {
+            id: 'painted-terrain-textures',
+            owner: 'BlockKart',
+            kind: 'offline-texture-generation',
+            command: ['node', 'tools/paint_terrain_textures.mjs'],
+            inputs: repoFileEntries(blockKartRoot, paintInputs),
+            outputs: repoFileEntries(blockKartRoot, paintOutputs),
+          },
+          {
+            id: 'primitive-terrain-assets',
+            owner: 'BlockKart',
+            kind: 'offline-terrain-generation',
+            command: ['node', 'tools/generate_primitive_terrain.mjs'],
+            inputs: repoFileEntries(blockKartRoot, terrainInputs),
+            outputs: repoFileEntries(blockKartRoot, terrainOutputs),
+          },
+        ],
+      },
+    ],
     dependencies: deps.modules.map((mod) => ({
       artifacts: (mod.artifacts ?? []).map((artifact) => {
         const localPath = path.join(tempQuickplay, artifact.url.slice('/quickplay/blockkart/'.length));

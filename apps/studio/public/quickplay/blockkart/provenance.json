@@ -19,11 +19,11 @@
       "task:quickplay-blockkart-package"
     ],
     "script": "apps/studio/scripts/package_blockkart_quickplay.mjs",
-    "version": 5
+    "version": 6
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:9db66a125ef250fe589679c0e387067ea4c20d341330159fadd41a2b43a015fe",
+    "voDevSourceDigest": "sha256:f90fafc59f93e6273ee51c72548c6d7c40578d67e587dc80801491aad39b9558",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -35,6 +35,12 @@
     "apps/studio/scripts/package_blockkart_quickplay.mjs",
     "eng/project.toml",
     "external:BlockKart",
+    "external:BlockKart/tools/pack_primitive_assets.vo",
+    "external:BlockKart/tools/generate_primitive_terrain.mjs",
+    "external:BlockKart/tools/paint_terrain_textures.mjs",
+    "external:BlockKart/tools/terrain_heightfield_spec.mjs",
+    "external:BlockKart/tools/terrain_recipe.mjs",
+    "external:BlockKart/terrain/recipes/primitive_concept_v1.json",
     "first-party:voplay",
     "module-cache:vopack",
     "module-cache:vogui"
@@ -42,12 +48,12 @@
   "project": {
     "commit": "b819dba4c038ff1e7f6a2cb3518fde24cc42ca1a",
     "dirty": false,
-    "filesDigest": "sha256:28d0154c09271a9c6aaa542a47bc1a3fe20cb5ceb3318d0473b9f97b1f930388",
+    "filesDigest": "sha256:0a4d1c15638f11f5c4611a85da7bc14a0473947ba67ac3bf64496c228f61dff9",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
       "sourceDigest": "sha256:3121cb8c9d16f3a4372a9ef8f3ba9cff9086289bd0437fc59ede032dd8c2ad6d",
-      "packagedDigest": "sha256:bbe197412aa05968eba3effb23e6d4ee9873d6856794e989744435e7d01bf356",
+      "packagedDigest": "sha256:4200cf7f204b4a3ec47001427e2432348506eca8527ecdc51d4fcc5c967bd6f5",
       "modules": [
         {
           "module": "github.com/vo-lang/vogui",
@@ -76,9 +82,9 @@
         {
           "module": "github.com/vo-lang/voplay",
           "version": "v0.1.34",
-          "commit": "64b8da373a54dd752e50fb6dc7ecef217dc5d89d",
-          "releaseManifestDigest": "sha256:cf1fecb405f870bed443032c768ee32850a1e0128230b8808ba6007edc883f44",
-          "sourceDigest": "sha256:ecf342fc76d3761fa08f9a652aca99797291b6d4b491d703ab1f216106f96324",
+          "commit": "f3c8296b634d5b7d28353d6c8d3b09daff4968a1",
+          "releaseManifestDigest": "sha256:beb1ae42bbefdd10c5fc4c6a981d652210ce270c99889ee68ce147bc6db2235e",
+          "sourceDigest": "sha256:03bf294c37458d6bbac9095d74253ac1eda941ef7f7cdf96c4674f3f124a7432",
           "artifacts": [
             {
               "kind": "extension-js-glue",
@@ -225,6 +231,491 @@
     ],
     "sourceFilesDigest": "sha256:4cc2c3028604d959d5b00d1e3305085174b3bc830340cabbb9fc1937d946ee70"
   },
+  "producers": [
+    {
+      "id": "blockkart-runtime-vpak",
+      "owner": "BlockKart",
+      "kind": "vpak",
+      "output": "assets/blockkart.vpak",
+      "command": [
+        "vo",
+        "run",
+        "tools/pack_primitive_assets.vo"
+      ],
+      "inputs": [
+        {
+          "digest": "sha256:258b6be7c01a4ed9703f5a0d387c0102d4fa39c7fa016c88850e52eeba8268d3",
+          "path": "assets/audio/kart_boost.wav",
+          "size": 30912
+        },
+        {
+          "digest": "sha256:d031a8e6f9b4ffc5147739a5110d954d0f7cb7ad96ddc39653eedf28107ea209",
+          "path": "assets/audio/kart_engine.wav",
+          "size": 52964
+        },
+        {
+          "digest": "sha256:ba693f5b9278c5089a1a3eb67e99ad0272633bf4c591de41db0c2e66dd4cd329",
+          "path": "assets/audio/kart_grass.wav",
+          "size": 39734
+        },
+        {
+          "digest": "sha256:151edfbab49fe54886da3d0e42ed271734e7bfbf1d9ae5d93734a7b2bbf7237e",
+          "path": "assets/audio/kart_hit.wav",
+          "size": 7982
+        },
+        {
+          "digest": "sha256:2117b0a4c24b7ae0a7da829eb8d3d612de534ec224a4bcc80b081a2c53fe938b",
+          "path": "assets/audio/kart_skid.wav",
+          "size": 35324
+        },
+        {
+          "digest": "sha256:5a4bda466ec06a2ee987bdb3e597a9ed8d14d84134020bd1520423d0fca28bdd",
+          "path": "assets/effects/grass_card_atlas.png",
+          "size": 465376
+        },
+        {
+          "digest": "sha256:1be474b7f7d4623cc54dacba63952b163b80eb6d04269ff34e658c6a4dbed4cc",
+          "path": "assets/maps/primitive_track/blockkart.map.json",
+          "size": 5065
+        },
+        {
+          "digest": "sha256:58d6e4c44375dc7dc16cc322864f11556c2ec4de8d07e79c7a76c236aa43d5ed",
+          "path": "assets/maps/primitive_track/dirt_mr.png",
+          "size": 78572
+        },
+        {
+          "digest": "sha256:2796b1c4906212aeed57255e99ca5d084a0e22116d969bef495c389435d5eb32",
+          "path": "assets/maps/primitive_track/dirt_normal.png",
+          "size": 546000
+        },
+        {
+          "digest": "sha256:3975893766908782dbd6913f9160966e33ac842960600584d3115b5969e07232",
+          "path": "assets/maps/primitive_track/dirt_texture.png",
+          "size": 455176
+        },
+        {
+          "digest": "sha256:4f7c93b559c2021580dbf4e009b5619cf5d3b0c9ae1e011ccbb9501dfd8fa1f8",
+          "path": "assets/maps/primitive_track/grass_mr.png",
+          "size": 78256
+        },
+        {
+          "digest": "sha256:d20dc6cf61c54dd8e1774de17639e71ee8dce18918bae9c6914ca6a571567902",
+          "path": "assets/maps/primitive_track/grass_normal.png",
+          "size": 719704
+        },
+        {
+          "digest": "sha256:a7d26b56d9ddd14bca6cda06ff15da13333b9882f819ea407e91256542bdb7ff",
+          "path": "assets/maps/primitive_track/grass_texture.png",
+          "size": 447533
+        },
+        {
+          "digest": "sha256:dd0ce81726cefada1d00d3e60599101515e7f7380a4aee4e17f433b8c5a348bd",
+          "path": "assets/maps/primitive_track/heightmap_large.png",
+          "size": 1089561
+        },
+        {
+          "digest": "sha256:25e6c301d1f53eb4a6759fcf46869760d729937c635fed7530e7e3a07988ef5f",
+          "path": "assets/maps/primitive_track/heightmap.png",
+          "size": 17841
+        },
+        {
+          "digest": "sha256:90b50fefe88e18e7aee161874490b9b97ccae81fe60e6c5be42b8c2e33ea1660",
+          "path": "assets/maps/primitive_track/hero_creek_ribbon.glb",
+          "size": 13060
+        },
+        {
+          "digest": "sha256:749b1ae0bdd1dd3135aa40bd640f39bae48d47cd8d400467d3624f1113ce4dfc",
+          "path": "assets/maps/primitive_track/lowpoly_terrain_height_grid.bin",
+          "size": 264236
+        },
+        {
+          "digest": "sha256:ef5a2168f8172f508292284c5ff299e58ca09b5fe7349e9461267ec633ae8a67",
+          "path": "assets/maps/primitive_track/lowpoly_terrain_lod.glb",
+          "size": 1682608
+        },
+        {
+          "digest": "sha256:754ab5322cba262444be5599ffec77d8d47d5cadb23aa0c8211b17d964d91ad4",
+          "path": "assets/maps/primitive_track/lowpoly_terrain.glb",
+          "size": 6212080
+        },
+        {
+          "digest": "sha256:4f7c93b559c2021580dbf4e009b5619cf5d3b0c9ae1e011ccbb9501dfd8fa1f8",
+          "path": "assets/maps/primitive_track/meadow_mr.png",
+          "size": 78256
+        },
+        {
+          "digest": "sha256:56fd502bdb83b153e93a207f250dca1cdd4144ad541f6204739810dbb984bc5f",
+          "path": "assets/maps/primitive_track/meadow_normal.png",
+          "size": 714941
+        },
+        {
+          "digest": "sha256:0f5c31282d9c855492914214f15d2bf6e9051f352ee07b6dc9a8af8538a2f331",
+          "path": "assets/maps/primitive_track/meadow_texture.png",
+          "size": 435283
+        },
+        {
+          "digest": "sha256:0775590a3a32b585906b797635b15e31e6de0b600c838c3069179fac8f88fff5",
+          "path": "assets/maps/primitive_track/road_asphalt.glb",
+          "size": 203372
+        },
+        {
+          "digest": "sha256:d815fbc4ec905dcba5d236d532f24170d8e6035526e1e27251e5da5d5cd9c0b4",
+          "path": "assets/maps/primitive_track/road_center_dashes.glb",
+          "size": 12884
+        },
+        {
+          "digest": "sha256:83a60fd27253babf71e84471c4371a7ec185038f7b813fa2c46d0898dccd6379",
+          "path": "assets/maps/primitive_track/road_curbs.glb",
+          "size": 307716
+        },
+        {
+          "digest": "sha256:28e02227510be0856c5cde8e3034b4c70ad13ca3797ed50b95bd553d1abbe54a",
+          "path": "assets/maps/primitive_track/road_edge_grime.glb",
+          "size": 132788
+        },
+        {
+          "digest": "sha256:203cca0a6da4e432122e5141624dccc2ef458306531bcabdad267bcff029c0b9",
+          "path": "assets/maps/primitive_track/road_edge_lines.glb",
+          "size": 102432
+        },
+        {
+          "digest": "sha256:7ac58927f39fe0085d0f3c098789ffba7c6527df9c93d37d53e8128df7984757",
+          "path": "assets/maps/primitive_track/road_shoulders.glb",
+          "size": 223592
+        },
+        {
+          "digest": "sha256:a656fbf66cbc2d8f1867cdf480eeb6159bb4847207ce01ffea1eb94faa5507de",
+          "path": "assets/maps/primitive_track/road_tire_grime.glb",
+          "size": 23912
+        },
+        {
+          "digest": "sha256:47e057604890d972e299ee8f08a47111dd6acf0ea9ab367748b868e55f48dfcd",
+          "path": "assets/maps/primitive_track/roadside_primitives.bin",
+          "size": 1195652
+        },
+        {
+          "digest": "sha256:2f6835c60e23ddfacd14d9be76b7ca2a0cb011bef2a0547ac275b7a8540eb552",
+          "path": "assets/maps/primitive_track/rock_mr.png",
+          "size": 87391
+        },
+        {
+          "digest": "sha256:2bb5faace9010e0027e81b8b22b4881dc2b9f602a446f1cf6af4222a99f1524c",
+          "path": "assets/maps/primitive_track/rock_normal.png",
+          "size": 778685
+        },
+        {
+          "digest": "sha256:8eb388f7691dd5c71e76131529a0f5bf71fbf8a45849b152627451fdc931a0e9",
+          "path": "assets/maps/primitive_track/rock_texture.png",
+          "size": 499348
+        },
+        {
+          "digest": "sha256:1196d9b52dc1f3103b332b213e5685192012f8ef54979fccea3fbe179122e3ab",
+          "path": "assets/maps/primitive_track/terrain_splat_large.png",
+          "size": 404155
+        },
+        {
+          "digest": "sha256:0c1e0cac8648fb7d49a5a9de7dcdead11464d93239d491aa704a02eb685fb6e5",
+          "path": "assets/maps/primitive_track/terrain_splat.png",
+          "size": 254006
+        },
+        {
+          "digest": "sha256:9dce6b152716fd5453bb69c0871df0efde0b17c8e1f16d12d26083d91feaa93d",
+          "path": "assets/skybox/back.png",
+          "size": 82811
+        },
+        {
+          "digest": "sha256:f92ececf64b5b14ad15f2cb6172ccc2c46024245966bb05ee4113364a12ff0f6",
+          "path": "assets/skybox/bottom.png",
+          "size": 6604
+        },
+        {
+          "digest": "sha256:84c75853f51e54b6168d0a7e57079584f4db8ef306698d3aada1997fca992cb1",
+          "path": "assets/skybox/front.png",
+          "size": 164681
+        },
+        {
+          "digest": "sha256:951ab3eb3167f4f4f2a9a66c0c074cc09571df7847c98f45b99e03dc4849c26e",
+          "path": "assets/skybox/left.png",
+          "size": 77397
+        },
+        {
+          "digest": "sha256:4e6d9d605909a2ff50c1ad11d6515d8c53e7f3acb400df4730b65a975534af6e",
+          "path": "assets/skybox/right.png",
+          "size": 147367
+        },
+        {
+          "digest": "sha256:77c81837d7a67b001892ed4fd71a1acf45a7a1094db3b60f3cc53598c936dbef",
+          "path": "assets/skybox/top.png",
+          "size": 180758
+        },
+        {
+          "digest": "sha256:1bd71ff6916fab602ca070a0635f350d103d97adf303ad76a01862b15dedbca0",
+          "path": "tools/pack_primitive_assets.vo",
+          "size": 1536
+        }
+      ],
+      "outputs": [
+        {
+          "digest": "sha256:504a84ef39f5b086526b899f311a1999f52108d7be84d8c9781ae32038b62f3d",
+          "path": "assets/blockkart.vpak",
+          "size": 16875487
+        }
+      ],
+      "upstream": [
+        {
+          "id": "painted-terrain-textures",
+          "owner": "BlockKart",
+          "kind": "offline-texture-generation",
+          "command": [
+            "node",
+            "tools/paint_terrain_textures.mjs"
+          ],
+          "inputs": [
+            {
+              "digest": "sha256:3c830c262e42b74636d596de1cd3fe54e2b07f6bcbf0a9e3a9f6abb64bac3005",
+              "path": "docs/images/terrain-upgrade-concept-v1.png",
+              "size": 2046873
+            },
+            {
+              "digest": "sha256:181b6e05f0487c5b6a5a96f7dede03d129cb6eef261719bab556e0917207131a",
+              "path": "tools/paint_terrain_textures.mjs",
+              "size": 39424
+            }
+          ],
+          "outputs": [
+            {
+              "digest": "sha256:5a4bda466ec06a2ee987bdb3e597a9ed8d14d84134020bd1520423d0fca28bdd",
+              "path": "assets/effects/grass_card_atlas.png",
+              "size": 465376
+            },
+            {
+              "digest": "sha256:3975893766908782dbd6913f9160966e33ac842960600584d3115b5969e07232",
+              "path": "assets/source/terrain_painted/dirt_painted_v1.png",
+              "size": 455176
+            },
+            {
+              "digest": "sha256:a7d26b56d9ddd14bca6cda06ff15da13333b9882f819ea407e91256542bdb7ff",
+              "path": "assets/source/terrain_painted/grass_painted_v1.png",
+              "size": 447533
+            },
+            {
+              "digest": "sha256:0f5c31282d9c855492914214f15d2bf6e9051f352ee07b6dc9a8af8538a2f331",
+              "path": "assets/source/terrain_painted/meadow_painted_v1.png",
+              "size": 435283
+            },
+            {
+              "digest": "sha256:8eb388f7691dd5c71e76131529a0f5bf71fbf8a45849b152627451fdc931a0e9",
+              "path": "assets/source/terrain_painted/rock_painted_v1.png",
+              "size": 499348
+            }
+          ]
+        },
+        {
+          "id": "primitive-terrain-assets",
+          "owner": "BlockKart",
+          "kind": "offline-terrain-generation",
+          "command": [
+            "node",
+            "tools/generate_primitive_terrain.mjs"
+          ],
+          "inputs": [
+            {
+              "digest": "sha256:5a4bda466ec06a2ee987bdb3e597a9ed8d14d84134020bd1520423d0fca28bdd",
+              "path": "assets/effects/grass_card_atlas.png",
+              "size": 465376
+            },
+            {
+              "digest": "sha256:3975893766908782dbd6913f9160966e33ac842960600584d3115b5969e07232",
+              "path": "assets/source/terrain_painted/dirt_painted_v1.png",
+              "size": 455176
+            },
+            {
+              "digest": "sha256:a7d26b56d9ddd14bca6cda06ff15da13333b9882f819ea407e91256542bdb7ff",
+              "path": "assets/source/terrain_painted/grass_painted_v1.png",
+              "size": 447533
+            },
+            {
+              "digest": "sha256:0f5c31282d9c855492914214f15d2bf6e9051f352ee07b6dc9a8af8538a2f331",
+              "path": "assets/source/terrain_painted/meadow_painted_v1.png",
+              "size": 435283
+            },
+            {
+              "digest": "sha256:8eb388f7691dd5c71e76131529a0f5bf71fbf8a45849b152627451fdc931a0e9",
+              "path": "assets/source/terrain_painted/rock_painted_v1.png",
+              "size": 499348
+            },
+            {
+              "digest": "sha256:bc4a697e6b31917b2deed12ba066d67725a236e7e9e114ced2b425f712587733",
+              "path": "terrain/recipes/primitive_concept_v1.json",
+              "size": 12655
+            },
+            {
+              "digest": "sha256:4aa912a763b068be7bb4312482f4bdbc2b476f79408da350d904e2f5f4c5398e",
+              "path": "tools/generate_primitive_terrain.mjs",
+              "size": 84029
+            },
+            {
+              "digest": "sha256:d7d5b3bce9750aed900e56b47dc1b878a7f4c687521823a779c0df210c26a57a",
+              "path": "tools/terrain_heightfield_spec.mjs",
+              "size": 26696
+            },
+            {
+              "digest": "sha256:25364309ac0fc78bcbee9c9608bb26576ebc34c7c65ae53e43dce5215e89af5a",
+              "path": "tools/terrain_recipe.mjs",
+              "size": 8500
+            }
+          ],
+          "outputs": [
+            {
+              "digest": "sha256:1be474b7f7d4623cc54dacba63952b163b80eb6d04269ff34e658c6a4dbed4cc",
+              "path": "assets/maps/primitive_track/blockkart.map.json",
+              "size": 5065
+            },
+            {
+              "digest": "sha256:58d6e4c44375dc7dc16cc322864f11556c2ec4de8d07e79c7a76c236aa43d5ed",
+              "path": "assets/maps/primitive_track/dirt_mr.png",
+              "size": 78572
+            },
+            {
+              "digest": "sha256:2796b1c4906212aeed57255e99ca5d084a0e22116d969bef495c389435d5eb32",
+              "path": "assets/maps/primitive_track/dirt_normal.png",
+              "size": 546000
+            },
+            {
+              "digest": "sha256:3975893766908782dbd6913f9160966e33ac842960600584d3115b5969e07232",
+              "path": "assets/maps/primitive_track/dirt_texture.png",
+              "size": 455176
+            },
+            {
+              "digest": "sha256:4f7c93b559c2021580dbf4e009b5619cf5d3b0c9ae1e011ccbb9501dfd8fa1f8",
+              "path": "assets/maps/primitive_track/grass_mr.png",
+              "size": 78256
+            },
+            {
+              "digest": "sha256:d20dc6cf61c54dd8e1774de17639e71ee8dce18918bae9c6914ca6a571567902",
+              "path": "assets/maps/primitive_track/grass_normal.png",
+              "size": 719704
+            },
+            {
+              "digest": "sha256:a7d26b56d9ddd14bca6cda06ff15da13333b9882f819ea407e91256542bdb7ff",
+              "path": "assets/maps/primitive_track/grass_texture.png",
+              "size": 447533
+            },
+            {
+              "digest": "sha256:dd0ce81726cefada1d00d3e60599101515e7f7380a4aee4e17f433b8c5a348bd",
+              "path": "assets/maps/primitive_track/heightmap_large.png",
+              "size": 1089561
+            },
+            {
+              "digest": "sha256:25e6c301d1f53eb4a6759fcf46869760d729937c635fed7530e7e3a07988ef5f",
+              "path": "assets/maps/primitive_track/heightmap.png",
+              "size": 17841
+            },
+            {
+              "digest": "sha256:90b50fefe88e18e7aee161874490b9b97ccae81fe60e6c5be42b8c2e33ea1660",
+              "path": "assets/maps/primitive_track/hero_creek_ribbon.glb",
+              "size": 13060
+            },
+            {
+              "digest": "sha256:749b1ae0bdd1dd3135aa40bd640f39bae48d47cd8d400467d3624f1113ce4dfc",
+              "path": "assets/maps/primitive_track/lowpoly_terrain_height_grid.bin",
+              "size": 264236
+            },
+            {
+              "digest": "sha256:ef5a2168f8172f508292284c5ff299e58ca09b5fe7349e9461267ec633ae8a67",
+              "path": "assets/maps/primitive_track/lowpoly_terrain_lod.glb",
+              "size": 1682608
+            },
+            {
+              "digest": "sha256:754ab5322cba262444be5599ffec77d8d47d5cadb23aa0c8211b17d964d91ad4",
+              "path": "assets/maps/primitive_track/lowpoly_terrain.glb",
+              "size": 6212080
+            },
+            {
+              "digest": "sha256:4f7c93b559c2021580dbf4e009b5619cf5d3b0c9ae1e011ccbb9501dfd8fa1f8",
+              "path": "assets/maps/primitive_track/meadow_mr.png",
+              "size": 78256
+            },
+            {
+              "digest": "sha256:56fd502bdb83b153e93a207f250dca1cdd4144ad541f6204739810dbb984bc5f",
+              "path": "assets/maps/primitive_track/meadow_normal.png",
+              "size": 714941
+            },
+            {
+              "digest": "sha256:0f5c31282d9c855492914214f15d2bf6e9051f352ee07b6dc9a8af8538a2f331",
+              "path": "assets/maps/primitive_track/meadow_texture.png",
+              "size": 435283
+            },
+            {
+              "digest": "sha256:0775590a3a32b585906b797635b15e31e6de0b600c838c3069179fac8f88fff5",
+              "path": "assets/maps/primitive_track/road_asphalt.glb",
+              "size": 203372
+            },
+            {
+              "digest": "sha256:d815fbc4ec905dcba5d236d532f24170d8e6035526e1e27251e5da5d5cd9c0b4",
+              "path": "assets/maps/primitive_track/road_center_dashes.glb",
+              "size": 12884
+            },
+            {
+              "digest": "sha256:83a60fd27253babf71e84471c4371a7ec185038f7b813fa2c46d0898dccd6379",
+              "path": "assets/maps/primitive_track/road_curbs.glb",
+              "size": 307716
+            },
+            {
+              "digest": "sha256:28e02227510be0856c5cde8e3034b4c70ad13ca3797ed50b95bd553d1abbe54a",
+              "path": "assets/maps/primitive_track/road_edge_grime.glb",
+              "size": 132788
+            },
+            {
+              "digest": "sha256:203cca0a6da4e432122e5141624dccc2ef458306531bcabdad267bcff029c0b9",
+              "path": "assets/maps/primitive_track/road_edge_lines.glb",
+              "size": 102432
+            },
+            {
+              "digest": "sha256:7ac58927f39fe0085d0f3c098789ffba7c6527df9c93d37d53e8128df7984757",
+              "path": "assets/maps/primitive_track/road_shoulders.glb",
+              "size": 223592
+            },
+            {
+              "digest": "sha256:a656fbf66cbc2d8f1867cdf480eeb6159bb4847207ce01ffea1eb94faa5507de",
+              "path": "assets/maps/primitive_track/road_tire_grime.glb",
+              "size": 23912
+            },
+            {
+              "digest": "sha256:47e057604890d972e299ee8f08a47111dd6acf0ea9ab367748b868e55f48dfcd",
+              "path": "assets/maps/primitive_track/roadside_primitives.bin",
+              "size": 1195652
+            },
+            {
+              "digest": "sha256:2f6835c60e23ddfacd14d9be76b7ca2a0cb011bef2a0547ac275b7a8540eb552",
+              "path": "assets/maps/primitive_track/rock_mr.png",
+              "size": 87391
+            },
+            {
+              "digest": "sha256:2bb5faace9010e0027e81b8b22b4881dc2b9f602a446f1cf6af4222a99f1524c",
+              "path": "assets/maps/primitive_track/rock_normal.png",
+              "size": 778685
+            },
+            {
+              "digest": "sha256:8eb388f7691dd5c71e76131529a0f5bf71fbf8a45849b152627451fdc931a0e9",
+              "path": "assets/maps/primitive_track/rock_texture.png",
+              "size": 499348
+            },
+            {
+              "digest": "sha256:1196d9b52dc1f3103b332b213e5685192012f8ef54979fccea3fbe179122e3ab",
+              "path": "assets/maps/primitive_track/terrain_splat_large.png",
+              "size": 404155
+            },
+            {
+              "digest": "sha256:0c1e0cac8648fb7d49a5a9de7dcdead11464d93239d491aa704a02eb685fb6e5",
+              "path": "assets/maps/primitive_track/terrain_splat.png",
+              "size": 254006
+            }
+          ]
+        }
+      ]
+    }
+  ],
   "dependencies": [
     {
       "artifacts": [
@@ -270,23 +761,23 @@
       ],
       "cacheDir": "github.com@vo-lang@voplay/v0.1.34",
       "dirty": false,
-      "filesDigest": "sha256:07354ab3fb53e1114d8ab79b5089f026cd6f687545b1289b6ec4cb603cef5e66",
+      "filesDigest": "sha256:8529e529b2909008d77dbe8e304e3a2b32deb3e9678134f5e63250a1cc331f37",
       "module": "github.com/vo-lang/voplay",
       "source": "external",
       "version": "v0.1.34",
-      "commit": "64b8da373a54dd752e50fb6dc7ecef217dc5d89d"
+      "commit": "f3c8296b634d5b7d28353d6c8d3b09daff4968a1"
     }
   ],
   "outputs": [
     {
-      "digest": "sha256:9b6b231ed0915651885ae88087c58fa7f5d7f79463e6b061b1a63abe9a570c11",
+      "digest": "sha256:50eaebdc988bfbb27ca0864c1d4207124b430441078d8da8c57a9aaa89d46bc8",
       "path": "project.json",
       "size": 22754139
     },
     {
-      "digest": "sha256:1253898d9bcb7612ccf8c8df3067b48d537adcf50e595481a73dc9ccdc38f96a",
+      "digest": "sha256:8876abfba1a69da9cc2095177bb0dab3d7dcebcb48b999610fce5d3dc3ee7412",
       "path": "deps.json",
-      "size": 2587750
+      "size": 2591710
     }
   ]
 }

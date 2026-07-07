@@ -37,8 +37,27 @@ function fileBytes(file) {
   return null;
 }
 
+function lineInFile(filePath, needle) {
+  if (!filePath || !existsSync(filePath)) return 1;
+  const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+  const index = lines.findIndex((line) => line.includes(needle));
+  return index === -1 ? 1 : index + 1;
+}
+
 function issue(issues, owner, subsystem, severity, message, evidence = {}) {
-  issues.push({ owner, subsystem, severity, message, evidence });
+  const file = evidence.file ?? evidence.path ?? null;
+  const line = evidence.line ?? (file ? lineInFile(resolve(root, file), evidence.needle ?? '') : 1);
+  issues.push({
+    owner,
+    subsystem,
+    severity,
+    message,
+    file,
+    line,
+    reason: evidence.reason ?? message,
+    requiredFix: evidence.requiredFix ?? 'Update the current source/provenance so the gate can verify this contract from first-party evidence.',
+    evidence,
+  });
 }
 
 function git(args, cwd) {
@@ -207,6 +226,202 @@ function repoSourceBytesForAudit(mod, files, entry, sourceBytes) {
   return sourceBytes;
 }
 
+const requiredVpakProducerOutput = 'assets/blockkart.vpak';
+const requiredVpakProducerInputPaths = [
+  'tools/pack_primitive_assets.vo',
+  'assets/maps/primitive_track/blockkart.map.json',
+];
+const requiredTerrainProducerInputs = [
+  'tools/generate_primitive_terrain.mjs',
+  'tools/terrain_heightfield_spec.mjs',
+  'tools/terrain_recipe.mjs',
+  'terrain/recipes/primitive_concept_v1.json',
+  'assets/source/terrain_painted/grass_painted_v1.png',
+  'assets/source/terrain_painted/meadow_painted_v1.png',
+  'assets/source/terrain_painted/dirt_painted_v1.png',
+  'assets/source/terrain_painted/rock_painted_v1.png',
+  'assets/effects/grass_card_atlas.png',
+];
+const requiredTerrainProducerOutputs = [
+  'assets/maps/primitive_track/lowpoly_terrain.glb',
+  'assets/maps/primitive_track/lowpoly_terrain_lod.glb',
+  'assets/maps/primitive_track/lowpoly_terrain_height_grid.bin',
+  'assets/maps/primitive_track/terrain_splat_large.png',
+];
+const requiredPaintProducerInputs = [
+  'tools/paint_terrain_textures.mjs',
+  'docs/images/terrain-upgrade-concept-v1.png',
+];
+const requiredPaintProducerOutputs = [
+  'assets/source/terrain_painted/grass_painted_v1.png',
+  'assets/source/terrain_painted/meadow_painted_v1.png',
+  'assets/source/terrain_painted/dirt_painted_v1.png',
+  'assets/source/terrain_painted/rock_painted_v1.png',
+  'assets/effects/grass_card_atlas.png',
+];
+
+function entryMap(entries) {
+  return new Map((entries ?? []).map((entry) => [entry.path, entry]));
+}
+
+function sourceDigestEntry(relative) {
+  const absolute = join(blockKartRoot, relative);
+  if (!existsSync(absolute)) return { path: relative, missing: true };
+  const bytes = readFileSync(absolute);
+  return { path: relative, digest: sha256(bytes), size: bytes.byteLength };
+}
+
+function validateDigestEntries(entries, requiredPaths, issues, owner, subsystem, producerLabel, requiredFix) {
+  const entriesByPath = entryMap(entries);
+  for (const requiredPath of requiredPaths) {
+    const actual = entriesByPath.get(requiredPath);
+    const expected = sourceDigestEntry(requiredPath);
+    if (!actual) {
+      issue(issues, owner, subsystem, 'P0', `${producerLabel} missing producer digest entry for ${requiredPath}`, {
+        file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+        needle: '"producers"',
+        requiredPath,
+        requiredFix,
+      });
+      continue;
+    }
+    if (expected.missing || actual.digest !== expected.digest || actual.size !== expected.size) {
+      issue(issues, owner, subsystem, 'P0', `${producerLabel} producer digest entry is stale for ${requiredPath}`, {
+        file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+        needle: requiredPath,
+        requiredPath,
+        expected,
+        found: actual,
+        requiredFix,
+      });
+    }
+  }
+}
+
+function validateBlockKartProducerProvenance(project, provenance, packaged, issues) {
+  const packagedVpak = packaged.get(requiredVpakProducerOutput);
+  const packagedVpakBytes = fileBytes(packagedVpak);
+  if (!packagedVpakBytes) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'Quickplay package must include assets/blockkart.vpak bytes', {
+      file: 'apps/studio/public/quickplay/blockkart/project.json',
+      needle: requiredVpakProducerOutput,
+      requiredFix: 'Regenerate the quickplay package with the BlockKart runtime vpak embedded.',
+    });
+    return;
+  }
+
+  const producer = (provenance.producers ?? []).find((entry) => entry?.output === requiredVpakProducerOutput);
+  if (!producer) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'assets/blockkart.vpak must declare first-party producer provenance', {
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      needle: '"outputs"',
+      requiredFix: 'Regenerate quickplay provenance with a producer record for tools/pack_primitive_assets.vo, terrain generation inputs, output digests, and toolchain command.',
+    });
+    return;
+  }
+
+  if (producer.owner !== 'BlockKart' || producer.kind !== 'vpak') {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'assets/blockkart.vpak producer must name the BlockKart vpak owner contract', {
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      needle: requiredVpakProducerOutput,
+      producer,
+      requiredFix: 'Set producer.owner=BlockKart and producer.kind=vpak for the runtime asset pack producer.',
+    });
+  }
+  if (!Array.isArray(producer.command) || !producer.command.includes('tools/pack_primitive_assets.vo')) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'assets/blockkart.vpak producer command must name tools/pack_primitive_assets.vo', {
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      needle: requiredVpakProducerOutput,
+      command: producer.command ?? null,
+      requiredFix: 'Record the pack command that generated assets/blockkart.vpak.',
+    });
+  }
+  validateDigestEntries(
+    producer.inputs,
+    requiredVpakProducerInputPaths,
+    issues,
+    'BlockKart',
+    'ProducerProvenance',
+    'assets/blockkart.vpak',
+    'Record current source digests for the vpak pack script and map manifest inputs.',
+  );
+  validateDigestEntries(
+    producer.outputs,
+    [requiredVpakProducerOutput],
+    issues,
+    'BlockKart',
+    'ProducerProvenance',
+    'assets/blockkart.vpak',
+    'Record the current output digest for assets/blockkart.vpak.',
+  );
+  const producerOutput = entryMap(producer.outputs).get(requiredVpakProducerOutput);
+  if (producerOutput?.digest !== sha256(packagedVpakBytes) || producerOutput?.size !== packagedVpakBytes.byteLength) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'assets/blockkart.vpak producer output must match packaged bytes', {
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      needle: requiredVpakProducerOutput,
+      expected: { digest: sha256(packagedVpakBytes), size: packagedVpakBytes.byteLength },
+      found: producerOutput ?? null,
+      requiredFix: 'Regenerate quickplay provenance from the current packaged vpak bytes.',
+    });
+  }
+
+  const upstream = Array.isArray(producer.upstream) ? producer.upstream : [];
+  const terrainProducer = upstream.find((entry) => entry?.id === 'primitive-terrain-assets');
+  const paintProducer = upstream.find((entry) => entry?.id === 'painted-terrain-textures');
+  if (!terrainProducer) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'assets/blockkart.vpak provenance must include primitive terrain generator lineage', {
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      needle: requiredVpakProducerOutput,
+      requiredFix: 'Record the tools/generate_primitive_terrain.mjs producer with terrain inputs and generated output digests.',
+    });
+  } else {
+    validateDigestEntries(
+      terrainProducer.inputs,
+      requiredTerrainProducerInputs,
+      issues,
+      'BlockKart',
+      'ProducerProvenance',
+      'primitive-terrain-assets',
+      'Record current terrain generator input digests.',
+    );
+    validateDigestEntries(
+      terrainProducer.outputs,
+      requiredTerrainProducerOutputs,
+      issues,
+      'BlockKart',
+      'ProducerProvenance',
+      'primitive-terrain-assets',
+      'Record current generated terrain output digests.',
+    );
+  }
+  if (!paintProducer) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'assets/blockkart.vpak provenance must include painted terrain texture lineage', {
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      needle: requiredVpakProducerOutput,
+      requiredFix: 'Record the tools/paint_terrain_textures.mjs producer with source concept and baked texture output digests.',
+    });
+  } else {
+    validateDigestEntries(
+      paintProducer.inputs,
+      requiredPaintProducerInputs,
+      issues,
+      'BlockKart',
+      'ProducerProvenance',
+      'painted-terrain-textures',
+      'Record current painted texture producer input digests.',
+    );
+    validateDigestEntries(
+      paintProducer.outputs,
+      requiredPaintProducerOutputs,
+      issues,
+      'BlockKart',
+      'ProducerProvenance',
+      'painted-terrain-textures',
+      'Record current painted texture output digests.',
+    );
+  }
+}
+
 function auditBlockKart(project, provenance, issues) {
   if (!existsSync(blockKartRoot)) {
     issue(issues, 'BlockKart', 'Source', 'P0', 'BlockKart source checkout is missing', { blockKartRoot });
@@ -252,6 +467,7 @@ function auditBlockKart(project, provenance, issues) {
   }
 
   const packaged = new Map((project.files ?? []).map((file) => [file.path, file]));
+  validateBlockKartProducerProvenance(project, provenance, packaged, issues);
   const sourceFiles = listSourceFiles(blockKartRoot, '.vo');
   const packagedVo = new Set([...packaged.keys()].filter((file) => file.endsWith('.vo')));
   const sourceAllowlist = new Map((provenance?.project?.sourceAllowlist ?? project.sourceAllowlist ?? [])
@@ -469,31 +685,42 @@ for (const mod of deps.modules ?? []) {
 }
 
 const generatedAt = new Date().toISOString();
+const freshEvidence = sourceBoundEvidence({
+  gate: 'quickplay-source-audit',
+  generatedAt,
+  root,
+  repos: [
+    { name: 'volang', root },
+    { name: 'BlockKart', root: blockKartRoot },
+    ...[...dependencyRepos.entries()].map(([module, repoRoot]) => ({ name: module, root: repoRoot })),
+  ],
+  gateFiles: [
+    'scripts/ci/quickplay_source_audit.mjs',
+    'scripts/ci/repo_roots.mjs',
+    'scripts/ci/source_bound_evidence.mjs',
+    'apps/studio/scripts/package_blockkart_quickplay.mjs',
+    'eng/tasks.toml',
+    'eng/artifacts.toml',
+    'eng/project.toml',
+  ],
+  artifacts: [quickplayDir],
+});
+if (freshEvidence.verdict.status !== 'pass') {
+  issue(issues, 'Volang', 'FreshEvidence', 'P0', 'quickplay source audit freshEvidence verdict must pass', {
+    file: 'scripts/ci/quickplay_source_audit.mjs',
+    needle: 'sourceBoundEvidence',
+    reason: 'Current source-bound report was produced from dirty or missing-commit repositories.',
+    dirtyRepos: freshEvidence.verdict.dirtyRepos,
+    missingCommitRepos: freshEvidence.verdict.missingCommitRepos,
+    requiredFix: 'Regenerate the report from clean checked-out sources after all quickplay/provenance changes are committed.',
+  });
+}
 const report = {
   schemaVersion: 1,
   kind: 'quickplay.sourceAuditReport',
   status: issues.length === 0 ? 'ok' : 'failed',
   generatedAt,
-  freshEvidence: sourceBoundEvidence({
-    gate: 'quickplay-source-audit',
-    generatedAt,
-    root,
-    repos: [
-      { name: 'volang', root },
-      { name: 'BlockKart', root: blockKartRoot },
-      ...[...dependencyRepos.entries()].map(([module, repoRoot]) => ({ name: module, root: repoRoot })),
-    ],
-    gateFiles: [
-      'scripts/ci/quickplay_source_audit.mjs',
-      'scripts/ci/repo_roots.mjs',
-      'scripts/ci/source_bound_evidence.mjs',
-      'apps/studio/scripts/package_blockkart_quickplay.mjs',
-      'eng/tasks.toml',
-      'eng/artifacts.toml',
-      'eng/project.toml',
-    ],
-    artifacts: [quickplayDir],
-  }),
+  freshEvidence,
   quickplayDir,
   blockKartRoot,
   checkedAt: generatedAt,
