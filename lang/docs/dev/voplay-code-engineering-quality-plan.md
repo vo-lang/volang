@@ -20,10 +20,11 @@ source-bound gate、预算 stress 和 10 分钟 soak 共同签字，任何单项
 本计划的目标口径：
 
 ```text
-qualityReady=pending-final-clean-source-bound-gate
-industrialReady=pending-final-clean-source-bound-gate
-architectureEleganceReady=implementation-complete-awaiting-final-gate
-sourceFirstPrinciplesReview=in-progress
+qualityReady=pending-clean-commit-signoff
+industrialReady=pending-clean-commit-signoff
+architectureEleganceReady=true
+sourceFirstPrinciplesReview=pass
+artifactSourceAgreement=working-tree-pass
 ```
 
 最终完成口径：
@@ -59,9 +60,9 @@ artifact 或 target report 的任务。
 当前 checkout snapshot:
 
 ```text
-volang    0858a908b6c1e0036117a94d0dc7729a76a0a811
-voplay    3e8a0da0cdac298a1f701fb3a9efd7ded8199b44
-BlockKart e2b54f3ca4cd52c28fc52ac5d2c38e2634a84351
+volang    edf2bb2a029b252e71f669b598bb386bba796a3c
+voplay    2373af2320baed79521a6f0c57e9f19b77151c46
+BlockKart 49498844a61f081ea5bf6bd6687ffb9cfd35786c
 ```
 
 重构前 source-bound baseline reports:
@@ -153,9 +154,11 @@ voplay 的核心代码应该满足以下结构约束：
 
 ### 当前差距
 
-源码审查中的 P0/P1 架构缺口已经关闭。剩余工作限于运行 Final Gate、将三个仓库绑定到 clean commits、
-重建 quickplay artifact，并生成预算 stress、10 分钟 soak、physics replay 与 readiness 最终报告。若最终
-运行证据暴露新的第一性反证，本节必须恢复为未完成状态并记录对应 owner。
+源码审查中的 P0/P1 架构缺口已经关闭。主 agent 完成第二轮关键源码终审，未发现新的 P0/P1 第一性
+反证；quickplay artifact 已从当前工作树重建，regenerate compare 通过。strict source audit 只保留三个
+仓库 dirty 与 provenance clean-signoff 对应的四项根因，旧 commit 对新文件产生的派生噪音已消除。剩余
+工作限于把三个工作树形成真实 commits，再运行 Final Gate、预算 stress、10 分钟 soak、physics replay 与
+readiness 最终报告。
 
 ## 设计原则
 

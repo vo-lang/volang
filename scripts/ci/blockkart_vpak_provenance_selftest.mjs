@@ -17,6 +17,7 @@ const outDir = path.resolve(process.env.BLOCKKART_VPAK_SELFTEST_OUT_DIR ?? path.
 const manifest = JSON.parse(readFileSync(path.join(blockKartRoot, 'assets/blockkart.vpak.provenance.json'), 'utf8'));
 const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'blockkart-vpak-provenance-selftest-'));
 const fixtureRoot = path.join(tempRoot, 'BlockKart');
+const blockKartWorkspacePrefix = 'workspace:github.com/vo-lang/blockkart/';
 
 function copy(relative) {
   const destination = path.join(fixtureRoot, relative);
@@ -25,10 +26,17 @@ function copy(relative) {
 }
 
 try {
+  const fixtureInputs = manifest.inputs.flatMap((entry) => {
+    if (!entry.path.startsWith('workspace:')) return [entry.path];
+    if (entry.path.startsWith(blockKartWorkspacePrefix)) {
+      return [entry.path.slice(blockKartWorkspacePrefix.length)];
+    }
+    return [];
+  });
   for (const relative of [
     'assets/blockkart.vpak',
     'assets/blockkart.vpak.provenance.json',
-    ...manifest.inputs.map((entry) => entry.path).filter((entry) => !entry.startsWith('workspace:')),
+    ...fixtureInputs,
   ]) {
     copy(relative);
   }

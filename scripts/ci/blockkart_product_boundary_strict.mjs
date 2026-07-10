@@ -128,22 +128,38 @@ function scan(pattern, allow = () => false) {
 }
 
 const blockKartVoFiles = listVoFiles(blockKartRoot);
+const voplayVoFiles = listVoFiles(voplayRoot);
 const boundaryFacts = analyzeBlockKartBoundary(blockKartVoFiles);
 const world = readProjectFile(blockKartRoot, 'world.vo');
 const primitiveWorld = readProjectFile(blockKartRoot, 'primitive_world.vo');
-const productFoundation = readProjectFile(blockKartRoot, 'product_foundation.vo');
+const primitiveContent = readProjectFile(blockKartRoot, 'primitive_content.vo');
 const diagnosticsJson = readProjectFile(blockKartRoot, 'diagnostics_json.vo');
-const vehicle = readProjectFile(voplayRoot, 'scene3d/vehicle.vo');
+const vehicleTelemetry = readProjectFile(voplayRoot, 'scene3d/vehicle_telemetry.vo');
+const sceneDiagnostics = readProjectFile(voplayRoot, 'scene3d/diagnostics.vo');
+const primitiveAuthoring = readProjectFile(voplayRoot, 'scene3d/primitive_authoring.vo');
 
 const directVehicleWriteHits = scan(/\bw\.vehicle\.(Speed|Yaw|Grounded)\s*=/);
 const directVehicleFactHits = scan(/\bw\.vehicle\.(Speed|Yaw|Grounded)\b/);
 const directPhysicsStepHits = scan(/\b(ProductStepAndSyncPhysics|[A-Za-z_][A-Za-z0-9_]*\s*\.\s*StepAndSyncPhysics)\s*\(/);
-const primitivePoseHits = scan(/\.SetPose\(/, (entry) => entry.rel === 'gameplay.vo');
 const handwrittenJsonHits = scan(/"\{"\s*\+|jsonString\(|jsonBool\(|jsonFloat\(/, (entry) => entry.rel === 'diagnostics_json.vo');
 const manualMarkerJsonHits = scan(/\bblockKartEmitJSON\s*\(|\bprintln\s*\(\s*blockKart[A-Za-z0-9_]*Marker\s*\+|blockKart[A-Za-z0-9_]*ReportMarker/, (entry) => entry.rel === 'diagnostics_json.vo');
 const lowLevelHudHits = scan(/\bPrimitiveStats\(|\bWheelState\(|VehicleGrounded|WheelMaxSlip|primitiveUploadBytes|primitiveDrawCalls|diag\.Primitive\.DrawCalls|content\.UploadBytes|primitiveStats\.DrawCalls|primitiveStats\.UploadBytes/);
-const genericAuthoringHits = scan(/ProductPrimitiveAuthoring|PrimitiveBatchAuthoring|PrimitiveInstanceAuthoring|SurfaceMaterialAuthoring|ColliderAuthoring|NewProductPrimitiveRuntime|NewProductPrimitiveAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|Authoring\.Add|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc|ShapeDesc|MaterialPreset)|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|PackWriter|vopack\./);
-const blockKartNamedAuthoringHits = scan(/NewBlockKartPrimitiveContent|PrepareBlockKartMapAsset|SpawnBlockKartMap|SpawnBlockKartRoadsideBakedContent|AddDynamicWithFlags|PlaceStatic|PlaceDetail|SetBlockKartPrimitivePose|attachPrimitiveTrackColliderEntities|spawnBlockKartTrackCollider|primitiveTerrainSurfacePosition/);
+const engineProductFacadeHits = voplayVoFiles.flatMap((entry) => {
+  const hits = [];
+  const pattern = /\b(?:ProductVehicleTelemetry|ProductSceneDiagnostics|ProductPrimitiveAuthoring|NewProductPrimitiveRuntime|NewProductPrimitiveAuthoring|ProductPrimitive(?:Place|Dynamic|SetPose)|ProductSpawnTrackColliderStrip)\b/g;
+  for (const match of entry.source.matchAll(pattern)) {
+    hits.push({ path: entry.rel, line: lineOf(entry.source, match[0]), symbol: match[0] });
+  }
+  return hits;
+});
+const engineBlockKartContentHits = voplayVoFiles.flatMap((entry) => {
+  const hits = [];
+  const pattern = /\bBlockKart(?:Primitive|Map|Pack)[A-Za-z0-9_]*\b/g;
+  for (const match of entry.source.matchAll(pattern)) {
+    hits.push({ path: entry.rel, line: lineOf(entry.source, match[0]), symbol: match[0] });
+  }
+  return hits;
+});
 const directIntentBypassHits = scan(/UpdateIntentFromSyncedState\s*\(|\b[A-Za-z_][A-Za-z0-9_]*\.UpdateIntent\s*\(/);
 const directConstraintHits = scan(/\b(ApplyEntityPhysicsTarget|ApplyEntityPhysicsConstraint|ApplyVehicleConstraint|VehicleConstraintCommand)\b/);
 const rawRenderKnobHits = scan(/\b[A-Za-z_][A-Za-z0-9_]*\.scene\.RenderDebugMode\b|\.RenderDebugMode\s*=(?!=)|\b(SetRenderDebug3D|PostProcessConfig|ShadowResolution)\b/);
@@ -216,12 +232,11 @@ const runtimeOwnerFacts = runtimeOwnerNames.map((owner) => {
 check(directVehicleWriteHits.length === 0, 'blockkart.direct_vehicle_state_write', 'BlockKart product runtime writes voplay vehicle physics state directly', { directVehicleWriteHits });
 check(directVehicleFactHits.length === 0, 'blockkart.direct_vehicle_low_level_fact', 'BlockKart product runtime reads Speed/Yaw/Grounded instead of structured telemetry', { directVehicleFactHits });
 check(directPhysicsStepHits.length === 0, 'blockkart.direct_scene_step', 'BlockKart product runtime calls Scene.StepAndSyncPhysics directly', { directPhysicsStepHits });
-check(primitivePoseHits.length === 0, 'blockkart.primitive_pose_workaround', 'BlockKart product runtime mutates primitive part pose directly', { primitivePoseHits });
 check(handwrittenJsonHits.length === 0, 'blockkart.handwritten_json_report', 'BlockKart diagnostics still hand-write JSON strings instead of a structured encoder/schema', { handwrittenJsonHits });
 check(manualMarkerJsonHits.length === 0, 'blockkart.manual_marker_json_report', 'BlockKart business/runtime files emit marker-prefixed JSON instead of using a schema-owned report encoder', { manualMarkerJsonHits });
 check(lowLevelHudHits.length === 0, 'blockkart.low_level_hud_fact', 'BlockKart HUD/diagnostics assemble low-level render, primitive, GPU, or vehicle facts', { lowLevelHudHits });
-check(genericAuthoringHits.length === 0, 'blockkart.generic_primitive_authoring', 'BlockKart product runtime owns generic primitive/layer/material/chunk authoring', { genericAuthoringHits });
-check(blockKartNamedAuthoringHits.length === 0, 'blockkart.blockkart_named_authoring_wrapper', 'BlockKart product runtime owns BlockKart-named primitive/map/collider authoring wrappers instead of consuming voplay-owned product content APIs', { blockKartNamedAuthoringHits });
+check(engineProductFacadeHits.length === 0, 'voplay.product_facade', 'voplay still exposes product-named facade APIs instead of engine owners', { engineProductFacadeHits });
+check(engineBlockKartContentHits.length === 0, 'voplay.blockkart_content', 'voplay still owns BlockKart-specific content', { engineBlockKartContentHits });
 check(directIntentBypassHits.length === 0, 'blockkart.direct_vehicle_intent_bypass', 'BlockKart product runtime updates controller/vehicle intent outside VehiclePhysicsSession', { directIntentBypassHits });
 check(directConstraintHits.length === 0, 'blockkart.direct_physics_constraint', 'BlockKart product runtime applies low-level physics constraints directly', { directConstraintHits });
 check(rawRenderKnobHits.length === 0, 'blockkart.raw_render_knob', 'BlockKart product runtime writes or exposes low-level render knobs directly', { rawRenderKnobHits });
@@ -233,11 +248,15 @@ check(ownerRuntimeContextHits.length === 0, 'blockkart.owner_methods_take_runtim
 check(boundaryFacts.wideOwnerParameters.length === 0, 'blockkart.owner_ports_semantically_narrow', 'Runtime owner ports must remain narrow after alias and wrapper expansion', { wideOwnerParameters: boundaryFacts.wideOwnerParameters.slice(0, 120), stateGroupsByType: boundaryFacts.stateGroupsByType });
 check(runtimeOwnerFacts.every((entry) => entry.methods.length > 0 && entry.calledByProduct), 'blockkart.empty_runtime_owner', 'runtime_owners.vo owners must own production methods and be called by runtime', { runtimeOwnerFacts });
 
-check(vehicle.includes('ProductVehicleTelemetry') || blockKartVoFiles.some((entry) => entry.source.includes('ProductVehicleTelemetry')), 'blockkart.product_vehicle_telemetry_missing', 'BlockKart strict boundary needs structured voplay product vehicle telemetry', {
-  productFoundation: lineOf(productFoundation, 'ProductVehicleTelemetry'),
+check(vehicleTelemetry.includes('func (v *Vehicle) Telemetry() VehicleTelemetry'), 'voplay.vehicle_telemetry_owner_missing', 'Vehicle must expose structured telemetry through its engine owner', {
+  vehicleTelemetry: lineOf(vehicleTelemetry, 'func (v *Vehicle) Telemetry() VehicleTelemetry'),
 });
-check(blockKartVoFiles.some((entry) => entry.source.includes('ProductSceneDiagnostics')), 'blockkart.product_scene_diagnostics_missing', 'BlockKart strict boundary needs structured voplay product scene diagnostics', {
-  world: lineOf(world, 'ProductSceneDiagnostics'),
+check(sceneDiagnostics.includes('func (s *Scene) Diagnostics() SceneDiagnostics'), 'voplay.scene_diagnostics_owner_missing', 'Scene must expose structured diagnostics through its engine owner', {
+  sceneDiagnostics: lineOf(sceneDiagnostics, 'func (s *Scene) Diagnostics() SceneDiagnostics'),
+});
+check(primitiveAuthoring.includes('type PrimitiveWorldAuthoring struct') && primitiveContent.includes('scene3d.PrimitiveWorldAuthoring'), 'blockkart.primitive_authoring_boundary_missing', 'BlockKart content must consume the generic scene3d primitive authoring owner', {
+  engineOwner: lineOf(primitiveAuthoring, 'type PrimitiveWorldAuthoring struct'),
+  productConsumer: lineOf(primitiveContent, 'scene3d.PrimitiveWorldAuthoring'),
 });
 check(diagnosticsJson.includes('jsonString') && handwrittenJsonHits.length === 0, 'blockkart.json_encoder_schema_missing', 'diagnostics_json.vo should be the only JSON escaping/encoding owner', {});
 check(/\\\\n|newline/i.test(diagnosticsJson) && /\\\\u00|control/i.test(diagnosticsJson), 'blockkart.json_encoder_control_escape_missing', 'diagnostics_json.vo must escape newlines and control characters through the structured encoder', {});

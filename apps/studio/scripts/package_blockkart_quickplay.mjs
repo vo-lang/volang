@@ -26,10 +26,15 @@ const BLOCKKART_SOURCE_ALLOWLIST = [
     reason: 'Asset-pack generation tool; quickplay runtime embeds the generated assets/blockkart.vpak payload.',
     expiresAt: '2027-01-31T00:00:00.000Z',
   },
+  {
+    path: 'runtimepack/runtime_pack.vo',
+    reason: 'Asset-pack schema package; quickplay runtime consumes its generated assets/blockkart.vpak payload.',
+    expiresAt: '2027-01-31T00:00:00.000Z',
+  },
 ];
 const QUICKPLAY_ARTIFACT_NAME = 'studio.quickplay.blockkart';
 const QUICKPLAY_ARTIFACT_PATH = 'apps/studio/public/quickplay/blockkart';
-const QUICKPLAY_GENERATOR_VERSION = 6;
+const QUICKPLAY_GENERATOR_VERSION = 7;
 const QUICKPLAY_TASK_ID = 'quickplay-blockkart-package';
 const QUICKPLAY_GENERATOR_COMMAND = ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'];
 const QUICKPLAY_GENERATOR_INPUTS = [

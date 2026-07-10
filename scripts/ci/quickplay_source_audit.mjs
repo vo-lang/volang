@@ -725,7 +725,8 @@ function auditDependencyRepoCommit(mod, locked, provenanceDependency, issues) {
     return;
   }
   const head = tryGit(['rev-parse', 'HEAD'], repoRoot);
-  if (provenanceDependency?.dirty === true) {
+  const dirty = provenanceDependency?.dirty === true;
+  if (dirty) {
     if (!head.ok || head.stdout !== locked.commit) {
       issue(issues, mod.module, 'SourceRepo', 'P0', 'Dirty dependency source repo HEAD does not match locked commit', { expected: locked.commit, found: head.ok ? head.stdout : null, repoRoot, error: head.error });
       return;
@@ -746,15 +747,24 @@ function auditDependencyRepoCommit(mod, locked, provenanceDependency, issues) {
     return;
   }
   for (const entry of web.source ?? []) {
-    const source = tryGitBytes(['show', `${locked.commit}:${entry.path}`], repoRoot);
+    const workingTreePath = join(repoRoot, entry.path);
+    const source = dirty
+      ? (existsSync(workingTreePath)
+        ? { ok: true, bytes: readFileSync(workingTreePath) }
+        : { ok: false, error: `missing working-tree source ${entry.path}` })
+      : tryGitBytes(['show', `${locked.commit}:${entry.path}`], repoRoot);
     if (!source.ok) {
-      issue(issues, mod.module, 'SourceRepo', 'P0', 'Locked dependency commit is missing release source file', { commit: locked.commit, path: entry.path });
+      issue(issues, mod.module, 'SourceRepo', 'P0', dirty
+        ? 'Dirty dependency working tree is missing packaged source file'
+        : 'Locked dependency commit is missing release source file', { commit: locked.commit, path: entry.path, error: source.error });
       continue;
     }
     const sourceBytes = source.bytes;
     const expectedBytes = repoSourceBytesForAudit(mod, files, entry, sourceBytes);
     if (expectedBytes.byteLength !== entry.size || sha256(expectedBytes) !== entry.digest) {
-      issue(issues, mod.module, 'SourceRepo', 'P0', 'Locked dependency commit source differs from vo.web.json source entry', {
+      issue(issues, mod.module, 'SourceRepo', 'P0', dirty
+        ? 'Dirty dependency working-tree source differs from vo.web.json source entry'
+        : 'Locked dependency commit source differs from vo.web.json source entry', {
         commit: locked.commit,
         path: entry.path,
         expected: { digest: entry.digest, size: entry.size },
