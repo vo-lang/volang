@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:58d5b5bbf1c31b5dc2746361aa45267687b24598aebb760f7968b1056e3d7b44",
+    "voDevSourceDigest": "sha256:93aa472c645a16f379eb6e07174d9e0a634e295ce27cccb5c9d13d2c7d774c16",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -48,14 +48,14 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "d63b162a0336d1d1b5959eefa66597b125643dfb",
+    "commit": "3a2a553f3a986df98a758d81823c413778b88256",
     "dirty": false,
-    "filesDigest": "sha256:d6c4b815ad1eabc67caed64f7fcfff3a22586cc2ea6c1159d230c3d7ae5cbacc",
+    "filesDigest": "sha256:2274d91846788f45df73bd0cde0f0770bd6c19faeeebb3dc669db352f2ca209d",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
       "sourceDigest": "sha256:3121cb8c9d16f3a4372a9ef8f3ba9cff9086289bd0437fc59ede032dd8c2ad6d",
-      "packagedDigest": "sha256:dc95e6de244a3920da91c9bdb8074422f4130eeb4b8337fa82c0eb2c54ed3a3b",
+      "packagedDigest": "sha256:edbe60d6d11442205b8d716f73076c52a6149ce0b95ac5f1cf8bacbf2a67e7e8",
       "modules": [
         {
           "module": "github.com/vo-lang/vogui",
@@ -84,9 +84,9 @@
         {
           "module": "github.com/vo-lang/voplay",
           "version": "v0.1.34",
-          "commit": "49e04ab7f5466bf21baca3b24c2e009708470328",
-          "releaseManifestDigest": "sha256:7d3b33effab8c3d1510b52c0475d53ade48fe47c4214ee5b4069517895d37905",
-          "sourceDigest": "sha256:e92306b123a091b277e33c19bfb180fb0562f42d8bca782d047b9e7bc14d1a12",
+          "commit": "61d4e36d10c3ecd139c24321c6314258c4806b73",
+          "releaseManifestDigest": "sha256:bffeab1970cc525d6576640f90c3c9bee4af1e776c460d9c937e8cb1e004f499",
+          "sourceDigest": "sha256:47616bfab93e4da952abd4c2f6752c6695535f772589e53a3494978bc9ea68fc",
           "artifacts": [
             {
               "kind": "extension-js-glue",
@@ -254,9 +254,9 @@
         "wasm-island"
       ],
       "source": {
-        "commit": "49e04ab7f5466bf21baca3b24c2e009708470328",
+        "commit": "61d4e36d10c3ecd139c24321c6314258c4806b73",
         "dirty": false,
-        "digest": "sha256:1d023a65035c80ab197f87db282683eb27d62d56299b477d813596d02f5c7c8f"
+        "digest": "sha256:155f98bf881e4c9bcd140edc9120e806b31d6871a1a902398c4051a45cc4d74e"
       },
       "toolchain": {
         "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
@@ -1033,8 +1033,8 @@
         },
         {
           "path": "workspace:github.com/vo-lang/voplay/scene3d/scene.vo",
-          "digest": "sha256:2c2124001ff705aa750ce6097a2434e523c63b7486077e84b5a9de140b0cabc1",
-          "size": 28130
+          "digest": "sha256:02470ce83b1db9105ca46d552242f62ca1086adea9fb90d48e2ef2b48366844d",
+          "size": 28484
         },
         {
           "path": "workspace:github.com/vo-lang/voplay/scene3d/surface_material.vo",
@@ -1439,9 +1439,9 @@
       ],
       "producerManifest": {
         "path": "assets/blockkart.vpak.provenance.json",
-        "sha256": "sha256:6326983f8d379beb880f3e76babc79f25bb1873a43fd468224cf609740249f72",
+        "sha256": "sha256:85851a40f146ff43e6e83a183eb7edd2debe7e76cddbe4c838218c5a8350a18d",
         "size": 60886,
-        "producerDigest": "0172d727e795ffcaf9553ef7679befed37e22bfb0f1a276308e010d09d26572c"
+        "producerDigest": "4206c5aa9f39875d50bf10324ccfa54514924246a92ce7a1918fcad50d6d22da"
       },
       "archiveEntryCount": 37,
       "payloadInputCount": 37,
@@ -2001,23 +2001,23 @@
       ],
       "cacheDir": "github.com@vo-lang@voplay/v0.1.34",
       "dirty": false,
-      "filesDigest": "sha256:07928cafbe284d41ddf4a124c9477f6acabb1e31869739d9b5c9feea78f38629",
+      "filesDigest": "sha256:35d7b9ec2e48f1fe4f9df560efde0ad8805ccf71f35290ff829871cdec87b781",
       "module": "github.com/vo-lang/voplay",
       "source": "external",
       "version": "v0.1.34",
-      "commit": "49e04ab7f5466bf21baca3b24c2e009708470328"
+      "commit": "61d4e36d10c3ecd139c24321c6314258c4806b73"
     }
   ],
   "outputs": [
     {
-      "digest": "sha256:d6f61904b7712557ec5aaf8652a8d31021277aa86fc07b49f7c79cf3dc7d5734",
+      "digest": "sha256:5d82dbfe160ec321b037e92feed62067055b5e3144b36031bef3535c65d870e8",
       "path": "project.json",
       "size": 22843100
     },
     {
-      "digest": "sha256:d7201f65fa26890f3d893dca2996d3b2b9812f45d48aec8794e29e9fab025197",
+      "digest": "sha256:286a3ed4bbc687dc48d47be0ee71d09f872f58ee7002b9692a706b0952f8500d",
       "path": "deps.json",
-      "size": 2640088
+      "size": 2640808
     }
   ]
 }
