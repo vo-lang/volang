@@ -187,6 +187,9 @@ function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
       frameP90Ms: lastTelemetry?.frameP90Ms ?? null,
       frameP99Ms: lastTelemetry?.frameP99Ms ?? null,
       resourceChurn: lastTelemetry?.resourceChurn ?? null,
+      telemetrySource: lastTelemetry?.telemetrySource ?? null,
+      telemetryError: lastTelemetry?.telemetryError ?? null,
+      perfEndpointError: lastTelemetry?.perfEndpointError ?? null,
       lastTelemetryPacket: lastTelemetry?.lastTelemetryPacket ?? null,
       updatedAt: new Date().toISOString(),
       timeline,
@@ -230,6 +233,9 @@ function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
           frameP90Ms: lastTelemetry?.frameP90Ms ?? null,
           frameP99Ms: lastTelemetry?.frameP99Ms ?? null,
           resourceChurn: lastTelemetry?.resourceChurn ?? null,
+          telemetrySource: lastTelemetry?.telemetrySource ?? null,
+          telemetryError: lastTelemetry?.telemetryError ?? null,
+          perfEndpointError: lastTelemetry?.perfEndpointError ?? null,
           lastTelemetryPacket: lastTelemetry?.lastTelemetryPacket ?? null,
           timeline,
         } : null,
@@ -683,13 +689,15 @@ if (process.argv.includes('--selftest-observability')) {
   mkdirSync(selftestDir, { recursive: true });
   const result = await runObservedProcess(
     'timeout-negative-fixture',
-    ['-e', `console.error('BlockKart baseline progress: telemetry ${JSON.stringify({ stage: 'capture', frameIndex: 42, pass: 'main', frameP90Ms: 16.7, frameP99Ms: 16.7, resourceChurn: 3, lastTelemetryPacket: { status: 'pass', frameGraphFailures: 0 } })}'); setInterval(() => {}, 1000)`],
+    ['-e', `console.error('BlockKart baseline progress: telemetry ${JSON.stringify({ stage: 'capture', frameIndex: 42, pass: 'main', frameP90Ms: 16.7, frameP99Ms: 16.7, resourceChurn: 3, telemetrySource: 'negative-fixture', telemetryError: 'fixture transport closed', perfEndpointError: null, lastTelemetryPacket: { status: 'pass', frameGraphFailures: 0 } })}'); setInterval(() => {}, 1000)`],
     heartbeatPath,
     100,
   );
   const timeoutStageRecorded = result.observability?.timeline?.some((entry) => entry.stage === 'timeout-signal') === true;
   const telemetryRecorded = result.timeoutDiagnostic?.frameIndex === 42
     && result.timeoutDiagnostic?.lastPass === 'main'
+    && result.timeoutDiagnostic?.telemetrySource === 'negative-fixture'
+    && result.timeoutDiagnostic?.telemetryError === 'fixture transport closed'
     && result.timeoutDiagnostic?.lastTelemetryPacket?.frameGraphFailures === 0;
   if (!result.timedOut || result.timeoutDiagnostic?.code !== 'voplay.renderStress.timeout' || !timeoutStageRecorded || !telemetryRecorded || !existsSync(heartbeatPath)) {
     fail(`observability selftest failed: ${JSON.stringify(result)}`);

@@ -198,18 +198,20 @@ async function captureWithTelemetryHeartbeat(client, durationMs, baseUrl) {
       perfReports: [],
       telemetryError: error instanceof Error ? error.message : String(error),
     }));
-    let perfReports = snapshot.perfReports ?? [];
+    const hookPerfReports = snapshot.perfReports ?? [];
+    let endpointPerfReports = [];
     let telemetrySource = 'cdp-debug-hook';
     let perfEndpointError = null;
-    if (perfReports.length === 0) {
+    if (hookPerfReports.length === 0) {
       const perfEndpoint = await fetchVoplayPerfEndpoint(baseUrl).catch((error) => ({
         reports: [],
         error: error instanceof Error ? error.message : String(error),
       }));
-      perfReports = perfEndpoint.reports ?? [];
+      endpointPerfReports = perfEndpoint.reports ?? [];
       perfEndpointError = perfEndpoint.error ?? null;
-      telemetrySource = perfReports.length > 0 ? 'perf-endpoint' : 'unavailable';
+      telemetrySource = endpointPerfReports.length > 0 ? 'perf-endpoint' : 'unavailable';
     }
+    const perfReports = normalizePerfReports(hookPerfReports, endpointPerfReports);
     const perfSummary = summarizePerfReports(perfReports).latestPerfSummary;
     const renderer = perfSummary?.renderer ?? {};
     const workload = perfSummary?.workload ?? {};
