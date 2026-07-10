@@ -60,8 +60,8 @@ artifact 或 target report 的任务。
 
 ```text
 volang    45ca195d7593d4866d6211ec69d7f4709eba754e
-voplay    61d4e36d10c3ecd139c24321c6314258c4806b73
-BlockKart 3a2a553f3a986df98a758d81823c413778b88256
+voplay    a57002adb0e33f720df7fb3808d0acf53b995c6b
+BlockKart e2b54f3ca4cd52c28fc52ac5d2c38e2634a84351
 ```
 
 重构前 source-bound baseline reports:

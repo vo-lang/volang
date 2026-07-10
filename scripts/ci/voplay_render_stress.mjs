@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -188,6 +188,12 @@ function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
       frameP99Ms: lastTelemetry?.frameP99Ms ?? null,
       resourceChurn: lastTelemetry?.resourceChurn ?? null,
       telemetrySource: lastTelemetry?.telemetrySource ?? null,
+      telemetryStatus: lastTelemetry?.telemetryStatus ?? null,
+      telemetryReportCount: lastTelemetry?.telemetryReportCount ?? null,
+      telemetryReportAgeMs: lastTelemetry?.telemetryReportAgeMs ?? null,
+      telemetryObservedSpanMs: lastTelemetry?.telemetryObservedSpanMs ?? null,
+      telemetryFrameProgress: lastTelemetry?.telemetryFrameProgress ?? null,
+      telemetryFailure: lastTelemetry?.telemetryFailure ?? null,
       telemetryError: lastTelemetry?.telemetryError ?? null,
       perfEndpointError: lastTelemetry?.perfEndpointError ?? null,
       lastTelemetryPacket: lastTelemetry?.lastTelemetryPacket ?? null,
@@ -234,6 +240,12 @@ function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
           frameP99Ms: lastTelemetry?.frameP99Ms ?? null,
           resourceChurn: lastTelemetry?.resourceChurn ?? null,
           telemetrySource: lastTelemetry?.telemetrySource ?? null,
+          telemetryStatus: lastTelemetry?.telemetryStatus ?? null,
+          telemetryReportCount: lastTelemetry?.telemetryReportCount ?? null,
+          telemetryReportAgeMs: lastTelemetry?.telemetryReportAgeMs ?? null,
+          telemetryObservedSpanMs: lastTelemetry?.telemetryObservedSpanMs ?? null,
+          telemetryFrameProgress: lastTelemetry?.telemetryFrameProgress ?? null,
+          telemetryFailure: lastTelemetry?.telemetryFailure ?? null,
           telemetryError: lastTelemetry?.telemetryError ?? null,
           perfEndpointError: lastTelemetry?.perfEndpointError ?? null,
           lastTelemetryPacket: lastTelemetry?.lastTelemetryPacket ?? null,
@@ -495,6 +507,7 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
       errors,
       resourceFailures,
       restart: baseline.restart,
+      captureTelemetry: baseline.captureTelemetry ?? null,
     },
     observability: meta.observability,
     issues,
@@ -689,7 +702,7 @@ if (process.argv.includes('--selftest-observability')) {
   mkdirSync(selftestDir, { recursive: true });
   const result = await runObservedProcess(
     'timeout-negative-fixture',
-    ['-e', `console.error('BlockKart baseline progress: telemetry ${JSON.stringify({ stage: 'capture', frameIndex: 42, pass: 'main', frameP90Ms: 16.7, frameP99Ms: 16.7, resourceChurn: 3, telemetrySource: 'negative-fixture', telemetryError: 'fixture transport closed', perfEndpointError: null, lastTelemetryPacket: { status: 'pass', frameGraphFailures: 0 } })}'); setInterval(() => {}, 1000)`],
+    ['-e', `console.error('BlockKart baseline progress: telemetry ${JSON.stringify({ stage: 'capture', frameIndex: 42, pass: 'main', frameP90Ms: 16.7, frameP99Ms: 16.7, resourceChurn: 3, telemetrySource: 'negative-fixture', telemetryStatus: 'failed', telemetryReportCount: 12, telemetryReportAgeMs: 50001, telemetryObservedSpanMs: 90000, telemetryFrameProgress: 2400, telemetryFailure: { code: 'voplay.renderTelemetry.stale' }, telemetryError: 'fixture transport closed', perfEndpointError: null, lastTelemetryPacket: { status: 'pass', frameGraphFailures: 0 } })}'); setInterval(() => {}, 1000)`],
     heartbeatPath,
     100,
   );
@@ -697,9 +710,21 @@ if (process.argv.includes('--selftest-observability')) {
   const telemetryRecorded = result.timeoutDiagnostic?.frameIndex === 42
     && result.timeoutDiagnostic?.lastPass === 'main'
     && result.timeoutDiagnostic?.telemetrySource === 'negative-fixture'
+    && result.timeoutDiagnostic?.telemetryStatus === 'failed'
+    && result.timeoutDiagnostic?.telemetryFailure?.code === 'voplay.renderTelemetry.stale'
     && result.timeoutDiagnostic?.telemetryError === 'fixture transport closed'
     && result.timeoutDiagnostic?.lastTelemetryPacket?.frameGraphFailures === 0;
-  if (!result.timedOut || result.timeoutDiagnostic?.code !== 'voplay.renderStress.timeout' || !timeoutStageRecorded || !telemetryRecorded || !existsSync(heartbeatPath)) {
+  const longRunTelemetrySelftest = spawnSync(process.execPath, [path.join(root, 'scripts/ci/blockkart_baseline.mjs'), '--selftest-long-run-telemetry'], {
+    cwd: root,
+    env: { ...process.env },
+    encoding: 'utf8',
+  });
+  if (!result.timedOut || result.timeoutDiagnostic?.code !== 'voplay.renderStress.timeout' || !timeoutStageRecorded || !telemetryRecorded || !existsSync(heartbeatPath) || longRunTelemetrySelftest.status !== 0) {
+    result.longRunTelemetrySelftest = {
+      status: longRunTelemetrySelftest.status,
+      stdout: longRunTelemetrySelftest.stdout,
+      stderr: longRunTelemetrySelftest.stderr,
+    };
     fail(`observability selftest failed: ${JSON.stringify(result)}`);
   }
   writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify({

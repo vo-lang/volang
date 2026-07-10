@@ -597,9 +597,29 @@ function sceneObservabilityFailures(report) {
       && Number.isFinite(heartbeat?.frameP90Ms)
       && Number.isFinite(heartbeat?.frameP99Ms)
       && Number.isFinite(heartbeat?.resourceChurn)
+      && heartbeat?.telemetryStatus === 'pass'
+      && Number.isFinite(heartbeat?.telemetryReportCount)
+      && Number.isFinite(heartbeat?.telemetryReportAgeMs)
+      && Number.isFinite(heartbeat?.telemetryObservedSpanMs)
+      && Number.isFinite(heartbeat?.telemetryFrameProgress)
       && heartbeat?.lastTelemetryPacket
       && typeof heartbeat.lastTelemetryPacket === 'object';
     return complete ? [] : [{ scene: scene?.name ?? null, heartbeat: heartbeat ?? null }];
+  });
+}
+
+function sceneLongRunTelemetryFailures(report) {
+  return (report?.scenes || []).flatMap((scene) => {
+    const telemetry = scene?.diagnostics?.captureTelemetry;
+    const requiredSpanMs = Math.max(0, Number(telemetry?.requestedMs ?? 0) - Number(telemetry?.spanGraceMs ?? 0));
+    const complete = telemetry?.required === true
+      && telemetry?.status === 'pass'
+      && Number(telemetry?.actualMs ?? 0) >= requiredSpanMs
+      && Number(telemetry?.observedSpanMs ?? 0) >= requiredSpanMs
+      && Number(telemetry?.lastReportAgeMs ?? Infinity) <= Number(telemetry?.maxReportAgeMs ?? 0)
+      && Number(telemetry?.frameProgress ?? 0) > 0
+      && telemetry?.failure == null;
+    return complete ? [] : [{ scene: scene?.name ?? null, telemetry: telemetry ?? null }];
   });
 }
 
@@ -1879,13 +1899,15 @@ const renderStress = checkReport(path.join(root, 'target/voplay-render-stress-bu
 checkReport(path.join(root, 'target/voplay-render-soak-10m/report.json'), 'phase-5', 'gate.render_soak_10m', (report) => {
   const sourceMismatches = sceneSourceMismatches(report);
   const observabilityFailures = sceneObservabilityFailures(report);
+  const longRunTelemetryFailures = sceneLongRunTelemetryFailures(report);
   return {
-    ok: report.status === 'pass' && allScenesPass(report) && sourceMismatches.length === 0 && observabilityFailures.length === 0,
+    ok: report.status === 'pass' && allScenesPass(report) && sourceMismatches.length === 0 && observabilityFailures.length === 0 && longRunTelemetryFailures.length === 0,
     detail: 'ten minute render soak report exists and passes',
     evidence: {
       status: report.status,
       sourceMismatches,
       observabilityFailures,
+      longRunTelemetryFailures,
       sceneCount: report.scenes?.length || 0,
       summary: report.summary || null,
     },

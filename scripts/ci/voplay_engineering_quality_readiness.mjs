@@ -1525,6 +1525,11 @@ const renderStressStructuredReady = renderStressReport?.status === 'pass'
     && Number.isFinite(scene?.observability?.frameP90Ms)
     && Number.isFinite(scene?.observability?.frameP99Ms)
     && Number.isFinite(scene?.observability?.resourceChurn)
+    && scene?.observability?.telemetryStatus === 'pass'
+    && Number.isFinite(scene?.observability?.telemetryReportCount)
+    && Number.isFinite(scene?.observability?.telemetryReportAgeMs)
+    && Number.isFinite(scene?.observability?.telemetryObservedSpanMs)
+    && Number.isFinite(scene?.observability?.telemetryFrameProgress)
     && scene?.observability?.lastTelemetryPacket
   ));
 const physicsAuthorityStructuredReady = physicsContractReport?.status === 'pass'

@@ -34,6 +34,9 @@ const cdpScreenshotAttempts = positiveInt(process.env.BLOCKKART_BASELINE_CDP_SCR
 const cdpScreenshotTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_CDP_SCREENSHOT_TIMEOUT_MS, 15000);
 const canvasDataUrlAttempts = positiveInt(process.env.BLOCKKART_BASELINE_CANVAS_DATA_URL_ATTEMPTS, 3);
 const canvasDataUrlTimeoutMs = positiveInt(process.env.BLOCKKART_BASELINE_CANVAS_DATA_URL_TIMEOUT_MS, 60000);
+const longRunTelemetryThresholdMs = positiveInt(process.env.BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_THRESHOLD_MS, 60000);
+const longRunTelemetryMaxAgeMs = positiveInt(process.env.BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_MAX_AGE_MS, 45000);
+const longRunTelemetrySpanGraceMs = positiveInt(process.env.BLOCKKART_BASELINE_LONG_RUN_TELEMETRY_SPAN_GRACE_MS, 60000);
 const startupWarnMs = positiveInt(process.env.BLOCKKART_BASELINE_STARTUP_WARN_MS, 20000);
 const maxSlowFrames = positiveInt(process.env.BLOCKKART_BASELINE_MAX_SLOW_FRAMES, 2);
 const restartCount = nonNegativeInt(argValue('--restart-count') || process.env.BLOCKKART_BASELINE_RESTART_COUNT, 0);
@@ -191,6 +194,25 @@ function progress(message) {
 async function captureWithTelemetryHeartbeat(client, durationMs, baseUrl) {
   const startedAt = Date.now();
   const intervalMs = Math.min(15000, Math.max(1000, durationMs));
+  const telemetry = {
+    schemaVersion: 1,
+    kind: 'blockkart.longRunRenderTelemetry',
+    required: durationMs >= longRunTelemetryThresholdMs,
+    requestedMs: durationMs,
+    thresholdMs: longRunTelemetryThresholdMs,
+    maxReportAgeMs: longRunTelemetryMaxAgeMs,
+    spanGraceMs: longRunTelemetrySpanGraceMs,
+    status: 'running',
+    sampleCount: 0,
+    firstReportAt: null,
+    lastReportAt: null,
+    observedSpanMs: 0,
+    lastReportAgeMs: null,
+    firstFrameIndex: null,
+    lastFrameIndex: null,
+    frameProgress: 0,
+    failure: null,
+  };
   while (Date.now() - startedAt < durationMs) {
     const remainingMs = durationMs - (Date.now() - startedAt);
     await sleep(Math.min(intervalMs, remainingMs));
@@ -199,20 +221,32 @@ async function captureWithTelemetryHeartbeat(client, durationMs, baseUrl) {
       telemetryError: error instanceof Error ? error.message : String(error),
     }));
     const hookPerfReports = snapshot.perfReports ?? [];
-    let endpointPerfReports = [];
-    let telemetrySource = 'cdp-debug-hook';
-    let perfEndpointError = null;
-    if (hookPerfReports.length === 0) {
-      const perfEndpoint = await fetchVoplayPerfEndpoint(baseUrl).catch((error) => ({
-        reports: [],
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      endpointPerfReports = perfEndpoint.reports ?? [];
-      perfEndpointError = perfEndpoint.error ?? null;
-      telemetrySource = endpointPerfReports.length > 0 ? 'perf-endpoint' : 'unavailable';
-    }
+    const perfEndpoint = await fetchVoplayPerfEndpoint(baseUrl).catch((error) => ({
+      reports: [],
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    const endpointPerfReports = perfEndpoint.reports ?? [];
+    const perfEndpointError = perfEndpoint.error ?? null;
+    const telemetrySource = hookPerfReports.length > 0
+      ? (endpointPerfReports.length > 0 ? 'cdp-debug-hook+perf-endpoint' : 'cdp-debug-hook')
+      : (endpointPerfReports.length > 0 ? 'perf-endpoint' : 'unavailable');
     const perfReports = normalizePerfReports(hookPerfReports, endpointPerfReports);
     const perfSummary = summarizePerfReports(perfReports).latestPerfSummary;
+    const endpointFacts = perfEndpointTelemetryFacts(endpointPerfReports);
+    telemetry.sampleCount++;
+    telemetry.firstReportAt = earlierTimestamp(telemetry.firstReportAt, endpointFacts.firstReportAt);
+    telemetry.lastReportAt = laterTimestamp(telemetry.lastReportAt, endpointFacts.lastReportAt);
+    telemetry.observedSpanMs = timestampSpanMs(telemetry.firstReportAt, telemetry.lastReportAt);
+    telemetry.lastReportAgeMs = timestampAgeMs(telemetry.lastReportAt);
+    if (Number.isFinite(endpointFacts.firstFrameIndex) && !Number.isFinite(telemetry.firstFrameIndex)) {
+      telemetry.firstFrameIndex = endpointFacts.firstFrameIndex;
+    }
+    if (Number.isFinite(endpointFacts.lastFrameIndex)) {
+      telemetry.lastFrameIndex = Math.max(telemetry.lastFrameIndex ?? endpointFacts.lastFrameIndex, endpointFacts.lastFrameIndex);
+    }
+    telemetry.frameProgress = Number.isFinite(telemetry.firstFrameIndex) && Number.isFinite(telemetry.lastFrameIndex)
+      ? Math.max(0, telemetry.lastFrameIndex - telemetry.firstFrameIndex)
+      : 0;
     const renderer = perfSummary?.renderer ?? {};
     const workload = perfSummary?.workload ?? {};
     const passTimings = {
@@ -228,16 +262,22 @@ async function captureWithTelemetryHeartbeat(client, durationMs, baseUrl) {
       + Number(workload.bindGroupCreates ?? 0)
       + Number(workload.textureUploads ?? 0)
       + Number(workload.residentChunkRebuilds ?? 0);
-    progress(`telemetry ${JSON.stringify({
+    const elapsedMs = Date.now() - startedAt;
+    const heartbeat = {
       stage: 'capture',
-      elapsedMs: Date.now() - startedAt,
-      frameIndex: perfSummary?.frame ?? null,
+      elapsedMs,
+      frameIndex: endpointFacts.lastFrameIndex ?? perfSummary?.frame ?? null,
       pass: slowestPass[0] || null,
       passMs: slowestPass[1] || 0,
       frameP90Ms: perfSummary?.window?.frameP90Ms ?? null,
       frameP99Ms: perfSummary?.window?.frameP99Ms ?? null,
       resourceChurn,
       telemetrySource,
+      telemetryStatus: telemetry.status,
+      telemetryReportCount: endpointPerfReports.length,
+      telemetryReportAgeMs: telemetry.lastReportAgeMs,
+      telemetryObservedSpanMs: telemetry.observedSpanMs,
+      telemetryFrameProgress: telemetry.frameProgress,
       lastTelemetryPacket: perfSummary ? {
         status: perfSummary.status ?? null,
         failure: perfSummary.failure ?? null,
@@ -257,8 +297,50 @@ async function captureWithTelemetryHeartbeat(client, durationMs, baseUrl) {
       } : null,
       telemetryError: snapshot.telemetryError ?? null,
       perfEndpointError,
-    })}`);
+    };
+    const staleAfterMs = longRunTelemetryThresholdMs + longRunTelemetryMaxAgeMs;
+    if (telemetry.required && elapsedMs >= staleAfterMs && (!Number.isFinite(telemetry.lastReportAgeMs) || telemetry.lastReportAgeMs > longRunTelemetryMaxAgeMs)) {
+      telemetry.status = 'failed';
+      telemetry.failure = {
+        code: 'voplay.renderTelemetry.stale',
+        elapsedMs,
+        lastReportAt: telemetry.lastReportAt,
+        lastReportAgeMs: telemetry.lastReportAgeMs,
+        maxReportAgeMs: longRunTelemetryMaxAgeMs,
+        lastFrameIndex: telemetry.lastFrameIndex,
+      };
+      heartbeat.telemetryStatus = telemetry.status;
+      heartbeat.telemetryFailure = telemetry.failure;
+      progress(`telemetry ${JSON.stringify(heartbeat)}`);
+      break;
+    }
+    progress(`telemetry ${JSON.stringify(heartbeat)}`);
   }
+  telemetry.actualMs = Date.now() - startedAt;
+  return finalizeCaptureTelemetry(telemetry, durationMs);
+}
+
+function finalizeCaptureTelemetry(telemetry, durationMs) {
+  if (telemetry.status !== 'failed') {
+    const requiredSpanMs = Math.max(0, durationMs - longRunTelemetrySpanGraceMs);
+    const fresh = Number.isFinite(telemetry.lastReportAgeMs) && telemetry.lastReportAgeMs <= longRunTelemetryMaxAgeMs;
+    const spansCapture = telemetry.observedSpanMs >= requiredSpanMs;
+    const advancesFrames = telemetry.frameProgress > 0;
+    telemetry.status = !telemetry.required || (fresh && spansCapture && advancesFrames) ? 'pass' : 'failed';
+    if (telemetry.status === 'failed') {
+      telemetry.failure = {
+        code: 'voplay.renderTelemetry.incomplete',
+        fresh,
+        spansCapture,
+        advancesFrames,
+        requiredSpanMs,
+        observedSpanMs: telemetry.observedSpanMs,
+        lastReportAgeMs: telemetry.lastReportAgeMs,
+        frameProgress: telemetry.frameProgress,
+      };
+    }
+  }
+  return telemetry;
 }
 
 function withTimeout(promise, timeoutMs, label) {
@@ -403,6 +485,60 @@ async function fetchVoplayPerfEndpoint(baseUrl) {
     count: Number.isFinite(body?.count) ? body.count : 0,
     reports: Array.isArray(body?.reports) ? body.reports : [],
   };
+}
+
+function perfEndpointTelemetryFacts(records) {
+  let firstReportAt = null;
+  let lastReportAt = null;
+  let firstFrameIndex = null;
+  let lastFrameIndex = null;
+  for (const record of records ?? []) {
+    firstReportAt = earlierTimestamp(firstReportAt, record?.receivedAt);
+    lastReportAt = laterTimestamp(lastReportAt, record?.receivedAt);
+    const frame = Number(record?.payload?.frame);
+    if (!Number.isFinite(frame)) {
+      continue;
+    }
+    if (!Number.isFinite(firstFrameIndex)) {
+      firstFrameIndex = frame;
+    }
+    lastFrameIndex = Number.isFinite(lastFrameIndex) ? Math.max(lastFrameIndex, frame) : frame;
+  }
+  return { firstReportAt, lastReportAt, firstFrameIndex, lastFrameIndex };
+}
+
+function timestampValue(value) {
+  const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function earlierTimestamp(current, candidate) {
+  const currentMs = timestampValue(current);
+  const candidateMs = timestampValue(candidate);
+  if (!Number.isFinite(candidateMs)) {
+    return current;
+  }
+  return !Number.isFinite(currentMs) || candidateMs < currentMs ? candidate : current;
+}
+
+function laterTimestamp(current, candidate) {
+  const currentMs = timestampValue(current);
+  const candidateMs = timestampValue(candidate);
+  if (!Number.isFinite(candidateMs)) {
+    return current;
+  }
+  return !Number.isFinite(currentMs) || candidateMs > currentMs ? candidate : current;
+}
+
+function timestampSpanMs(first, last) {
+  const firstMs = timestampValue(first);
+  const lastMs = timestampValue(last);
+  return Number.isFinite(firstMs) && Number.isFinite(lastMs) ? Math.max(0, lastMs - firstMs) : 0;
+}
+
+function timestampAgeMs(value) {
+  const timestampMs = timestampValue(value);
+  return Number.isFinite(timestampMs) ? Math.max(0, Date.now() - timestampMs) : null;
 }
 
 function commandWorks(command) {
@@ -2584,7 +2720,7 @@ function isIgnoredResourceFailure(failure) {
   return /\/favicon\.ico(?:[?#]|$)/i.test(failure?.url ?? '');
 }
 
-function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resourceFailures, startupPhases, slowFrames, perfReports, lifecycle, expectedLifecycleState, diagnostics, restartScenario, startRaceScenario, storageReloadScenario, renderStressScenario, resizeScenario, performanceAttribution }) {
+function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resourceFailures, startupPhases, slowFrames, perfReports, lifecycle, expectedLifecycleState, diagnostics, restartScenario, startRaceScenario, storageReloadScenario, renderStressScenario, resizeScenario, performanceAttribution, captureTelemetry }) {
   const issues = [];
   const add = (severity, owner, title, evidence) => issues.push({ severity, owner, title, evidence });
   if (!firstFrame.ok) {
@@ -2624,6 +2760,9 @@ function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resource
   }
   if (!firstFrame.skipped && expectedLifecycleState !== 'Failed' && perfReports.length === 0) {
     add('P1', 'voplay', 'voplay perf reports were not captured under trace mode', 'globalThis.__voplayPerfReports was empty after capture window');
+  }
+  if (captureTelemetry?.required && captureTelemetry.status !== 'pass') {
+    add('P0', 'voplay/studio', 'Long-run render telemetry stopped advancing', JSON.stringify(captureTelemetry));
   }
   if (!firstFrame.skipped && expectedLifecycleState === 'Running') {
     if ((diagnostics?.assetReports?.length ?? 0) === 0) {
@@ -3139,9 +3278,17 @@ async function main() {
       }
       progress(`storage reload scenario done completed=${storageReloadScenario.completed}`);
     }
+    let captureTelemetry = {
+      schemaVersion: 1,
+      kind: 'blockkart.longRunRenderTelemetry',
+      required: false,
+      requestedMs: captureMs,
+      status: 'skipped',
+      failure: 'capture did not run',
+    };
     if (firstFrame.ok && !firstFrame.skipped && captureMs > 0) {
       progress(`capture sleep start ms=${captureMs}`);
-      await captureWithTelemetryHeartbeat(client, captureMs, baseUrl);
+      captureTelemetry = await captureWithTelemetryHeartbeat(client, captureMs, baseUrl);
       progress('capture sleep done');
     }
     progress('final state evaluate start');
@@ -3339,6 +3486,7 @@ async function main() {
       renderStressScenario,
       resizeScenario,
       performanceAttribution,
+      captureTelemetry,
     });
     const p0p1 = issues.filter((issue) => issue.severity === 'P0' || issue.severity === 'P1');
     const generatedAt = new Date().toISOString();
@@ -3409,6 +3557,7 @@ async function main() {
       restart: restartScenario,
       diagnostics,
       performanceAttribution,
+      captureTelemetry,
       visual: {
         viewport: viewportAnalysis ?? { nonEmpty: false, reason: 'viewport screenshot was not captured' },
         canvas: canvasAnalysis ?? { nonEmpty: false, reason: 'canvas crop was not captured' },
@@ -3434,7 +3583,9 @@ async function main() {
       remainingRisks: [
         'Baseline covers the checked-in quickplay package, not a local BlockKart source checkout.',
         'Headless WebGPU timing is machine-dependent; slow-frame thresholds are diagnostic, not a final product FPS promise.',
-        'The capture window is intentionally short for CI; long-run race loop stability remains a follow-up product soak gate.',
+        captureTelemetry.required
+          ? 'Long-run capture acceptance requires fresh endpoint telemetry, sufficient observed span, and advancing frame indices.'
+          : 'The baseline capture window is short; the dedicated 10-minute soak owns long-run stability evidence.',
         'BlockKart product persistence is scoped to the Studio web runtime /persist VFS root; native-host preference sync remains a later host integration gate.',
       ],
     };
@@ -3477,6 +3628,33 @@ async function main() {
       .join('\n');
     fail(logs ? `${detail}\n${logs}` : detail);
   }
+}
+
+if (process.argv.includes('--selftest-long-run-telemetry')) {
+  const fixture = {
+    required: true,
+    requestedMs: 600000,
+    maxReportAgeMs: 45000,
+    spanGraceMs: 60000,
+    status: 'running',
+    actualMs: 600000,
+    observedSpanMs: 570000,
+    lastReportAgeMs: 1000,
+    frameProgress: 30000,
+    failure: null,
+  };
+  const passing = finalizeCaptureTelemetry({ ...fixture }, fixture.requestedMs);
+  const incomplete = finalizeCaptureTelemetry({ ...fixture, observedSpanMs: 120000 }, fixture.requestedMs);
+  const stale = finalizeCaptureTelemetry({
+    ...fixture,
+    status: 'failed',
+    failure: { code: 'voplay.renderTelemetry.stale' },
+  }, fixture.requestedMs);
+  if (passing.status !== 'pass' || incomplete.status !== 'failed' || incomplete.failure?.code !== 'voplay.renderTelemetry.incomplete' || stale.failure?.code !== 'voplay.renderTelemetry.stale') {
+    throw new Error(`long-run telemetry selftest failed: ${JSON.stringify({ passing, incomplete, stale })}`);
+  }
+  console.log('BlockKart long-run telemetry selftest: ok');
+  process.exit(0);
 }
 
 await withTimeout(main(), baselineTimeoutMs, 'BlockKart baseline').catch((error) => {
