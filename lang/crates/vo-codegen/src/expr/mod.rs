@@ -13,9 +13,9 @@ pub mod pointer;
 pub mod selector;
 
 use vo_common_core::instruction::{pack_iface_assert_flags, pack_queue_recv_flags};
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr, ExprKind, UnaryOp};
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

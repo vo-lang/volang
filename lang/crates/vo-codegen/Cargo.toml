@@ -11,6 +11,6 @@ vo-runtime = { path = "../vo-runtime", default-features = false }
 vo-stdlib = { path = "../vo-stdlib", default-features = false }
 vo-syntax = { path = "../vo-syntax" }
 vo-analysis = { path = "../vo-analysis" }
-vo-vm = { path = "../vo-vm", default-features = false }
 
 [dev-dependencies]
+vo-vm = { path = "../vo-vm" }

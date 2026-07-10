@@ -485,7 +485,12 @@ fn emit_final_receiver(
             } else {
                 // Need to compute ptr + offset to get pointer to embedded field
                 let offset_reg = builder.alloc_slots(&[SlotType::Value]);
-                builder.emit_op(vo_vm::instruction::Opcode::LoadInt, offset_reg, offset, 0);
+                builder.emit_op(
+                    vo_runtime::instruction::Opcode::LoadInt,
+                    offset_reg,
+                    offset,
+                    0,
+                );
                 builder.emit_ptr_add(dst, reg, offset_reg);
             }
         } else {

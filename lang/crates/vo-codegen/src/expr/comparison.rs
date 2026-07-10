@@ -1,9 +1,9 @@
 #![allow(clippy::too_many_arguments)]
 //! Composite type comparison (struct/array equality).
 
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{BinaryOp, Expr};
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

@@ -21,8 +21,8 @@ pub use type_info::TypeInfoWrapper;
 pub use type_interner::{intern_type_key, TypeInterner};
 
 use vo_analysis::Project;
+use vo_runtime::bytecode::Module;
 use vo_syntax::ast::Decl;
-use vo_vm::bytecode::Module;
 
 use crate::func::ElemLayoutSpec;
 
@@ -82,8 +82,8 @@ fn register_types(
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
     use std::collections::BTreeMap;
+    use vo_runtime::bytecode::{InterfaceMeta, NamedTypeMeta};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
-    use vo_vm::bytecode::{InterfaceMeta, NamedTypeMeta};
 
     fn register_pkg_types(
         pkg_path: &str,
@@ -93,9 +93,9 @@ fn register_types(
         info: &TypeInfoWrapper,
     ) -> Result<(), CodegenError> {
         use std::collections::BTreeMap;
+        use vo_runtime::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
         use vo_runtime::ValueMeta;
         use vo_syntax::ast::{Decl, TypeExprKind};
-        use vo_vm::bytecode::{InterfaceMeta, NamedTypeMeta, StructMeta};
 
         fn checked_struct_offset(offset: u16, slot_count: u16) -> Result<u16, CodegenError> {
             offset.checked_add(slot_count).ok_or_else(|| {
@@ -166,7 +166,7 @@ fn register_types(
                             // Embedded field: name comes from the type
                             let field_name = info.get_type_name(field_type);
                             slot_types.extend(slot_type_list);
-                            fields.push(vo_vm::bytecode::FieldMeta {
+                            fields.push(vo_runtime::bytecode::FieldMeta {
                                 name: field_name,
                                 offset,
                                 slot_count,
@@ -186,7 +186,7 @@ fn register_types(
                                     .unwrap_or("?")
                                     .to_string();
                                 slot_types.extend(slot_type_list.clone());
-                                fields.push(vo_vm::bytecode::FieldMeta {
+                                fields.push(vo_runtime::bytecode::FieldMeta {
                                     name: field_name,
                                     offset,
                                     slot_count,
@@ -240,7 +240,7 @@ fn register_types(
                             .map(|m| tc_objs.lobjs[*m].name().to_string())
                             .collect();
 
-                        let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs
+                        let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
                             .iter()
                             .map(|&m| {
                                 let obj = &tc_objs.lobjs[m];
@@ -251,7 +251,7 @@ fn register_types(
                                 let sig =
                                     signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                                 let signature_rttid = ctx.intern_rttid(sig);
-                                vo_vm::bytecode::InterfaceMethodMeta {
+                                vo_runtime::bytecode::InterfaceMethodMeta {
                                     name,
                                     signature_rttid,
                                 }
@@ -323,7 +323,7 @@ fn register_types(
                         .map(|m| tc_objs.lobjs[*m].name().to_string())
                         .collect();
 
-                    let metas: Vec<vo_vm::bytecode::InterfaceMethodMeta> = method_objs
+                    let metas: Vec<vo_runtime::bytecode::InterfaceMethodMeta> = method_objs
                         .iter()
                         .map(|&m| {
                             let obj = &tc_objs.lobjs[m];
@@ -333,7 +333,7 @@ fn register_types(
                             });
                             let sig = signature_type_to_runtime_type(sig_type, tc_objs, info, ctx);
                             let signature_rttid = ctx.intern_rttid(sig);
-                            vo_vm::bytecode::InterfaceMethodMeta {
+                            vo_runtime::bytecode::InterfaceMethodMeta {
                                 name,
                                 signature_rttid,
                             }
@@ -404,8 +404,8 @@ fn register_types(
 /// Register builtin protocol interfaces (DynAttr, DynSetAttr, etc.)
 /// These enable protocol dispatch for ~> operator without requiring import "dyn".
 fn register_builtin_protocols(project: &Project, ctx: &mut CodegenContext, info: &TypeInfoWrapper) {
+    use vo_runtime::bytecode::{InterfaceMeta, InterfaceMethodMeta};
     use vo_runtime::{RuntimeType, ValueKind, ValueRttid};
-    use vo_vm::bytecode::{InterfaceMeta, InterfaceMethodMeta};
 
     let tc_objs = &project.tc_objs;
 
@@ -660,7 +660,7 @@ fn collect_file_declarations(
                         let obj_key = info.get_def(name);
                         ctx.register_global(
                             obj_key,
-                            vo_vm::bytecode::GlobalDef {
+                            vo_runtime::bytecode::GlobalDef {
                                 name: project
                                     .interner
                                     .resolve(name.symbol)
@@ -1144,7 +1144,7 @@ fn compile_func_body(
     func_decl: &vo_syntax::ast::FuncDecl,
     ctx: &mut CodegenContext,
     info: &TypeInfoWrapper,
-) -> Result<vo_vm::bytecode::FunctionDef, CodegenError> {
+) -> Result<vo_runtime::bytecode::FunctionDef, CodegenError> {
     let name = info
         .project
         .interner
@@ -1342,7 +1342,7 @@ fn compile_func_body(
                 // Zero-initialize non-escaped named return (Go zero-value semantics)
                 // VM no longer does write_bytes, so codegen must handle this
                 for i in 0..slots {
-                    builder.emit_op(vo_vm::instruction::Opcode::LoadInt, slot + i, 0, 0);
+                    builder.emit_op(vo_runtime::instruction::Opcode::LoadInt, slot + i, 0, 0);
                 }
                 slot
             };
@@ -1354,7 +1354,12 @@ fn compile_func_body(
     for er in escaped_returns {
         let meta_idx = ctx.get_boxing_meta(er.result_type, info);
         let meta_reg = builder.alloc_slots(&[vo_runtime::SlotType::Value]);
-        builder.emit_op(vo_vm::instruction::Opcode::LoadConst, meta_reg, meta_idx, 0);
+        builder.emit_op(
+            vo_runtime::instruction::Opcode::LoadConst,
+            meta_reg,
+            meta_idx,
+            0,
+        );
         assert_eq!(er.slots as usize, er.slot_types.len());
         builder.emit_ptr_new(er.gcref_slot, meta_reg, &er.slot_types);
     }
@@ -1387,7 +1392,7 @@ fn compile_global_array_init(
     func: &mut FuncBuilder,
     info: &TypeInfoWrapper,
 ) -> Result<(), CodegenError> {
-    use vo_vm::instruction::Opcode;
+    use vo_runtime::instruction::Opcode;
 
     let array_len = info.array_len(array_type);
     let elem_type = info.array_elem_type(array_type);
@@ -1563,7 +1568,7 @@ fn compile_init_and_entry(
     compile_package_globals(ctx, &mut init_builder, info)?;
 
     // Add return
-    init_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
+    init_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
     let init_func_id = ctx.add_function_from_builder(init_builder);
     // Note: __init__ is NOT registered as a user init function - it's handled separately
 
@@ -1581,7 +1586,7 @@ fn compile_init_and_entry(
     for &user_init_id in ctx.init_functions() {
         emit_entry_static_call(&mut island_init_builder, ctx, user_init_id)?;
     }
-    island_init_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
+    island_init_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
     let island_init_func_id = ctx.add_function_from_builder(island_init_builder);
     ctx.set_island_init_func(island_init_func_id);
 
@@ -1602,7 +1607,7 @@ fn compile_init_and_entry(
     }
 
     // Return
-    entry_builder.emit_op(vo_vm::instruction::Opcode::Return, 0, 0, 0);
+    entry_builder.emit_op(vo_runtime::instruction::Opcode::Return, 0, 0, 0);
 
     let entry_func_id = ctx.add_function_from_builder(entry_builder);
     ctx.set_entry_func(entry_func_id);

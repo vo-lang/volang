@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_analysis::typ::Type;
+use vo_runtime::bytecode::{InterfaceMeta, InterfaceMethodMeta, StructMeta};
 use vo_runtime::{ChanDir, InterfaceMethod, RuntimeType, StructField, ValueKind, ValueRttid};
-use vo_vm::bytecode::{InterfaceMeta, InterfaceMethodMeta, StructMeta};
 
 /// A type interner that assigns unique runtime type IDs to types.
 ///

@@ -15,9 +15,9 @@ mod var_def;
 pub use return_stmt::emit_error_return;
 pub use var_def::LocalDefiner;
 
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{Block, Stmt, StmtKind};
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

@@ -8,8 +8,8 @@
 //! 3. **Error position**: error value replaces the last return slot (if it's error type)
 
 use vo_common_core::bytecode::ReturnFlags;
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

@@ -2,8 +2,8 @@
 
 use vo_analysis::objects::TypeKey;
 use vo_common_core::instruction::pack_queue_recv_flags;
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

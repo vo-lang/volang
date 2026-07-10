@@ -1,8 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 //! Defer and go statement compilation.
 
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
-use vo_vm::instruction::Opcode;
 
 use vo_analysis::objects::TypeKey;
 
