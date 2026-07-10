@@ -188,7 +188,7 @@ function progress(message) {
   console.error(`BlockKart baseline progress: ${message}`);
 }
 
-async function captureWithTelemetryHeartbeat(client, durationMs) {
+async function captureWithTelemetryHeartbeat(client, durationMs, baseUrl) {
   const startedAt = Date.now();
   const intervalMs = Math.min(15000, Math.max(1000, durationMs));
   while (Date.now() - startedAt < durationMs) {
@@ -198,7 +198,19 @@ async function captureWithTelemetryHeartbeat(client, durationMs) {
       perfReports: [],
       telemetryError: error instanceof Error ? error.message : String(error),
     }));
-    const perfSummary = summarizePerfReports(snapshot.perfReports ?? []).latestPerfSummary;
+    let perfReports = snapshot.perfReports ?? [];
+    let telemetrySource = 'cdp-debug-hook';
+    let perfEndpointError = null;
+    if (perfReports.length === 0) {
+      const perfEndpoint = await fetchVoplayPerfEndpoint(baseUrl).catch((error) => ({
+        reports: [],
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      perfReports = perfEndpoint.reports ?? [];
+      perfEndpointError = perfEndpoint.error ?? null;
+      telemetrySource = perfReports.length > 0 ? 'perf-endpoint' : 'unavailable';
+    }
+    const perfSummary = summarizePerfReports(perfReports).latestPerfSummary;
     const renderer = perfSummary?.renderer ?? {};
     const workload = perfSummary?.workload ?? {};
     const passTimings = {
@@ -223,6 +235,7 @@ async function captureWithTelemetryHeartbeat(client, durationMs) {
       frameP90Ms: perfSummary?.window?.frameP90Ms ?? null,
       frameP99Ms: perfSummary?.window?.frameP99Ms ?? null,
       resourceChurn,
+      telemetrySource,
       lastTelemetryPacket: perfSummary ? {
         status: perfSummary.status ?? null,
         failure: perfSummary.failure ?? null,
@@ -241,6 +254,7 @@ async function captureWithTelemetryHeartbeat(client, durationMs) {
         incompatibleDraws: workload.incompatibleDraws ?? 0,
       } : null,
       telemetryError: snapshot.telemetryError ?? null,
+      perfEndpointError,
     })}`);
   }
 }
@@ -591,11 +605,13 @@ function openWebSocket(url) {
 class CdpClient {
   constructor(ws) {
     this.ws = ws;
+    this.closed = false;
     this.nextId = 1;
     this.pending = new Map();
     this.handlers = new Map();
     ws.addEventListener('message', (event) => this.onMessage(event));
     ws.addEventListener('close', () => {
+      this.closed = true;
       for (const { reject, timer } of this.pending.values()) {
         clearTimeout(timer);
         reject(new Error('CDP websocket closed'));
@@ -615,6 +631,9 @@ class CdpClient {
   }
 
   waitFor(method, predicate = () => true, timeoutMs = 30000) {
+    if (this.closed) {
+      return Promise.reject(new Error(`CDP websocket closed before waiting for ${method}`));
+    }
     return new Promise((resolve, reject) => {
       const off = this.on(method, (params) => {
         if (!predicate(params)) {
@@ -632,6 +651,9 @@ class CdpClient {
   }
 
   send(method, params = {}, timeoutMs = 30000) {
+    if (this.closed) {
+      return Promise.reject(new Error(`CDP websocket closed before ${method}`));
+    }
     const id = this.nextId++;
     const message = JSON.stringify({ id, method, params });
     return new Promise((resolve, reject) => {
@@ -640,7 +662,13 @@ class CdpClient {
         reject(new Error(`CDP ${method} timed out`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, method });
-      this.ws.send(message);
+      try {
+        this.ws.send(message);
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new Error(`CDP ${method} send failed: ${error instanceof Error ? error.message : String(error)}`));
+      }
     });
   }
 
@@ -3111,7 +3139,7 @@ async function main() {
     }
     if (firstFrame.ok && !firstFrame.skipped && captureMs > 0) {
       progress(`capture sleep start ms=${captureMs}`);
-      await captureWithTelemetryHeartbeat(client, captureMs);
+      await captureWithTelemetryHeartbeat(client, captureMs, baseUrl);
       progress('capture sleep done');
     }
     progress('final state evaluate start');
