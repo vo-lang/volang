@@ -44,35 +44,78 @@ pub fn from_rust_str(gc: &mut Gc, s: &str) -> GcRef {
 }
 
 #[inline]
-pub fn len(s: GcRef) -> usize {
+/// Return the byte length of a live VM string.
+///
+/// # Safety
+///
+/// A non-null `s` must point to a live string object for this call.
+pub unsafe fn len(s: GcRef) -> usize {
     if s.is_null() {
         return 0;
     }
     slice::len(s)
 }
 #[inline]
-pub fn data_ptr(s: GcRef) -> *mut u8 {
+/// Return the byte storage pointer of a live VM string.
+///
+/// # Safety
+///
+/// `s` must point to a live string object.
+pub unsafe fn data_ptr(s: GcRef) -> *mut u8 {
     slice::data_ptr(s)
 }
 
-pub fn as_bytes(s: GcRef) -> &'static [u8] {
+/// Borrow raw string bytes inside a VM-owned lifetime boundary.
+///
+/// # Safety
+///
+/// `s` must remain a live string object for the full returned lifetime, and no
+/// GC step may reclaim it while the borrow is used.
+pub(crate) unsafe fn bytes_unchecked<'a>(s: GcRef) -> &'a [u8] {
     if s.is_null() {
         return &[];
     }
-    unsafe { core::slice::from_raw_parts(slice::data_ptr(s), slice::len(s)) }
+    core::slice::from_raw_parts(slice::data_ptr(s), slice::len(s))
 }
 
-pub fn as_str(s: GcRef) -> &'static str {
-    unsafe { core::str::from_utf8_unchecked(as_bytes(s)) }
+/// Copy the byte representation into host-owned storage.
+///
+/// # Safety
+///
+/// A non-null `s` must point to a live string object for this call.
+pub unsafe fn to_bytes(s: GcRef) -> Vec<u8> {
+    unsafe { bytes_unchecked(s) }.to_vec()
 }
 
-pub fn index(s: GcRef, idx: usize) -> u8 {
-    as_bytes(s)[idx]
+/// Copy a VM string into host-owned UTF-8 text.
+///
+/// Vo strings retain arbitrary bytes. Invalid UTF-8 is decoded with the
+/// replacement character so host-facing diagnostics never invoke undefined
+/// behavior or retain a borrow beyond the current GC boundary.
+///
+/// # Safety
+///
+/// A non-null `s` must point to a live string object for this call.
+pub unsafe fn to_rust_string(s: GcRef) -> String {
+    String::from_utf8_lossy(unsafe { bytes_unchecked(s) }).into_owned()
+}
+
+/// Return one byte from a live VM string.
+///
+/// # Safety
+///
+/// `s` must point to a live string object and `idx` must be in bounds.
+pub unsafe fn index(s: GcRef, idx: usize) -> u8 {
+    (unsafe { bytes_unchecked(s) })[idx]
 }
 
 /// Decode UTF-8 rune at byte position. Returns (rune, width).
-pub fn decode_rune_at(s: GcRef, pos: usize) -> (i32, usize) {
-    let bytes = as_bytes(s);
+///
+/// # Safety
+///
+/// A non-null `s` must point to a live string object for this call.
+pub unsafe fn decode_rune_at(s: GcRef, pos: usize) -> (i32, usize) {
+    let bytes = unsafe { bytes_unchecked(s) };
     if pos >= bytes.len() {
         return (RUNE_ERROR, 0);
     }
@@ -95,7 +138,12 @@ fn decode_rune(bytes: &[u8]) -> (i32, usize) {
     }
 }
 
-pub fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
+/// Concatenate two live VM strings.
+///
+/// # Safety
+///
+/// Each non-null input must point to a live string object owned by `gc`.
+pub unsafe fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
     if a.is_null() {
         return b;
     }
@@ -114,7 +162,12 @@ pub fn concat(gc: &mut Gc, a: GcRef, b: GcRef) -> GcRef {
     alloc_string(gc, arr, arr_ptr, total)
 }
 
-pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> Option<GcRef> {
+/// Create an immutable view over part of a live VM string.
+///
+/// # Safety
+///
+/// `s` must point to a live string object owned by `gc` when non-null.
+pub unsafe fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> Option<GcRef> {
     let len = len(s);
     if start > end || end > len {
         return None;
@@ -133,23 +186,40 @@ pub fn slice_of(gc: &mut Gc, s: GcRef, start: usize, end: usize) -> Option<GcRef
     ))
 }
 
-pub fn eq(a: GcRef, b: GcRef) -> bool {
+/// Compare two live VM strings by bytes.
+///
+/// # Safety
+///
+/// Each non-null input must point to a live string object.
+pub unsafe fn eq(a: GcRef, b: GcRef) -> bool {
     if a == b {
         return true;
     }
     if a.is_null() || b.is_null() {
         return false;
     }
-    as_bytes(a) == as_bytes(b)
+    unsafe { bytes_unchecked(a) == bytes_unchecked(b) }
 }
 
-pub fn ne(a: GcRef, b: GcRef) -> bool {
-    !eq(a, b)
+/// Compare two live VM strings by bytes.
+///
+/// # Safety
+///
+/// Each non-null input must point to a live string object.
+pub unsafe fn ne(a: GcRef, b: GcRef) -> bool {
+    !unsafe { eq(a, b) }
 }
 
 macro_rules! str_cmp {
     ($name:ident, $op:tt) => {
-        pub fn $name(a: GcRef, b: GcRef) -> bool { as_bytes(a) $op as_bytes(b) }
+        #[doc = "Compare two live VM strings lexicographically."]
+        ///
+        /// # Safety
+        ///
+        /// Each non-null input must point to a live string object.
+        pub unsafe fn $name(a: GcRef, b: GcRef) -> bool {
+            unsafe { bytes_unchecked(a) $op bytes_unchecked(b) }
+        }
     };
 }
 str_cmp!(lt, <);
@@ -157,8 +227,13 @@ str_cmp!(le, <=);
 str_cmp!(gt, >);
 str_cmp!(ge, >=);
 
-pub fn cmp(a: GcRef, b: GcRef) -> i32 {
-    match as_bytes(a).cmp(as_bytes(b)) {
+/// Compare two live VM strings lexicographically.
+///
+/// # Safety
+///
+/// Each non-null input must point to a live string object.
+pub unsafe fn cmp(a: GcRef, b: GcRef) -> i32 {
+    match unsafe { bytes_unchecked(a).cmp(bytes_unchecked(b)) } {
         core::cmp::Ordering::Less => -1,
         core::cmp::Ordering::Equal => 0,
         core::cmp::Ordering::Greater => 1,
@@ -172,7 +247,12 @@ pub fn new_from_string(gc: &mut Gc, s: String) -> GcRef {
 }
 
 /// Create string from a byte slice object. Copies the data (strings are immutable).
-pub fn from_slice(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
+/// Copy a live byte slice into a VM string.
+///
+/// # Safety
+///
+/// `slice_ref` must point to a live byte-slice object owned by `gc` when non-null.
+pub unsafe fn from_slice(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
     if slice_ref.is_null() {
         return core::ptr::null_mut();
     }
@@ -187,8 +267,13 @@ pub fn from_slice(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
 }
 
 /// Convert string to []byte slice object. Returns slice GcRef.
-pub fn to_byte_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
-    let bytes = as_bytes(s);
+/// Copy a live VM string into a byte-slice object.
+///
+/// # Safety
+///
+/// `s` must point to a live string object owned by `gc` when non-null.
+pub unsafe fn to_byte_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
+    let bytes = unsafe { bytes_unchecked(s) };
     let len = bytes.len();
     if len == 0 {
         return core::ptr::null_mut();
@@ -202,7 +287,12 @@ pub fn to_byte_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
 }
 
 /// Create string from a rune slice object (GcRef to SliceData).
-pub fn from_rune_slice_obj(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
+/// Encode a live rune slice as a VM string.
+///
+/// # Safety
+///
+/// `slice_ref` must point to a live rune-slice object owned by `gc` when non-null.
+pub unsafe fn from_rune_slice_obj(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
     if slice_ref.is_null() {
         return core::ptr::null_mut();
     }
@@ -227,8 +317,13 @@ pub fn from_rune_slice_obj(gc: &mut Gc, slice_ref: GcRef) -> GcRef {
 }
 
 /// Convert string to []rune slice object. Returns slice GcRef.
-pub fn to_rune_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
-    let str_data = as_str(s);
+/// Decode a live VM string into a rune-slice object.
+///
+/// # Safety
+///
+/// `s` must point to a live string object owned by `gc` when non-null.
+pub unsafe fn to_rune_slice_obj(gc: &mut Gc, s: GcRef) -> GcRef {
+    let str_data = unsafe { to_rust_string(s) };
     let len = str_data.chars().count();
     if len == 0 {
         return core::ptr::null_mut();

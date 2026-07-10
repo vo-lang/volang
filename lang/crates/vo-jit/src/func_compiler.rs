@@ -38,6 +38,7 @@ pub struct FunctionCompiler<'a> {
     /// have triggered fiber.stack reallocation via jit_push_frame.
     args_ptr_var: Variable,
     args_ptr_is_stack_var: Variable,
+    execution_budget: Variable,
     /// Slots that have been verified non-nil in the current basic block.
     /// Cleared on block transitions (jump targets).
     checked_non_nil: HashSet<u16>,
@@ -85,6 +86,7 @@ impl<'a> FunctionCompiler<'a> {
             saved_jit_bp: Variable::from_u32(local_slots + 1000),
             args_ptr_var: Variable::from_u32(local_slots + 1001),
             args_ptr_is_stack_var: Variable::from_u32(local_slots + 1002),
+            execution_budget: Variable::from_u32(local_slots + 1003),
             checked_non_nil: HashSet::new(),
             memory_only_start: u16::MAX,
             saved_caller_bp: Value::from_u32(0),
@@ -190,6 +192,56 @@ impl<'a> FunctionCompiler<'a> {
             dst_ptr,
             copy_frame_slots,
         );
+    }
+
+    fn emit_cooperative_yield(&mut self, resume_pc: usize) {
+        self.emit_variable_spill();
+        let ctx = self.builder.block_params(self.entry_block)[0];
+        let resume_pc = self.builder.ins().iconst(
+            types::I32,
+            i64::from(u32::try_from(resume_pc).unwrap_or(u32::MAX)),
+        );
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            resume_pc,
+            ctx,
+            JitContext::OFFSET_CALL_RESUME_PC,
+        );
+        let call_kind = self
+            .builder
+            .ins()
+            .iconst(types::I8, i64::from(JitContext::CALL_KIND_YIELD));
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            call_kind,
+            ctx,
+            JitContext::OFFSET_CALL_KIND,
+        );
+        let result = self
+            .builder
+            .ins()
+            .iconst(types::I32, i64::from(JitContext::JIT_RESULT_CALL));
+        self.builder.ins().return_(&[result]);
+    }
+
+    fn emit_backedge_jump(&mut self, target: usize, target_block: Block) {
+        let cost = crate::compile_common::backedge_bytecode_cost(self.current_pc, target);
+        let poll = crate::compile_common::branch_on_execution_budget(
+            &mut self.builder,
+            self.execution_budget,
+            cost,
+        );
+
+        self.builder.switch_to_block(poll.exhausted);
+        self.builder.seal_block(poll.exhausted);
+        self.emit_cooperative_yield(target);
+
+        crate::compile_common::continue_after_execution_budget_poll(
+            &mut self.builder,
+            self.execution_budget,
+            &poll,
+        );
+        self.builder.ins().jump(target_block, &[]);
     }
 
     fn current_memory_base_ptr(&mut self) -> Value {
@@ -333,6 +385,10 @@ impl<'a> FunctionCompiler<'a> {
         let ctx = params[0];
         let args_ptr = params[1]; // Points to fiber.stack[jit_bp]
         let _ret = params[2];
+        crate::compile_common::initialize_execution_budget(
+            &mut self.builder,
+            self.execution_budget,
+        );
         let current_func_id = self
             .builder
             .ins()
@@ -478,7 +534,11 @@ impl<'a> FunctionCompiler<'a> {
         let target = self.checked_branch_target(self.current_pc, inst.imm32(), inst.opcode())?;
         let block = self.block_for_pc(target, "jump")?;
 
-        self.builder.ins().jump(block, &[]);
+        if target <= self.current_pc {
+            self.emit_backedge_jump(target, block);
+        } else {
+            self.builder.ins().jump(block, &[]);
+        }
         Ok(())
     }
 
@@ -525,9 +585,19 @@ impl<'a> FunctionCompiler<'a> {
 
         let zero = self.builder.ins().iconst(types::I64, 0);
         let cmp = self.builder.ins().icmp(cmp_cond, cond, zero);
-        self.builder
-            .ins()
-            .brif(cmp, target_block, &[], fall_through, &[]);
+        if target <= self.current_pc {
+            let poll_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(cmp, poll_block, &[], fall_through, &[]);
+            self.builder.switch_to_block(poll_block);
+            self.builder.seal_block(poll_block);
+            self.emit_backedge_jump(target, target_block);
+        } else {
+            self.builder
+                .ins()
+                .brif(cmp, target_block, &[], fall_through, &[]);
+        }
 
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
@@ -554,9 +624,19 @@ impl<'a> FunctionCompiler<'a> {
         let target_block = self.block_for_pc(target, "forloop")?;
         let fall_through = self.builder.create_block();
 
-        self.builder
-            .ins()
-            .brif(continue_loop, target_block, &[], fall_through, &[]);
+        if target <= self.current_pc {
+            let poll_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(continue_loop, poll_block, &[], fall_through, &[]);
+            self.builder.switch_to_block(poll_block);
+            self.builder.seal_block(poll_block);
+            self.emit_backedge_jump(target, target_block);
+        } else {
+            self.builder
+                .ins()
+                .brif(continue_loop, target_block, &[], fall_through, &[]);
+        }
         self.builder.switch_to_block(fall_through);
         self.builder.seal_block(fall_through);
         self.clear_flow_facts();

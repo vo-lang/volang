@@ -379,9 +379,8 @@ pub(crate) fn preflight_endpoint_request_command(
     }
     preflight_endpoint_request_response_identity(kind, fiber_key, wait_id)?;
 
-    match vm.state.endpoint_registry.entries.get(&endpoint_id) {
-        Some(EndpointEntry::Live(ch_ref)) => {
-            let ch = *ch_ref;
+    match vm.state.endpoint_registry.entry(endpoint_id) {
+        Some(EndpointEntry::Live(ch)) => {
             if !endpoint_request_authorized(vm, ch, from_island) {
                 if fiber_key != 0 && wait_id != 0 && reject_endpoint_request_kind(kind).is_some() {
                     preflight_endpoint_response_route(
@@ -428,9 +427,8 @@ pub(crate) fn handle_endpoint_request_command(
         return Ok(());
     }
 
-    match vm.state.endpoint_registry.entries.get(&endpoint_id) {
-        Some(EndpointEntry::Live(ch_ref)) => {
-            let ch = *ch_ref;
+    match vm.state.endpoint_registry.entry(endpoint_id) {
+        Some(EndpointEntry::Live(ch)) => {
             if !endpoint_request_authorized(vm, ch, from_island) {
                 reject_endpoint_request(vm, endpoint_id, &kind, from_island, fiber_key, wait_id)?;
                 return Ok(());
@@ -1042,15 +1040,15 @@ pub(crate) fn endpoint_response_from_authorized_source(
     endpoint_id: u64,
     from_island: u32,
 ) -> bool {
-    match vm.state.endpoint_registry.entries.get(&endpoint_id) {
-        Some(EndpointEntry::Live(ch)) if queue::is_remote(*ch) => {
-            queue::remote_proxy(*ch).home_island == from_island
+    match vm.state.endpoint_registry.entry(endpoint_id) {
+        Some(EndpointEntry::Live(ch)) if queue::is_remote(ch) => {
+            queue::remote_proxy(ch).home_island == from_island
         }
         Some(EndpointEntry::Live(_)) => from_island == vm.state.current_island_id,
         None => false,
         Some(EndpointEntry::Tombstone {
             response_source: Some(source),
-        }) => *source == from_island,
+        }) => source == from_island,
         Some(EndpointEntry::Tombstone {
             response_source: None,
         }) => from_island == vm.state.current_island_id,

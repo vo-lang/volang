@@ -921,8 +921,9 @@ mod tests {
         assert_eq!(captures.len(), 2);
         assert_eq!(Gc::header(captures[0] as GcRef).kind(), ValueKind::String);
         assert_eq!(Gc::header(captures[1] as GcRef).kind(), ValueKind::String);
-        assert_eq!(string::as_bytes(captures[0] as GcRef), b"left");
-        assert_eq!(string::as_bytes(captures[1] as GcRef), b"right");
+        // Safety: unpacking produced live string captures in `gc`.
+        assert_eq!(unsafe { string::to_bytes(captures[0] as GcRef) }, b"left");
+        assert_eq!(unsafe { string::to_bytes(captures[1] as GcRef) }, b"right");
     }
 
     fn roundtrip_frame(target_island_id: u32, cmd: IslandCommand) {

@@ -10,10 +10,6 @@ mod call;
 mod panic;
 mod wait;
 
-fn jit_error_message(action: &str, func_name: &str, err: &vo_jit::JitError) -> String {
-    format!("JIT {action} failed for {func_name}: {err}")
-}
-
 fn append_infra_error_detail(mut base: String, ctx: &JitContextWrapper) -> String {
     let detail = unsafe { ctx.ctx.infra_error_message.as_ref() }
         .map(String::as_str)

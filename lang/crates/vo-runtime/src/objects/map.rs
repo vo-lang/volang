@@ -188,7 +188,8 @@ pub fn get_checked(
         }
         MapInner::StringKey(map) => {
             let str_ref = key[0] as GcRef;
-            let str_bytes: Box<[u8]> = string::as_bytes(str_ref).into();
+            // Safety: string keys are live while the owning map operation runs.
+            let str_bytes: Box<[u8]> = unsafe { string::to_bytes(str_ref) }.into();
             Ok(map.get(&str_bytes).map(|(_, v)| v.as_ref()))
         }
         MapInner::StructKey(map) => {
@@ -260,7 +261,8 @@ pub unsafe fn set_checked(
         }
         MapInner::StringKey(map) => {
             let str_ref = key[0] as GcRef;
-            let str_bytes: Box<[u8]> = string::as_bytes(str_ref).into();
+            // Safety: string keys are live while the owning map operation runs.
+            let str_bytes: Box<[u8]> = unsafe { string::to_bytes(str_ref) }.into();
             map.insert(str_bytes, (str_ref, val_box));
         }
         MapInner::StructKey(map) => {
@@ -318,7 +320,8 @@ pub fn delete_checked(m: GcRef, key: &[u64], module: Option<&Module>) -> Result<
         }
         MapInner::StringKey(map) => {
             let str_ref = key[0] as GcRef;
-            let str_bytes: Box<[u8]> = string::as_bytes(str_ref).into();
+            // Safety: string keys are live while the owning map operation runs.
+            let str_bytes: Box<[u8]> = unsafe { string::to_bytes(str_ref) }.into();
             map.remove(&str_bytes);
         }
         MapInner::StructKey(map) => {

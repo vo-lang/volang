@@ -37,7 +37,6 @@ pub extern "C" fn jit_call_extern(
     };
     let ctx_ref = unsafe { &mut *ctx };
     let registry = unsafe { &*(extern_registry as *const ExternRegistry) };
-    let gc = unsafe { &mut *gc };
     let module = unsafe { &*(module as *const Module) };
     let Some(_extern_def) = module.externs.get(extern_id as usize) else {
         return vo_runtime::jit_api::set_jit_infra_error(
@@ -58,6 +57,9 @@ pub extern "C" fn jit_call_extern(
             extern_id as u64,
         );
     };
+    // The short immutable VM borrow above ends before decoding mutable pointers
+    // to individual VM-owned services carried by JitContext.
+    let gc = unsafe { &mut *gc };
     let arg_slots = match validate_callback_slot_count(
         ctx,
         vo_runtime::jit_api::JIT_INFRA_ERROR_INVALID_METADATA,

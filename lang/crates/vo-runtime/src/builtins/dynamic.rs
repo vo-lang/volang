@@ -1420,8 +1420,9 @@ fn get_string_index(
     key_slot0: u64,
     key_slot1: u64,
 ) -> DynResult<(u64, u64)> {
-    let s = str_obj::as_str(base_ref);
-    let bytes = s.as_bytes();
+    // SAFETY: the extern call owns a live argument root and performs no GC
+    // operation before the selected byte is copied into a scalar slot.
+    let bytes = unsafe { str_obj::bytes_unchecked(base_ref) };
 
     let idx = check_int_index(key_slot0, key_slot1, bytes.len()).map_err(|e| match e {
         IndexError::BadType => (DynErr::BadIndex, "index must be integer"),
@@ -1996,10 +1997,11 @@ fn dyn_field(call: &mut ExternCallContext) -> ExternResult {
     let field_name = if field_name_ref.is_null() {
         return write_get_error(call, DynErr::NilBase, "field name is nil");
     } else {
-        str_obj::as_str(field_name_ref)
+        // Safety: the dynamic builtin ABI supplies a live string argument.
+        unsafe { str_obj::to_rust_string(field_name_ref) }
     };
 
-    match get_value(call, base_slot0, base_slot1, DynKey::Field(field_name)) {
+    match get_value(call, base_slot0, base_slot1, DynKey::Field(&field_name)) {
         Ok((v0, v1)) => write_get_result(call, v0, v1, expected_rttid, expected_vk),
         Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
@@ -2044,14 +2046,15 @@ fn dyn_set_field(call: &mut ExternCallContext) -> ExternResult {
     let field_name = if field_name_ref.is_null() {
         return write_set_error(call, DynErr::NilBase, "field name is nil");
     } else {
-        str_obj::as_str(field_name_ref)
+        // Safety: the dynamic builtin ABI supplies a live string argument.
+        unsafe { str_obj::to_rust_string(field_name_ref) }
     };
 
     match set_value(
         call,
         base_slot0,
         base_slot1,
-        DynKey::Field(field_name),
+        DynKey::Field(&field_name),
         val_slot0,
         val_slot1,
     ) {
@@ -2169,12 +2172,13 @@ fn dyn_method(call: &mut ExternCallContext) -> ExternResult {
         );
     }
 
-    let method_name = str_obj::as_str(method_name_ref);
+    // Safety: the dynamic builtin ABI supplies a live string argument.
+    let method_name = unsafe { str_obj::to_rust_string(method_name_ref) };
     do_method(
         call,
         base_slot0,
         base_slot1,
-        method_name,
+        &method_name,
         args_slice_ref,
         ret_count,
         metas_start,
@@ -2352,10 +2356,11 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
     let field_name = if name_ref.is_null() {
         return write_get_error(call, DynErr::NilBase, "field name is nil");
     } else {
-        str_obj::as_str(name_ref)
+        // Safety: the dynamic builtin ABI supplies a live string argument.
+        unsafe { str_obj::to_rust_string(name_ref) }
     };
 
-    match get_value(call, base_slot0, base_slot1, DynKey::Field(field_name)) {
+    match get_value(call, base_slot0, base_slot1, DynKey::Field(&field_name)) {
         Ok((v0, v1)) => {
             call.ret_u64(0, v0);
             call.ret_u64(1, v1);
@@ -2410,14 +2415,15 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
     let field_name = if name_ref.is_null() {
         return write_set_error(call, DynErr::NilBase, "field name is nil");
     } else {
-        str_obj::as_str(name_ref)
+        // Safety: the dynamic builtin ABI supplies a live string argument.
+        unsafe { str_obj::to_rust_string(name_ref) }
     };
 
     match set_value(
         call,
         base_slot0,
         base_slot1,
-        DynKey::Field(field_name),
+        DynKey::Field(&field_name),
         val_slot0,
         val_slot1,
     ) {

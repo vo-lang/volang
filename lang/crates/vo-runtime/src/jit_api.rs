@@ -24,7 +24,9 @@ use std::ffi::c_void;
 use crate::gc::{Gc, GcRef};
 use crate::itab::ItabCache;
 use crate::objects::interface::InterfaceSlot;
+
 use crate::slot::slots_for_bytes;
+pub use crate::EXECUTION_TIMESLICE_INSTRUCTIONS;
 use crate::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 use vo_common_core::bytecode::{JitInstructionMetadata, Module};
 use vo_common_core::instruction::iface_assert_result_slots_from_flags;
@@ -316,8 +318,8 @@ pub struct JitContext {
     /// Pointer to the global variables array.
     pub globals: *mut u64,
 
-    /// Pointer to safepoint flag (read by JIT to check if GC wants to run).
-    /// When this is true, JIT should call vo_gc_safepoint().
+    /// Legacy ABI slot retained for extension compatibility.
+    /// Native scheduling uses compiler-owned cooperative back-edge budgets.
     pub safepoint_flag: *const bool,
 
     /// Pointer to panic flag (set by JIT when panic occurs).
@@ -1627,27 +1629,14 @@ pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
     }
 }
 
-/// GC safepoint - intentionally a no-op.
+/// Legacy safepoint compatibility symbol.
 ///
-/// The synchronous JIT design with non-moving GC means stack maps are NOT needed:
-///
-/// 1. **Non-moving GC**: GcRef pointers never change, so JIT's SSA variables
-///    holding GcRefs remain valid even after GC runs.
-///
-/// 2. **Reachability**: All GcRefs in JIT code originate from `fiber.stack`
-///    (already tracked by GC) or from helper return values (already rooted).
-///
-/// 3. **GC triggers only at call boundaries**:
-///    - `vo_gc_alloc` - checks debt and may trigger collection
-///    - `vo_call_vm` - enters VM context where GC can run
-///    - Other extern calls
-///
-/// This design eliminates the need for expensive stack maps while maintaining
-/// GC correctness. The trade-off is that long JIT loops without allocations
-/// will delay GC, but this only affects latency, not correctness.
+/// Generated native loops use a compiler-owned execution budget and return
+/// `CALL_KIND_YIELD` at back edges. The VM then owns interrupt polling, root
+/// materialization, and incremental GC work at the scheduling boundary.
 #[no_mangle]
 pub extern "C" fn vo_gc_safepoint(_ctx: *mut JitContext) {
-    // Intentionally no-op. See doc comment for design rationale.
+    // Kept as an ABI symbol for already-built extensions.
 }
 
 /// Set Call request state in JitContext.
@@ -2654,7 +2643,8 @@ pub extern "C" fn vo_map_iter_next(
 #[no_mangle]
 pub extern "C" fn vo_str_decode_rune(s: u64, pos: u64) -> u64 {
     use crate::objects::string;
-    let (rune, width) = string::decode_rune_at(s as crate::gc::GcRef, pos as usize);
+    // Safety: generated code passes a live string reference.
+    let (rune, width) = unsafe { string::decode_rune_at(s as crate::gc::GcRef, pos as usize) };
     ((rune as u64) << 32) | (width as u64)
 }
 
@@ -2662,14 +2652,16 @@ pub extern "C" fn vo_str_decode_rune(s: u64, pos: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn vo_str_len(s: u64) -> u64 {
     use crate::objects::string;
-    string::len(s as crate::gc::GcRef) as u64
+    // Safety: generated code passes a live string reference.
+    unsafe { string::len(s as crate::gc::GcRef) as u64 }
 }
 
 /// Get byte at index.
 #[no_mangle]
 pub extern "C" fn vo_str_index(s: u64, idx: u64) -> u64 {
     use crate::objects::string;
-    string::index(s as crate::gc::GcRef, idx as usize) as u64
+    // Safety: generated code performs the bounds check before this helper.
+    unsafe { string::index(s as crate::gc::GcRef, idx as usize) as u64 }
 }
 
 /// Concatenate two strings.
@@ -2699,14 +2691,16 @@ pub extern "C" fn vo_str_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn vo_str_eq(a: u64, b: u64) -> u64 {
     use crate::objects::string;
-    string::eq(a as crate::gc::GcRef, b as crate::gc::GcRef) as u64
+    // Safety: generated code passes live string references.
+    unsafe { string::eq(a as crate::gc::GcRef, b as crate::gc::GcRef) as u64 }
 }
 
 /// Compare strings.
 #[no_mangle]
 pub extern "C" fn vo_str_cmp(a: u64, b: u64) -> i32 {
     use crate::objects::string;
-    string::cmp(a as crate::gc::GcRef, b as crate::gc::GcRef)
+    // Safety: generated code passes live string references.
+    unsafe { string::cmp(a as crate::gc::GcRef, b as crate::gc::GcRef) }
 }
 
 /// Create string from constant index.

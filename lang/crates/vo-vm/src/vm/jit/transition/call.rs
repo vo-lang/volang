@@ -9,14 +9,12 @@ use super::super::bridge_result::{JitBridgeMode, JitBridgeTransition};
 use super::super::context::JitContextWrapper;
 use super::super::materialize::{materialize_jit_frames, setup_prepared_call, setup_regular_call};
 use super::super::side_exit;
-use super::jit_error_message;
 
-struct CallTarget<'a> {
+struct CallTarget {
     func_id: u32,
     call_arg_start: usize,
     ret_slots: u16,
     ret_reg: u16,
-    func_def: &'a vo_runtime::bytecode::FunctionDef,
 }
 
 pub(super) fn handle_call_transition(
@@ -51,7 +49,6 @@ pub(super) fn handle_call_transition(
         call_arg_start,
         ret_slots: callee_func_def.ret_slots,
         ret_reg: ctx.call_ret_reg(),
-        func_def: callee_func_def,
     };
 
     if call_kind == JitContext::CALL_KIND_PREPARED {
@@ -88,7 +85,15 @@ fn handle_special_call_kind(
         JitBridgeMode::LoopOsr => {
             let resume_pc = ctx.call_resume_pc();
             match materialize_jit_frames(fiber, module, resume_pc) {
-                Ok(()) => JitBridgeTransition::FrameChanged,
+                Ok(()) if call_kind == JitContext::CALL_KIND_YIELD => {
+                    JitBridgeTransition::TimesliceExpired
+                }
+                Ok(()) if call_kind == JitContext::CALL_KIND_BLOCK => {
+                    JitBridgeTransition::QueueBlock
+                }
+                Ok(()) => JitBridgeTransition::JitError(format!(
+                    "loop OSR returned unknown special call kind {call_kind}"
+                )),
                 Err(err) => JitBridgeTransition::FrameMaterializeError(err),
             }
         }
@@ -284,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_jit_regular_call_resolve_failure_is_transactional_058() {
+    fn vm_jit_regular_call_defers_compilation_to_materialized_frame_entry_058() {
         let mut vm = Vm::try_with_jit_config(JitConfig {
             call_threshold: 1,
             ..JitConfig::default()
@@ -315,9 +320,7 @@ mod tests {
             ret_slots: 0,
         });
         let before_frame_count = fiber.frames.len();
-        let before_last_pc = fiber.frames.last().map(|frame| frame.pc);
-        let before_resume_count = fiber.resume_stack.len();
-        let before_sp = fiber.sp;
+        let before_cold_side_exits = side_exit_count(&vm, JitSideExitReason::InterpretedCold);
         let before_regular_side_exits = side_exit_count(&vm, JitSideExitReason::RegularCall);
 
         let mut ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("jit context");
@@ -335,20 +338,18 @@ mod tests {
             &ctx,
         );
 
-        let JitBridgeTransition::JitError(message) = transition else {
-            panic!("regular call resolve failure must be a JitError");
-        };
-        assert!(
-            message.contains("callee compilation"),
-            "unexpected error: {message}"
+        assert!(matches!(transition, JitBridgeTransition::FrameChanged));
+        assert_eq!(fiber.frames.len(), before_frame_count + 2);
+        assert_eq!(fiber.frames.last().map(|frame| frame.func_id), Some(2));
+        assert!(fiber.resume_stack.is_empty());
+        assert_eq!(vm.jit_code_memory_stats().function_count, 0);
+        assert_eq!(
+            side_exit_count(&vm, JitSideExitReason::InterpretedCold),
+            before_cold_side_exits + 1
         );
-        assert_eq!(fiber.frames.len(), before_frame_count);
-        assert_eq!(fiber.frames.last().map(|frame| frame.pc), before_last_pc);
-        assert_eq!(fiber.resume_stack.len(), before_resume_count);
-        assert_eq!(fiber.sp, before_sp);
         assert_eq!(
             side_exit_count(&vm, JitSideExitReason::RegularCall),
-            before_regular_side_exits
+            before_regular_side_exits + 1
         );
     }
 
@@ -407,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_jit_prepared_call_resolve_failure_rolls_back_callback_window_058() {
+    fn vm_jit_prepared_call_defers_compilation_to_materialized_frame_entry_058() {
         let mut vm = Vm::try_with_jit_config(JitConfig {
             call_threshold: 1,
             ..JitConfig::default()
@@ -429,9 +430,9 @@ mod tests {
         let caller_bp = fiber.push_frame(0, 2, 0, 0, 0);
         fiber.current_frame_mut().expect("caller frame").pc = 7;
         let before_frame_count = fiber.frames.len();
-        let before_last_pc = fiber.frames.last().map(|frame| frame.pc);
         let before_sp = fiber.sp;
         let before_resume_count = fiber.resume_stack.len();
+        let before_cold_side_exits = side_exit_count(&vm, JitSideExitReason::InterpretedCold);
         let before_prepared_side_exits =
             side_exit_count(&vm, JitSideExitReason::PreparedDynamicCall);
 
@@ -458,20 +459,19 @@ mod tests {
             &ctx,
         );
 
-        let JitBridgeTransition::JitError(message) = transition else {
-            panic!("prepared call resolve failure must be a JitError");
-        };
-        assert!(
-            message.contains("prepared dynamic callee compilation"),
-            "unexpected error: {message}"
-        );
-        assert_eq!(fiber.frames.len(), before_frame_count);
-        assert_eq!(fiber.frames.last().map(|frame| frame.pc), before_last_pc);
+        assert!(matches!(transition, JitBridgeTransition::FrameChanged));
+        assert_eq!(fiber.frames.len(), before_frame_count + 1);
+        assert_eq!(fiber.frames.last().map(|frame| frame.func_id), Some(1));
         assert_eq!(fiber.resume_stack.len(), before_resume_count);
-        assert_eq!(fiber.sp, before_sp);
+        assert!(fiber.sp > before_sp);
+        assert_eq!(vm.jit_code_memory_stats().function_count, 0);
+        assert_eq!(
+            side_exit_count(&vm, JitSideExitReason::InterpretedCold),
+            before_cold_side_exits + 1
+        );
         assert_eq!(
             side_exit_count(&vm, JitSideExitReason::PreparedDynamicCall),
-            before_prepared_side_exits
+            before_prepared_side_exits + 1
         );
     }
 
@@ -529,23 +529,17 @@ mod tests {
     }
 }
 
-fn resolve_callee_before_materialize(
-    vm: &mut Vm,
-    module: &Module,
-    target: &CallTarget<'_>,
-    action: &str,
-) -> Result<bool, String> {
-    if let Some(jit_mgr) = vm.jit.manager_mut() {
-        let env = vo_jit::JitCompileEnv {
-            externs: &vm.state.resolved_externs,
-            backend_caps: Default::default(),
-        };
-        return jit_mgr
-            .resolve_call(target.func_id, target.func_def, module, env)
-            .map(|entry| entry.is_none())
-            .map_err(|err| jit_error_message(action, &target.func_def.name, &err));
+fn callee_interpreter_reason(vm: &Vm, target: &CallTarget) -> Option<JitSideExitReason> {
+    if let Some(jit_mgr) = vm.jit.manager() {
+        if jit_mgr.get_entry(target.func_id).is_some() {
+            return None;
+        }
+        if jit_mgr.is_unsupported(target.func_id).unwrap_or(false) {
+            return Some(JitSideExitReason::InterpretedUnsupported);
+        }
+        return Some(JitSideExitReason::InterpretedCold);
     }
-    Ok(false)
+    None
 }
 
 fn rollback_prepared_callback_window(fiber: &mut Fiber, ctx: &JitContextWrapper) {
@@ -557,20 +551,9 @@ fn handle_prepared_call(
     fiber: &mut Fiber,
     module: &Module,
     ctx: &JitContextWrapper,
-    target: CallTarget<'_>,
+    target: CallTarget,
 ) -> JitBridgeTransition {
-    let interpreted_cold = match resolve_callee_before_materialize(
-        vm,
-        module,
-        &target,
-        "prepared dynamic callee compilation",
-    ) {
-        Ok(interpreted_cold) => interpreted_cold,
-        Err(err) => {
-            rollback_prepared_callback_window(fiber, ctx);
-            return JitBridgeTransition::JitError(err);
-        }
-    };
+    let interpreter_reason = callee_interpreter_reason(vm, &target);
     let callee_bp = ctx.call_resume_pc() as usize;
     let caller_resume_pc = ctx.call_arg_start();
     match setup_prepared_call(
@@ -583,8 +566,8 @@ fn handle_prepared_call(
         caller_resume_pc,
     ) {
         Ok(()) => {
-            if interpreted_cold {
-                side_exit::record(vm, JitSideExitReason::InterpretedCold);
+            if let Some(reason) = interpreter_reason {
+                side_exit::record(vm, reason);
             }
             side_exit::record(vm, JitSideExitReason::PreparedDynamicCall);
             JitBridgeTransition::FrameChanged
@@ -602,16 +585,13 @@ fn handle_regular_call(
     fiber: &mut Fiber,
     module: &Module,
     ctx: &JitContextWrapper,
-    target: CallTarget<'_>,
+    target: CallTarget,
 ) -> JitBridgeTransition {
     let resume_pc = ctx.call_resume_pc();
-    let interpreted_cold = if mode.resolve_regular_callee() {
-        match resolve_callee_before_materialize(vm, module, &target, "callee compilation") {
-            Ok(interpreted_cold) => interpreted_cold,
-            Err(err) => return JitBridgeTransition::JitError(err),
-        }
+    let interpreter_reason = if mode.resolve_regular_callee() {
+        callee_interpreter_reason(vm, &target)
     } else {
-        false
+        None
     };
 
     if let Err(err) = setup_regular_call(
@@ -626,8 +606,8 @@ fn handle_regular_call(
         return JitBridgeTransition::FrameMaterializeError(err);
     }
 
-    if interpreted_cold {
-        side_exit::record(vm, JitSideExitReason::InterpretedCold);
+    if let Some(reason) = interpreter_reason {
+        side_exit::record(vm, reason);
     }
     side_exit::record(vm, JitSideExitReason::RegularCall);
     JitBridgeTransition::FrameChanged

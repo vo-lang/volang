@@ -42,6 +42,8 @@ pub use vo_runtime::serialize;
 // Re-export semantic JIT surface types for external use.
 #[cfg(feature = "jit")]
 pub use vm::{JitConfig, JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};
+#[cfg(feature = "jit")]
+pub use vo_jit::JitCodeMemoryStats;
 
 #[cfg(test)]
 mod tests {

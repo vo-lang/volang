@@ -266,7 +266,8 @@ fn marshal_field_value_depth<W: FormatWriter>(
             if str_ref.is_null() {
                 writer.write_string("");
             } else {
-                writer.write_string(str_obj::as_str(str_ref));
+                // Safety: this slot is described as a live string by the runtime type.
+                writer.write_string(&unsafe { str_obj::to_rust_string(str_ref) });
             }
         }
         ValueKind::Struct => {
@@ -351,7 +352,8 @@ fn marshal_any_value_depth<W: FormatWriter>(
             if str_ref.is_null() {
                 writer.write_string("");
             } else {
-                writer.write_string(str_obj::as_str(str_ref));
+                // Safety: this slot is described as a live string by the runtime type.
+                writer.write_string(&unsafe { str_obj::to_rust_string(str_ref) });
             }
         }
         ValueKind::Struct => {
@@ -534,12 +536,13 @@ fn marshal_map_value_depth<W: FormatWriter>(
     while let Some((key, val)) = map::iter_next(&mut iter) {
         let key_str_ref = key[0] as GcRef;
         let key_str = if key_str_ref.is_null() {
-            ""
+            String::new()
         } else {
-            str_obj::as_str(key_str_ref)
+            // Safety: JSON object keys are live VM strings.
+            unsafe { str_obj::to_rust_string(key_str_ref) }
         };
 
-        if !writer.write_field_start(key_str, first) {
+        if !writer.write_field_start(&key_str, first) {
             continue;
         }
         first = false;
@@ -614,7 +617,8 @@ fn marshal_elem_value_depth<W: FormatWriter>(
             if str_ref.is_null() {
                 writer.write_string("");
             } else {
-                writer.write_string(str_obj::as_str(str_ref));
+                // Safety: this slot is described as a live string by the runtime type.
+                writer.write_string(&unsafe { str_obj::to_rust_string(str_ref) });
             }
         }
         ValueKind::Struct => {
@@ -678,7 +682,8 @@ fn marshal_map_val_depth<W: FormatWriter>(
             if str_ref.is_null() {
                 writer.write_string("");
             } else {
-                writer.write_string(str_obj::as_str(str_ref));
+                // Safety: this slot is described as a live string by the runtime type.
+                writer.write_string(&unsafe { str_obj::to_rust_string(str_ref) });
             }
         }
         ValueKind::Struct => {

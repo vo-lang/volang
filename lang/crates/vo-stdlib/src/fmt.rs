@@ -415,7 +415,8 @@ fn format_with_spec(
         }
         's' => {
             let mut s = match vk {
-                ValueKind::String => str_obj::as_str(slot1 as GcRef).to_string(),
+                // Safety: the interface metadata identifies `slot1` as a live string.
+                ValueKind::String => unsafe { str_obj::to_rust_string(slot1 as GcRef) },
                 _ => format_interface_with_ctx(slot0, slot1, call),
             };
             if let Some(prec) = spec.precision {
@@ -570,8 +571,9 @@ fn format_with_spec(
         }
         'x' => match vk {
             ValueKind::String => {
-                let s = str_obj::as_str(slot1 as GcRef);
-                let hex: String = s.bytes().map(|b| format!("{:02x}", b)).collect();
+                // Safety: the interface metadata identifies `slot1` as a live string.
+                let bytes = unsafe { str_obj::to_bytes(slot1 as GcRef) };
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                 pad_width(hex, spec, ' ')
             }
             _ if vk.is_integer() => {
@@ -589,8 +591,9 @@ fn format_with_spec(
         },
         'X' => match vk {
             ValueKind::String => {
-                let s = str_obj::as_str(slot1 as GcRef);
-                let hex: String = s.bytes().map(|b| format!("{:02X}", b)).collect();
+                // Safety: the interface metadata identifies `slot1` as a live string.
+                let bytes = unsafe { str_obj::to_bytes(slot1 as GcRef) };
+                let hex: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
                 pad_width(hex, spec, ' ')
             }
             _ if vk.is_integer() => {
@@ -617,7 +620,8 @@ fn format_with_spec(
         'p' => pad_width(format!("0x{:x}", slot1), spec, ' '),
         'q' => match vk {
             ValueKind::String => {
-                let s = str_obj::as_str(slot1 as GcRef);
+                // Safety: the interface metadata identifies `slot1` as a live string.
+                let s = unsafe { str_obj::to_rust_string(slot1 as GcRef) };
                 pad_width(format!("{:?}", s), spec, ' ')
             }
             _ if vk.is_integer() => {

@@ -32,10 +32,12 @@ pub enum JitSideExitReason {
     Replay = 7,
     LoopNotHot = 8,
     HostEvent = 9,
+    LoopMetadataUnavailable = 10,
+    InterpretedUnsupported = 11,
 }
 
 impl JitSideExitReason {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 12;
 
     #[inline]
     const fn index(self) -> usize {
@@ -61,7 +63,7 @@ impl JitSideExitReasonStats {
 
     #[inline]
     fn increment(&mut self, reason: JitSideExitReason) {
-        self.counts[reason.index()] += 1;
+        self.counts[reason.index()] = self.counts[reason.index()].saturating_add(1);
     }
 }
 
@@ -195,13 +197,19 @@ pub struct JitManager {
     /// Counts of JIT-compiled code that was actually entered during this VM run.
     execution_stats: JitExecutionStats,
 
+    /// VM-wide dynamic call cache. A VM executes one fiber at a time, and the
+    /// owner key includes caller function plus callsite, so sharing this table
+    /// preserves cache isolation without charging every fiber ~28 KiB.
+    dynamic_call_ic: Vec<vo_runtime::jit_api::DynCallIC>,
+
     /// Reusable scratch buffer for direct callee snapshots.
     available_direct_callees_buf: Vec<u32>,
 }
 
-// SAFETY: func_table contains raw pointers to JIT code which is thread-safe to read.
+// SAFETY: ownership may move between island threads only while no native body
+// is executing. JitManager deliberately has no Sync implementation: its code
+// tables, compiler, and execution counters have one VM-thread owner.
 unsafe impl Send for JitManager {}
-unsafe impl Sync for JitManager {}
 
 impl JitManager {
     /// Create a new JIT manager.
@@ -213,6 +221,7 @@ impl JitManager {
             compiler: JitCompiler::new()?,
             config: JitConfig::default(),
             execution_stats: JitExecutionStats::default(),
+            dynamic_call_ic: Vec::new(),
             available_direct_callees_buf: Vec::new(),
         })
     }
@@ -227,6 +236,7 @@ impl JitManager {
             compiler,
             config,
             execution_stats: JitExecutionStats::default(),
+            dynamic_call_ic: Vec::new(),
             available_direct_callees_buf: Vec::new(),
         })
     }
@@ -237,6 +247,7 @@ impl JitManager {
         self.func_table = vec![std::ptr::null(); func_count];
         self.direct_call_table = vec![std::ptr::null(); func_count];
         self.execution_stats = JitExecutionStats::default();
+        self.dynamic_call_ic.clear();
     }
 
     /// Get function table pointer for JIT code.
@@ -265,6 +276,13 @@ impl JitManager {
         self.direct_call_table.len()
     }
 
+    pub fn ensure_dynamic_call_ic(&mut self) -> *mut vo_runtime::jit_api::DynCallIC {
+        if self.dynamic_call_ic.is_empty() {
+            self.dynamic_call_ic = vo_runtime::jit_api::alloc_ic_table();
+        }
+        self.dynamic_call_ic.as_mut_ptr()
+    }
+
     /// Get JIT configuration (for passing to island threads).
     #[inline]
     pub fn config(&self) -> &JitConfig {
@@ -277,13 +295,32 @@ impl JitManager {
     }
 
     #[inline]
+    pub fn code_memory_stats(&self) -> vo_jit::JitCodeMemoryStats {
+        self.compiler.code_memory_stats()
+    }
+
+    pub fn unsupported_function_count(&self) -> usize {
+        self.funcs
+            .iter()
+            .filter(|info| info.state == CompileState::Unsupported)
+            .count()
+    }
+
+    pub fn function_compile_error(&self, func_id: u32) -> Option<&str> {
+        self.funcs
+            .get(func_id as usize)
+            .and_then(|info| info.compile_error.as_deref())
+    }
+
+    #[inline]
     pub fn record_function_entry(&mut self) {
-        self.execution_stats.function_entries += 1;
+        self.execution_stats.function_entries =
+            self.execution_stats.function_entries.saturating_add(1);
     }
 
     #[inline]
     pub fn record_loop_entry(&mut self) {
-        self.execution_stats.loop_entries += 1;
+        self.execution_stats.loop_entries = self.execution_stats.loop_entries.saturating_add(1);
     }
 
     #[inline]
@@ -294,7 +331,7 @@ impl JitManager {
     fn rebuild_available_direct_callees(&self, out: &mut Vec<u32>) {
         out.clear();
         if out.capacity() < self.func_table.len() {
-            out.reserve(self.func_table.len() - out.capacity());
+            out.reserve(self.func_table.len());
         }
 
         for (id, ptr) in self.func_table.iter().enumerate() {
@@ -337,15 +374,7 @@ impl JitManager {
         }
 
         if self.is_unsupported(func_id)? {
-            let msg = self
-                .funcs
-                .get(func_id as usize)
-                .and_then(|info| info.compile_error.as_deref())
-                .unwrap_or("function is marked unsupported for JIT");
-            return Err(JitError::Internal(format!(
-                "function {} cannot be JIT-compiled: {msg}",
-                func_def.name
-            )));
+            return Ok(None);
         }
 
         // 2. Record call, compile if hot
@@ -356,6 +385,7 @@ impl JitManager {
                         return Ok(Some(entry));
                     }
                 }
+                Err(JitError::UnsupportedOpcode(_)) => return Ok(None),
                 Err(err) => return Err(err),
             }
         }
@@ -375,7 +405,7 @@ impl JitManager {
             .funcs
             .get_mut(id)
             .ok_or(JitError::FunctionNotFound(func_id))?;
-        info.call_count += 1;
+        info.call_count = info.call_count.saturating_add(1);
         Ok(
             info.call_count >= self.config.call_threshold
                 && info.state == CompileState::Interpreted,
@@ -395,7 +425,7 @@ impl JitManager {
             .ok_or(JitError::FunctionNotFound(func_id))?;
 
         let count = info.loop_counts.entry(loop_begin_pc).or_insert(0);
-        *count += 1;
+        *count = count.saturating_add(1);
         Ok(*count >= self.config.loop_threshold)
     }
 
@@ -465,6 +495,9 @@ impl JitManager {
             return Ok(());
         }
 
+        // SAFETY: Vm accepts one module per lifetime, stores it behind a private
+        // field, and exposes only shared module access after load.
+        unsafe { self.compiler.bind_immutable_module_scope(module)? };
         // Build a snapshot of currently compiled functions so codegen can emit
         // direct FuncRef calls for non-self static callees when possible.
         let mut available_direct_callees = std::mem::take(&mut self.available_direct_callees_buf);
@@ -477,7 +510,9 @@ impl JitManager {
         self.available_direct_callees_buf = available_direct_callees;
         if let Err(e) = compile_result {
             if let Some(info) = self.funcs.get_mut(idx) {
-                info.state = CompileState::Unsupported;
+                if matches!(&e, JitError::UnsupportedOpcode(_)) {
+                    info.state = CompileState::Unsupported;
+                }
                 info.compile_error = Some(e.to_string());
             }
             return Err(e);
@@ -503,14 +538,6 @@ impl JitManager {
         }
 
         Ok(())
-    }
-
-    /// Check if function is already compiled.
-    pub fn is_compiled(&self, func_id: u32) -> Result<bool, JitError> {
-        self.funcs
-            .get(func_id as usize)
-            .map(|info| info.state == CompileState::FullyCompiled)
-            .ok_or(JitError::FunctionNotFound(func_id))
     }
 
     /// Check if function is marked as unsupported.
@@ -563,6 +590,8 @@ impl JitManager {
         if self.funcs.get(func_id as usize).is_none() {
             return Err(JitError::FunctionNotFound(func_id));
         }
+        // SAFETY: same VM-owned immutable module contract as `compile_full`.
+        unsafe { self.compiler.bind_immutable_module_scope(module)? };
         let mut available_direct_callees = std::mem::take(&mut self.available_direct_callees_buf);
         self.rebuild_available_direct_callees(&mut available_direct_callees);
         let compile_result = self.compiler.compile_loop(
@@ -641,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_function_error_is_not_counted_as_side_exit() {
+    fn unsupported_function_stays_on_interpreter_without_side_exit_noise() {
         let func = empty_func();
         let mut module = VoModule::new("m".to_string());
         module.functions.push(func.clone());
@@ -654,13 +683,15 @@ mod tests {
             backend_caps: Default::default(),
         };
 
-        let err = manager
+        let entry = manager
             .resolve_call(0, &func, &module, env)
-            .expect_err("unsupported function must fail fast");
+            .expect("unsupported function should remain interpretable");
 
-        assert!(
-            err.to_string().contains("cannot be JIT-compiled"),
-            "unexpected error: {err}"
+        assert!(entry.is_none());
+        assert_eq!(manager.unsupported_function_count(), 1);
+        assert_eq!(
+            manager.function_compile_error(0),
+            Some("function marked unsupported")
         );
         assert_eq!(manager.execution_stats().side_exit_reasons.total(), 0);
     }

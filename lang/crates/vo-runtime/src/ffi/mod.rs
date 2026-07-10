@@ -81,6 +81,7 @@ pub struct SentinelErrorCache {
     inner: HashMap<&'static str, Vec<(u64, u64)>>,
     #[cfg(not(feature = "std"))]
     inner: BTreeMap<&'static str, Vec<(u64, u64)>>,
+    gc_roots: Vec<GcRef>,
 }
 
 impl SentinelErrorCache {
@@ -104,12 +105,25 @@ impl SentinelErrorCache {
 
     pub fn insert(&mut self, pkg: &'static str, errors: Vec<(u64, u64)>) {
         self.inner.insert(pkg, errors);
+        self.gc_roots.clear();
+        for values in self.inner.values() {
+            for &(slot0, slot1) in values {
+                if crate::objects::interface::data_is_gc_ref(slot0) && slot1 != 0 {
+                    self.gc_roots.push(slot1 as GcRef);
+                }
+            }
+        }
     }
 
     /// Iterate all cached error values (for GC root scanning).
     /// Each entry is a slice of (slot0, slot1) interface pairs.
     pub fn iter_values(&self) -> impl Iterator<Item = &[(u64, u64)]> {
         self.inner.values().map(|v| v.as_slice())
+    }
+
+    /// Random access for budgeted VM root scanning.
+    pub fn gc_root_at(&self, index: usize) -> Option<GcRef> {
+        self.gc_roots.get(index).copied()
     }
 }
 
@@ -437,14 +451,15 @@ pub struct ExternEntry {
 
 #[cfg(feature = "std")]
 impl ExternEntry {
-    /// Get function name as a string slice.
-    pub fn name(&self) -> &str {
-        unsafe {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                self.name_ptr,
-                self.name_len as usize,
-            ))
-        }
+    /// Borrow the function name carried by the extension ABI entry.
+    ///
+    /// # Safety
+    /// `name_ptr..name_len` must remain readable and contain UTF-8 for the
+    /// returned lifetime. Dynamic extension tables must pass loader validation
+    /// before calling this method.
+    pub unsafe fn name_unchecked(&self) -> &str {
+        let bytes = core::slice::from_raw_parts(self.name_ptr, self.name_len as usize);
+        core::str::from_utf8(bytes).expect("validated extension name must remain UTF-8")
     }
 
     pub fn effects(&self) -> Option<ExternEffects> {
@@ -520,7 +535,9 @@ pub static EXTERN_TABLE: [ExternEntry] = [..];
 /// Lookup an extension function by name.
 #[cfg(feature = "std")]
 pub fn lookup_extern_entry(name: &str) -> Option<&'static ExternEntry> {
-    EXTERN_TABLE.iter().find(|entry| entry.name() == name)
+    EXTERN_TABLE
+        .iter()
+        .find(|entry| unsafe { entry.name_unchecked() == name })
 }
 
 /// Lookup an extension function by name.
@@ -1053,11 +1070,18 @@ impl<'a> ExternCallContext<'a> {
     /// Read argument as string (zero-copy borrow).
     #[inline]
     pub fn arg_str(&self, n: u16) -> &str {
+        self.try_arg_str(n)
+            .expect("Vo string argument contains invalid UTF-8")
+    }
+
+    /// Read an argument as UTF-8 without assuming every Vo string is valid text.
+    #[inline]
+    pub fn try_arg_str(&self, n: u16) -> Result<&str, core::str::Utf8Error> {
         let ptr = self.arg_ref(n);
         if ptr.is_null() {
-            ""
+            Ok("")
         } else {
-            string::as_str(ptr)
+            core::str::from_utf8(unsafe { string::bytes_unchecked(ptr) })
         }
     }
 

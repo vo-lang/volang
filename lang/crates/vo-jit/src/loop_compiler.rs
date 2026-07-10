@@ -20,8 +20,19 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 pub type LoopFunc = extern "C" fn(*mut JitContext, *mut u64) -> JitResult;
 
 pub struct CompiledLoop {
-    pub code_ptr: *const u8,
-    pub loop_info: LoopInfo,
+    pub(crate) code_ptr: *const u8,
+    pub(crate) code_size: usize,
+    pub(crate) loop_info: LoopInfo,
+}
+
+impl CompiledLoop {
+    pub fn code_size(&self) -> usize {
+        self.code_size
+    }
+
+    pub fn loop_info(&self) -> &LoopInfo {
+        &self.loop_info
+    }
 }
 
 unsafe impl Send for CompiledLoop {}
@@ -40,6 +51,7 @@ pub struct LoopCompiler<'a> {
     exit_block: Block,
     current_pc: usize,
     locals_ptr_var: Variable,
+    execution_budget: Variable,
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
@@ -83,6 +95,7 @@ impl<'a> LoopCompiler<'a> {
             exit_block,
             current_pc: 0,
             locals_ptr_var: Variable::from_u32(local_slots + 1000),
+            execution_budget: Variable::from_u32(local_slots + 1001),
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
@@ -183,6 +196,10 @@ impl<'a> LoopCompiler<'a> {
         let params = self.builder.block_params(self.entry_block);
         self.ctx_ptr = params[0];
         let locals_ptr_init = params[1];
+        crate::compile_common::initialize_execution_budget(
+            &mut self.builder,
+            self.execution_budget,
+        );
         let current_func_id = self
             .builder
             .ins()
@@ -215,6 +232,55 @@ impl<'a> LoopCompiler<'a> {
             self.memory_only_start,
         )
         .spill_ssa_prefix_to_memory(&mut self.builder, locals_ptr);
+    }
+
+    fn emit_cooperative_yield(&mut self, resume_pc: usize) {
+        self.store_vars_to_memory();
+        let resume_pc = self.builder.ins().iconst(
+            types::I32,
+            i64::from(u32::try_from(resume_pc).unwrap_or(u32::MAX)),
+        );
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            resume_pc,
+            self.ctx_ptr,
+            JitContext::OFFSET_CALL_RESUME_PC,
+        );
+        let call_kind = self
+            .builder
+            .ins()
+            .iconst(types::I8, i64::from(JitContext::CALL_KIND_YIELD));
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            call_kind,
+            self.ctx_ptr,
+            JitContext::OFFSET_CALL_KIND,
+        );
+        let result = self
+            .builder
+            .ins()
+            .iconst(types::I32, i64::from(JitContext::JIT_RESULT_CALL));
+        self.builder.ins().return_(&[result]);
+    }
+
+    fn emit_backedge_jump(&mut self, target: usize, target_block: Block) {
+        let cost = crate::compile_common::backedge_bytecode_cost(self.current_pc, target);
+        let poll = crate::compile_common::branch_on_execution_budget(
+            &mut self.builder,
+            self.execution_budget,
+            cost,
+        );
+
+        self.builder.switch_to_block(poll.exhausted);
+        self.builder.seal_block(poll.exhausted);
+        self.emit_cooperative_yield(target);
+
+        crate::compile_common::continue_after_execution_budget_poll(
+            &mut self.builder,
+            self.execution_budget,
+            &poll,
+        );
+        self.builder.ins().jump(target_block, &[]);
     }
 
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
@@ -277,7 +343,7 @@ impl<'a> LoopCompiler<'a> {
         // Back-edge: jump to loop header (begin_pc = loop_start)
         if raw_target == self.loop_info.begin_pc {
             let loop_header = self.block_for_pc(self.loop_info.begin_pc, "loop header")?;
-            self.builder.ins().jump(loop_header, &[]);
+            self.emit_backedge_jump(raw_target, loop_header);
         } else if raw_target < self.loop_info.begin_pc || raw_target >= loop_end {
             // Jump outside loop - exit to VM
             self.store_vars_to_memory();
@@ -319,9 +385,19 @@ impl<'a> LoopCompiler<'a> {
         } else {
             // Target within loop - stay in JIT
             let target_block = self.block_for_pc(target, "conditional jump")?;
-            self.builder
-                .ins()
-                .brif(cmp, target_block, &[], fall_through, &[]);
+            if target <= self.current_pc {
+                let poll_block = self.builder.create_block();
+                self.builder
+                    .ins()
+                    .brif(cmp, poll_block, &[], fall_through, &[]);
+                self.builder.switch_to_block(poll_block);
+                self.builder.seal_block(poll_block);
+                self.emit_backedge_jump(target, target_block);
+            } else {
+                self.builder
+                    .ins()
+                    .brif(cmp, target_block, &[], fall_through, &[]);
+            }
         }
 
         self.builder.switch_to_block(fall_through);
@@ -354,9 +430,19 @@ impl<'a> LoopCompiler<'a> {
         if exit_pc >= self.loop_info.begin_pc && exit_pc <= self.loop_info.end_pc {
             // Exit within loop - continue in JIT
             let fall_through = self.builder.create_block();
-            self.builder
-                .ins()
-                .brif(continue_loop, target_block, &[], fall_through, &[]);
+            if target <= self.current_pc {
+                let poll_block = self.builder.create_block();
+                self.builder
+                    .ins()
+                    .brif(continue_loop, poll_block, &[], fall_through, &[]);
+                self.builder.switch_to_block(poll_block);
+                self.builder.seal_block(poll_block);
+                self.emit_backedge_jump(target, target_block);
+            } else {
+                self.builder
+                    .ins()
+                    .brif(continue_loop, target_block, &[], fall_through, &[]);
+            }
             self.builder.switch_to_block(fall_through);
             self.builder.seal_block(fall_through);
             self.clear_flow_facts();
@@ -364,9 +450,19 @@ impl<'a> LoopCompiler<'a> {
         } else {
             // Exit outside loop - return to VM
             let exit_block = self.builder.create_block();
-            self.builder
-                .ins()
-                .brif(continue_loop, target_block, &[], exit_block, &[]);
+            if target <= self.current_pc {
+                let poll_block = self.builder.create_block();
+                self.builder
+                    .ins()
+                    .brif(continue_loop, poll_block, &[], exit_block, &[]);
+                self.builder.switch_to_block(poll_block);
+                self.builder.seal_block(poll_block);
+                self.emit_backedge_jump(target, target_block);
+            } else {
+                self.builder
+                    .ins()
+                    .brif(continue_loop, target_block, &[], exit_block, &[]);
+            }
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();

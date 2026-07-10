@@ -643,7 +643,7 @@ fn pack_string(packed: &mut PackedValue, str_ref: GcRef) {
         // Null string: length = 0
         packed.data.extend_from_slice(&0u64.to_le_bytes());
     } else {
-        let bytes = string::as_bytes(str_ref);
+        let bytes = unsafe { string::bytes_unchecked(str_ref) };
         packed
             .data
             .extend_from_slice(&(bytes.len() as u64).to_le_bytes());

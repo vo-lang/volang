@@ -133,7 +133,8 @@ fn timesys_local_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
 fn timesys_iana_offset_at(call: &mut ExternCallContext) -> ExternResult {
     let name_ref = call.arg_ref(0);
     let unix_sec = call.arg_i64(1);
-    let name = str_obj::as_str(name_ref);
+    // Safety: the native call signature supplies a live string argument.
+    let name = unsafe { str_obj::to_rust_string(name_ref) };
     let tz: Tz = name.parse().unwrap_or(Tz::UTC);
     let dt = tz_at(tz, unix_sec);
     call.ret_i64(0, dt.offset().fix().local_minus_utc() as i64);
@@ -144,7 +145,8 @@ fn timesys_iana_offset_at(call: &mut ExternCallContext) -> ExternResult {
 fn timesys_iana_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
     let name_ref = call.arg_ref(0);
     let unix_sec = call.arg_i64(1);
-    let name = str_obj::as_str(name_ref);
+    // Safety: the native call signature supplies a live string argument.
+    let name = unsafe { str_obj::to_rust_string(name_ref) };
     let tz: Tz = name.parse().unwrap_or(Tz::UTC);
     let dt = tz_at(tz, unix_sec);
     let abbrev = dt.format("%Z").to_string();
@@ -156,7 +158,8 @@ fn timesys_iana_abbrev_at(call: &mut ExternCallContext) -> ExternResult {
 #[cfg(feature = "std")]
 fn timesys_load_location(call: &mut ExternCallContext) -> ExternResult {
     let name_ref = call.arg_ref(0);
-    let name = str_obj::as_str(name_ref);
+    // Safety: the native call signature supplies a live string argument.
+    let name = unsafe { str_obj::to_rust_string(name_ref) };
     match name.parse::<Tz>() {
         Ok(tz) => {
             let canonical = tz.name();

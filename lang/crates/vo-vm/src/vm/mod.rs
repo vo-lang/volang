@@ -1,6 +1,8 @@
 //! Virtual machine main structure.
 
 #[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::format;
@@ -47,7 +49,8 @@ pub(crate) use types::EndpointRegistrySnapshot;
 pub use types::IslandThread;
 pub use types::{
     ErrorLocation, ExecResult, GcRootEffect, RuntimeTrapKind, SchedulingOutcome, VmError,
-    VmGcStepStats, VmRootScanMode, VmRootScanSnapshot, VmState, TIME_SLICE,
+    VmFiberRootScanStage, VmGcStepStats, VmRootScanMode, VmRootScanSnapshot, VmRootScanStage,
+    VmState, TIME_SLICE,
 };
 
 use extern_call::{apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary};
@@ -249,13 +252,6 @@ impl VmJitState {
 }
 
 pub struct Vm {
-    /// JIT state (only available with "jit" feature).
-    ///
-    /// Strict JIT entry points validate all function metadata before a module is accepted.
-    /// IMPORTANT: Must be first field so it's dropped LAST (Rust drops in reverse order).
-    /// JIT code memory must remain valid while scheduler/fibers are being dropped.
-    #[cfg(feature = "jit")]
-    jit: VmJitState,
     #[cfg(feature = "std")]
     extension_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     #[cfg(feature = "std")]
@@ -263,6 +259,59 @@ pub struct Vm {
     pub(crate) module: Option<Module>,
     pub(crate) scheduler: Scheduler,
     pub(crate) state: VmState,
+    /// JIT state is declared last so Rust's declaration-order field drop keeps
+    /// executable memory alive until module, scheduler, and VM state are gone.
+    /// Strict JIT entry points validate all function metadata before admission.
+    #[cfg(feature = "jit")]
+    jit: VmJitState,
+}
+
+/// Owns the active module and fiber outside `Vm` for one execution slice.
+/// Drop restores both owners during normal return and panic unwinding.
+struct DetachedFiberExecution<'vm> {
+    vm: &'vm mut Vm,
+    fiber_id: crate::scheduler::FiberId,
+    module: Option<Module>,
+    fiber: Option<Box<Fiber>>,
+}
+
+impl<'vm> DetachedFiberExecution<'vm> {
+    fn try_new(vm: &'vm mut Vm, fiber_id: crate::scheduler::FiberId) -> Option<Self> {
+        let module = vm.module.take()?;
+        let Some(fiber) = vm.scheduler.detach_for_execution(fiber_id) else {
+            vm.module = Some(module);
+            return None;
+        };
+        Some(Self {
+            vm,
+            fiber_id,
+            module: Some(module),
+            fiber: Some(fiber),
+        })
+    }
+
+    fn run(&mut self) -> ExecResult {
+        let module = self.module.as_ref().expect("detached module owner");
+        let fiber = self.fiber.as_mut().expect("detached fiber owner");
+        self.vm.run_detached_fiber(self.fiber_id, fiber, module)
+    }
+
+    fn restore(&mut self) {
+        if let Some(fiber) = self.fiber.take() {
+            self.vm
+                .scheduler
+                .reattach_after_execution(self.fiber_id, fiber);
+        }
+        if let Some(module) = self.module.take() {
+            self.vm.module = Some(module);
+        }
+    }
+}
+
+impl Drop for DetachedFiberExecution<'_> {
+    fn drop(&mut self) {
+        self.restore();
+    }
 }
 
 #[cfg(feature = "jit")]
@@ -650,6 +699,29 @@ impl Vm {
             .unwrap_or_default()
     }
 
+    #[cfg(feature = "jit")]
+    pub fn jit_code_memory_stats(&self) -> vo_jit::JitCodeMemoryStats {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.code_memory_stats())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_unsupported_function_count(&self) -> usize {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.unsupported_function_count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_function_compile_error(&self, func_id: u32) -> Option<&str> {
+        self.jit
+            .manager()
+            .and_then(|mgr| mgr.function_compile_error(func_id))
+    }
+
     #[cfg(not(feature = "jit"))]
     pub fn has_jit(&self) -> bool {
         false
@@ -837,6 +909,36 @@ impl Vm {
     /// Returns the island handle (GcRef).
     #[cfg(feature = "std")]
     pub fn create_island(&mut self) -> Result<GcRef, VmError> {
+        let module = if self.state.external_island_transport {
+            None
+        } else {
+            Some(
+                self.module
+                    .as_ref()
+                    .ok_or_else(|| {
+                        VmError::Jit("create_island requires loaded module".to_string())
+                    })?
+                    .clone(),
+            )
+        };
+        self.create_island_with_owned_module(module)
+    }
+
+    /// Create an island while an execution lease owns the active module.
+    #[cfg(feature = "std")]
+    pub(crate) fn create_island_for_execution(
+        &mut self,
+        module: &Module,
+    ) -> Result<GcRef, VmError> {
+        let module = (!self.state.external_island_transport).then(|| module.clone());
+        self.create_island_with_owned_module(module)
+    }
+
+    #[cfg(feature = "std")]
+    fn create_island_with_owned_module(
+        &mut self,
+        module: Option<Module>,
+    ) -> Result<GcRef, VmError> {
         let next_id = self.state.next_island_id;
         if self.state.external_island_transport {
             self.state.next_island_id += 1;
@@ -845,9 +947,7 @@ impl Vm {
 
         use vo_runtime::island_transport::{InThreadTransport, IslandSender};
 
-        let module = self
-            .module
-            .as_ref()
+        let module = module
             .ok_or_else(|| VmError::Jit("create_island requires loaded module".to_string()))?;
         self.state.next_island_id += 1;
 
@@ -887,7 +987,7 @@ impl Vm {
             .insert(next_id, island_sender.clone());
 
         // Spawn island thread with JIT config from main VM
-        let module_arc = std::sync::Arc::new(module.clone());
+        let module_arc = std::sync::Arc::new(module);
         let registry_clone = registry.clone();
         let extension_specs = self.extension_specs.clone().unwrap_or_default();
         #[cfg(feature = "jit")]
@@ -1609,25 +1709,29 @@ impl Vm {
     /// Run a fiber for up to TIME_SLICE instructions.
     /// Uses FiberId for type-safe fiber access.
     fn run_fiber(&mut self, fiber_id: crate::scheduler::FiberId) -> ExecResult {
-        let module_ptr = match &self.module {
-            Some(m) => m as *const Module,
-            None => return ExecResult::Done,
-        };
-        // SAFETY: module_ptr is valid for the duration of run_fiber.
-        let module = unsafe { &*module_ptr };
-
-        // Cache fiber pointer outside the loop through a generation-bearing lease.
-        // SAFETY: Box<Fiber> ensures stable addresses - fiber_ptr remains valid across Vec operations.
-        // The lease is released before runtime transitions or wake commands are applied.
-        let fiber_ptr = {
-            let mut lease = match self.scheduler.lease_fiber(fiber_id) {
-                Some(lease) => lease,
-                None => return ExecResult::Done,
+        let result = {
+            let Some(mut execution) = DetachedFiberExecution::try_new(self, fiber_id) else {
+                return ExecResult::Done;
             };
-            lease.fiber_mut() as *mut Fiber
+            execution.run()
         };
-        let fiber = unsafe { &mut *fiber_ptr };
 
+        #[cfg(feature = "jit")]
+        let result = self.attach_pending_runtime_transitions(result);
+        result
+    }
+
+    /// Execute with the active module and fiber owned outside `Vm`.
+    ///
+    /// This makes the JIT/FFI callback contract structurally disjoint: callbacks
+    /// may borrow VM services while the active fiber and immutable module remain
+    /// independent values, with runtime transitions committed after reattachment.
+    fn run_detached_fiber(
+        &mut self,
+        fiber_id: crate::scheduler::FiberId,
+        fiber: &mut Fiber,
+        module: &Module,
+    ) -> ExecResult {
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
         // Get raw pointer to stack for fast access - fiber.ensure_capacity may invalidate this
         let mut stack = fiber.stack_ptr();
@@ -1685,6 +1789,10 @@ impl Vm {
             ($result:expr) => {{
                 let r = $result;
                 if matches!(r, ExecResult::FrameChanged) {
+                    #[cfg(feature = "jit")]
+                    if !self.state.pending_runtime_transitions.is_empty() {
+                        return ExecResult::FrameChanged;
+                    }
                     stack = fiber.stack_ptr();
                     refetch_after_frame_change!();
                     continue;
@@ -1698,49 +1806,36 @@ impl Vm {
         #[cfg(feature = "jit")]
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
-                if let Some(osr_result) = jit::try_loop_osr(self, fiber_id, func_id, $target_pc, bp)
+                if let Some(osr_result) =
+                    jit::try_loop_osr(self, fiber, module, func_id, $target_pc, bp)
                 {
                     match osr_result {
                         jit::OsrResult::FrameChanged => {
-                            let result =
-                                self.attach_pending_runtime_transitions(ExecResult::FrameChanged);
-                            if !matches!(result, ExecResult::FrameChanged) {
-                                return result;
+                            if !self.state.pending_runtime_transitions.is_empty() {
+                                return ExecResult::FrameChanged;
                             }
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
                             refetch_after_frame_change!();
                             continue;
                         }
                         jit::OsrResult::Transition(transition) => {
-                            return self.attach_pending_runtime_transitions(
-                                ExecResult::Transition(transition),
-                            );
+                            return ExecResult::Transition(transition);
                         }
                         jit::OsrResult::ExitPc(exit_pc) => {
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             let Some(frame) = fiber.current_frame_mut() else {
                                 return ExecResult::JitError(
                                     "OsrResult::ExitPc without active frame".to_string(),
                                 );
                             };
                             frame.pc = exit_pc;
-                            let result =
-                                self.attach_pending_runtime_transitions(ExecResult::FrameChanged);
-                            if !matches!(result, ExecResult::FrameChanged) {
-                                return result;
+                            if !self.state.pending_runtime_transitions.is_empty() {
+                                return ExecResult::FrameChanged;
                             }
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
                             refetch_after_frame_change!();
                             continue;
                         }
                         jit::OsrResult::Panic => {
-                            let result = self.attach_pending_runtime_transitions(ExecResult::Panic);
-                            if !matches!(result, ExecResult::Panic) {
-                                return result;
-                            }
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
                             handle_panic_result!(helpers::panic_unwind(
                                 &mut self.state.gc,
@@ -1750,8 +1845,7 @@ impl Vm {
                             ));
                         }
                         jit::OsrResult::JitError(msg) => {
-                            return self
-                                .attach_pending_runtime_transitions(ExecResult::JitError(msg));
+                            return ExecResult::JitError(msg);
                         }
                     }
                 }
@@ -2016,15 +2110,31 @@ impl Vm {
                         &self.state.resolved_externs,
                     )
                 {
-                    if let Some(jit_func) = self
-                        .jit
-                        .manager()
-                        .and_then(|jit_mgr| jit_mgr.get_entry(func_id))
-                    {
+                    let jit_func = if let Some(jit_mgr) = self.jit.manager_mut() {
+                        let env = vo_jit::JitCompileEnv {
+                            externs: &self.state.resolved_externs,
+                            backend_caps: Default::default(),
+                        };
+                        match jit_mgr.resolve_call(func_id, func, module, env) {
+                            Ok(entry) => entry,
+                            Err(err) => {
+                                return ExecResult::JitError(format!(
+                                    "JIT frame-entry compilation failed for {}: {err}",
+                                    func.name
+                                ));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(jit_func) = jit_func {
                         let result = jit::dispatch_jit_frame(self, fiber, module, jit_func);
                         stack = fiber.stack_ptr();
                         match result {
                             ExecResult::FrameChanged => {
+                                if !self.state.pending_runtime_transitions.is_empty() {
+                                    return ExecResult::FrameChanged;
+                                }
                                 refetch_after_frame_change!();
                                 continue;
                             }
@@ -2508,52 +2618,6 @@ impl Vm {
 
                 // === FRAME-CHANGING INSTRUCTIONS: must call refetch!() ===
                 Opcode::Call => {
-                    #[cfg(feature = "jit")]
-                    {
-                        let target_func_id = inst.static_call_func_id();
-                        if let Some(jit_mgr) = self.jit.manager_mut() {
-                            let Some(target_func) = module.functions.get(target_func_id as usize)
-                            else {
-                                return ExecResult::JitError(format!(
-                                    "missing call target function id {target_func_id}"
-                                ));
-                            };
-                            let env = vo_jit::JitCompileEnv {
-                                externs: &self.state.resolved_externs,
-                                backend_caps: Default::default(),
-                            };
-                            match jit_mgr.resolve_call(target_func_id, target_func, module, env) {
-                                Ok(Some(jit_func)) => {
-                                    // Execute via JIT
-                                    let result = jit::dispatch_jit_call(
-                                        self,
-                                        fiber,
-                                        &inst,
-                                        module,
-                                        jit_func,
-                                        target_func_id,
-                                    );
-                                    stack = fiber.stack_ptr();
-                                    match result {
-                                        ExecResult::FrameChanged => {
-                                            // JIT returned Ok or panic_unwind needs to execute defer
-                                            refetch_after_frame_change!();
-                                        }
-                                        other => return other,
-                                    }
-                                    continue;
-                                }
-                                Ok(None) => {}
-                                Err(err) => {
-                                    return ExecResult::JitError(format!(
-                                        "JIT call compilation failed for {}: {err}",
-                                        target_func.name
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    // VM continuation for cold or side-exiting calls.
                     handle_panic_result!(exec::exec_call(&mut self.state.gc, fiber, &inst, module));
                 }
                 Opcode::CallExtern => {
@@ -2846,37 +2910,50 @@ impl Vm {
                 Opcode::StrEq => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::eq(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::eq(a, b) }
+                        as u64);
                 }
                 Opcode::StrNe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::ne(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::ne(a, b) }
+                        as u64);
                 }
                 Opcode::StrLt => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::lt(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::lt(a, b) }
+                        as u64);
                 }
                 Opcode::StrLe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::le(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::le(a, b) }
+                        as u64);
                 }
                 Opcode::StrGt => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::gt(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::gt(a, b) }
+                        as u64);
                 }
                 Opcode::StrGe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::ge(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::ge(a, b) }
+                        as u64);
                 }
                 Opcode::StrDecodeRune => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let pos = stack_get(stack, bp + inst.c as usize) as usize;
-                    let (rune, width) = string::decode_rune_at(s, pos);
+                    // Safety: verified bytecode supplies a live string operand.
+                    let (rune, width) = unsafe { string::decode_rune_at(s, pos) };
                     stack_set(stack, bp + inst.a as usize, rune as u64);
                     stack_set(stack, bp + inst.a as usize + 1, width as u64);
                 }
@@ -3926,7 +4003,7 @@ impl Vm {
                 // === ISLAND/CHANNEL: Cross-island operations ===
                 #[cfg(feature = "std")]
                 Opcode::IslandNew => {
-                    let handle = match self.create_island() {
+                    let handle = match self.create_island_for_execution(module) {
                         Ok(handle) => handle,
                         Err(VmError::Jit(msg)) => return ExecResult::JitError(msg),
                         Err(err) => {

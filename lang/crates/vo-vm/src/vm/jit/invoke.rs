@@ -2,16 +2,18 @@
 use alloc::vec::Vec;
 
 use vo_runtime::bytecode::Module;
+#[cfg(test)]
 use vo_runtime::instruction::Instruction;
 use vo_runtime::jit_api::JitResult;
 
 use crate::fiber::Fiber;
+#[cfg(test)]
 use crate::frame_call::{validate_call_frame_shape, validate_call_return_window};
 use crate::vm::{ExecResult, Vm};
 
-use super::bridge_result::{
-    exec_result_from_bridge_transition, stack_overflow_exec_result, JitBridgeMode,
-};
+#[cfg(test)]
+use super::bridge_result::stack_overflow_exec_result;
+use super::bridge_result::{exec_result_from_bridge_transition, JitBridgeMode};
 use super::context::{build_jit_context, JitContextWrapper};
 use super::transition::handle_jit_non_ok_transition;
 
@@ -37,7 +39,8 @@ fn heap_error_return_gcref_index(func: &vo_runtime::bytecode::FunctionDef) -> Op
 /// 4. Handles the result (Ok/Panic/Call/WaitIo)
 ///
 /// Returns `ExecResult::FrameChanged` on success (return values written to stack).
-pub fn dispatch_jit_call(
+#[cfg(test)]
+fn dispatch_jit_call(
     vm: &mut Vm,
     fiber: &mut Fiber,
     inst: &Instruction,
@@ -176,8 +179,7 @@ fn invoke_jit_and_handle(
     let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
 
-    let exec_result = handle_jit_result(vm, fiber, module, result, ctx, ret_slots, ret);
-    vm.attach_pending_runtime_transitions(exec_result)
+    handle_jit_result(vm, fiber, module, result, ctx, ret_slots, ret)
 }
 
 fn handle_jit_result(

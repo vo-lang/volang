@@ -401,7 +401,7 @@ impl PanicState {
             PanicState::Fatal => "fatal error".to_string(),
             PanicState::Recoverable(val) => {
                 if val.is_string() && !val.as_ref().is_null() {
-                    return val.as_str().to_string();
+                    return val.to_rust_string();
                 }
                 "panic".to_string()
             }
@@ -618,7 +618,7 @@ pub const MAX_JIT_CALL_DEPTH: usize = 512;
 /// `memory access out of bounds` from `RawVec::grow_one` in call-frame push.
 const MAX_CALL_FRAMES: usize = 1 << 15;
 
-const CALL_IFACE_IC_TABLE_SIZE: usize = 512;
+const CALL_IFACE_IC_TABLE_SIZE: usize = 64;
 const CALL_IFACE_IC_TABLE_MASK: u32 = (CALL_IFACE_IC_TABLE_SIZE - 1) as u32;
 
 /// Resume point for JIT call chain suspension.
@@ -731,10 +731,6 @@ pub struct Fiber {
     /// On resume, they are popped and converted to VM frames.
     #[cfg(feature = "jit")]
     pub resume_stack: Vec<ResumePoint>,
-    /// Per-fiber monomorphic inline cache table for dynamic calls (closure/iface).
-    /// Lazily allocated on first JIT use. Per-fiber to avoid data races between goroutines.
-    #[cfg(feature = "jit")]
-    pub ic_table: Vec<vo_runtime::jit_api::DynCallIC>,
     #[cfg(feature = "jit")]
     pub jit_extern_suspend: Option<JitExternSuspend>,
     pub call_iface_ic_table: Vec<CallIfaceICEntry>,
@@ -747,9 +743,6 @@ pub struct Fiber {
     /// JIT user panic flag — true when panic is from explicit `panic()` call, false for runtime errors.
     #[cfg(feature = "jit")]
     pub jit_is_user_panic: bool,
-    /// JIT safepoint flag — currently always false (GC safepoint is a no-op).
-    #[cfg(feature = "jit")]
-    pub jit_safepoint_flag: bool,
     /// JIT panic message — the interface{} value passed to panic().
     #[cfg(feature = "jit")]
     pub jit_panic_msg: InterfaceSlot,
@@ -794,8 +787,6 @@ impl Fiber {
             #[cfg(feature = "jit")]
             resume_stack: Vec::new(), // Lazy: only allocates on first push (Call/WaitIo)
             #[cfg(feature = "jit")]
-            ic_table: Vec::new(), // Lazy: allocated on first JIT dispatch
-            #[cfg(feature = "jit")]
             jit_extern_suspend: None,
             call_iface_ic_table: Vec::new(),
             closure_replay: ClosureReplayState::new(),
@@ -803,8 +794,6 @@ impl Fiber {
             jit_panic_flag: false,
             #[cfg(feature = "jit")]
             jit_is_user_panic: false,
-            #[cfg(feature = "jit")]
-            jit_safepoint_flag: false,
             #[cfg(feature = "jit")]
             jit_panic_msg: InterfaceSlot::default(),
             #[cfg(feature = "jit")]
@@ -994,13 +983,6 @@ impl Fiber {
         {
             self.jit_extern_suspend = None;
         }
-        #[cfg(feature = "jit")]
-        if !self.ic_table.is_empty() {
-            // Zero all IC entries (key=0 means invalid). memset is faster than per-entry clear.
-            unsafe {
-                core::ptr::write_bytes(self.ic_table.as_mut_ptr(), 0, self.ic_table.len());
-            }
-        }
         if !self.call_iface_ic_table.is_empty() {
             unsafe {
                 core::ptr::write_bytes(
@@ -1015,7 +997,6 @@ impl Fiber {
         {
             self.jit_panic_flag = false;
             self.jit_is_user_panic = false;
-            self.jit_safepoint_flag = false;
             self.jit_panic_msg = InterfaceSlot::default();
             self.jit_infra_error_message.clear();
         }
@@ -1023,16 +1004,6 @@ impl Fiber {
         self.remote_send_closed = false;
         self.remote_endpoint_wait = None;
         self.next_remote_endpoint_wait_id = 1;
-    }
-
-    /// Ensure IC table is allocated (lazy allocation on first JIT dispatch).
-    /// Returns mutable pointer to the IC table.
-    #[cfg(feature = "jit")]
-    pub fn ensure_ic_table(&mut self) -> *mut vo_runtime::jit_api::DynCallIC {
-        if self.ic_table.is_empty() {
-            self.ic_table = vo_runtime::jit_api::alloc_ic_table();
-        }
-        self.ic_table.as_mut_ptr()
     }
 
     #[inline]

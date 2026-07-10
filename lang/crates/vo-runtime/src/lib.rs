@@ -5,6 +5,9 @@ extern crate alloc;
 
 extern crate self as vo_runtime;
 
+/// Cooperative instruction budget shared by interpreter and native tiers.
+pub const EXECUTION_TIMESLICE_INSTRUCTIONS: u32 = 1000;
+
 pub mod output;
 pub mod slot;
 

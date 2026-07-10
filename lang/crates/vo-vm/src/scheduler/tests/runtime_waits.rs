@@ -689,18 +689,32 @@ fn try_wake_fiber_ignores_unknown_id() {
 }
 
 #[test]
-fn fiber_lease_carries_generation_wake_key() {
+fn detached_execution_preserves_generation_identity() {
     let mut scheduler = Scheduler::new();
     let fid = scheduler.spawn(Fiber::new(0));
 
-    let lease = scheduler.lease_fiber(fid).expect("lease");
-
-    assert_eq!(lease.key.slot, fid.to_raw());
-    assert_eq!(lease.key.generation, lease.fiber().generation);
+    let fiber = scheduler.detach_for_execution(fid).expect("detached fiber");
+    assert_eq!(fiber.id, fid.to_raw());
+    assert_eq!(fiber.generation, 1);
+    scheduler.reattach_after_execution(fid, fiber);
+    assert_eq!(scheduler.get_fiber(fid).generation, 1);
 }
 
 #[test]
-fn fiber_lease_key_tracks_reused_slot_generation() {
+fn detached_execution_placeholder_survives_multiple_release_slices() {
+    let mut scheduler = Scheduler::new();
+    let fid = scheduler.spawn(Fiber::new(0));
+
+    for _ in 0..3 {
+        let fiber = scheduler
+            .detach_for_execution(fid)
+            .expect("execution placeholder must be reusable after reattachment");
+        scheduler.reattach_after_execution(fid, fiber);
+    }
+}
+
+#[test]
+fn detached_execution_tracks_reused_slot_generation() {
     let mut scheduler = Scheduler::new();
     let first = scheduler.spawn(Fiber::new(0));
     scheduler.schedule_next().expect("first fiber");
@@ -708,10 +722,13 @@ fn fiber_lease_key_tracks_reused_slot_generation() {
 
     let reused = scheduler.reuse_or_spawn();
     assert_eq!(reused, first);
-    let lease = scheduler.lease_fiber(reused).expect("lease reused");
+    let fiber = scheduler
+        .detach_for_execution(reused)
+        .expect("detach reused");
 
-    assert_eq!(lease.key.slot, first.to_raw());
-    assert_eq!(lease.key.generation, 2);
+    assert_eq!(fiber.id, first.to_raw());
+    assert_eq!(fiber.generation, 2);
+    scheduler.reattach_after_execution(reused, fiber);
 }
 
 #[test]

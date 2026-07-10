@@ -130,20 +130,28 @@ pub fn default_sink() -> Arc<dyn OutputSink> {
 
 #[cfg(not(feature = "std"))]
 use core::cell::UnsafeCell;
-
-/// Global output buffer for no_std mode (WASM is single-threaded).
-/// SAFETY: WASM is single-threaded, so UnsafeCell access is safe.
 #[cfg(not(feature = "std"))]
-struct OutputBuffer(UnsafeCell<String>);
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(not(feature = "std"))]
+struct OutputBuffer {
+    locked: AtomicBool,
+    value: UnsafeCell<String>,
+}
+
+#[cfg(not(feature = "std"))]
+// SAFETY: every access to `value` and the associated hook is serialized by
+// `locked`, including no_std hosts that enable multiple threads.
 unsafe impl Sync for OutputBuffer {}
 
 #[cfg(not(feature = "std"))]
-static OUTPUT_BUFFER: OutputBuffer = OutputBuffer(UnsafeCell::new(String::new()));
+static OUTPUT_BUFFER: OutputBuffer = OutputBuffer {
+    locked: AtomicBool::new(false),
+    value: UnsafeCell::new(String::new()),
+};
 
 /// Optional write hook for immediate output (e.g. console.log in WASM).
-/// SAFETY: WASM is single-threaded, so static mut access is safe.
+/// Access is serialized by `OUTPUT_BUFFER`.
 #[cfg(not(feature = "std"))]
 static mut WRITE_HOOK: Option<fn(&str)> = None;
 
@@ -151,16 +159,27 @@ static mut WRITE_HOOK: Option<fn(&str)> = None;
 /// Useful in WASM to flush output to console.log immediately.
 #[cfg(not(feature = "std"))]
 pub fn set_write_hook(hook: fn(&str)) {
-    unsafe {
-        WRITE_HOOK = Some(hook);
-    }
+    OUTPUT_BUFFER.with(|_| unsafe { WRITE_HOOK = Some(hook) });
 }
 
 #[cfg(not(feature = "std"))]
 impl OutputBuffer {
     fn with<R>(&self, f: impl FnOnce(&mut String) -> R) -> R {
-        // SAFETY: WASM is single-threaded
-        unsafe { f(&mut *self.0.get()) }
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        struct Unlock<'a>(&'a AtomicBool);
+        impl Drop for Unlock<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _unlock = Unlock(&self.locked);
+        unsafe { f(&mut *self.value.get()) }
     }
 }
 
@@ -175,11 +194,6 @@ impl OutputBuffer {
 pub struct GlobalBufferSink;
 
 #[cfg(not(feature = "std"))]
-unsafe impl Send for GlobalBufferSink {}
-#[cfg(not(feature = "std"))]
-unsafe impl Sync for GlobalBufferSink {}
-
-#[cfg(not(feature = "std"))]
 impl OutputSink for GlobalBufferSink {
     #[inline]
     fn write(&self, s: &str) {
@@ -187,14 +201,13 @@ impl OutputSink for GlobalBufferSink {
     }
     #[inline]
     fn writeln(&self, s: &str) {
-        OUTPUT_BUFFER.with(|buf| {
+        let hook = OUTPUT_BUFFER.with(|buf| {
             buf.push_str(s);
             buf.push('\n');
+            unsafe { WRITE_HOOK }
         });
-        unsafe {
-            if let Some(hook) = WRITE_HOOK {
-                hook(s);
-            }
+        if let Some(hook) = hook {
+            hook(s);
         }
     }
 }

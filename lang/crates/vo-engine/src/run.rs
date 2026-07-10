@@ -19,11 +19,58 @@ pub enum RunMode {
     Jit,
 }
 
+#[cfg(feature = "jit")]
+fn jit_config_error(message: String) -> RunError {
+    RunError::Runtime(RuntimeError {
+        message,
+        location: None,
+        kind: RuntimeErrorKind::Other,
+    })
+}
+
+#[cfg(feature = "jit")]
+fn jit_env_u32(name: &str, default: u32) -> Result<u32, RunError> {
+    match std::env::var(name) {
+        Ok(value) => value.parse::<u32>().map_err(|_| {
+            jit_config_error(format!(
+                "invalid {name} value {value:?}: expected an unsigned 32-bit integer"
+            ))
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(jit_config_error(format!(
+            "invalid {name}: value is not valid Unicode"
+        ))),
+    }
+}
+
+#[cfg(feature = "jit")]
+fn jit_env_bool(name: &str, default: bool) -> Result<bool, RunError> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let normalized = value.to_ascii_lowercase();
+            match normalized.as_str() {
+                "1" | "true" | "yes" => Ok(true),
+                "0" | "false" | "no" => Ok(false),
+                _ => Err(jit_config_error(format!(
+                    "invalid {name} value {value:?}: expected true/false, yes/no, or 1/0"
+                ))),
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(jit_config_error(format!(
+            "invalid {name}: value is not valid Unicode"
+        ))),
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RunObservation {
     pub jit_function_entries: u64,
     pub jit_loop_entries: u64,
     pub jit_regular_call_side_exits: u64,
+    pub jit_function_code_bytes: usize,
+    pub jit_loop_code_bytes: usize,
+    pub jit_unsupported_functions: usize,
 }
 
 impl RunObservation {
@@ -183,15 +230,9 @@ pub fn run_with_output_interruptible_observed(
         RunMode::Jit => {
             use vo_vm::JitConfig;
 
-            let call_threshold = std::env::var("VO_JIT_CALL_THRESHOLD")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(100);
-            let loop_threshold = std::env::var("VO_JIT_LOOP_THRESHOLD")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(50);
-            let debug_ir = std::env::var("VO_JIT_DEBUG").is_ok();
+            let call_threshold = jit_env_u32("VO_JIT_CALL_THRESHOLD", 100)?;
+            let loop_threshold = jit_env_u32("VO_JIT_LOOP_THRESHOLD", 50)?;
+            let debug_ir = jit_env_bool("VO_JIT_DEBUG", false)?;
 
             let config = JitConfig {
                 call_threshold,
@@ -240,10 +281,14 @@ pub fn run_with_output_interruptible_observed(
 #[cfg(feature = "jit")]
 fn run_observation(vm: &Vm) -> RunObservation {
     let stats = vm.jit_execution_stats();
+    let code = vm.jit_code_memory_stats();
     RunObservation {
         jit_function_entries: stats.function_entries,
         jit_loop_entries: stats.loop_entries,
         jit_regular_call_side_exits: stats.side_exit_count(vo_vm::JitSideExitReason::RegularCall),
+        jit_function_code_bytes: code.function_bytes,
+        jit_loop_code_bytes: code.loop_bytes,
+        jit_unsupported_functions: vm.jit_unsupported_function_count(),
     }
 }
 

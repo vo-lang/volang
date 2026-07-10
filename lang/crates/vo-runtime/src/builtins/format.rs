@@ -38,7 +38,8 @@ pub fn format_value(val: u64, kind: ValueKind) -> String {
             if ptr.is_null() {
                 String::new()
             } else {
-                str_obj::as_str(ptr).to_string()
+                // Safety: `kind` identifies `val` as a live VM string.
+                unsafe { str_obj::to_rust_string(ptr) }
             }
         }
         ValueKind::Slice => "[...]".to_string(),
@@ -81,7 +82,10 @@ pub fn format_interface_with_ctx(
         ValueKind::Uint32 => (slot1 as u32).to_string(),
         ValueKind::Float32 => f32::from_bits(slot1 as u32).to_string(),
         ValueKind::Float64 => f64::from_bits(slot1).to_string(),
-        ValueKind::String => str_obj::as_str(slot1 as GcRef).to_string(),
+        ValueKind::String => {
+            // Safety: the interface metadata identifies `slot1` as a live string.
+            unsafe { str_obj::to_rust_string(slot1 as GcRef) }
+        }
         ValueKind::Pointer => {
             // Check if this is an error interface
             if let Some(ctx) = call {
@@ -119,7 +123,8 @@ fn format_error_chain(ptr: GcRef, field_offsets: [u16; 2], ctx: &ExternCallConte
     // Read msg field
     let msg_ref = unsafe { Gc::read_slot(ptr, field_offsets[0] as usize) } as GcRef;
     let msg = if !msg_ref.is_null() {
-        str_obj::as_str(msg_ref).to_string()
+        // Safety: the well-known error layout identifies this field as a string.
+        unsafe { str_obj::to_rust_string(msg_ref) }
     } else {
         String::new()
     };

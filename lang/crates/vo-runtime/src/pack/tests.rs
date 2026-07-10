@@ -70,7 +70,7 @@ fn test_pack_unpack_string() {
     unpack_slots(&mut gc, &packed, &mut dst, &struct_metas, &runtime_types);
 
     let unpacked_str = dst[0] as GcRef;
-    assert_eq!(string::as_str(unpacked_str), "hello");
+    assert_eq!(unsafe { string::to_rust_string(unpacked_str) }, "hello");
     // Verify it's a different GcRef (deep copy)
     assert_ne!(str_ref, unpacked_str);
 }
@@ -114,8 +114,8 @@ fn pack_unpack_inline_array_value_does_not_treat_first_slot_as_heap_array_ref() 
         &runtime_types,
     );
 
-    assert_eq!(string::as_str(dst[0] as GcRef), "left");
-    assert_eq!(string::as_str(dst[1] as GcRef), "right");
+    assert_eq!(unsafe { string::to_rust_string(dst[0] as GcRef) }, "left");
+    assert_eq!(unsafe { string::to_rust_string(dst[1] as GcRef) }, "right");
     assert_ne!(dst[0], left as u64);
     assert_ne!(dst[1], right as u64);
 }

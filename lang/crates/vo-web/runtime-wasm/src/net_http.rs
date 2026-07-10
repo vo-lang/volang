@@ -197,7 +197,8 @@ fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
         let raw = unsafe { slice::get(slice_ref, i, elem_bytes) };
         let str_ref: GcRef = slot_to_ptr(raw);
         if !str_ref.is_null() {
-            result.push(vo_runtime::objects::string::as_str(str_ref).to_string());
+            // Safety: the typed slice supplies live string elements.
+            result.push(unsafe { vo_runtime::objects::string::to_rust_string(str_ref) });
         } else {
             result.push(String::new());
         }

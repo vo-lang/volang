@@ -168,8 +168,8 @@ fn vm_direct_method_capture_protocol_006_spawn_allocates_multi_slot_receiver_cap
         let copied_right = *stack.add(1) as GcRef;
         assert_ne!(copied_left, left, "cross-island strings are deep-copied");
         assert_ne!(copied_right, right, "cross-island strings are deep-copied");
-        assert_eq!(string::as_bytes(copied_left), b"left");
-        assert_eq!(string::as_bytes(copied_right), b"right");
+        assert_eq!(string::to_bytes(copied_left), b"left");
+        assert_eq!(string::to_bytes(copied_right), b"right");
     }
 }
 
