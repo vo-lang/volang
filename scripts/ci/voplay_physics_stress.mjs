@@ -46,6 +46,50 @@ function tail(text) {
   return value.length > 6000 ? value.slice(value.length - 6000) : value;
 }
 
+function replayExecutionPlanFacts(source) {
+  const coordinatorStart = source.indexOf('func replayContracts(');
+  const contractHelperStart = source.indexOf('func replayTraceContractReport(');
+  const freshVerifierStart = source.indexOf('func verifyReplaySuiteFile(');
+  const nextFunctionStart = source.indexOf('func scenarioDefinitionByName(', freshVerifierStart);
+  if (coordinatorStart < 0 || contractHelperStart <= coordinatorStart || freshVerifierStart < 0 || nextFunctionStart <= freshVerifierStart) {
+    return {
+      coordinatorUsesContractOnly: false,
+      freshVerifierExecutesTrace: false,
+      sourceShapeComplete: false,
+    };
+  }
+  const coordinator = source.slice(coordinatorStart, contractHelperStart);
+  const freshVerifier = source.slice(freshVerifierStart, nextFunctionStart);
+  return {
+    coordinatorUsesContractOnly: coordinator.includes('report := replayTraceContractReport(execution.Definition, execution.Trace)')
+      && !coordinator.includes('report := verifyReplayTrace(execution.Definition, execution.Trace)'),
+    freshVerifierExecutesTrace: freshVerifier.includes('report := verifyReplayTrace(def, entry.Trace)'),
+    sourceShapeComplete: true,
+  };
+}
+
+function requireReplayExecutionPlan() {
+  const source = readFileSync(scenarioSourceFile, 'utf8');
+  const facts = replayExecutionPlanFacts(source);
+  const duplicateReplayFixture = source.replace(
+    'report := replayTraceContractReport(execution.Definition, execution.Trace)',
+    'report := verifyReplayTrace(execution.Definition, execution.Trace)',
+  );
+  const negativeDuplicateRejected = replayExecutionPlanFacts(duplicateReplayFixture).coordinatorUsesContractOnly === false;
+  if (!facts.sourceShapeComplete || !facts.coordinatorUsesContractOnly || !facts.freshVerifierExecutesTrace || !negativeDuplicateRejected) {
+    fail(`replay execution plan contract failed: ${JSON.stringify({ ...facts, negativeDuplicateRejected })}`);
+  }
+  return {
+    schemaVersion: 1,
+    kind: 'voplay.physicsReplayExecutionPlan',
+    referenceSimulationPasses: 1,
+    freshReplaySimulationPasses: 1,
+    duplicateInProcessReplay: false,
+    ...facts,
+    negativeDuplicateRejected,
+  };
+}
+
 function prepareScenarioProject() {
   const localModules = [
     { module: 'github.com/vo-lang/voplay', dir: voplayRoot },
@@ -110,6 +154,14 @@ function validateReport(report) {
   const maxAngularVelocity = numberOr(physicsBudget.maxAngularVelocity);
   const maxReplayDriftMeters = numberOr(physicsBudget.maxReplayDriftMeters, 0.01);
   const maxLongStuckSeconds = numberOr(physicsBudget.maxLongStuckSeconds);
+  if (
+    report?.replayExecutionPlan?.referenceSimulationPasses !== 1
+    || report?.replayExecutionPlan?.freshReplaySimulationPasses !== 1
+    || report?.replayExecutionPlan?.duplicateInProcessReplay !== false
+    || report?.replayExecutionPlan?.negativeDuplicateRejected !== true
+  ) {
+    issues.push({ code: 'physics.replay_execution_plan', severity: 0, detail: JSON.stringify(report?.replayExecutionPlan ?? {}) });
+  }
   if (report?.kind !== 'voplay.physicsStressReport') {
     issues.push({ code: 'report.kind', severity: 0, detail: `unexpected kind ${report?.kind}` });
   }
@@ -302,7 +354,9 @@ function formatNumber(value) {
 }
 
 mkdirSync(outDir, { recursive: true });
+const replayExecutionPlan = requireReplayExecutionPlan();
 const report = runScenarioProgram();
+report.replayExecutionPlan = replayExecutionPlan;
 const gate = validateReport(report);
 const generatedAt = new Date().toISOString();
 report.summary = {
