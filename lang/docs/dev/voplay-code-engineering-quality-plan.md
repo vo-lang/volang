@@ -60,7 +60,7 @@ artifact 或 target report 的任务。
 
 ```text
 volang    7c4f2e196390c8ee16add4b5e2295a863b6b136f
-voplay    a57002adb0e33f720df7fb3808d0acf53b995c6b
+voplay    6e54d9e053eb08572532f646dedb41d3cb066277
 BlockKart e2b54f3ca4cd52c28fc52ac5d2c38e2634a84351
 ```
 

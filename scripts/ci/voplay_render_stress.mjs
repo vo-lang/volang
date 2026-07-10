@@ -719,12 +719,32 @@ if (process.argv.includes('--selftest-observability')) {
     env: { ...process.env },
     encoding: 'utf8',
   });
-  if (!result.timedOut || result.timeoutDiagnostic?.code !== 'voplay.renderStress.timeout' || !timeoutStageRecorded || !telemetryRecorded || !existsSync(heartbeatPath) || longRunTelemetrySelftest.status !== 0) {
+  const voplayTransportSource = readFileSync(path.join(voplayRoot, 'js/render_bootstrap.ts'), 'utf8');
+  const voplayTransportBody = voplayTransportSource.slice(
+    voplayTransportSource.indexOf('function postVoplayPerfReports('),
+    voplayTransportSource.indexOf('function readLocationParam('),
+  );
+  const studioTransportSource = readFileSync(path.join(root, 'apps/studio/src/lib/perf_report_bridge.ts'), 'utf8');
+  const studioTransportBody = studioTransportSource.slice(
+    studioTransportSource.indexOf('function flushVoplayPerfPayloads('),
+    studioTransportSource.indexOf('function isLocalHost('),
+  );
+  const transportSourceContract = {
+    voplayBatchPost: voplayTransportBody.includes('JSON.stringify(payloads)'),
+    voplayResponseConsumed: voplayTransportBody.includes('response.arrayBuffer()'),
+    voplayBoundedTransport: !voplayTransportBody.includes('sendBeacon') && !voplayTransportBody.includes('keepalive'),
+    studioBatchPost: studioTransportBody.includes('pending.map(parseVoplayPerfPayload)'),
+    studioResponseConsumed: studioTransportBody.includes('response.arrayBuffer()'),
+    studioBoundedTransport: !studioTransportBody.includes('sendBeacon') && !studioTransportBody.includes('keepalive'),
+  };
+  const transportSourceContractPassed = Object.values(transportSourceContract).every((value) => value === true);
+  if (!result.timedOut || result.timeoutDiagnostic?.code !== 'voplay.renderStress.timeout' || !timeoutStageRecorded || !telemetryRecorded || !existsSync(heartbeatPath) || longRunTelemetrySelftest.status !== 0 || !transportSourceContractPassed) {
     result.longRunTelemetrySelftest = {
       status: longRunTelemetrySelftest.status,
       stdout: longRunTelemetrySelftest.stdout,
       stderr: longRunTelemetrySelftest.stderr,
     };
+    result.transportSourceContract = transportSourceContract;
     fail(`observability selftest failed: ${JSON.stringify(result)}`);
   }
   writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify({
@@ -733,6 +753,7 @@ if (process.argv.includes('--selftest-observability')) {
     status: 'pass',
     timeoutDiagnostic: result.timeoutDiagnostic,
     heartbeat: result.observability,
+    transportSourceContract,
   }, null, 2)}\n`);
   console.log('voplay render stress observability selftest: ok');
   process.exit(0);

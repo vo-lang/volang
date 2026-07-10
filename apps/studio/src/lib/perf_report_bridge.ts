@@ -95,9 +95,10 @@ function queueVoplayPerfPayload(text: string): void {
 function flushVoplayPerfPayloads(): void {
   voplayPerfReportFlushTimer = null;
   const pending = pendingVoplayPerfReports.splice(0);
-  for (const text of pending) {
-    postVoplayPerfPayload(parseVoplayPerfPayload(text));
+  if (pending.length === 0) {
+    return;
   }
+  postVoplayPerfPayload(pending.map(parseVoplayPerfPayload));
 }
 
 function postVoplayPerfPayload(payload: unknown): void {
@@ -109,8 +110,8 @@ function postVoplayPerfPayload(payload: unknown): void {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
-      keepalive: true,
-    }).catch(() => {});
+      cache: 'no-store',
+    }).then((response) => response.arrayBuffer()).catch(() => {});
   } catch {
     // Perf reporting must not affect the running game.
   }
