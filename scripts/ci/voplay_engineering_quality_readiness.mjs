@@ -312,9 +312,10 @@ function packetDecodeBranchFailures(sceneSource) {
   const specs = [
     {
       signature: 'func (s *Scene) StepAndSyncPhysics',
-      token: 'if !ok',
+      token: 'if headerError != ""',
       source: 'body',
       reason: 'invalid_header',
+      reasonToken: 'Reason: headerError',
       expectedReturn: 'return',
     },
     {
@@ -333,9 +334,10 @@ function packetDecodeBranchFailures(sceneSource) {
     },
     {
       signature: 'func (s *Scene) Contacts',
-      token: 'if !ok',
+      token: 'if headerError != ""',
       source: 'contact',
       reason: 'invalid_header',
+      reasonToken: 'Reason: headerError',
       expectedReturn: 'return []Contact{}',
     },
     {
@@ -359,7 +361,7 @@ function packetDecodeBranchFailures(sceneSource) {
     const branch = blockAfterToken(body, spec.token);
     const structured = branch.includes('recordPhysicsBackendPacketError')
       && branch.includes(`Source: "${spec.source}"`)
-      && branch.includes(`Reason: "${spec.reason}"`)
+      && branch.includes(spec.reasonToken ?? `Reason: "${spec.reason}"`)
       && branch.includes('ExpectedBytes:')
       && branch.includes('ActualBytes:')
       && branch.includes(spec.expectedReturn);
@@ -543,7 +545,7 @@ function sourceAuditFailuresFromSource({
       evidence: { path: 'voplay/rust/src/renderer/pass_dispatch.rs', line: lineOf(rendererPassDispatch, 'struct RenderPassResources') },
     });
   }
-  if (!(frameGraph.includes('backing_generation') && frameGraph.includes('actual_texture_view') && frameGraph.includes('validate_backing_generation'))) {
+  if (!(frameGraph.includes('backing_generation') && frameGraph.includes('actual_texture_view') && frameGraph.includes('actual_backing_identity') && frameGraph.includes('validate_backing('))) {
     failures.push({
       code: 'render.resource_registry_generation_unverified',
       severity: 'P1',
@@ -912,7 +914,12 @@ const renderPassSources = projectTexts(voplayRoot, [
 const transparentPass = projectText(voplayRoot, 'rust/src/renderer/main_transparent_pass.rs');
 const frameGraph = projectText(voplayRoot, 'rust/src/renderer_frame.rs');
 const frameGraphResourceRegistry = projectText(voplayRoot, 'rust/src/renderer_frame/resource_registry.rs');
-const frameGraphAuditSource = `${frameGraph}\n${frameGraphResourceRegistry}`;
+const frameGraphBackingSource = projectTexts(voplayRoot, [
+  'rust/src/renderer_frame/resource_backing.rs',
+  'rust/src/renderer_frame/resource_registry/target_store.rs',
+  'rust/src/renderer_frame/resource_registry/view_access.rs',
+]);
+const frameGraphAuditSource = `${frameGraph}\n${frameGraphResourceRegistry}\n${frameGraphBackingSource}`;
 const renderWorld = projectTexts(voplayRoot, [
   'rust/src/render_world.rs',
   'rust/src/render_world/store.rs',
@@ -1525,7 +1532,9 @@ const renderStressStructuredReady = renderStressReport?.status === 'pass'
     && Number.isFinite(scene?.observability?.frameP90Ms)
     && Number.isFinite(scene?.observability?.frameP99Ms)
     && Number.isFinite(scene?.observability?.resourceChurn)
-    && scene?.observability?.telemetryStatus === 'pass'
+    && (scene?.observability?.telemetryStatus === 'running' || scene?.observability?.telemetryStatus === 'pass')
+    && scene?.observability?.telemetryFailure == null
+    && scene?.observability?.perfEndpointError == null
     && Number.isFinite(scene?.observability?.telemetryReportCount)
     && Number.isFinite(scene?.observability?.telemetryReportAgeMs)
     && Number.isFinite(scene?.observability?.telemetryObservedSpanMs)

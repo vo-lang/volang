@@ -337,9 +337,10 @@ function packetDecodeBranchFailures(sceneSource) {
   const specs = [
     {
       signature: 'func (s *Scene) StepAndSyncPhysics',
-      token: 'if !ok',
+      token: 'if headerError != ""',
       source: 'body',
       reason: 'invalid_header',
+      reasonToken: 'Reason: headerError',
       expectedReturn: 'return',
     },
     {
@@ -358,9 +359,10 @@ function packetDecodeBranchFailures(sceneSource) {
     },
     {
       signature: 'func (s *Scene) Contacts',
-      token: 'if !ok',
+      token: 'if headerError != ""',
       source: 'contact',
       reason: 'invalid_header',
+      reasonToken: 'Reason: headerError',
       expectedReturn: 'return []Contact{}',
     },
     {
@@ -384,7 +386,7 @@ function packetDecodeBranchFailures(sceneSource) {
     const branch = blockAfterToken(body, spec.token);
     const structured = branch.includes('recordPhysicsBackendPacketError')
       && branch.includes(`Source: "${spec.source}"`)
-      && branch.includes(`Reason: "${spec.reason}"`)
+      && branch.includes(spec.reasonToken ?? `Reason: "${spec.reason}"`)
       && branch.includes('ExpectedBytes:')
       && branch.includes('ActualBytes:')
       && branch.includes(spec.expectedReturn);
@@ -597,7 +599,9 @@ function sceneObservabilityFailures(report) {
       && Number.isFinite(heartbeat?.frameP90Ms)
       && Number.isFinite(heartbeat?.frameP99Ms)
       && Number.isFinite(heartbeat?.resourceChurn)
-      && heartbeat?.telemetryStatus === 'pass'
+      && (heartbeat?.telemetryStatus === 'running' || heartbeat?.telemetryStatus === 'pass')
+      && heartbeat?.telemetryFailure == null
+      && heartbeat?.perfEndpointError == null
       && Number.isFinite(heartbeat?.telemetryReportCount)
       && Number.isFinite(heartbeat?.telemetryReportAgeMs)
       && Number.isFinite(heartbeat?.telemetryObservedSpanMs)
@@ -661,7 +665,12 @@ const rendererFramePerfFinalize = readProjectFile(voplayRoot, 'rust/src/renderer
 const rendererFrameOrchestratorRuntime = readText(path.join(voplayRoot, 'rust/src/renderer/frame_orchestrator_runtime.rs')) || '';
 const frameGraph = readProjectFile(voplayRoot, 'rust/src/renderer_frame.rs', 'phase-0', 'source.framegraph_exists');
 const frameGraphResourceRegistry = readProjectFile(voplayRoot, 'rust/src/renderer_frame/resource_registry.rs', 'phase-0', 'source.framegraph_resource_registry_exists');
-const frameGraphAuditSource = `${frameGraph}\n${frameGraphResourceRegistry}`;
+const frameGraphBackingSource = [
+  readText(path.join(voplayRoot, 'rust/src/renderer_frame/resource_backing.rs')) || '',
+  ...listFiles(path.join(voplayRoot, 'rust/src/renderer_frame/resource_registry'), '.rs')
+    .map((file) => readText(file) || ''),
+].join('\n');
+const frameGraphAuditSource = `${frameGraph}\n${frameGraphResourceRegistry}\n${frameGraphBackingSource}`;
 const renderWorld = readProjectFile(voplayRoot, 'rust/src/render_world.rs', 'phase-0', 'source.render_world_exists');
 const renderWorldAuditSource = [
   renderWorld,
@@ -966,13 +975,15 @@ const dirtyRangeFullRebuildHits = [
 const dirtyRangePartialUploadVerified = /partial.*upload|upload.*partial/i.test(primitivePipelineAuditSource)
   && /fn\s+upload_resident_dirty_range[\s\S]*queue\.write_buffer\([\s\S]*byte_offset[\s\S]*bytemuck::bytes_of/s.test(primitivePipelineRuntime)
   && /full_rebuild_count\s*(?:[:=]|,)\s*0|fullRebuildCount\s*=\s*0/.test(primitivePipelineAuditSource);
-const renderPassContextWideHits = sourceRegexHits(
-  [{ path: 'rust/src/renderer/pass_dispatch.rs', source: rendererPassDispatch }],
-  /\b(device|queue|pipeline2d|pipeline_sprite|pipeline3d|primitive_pipeline|pipeline_depth|pipeline_shadow|pipeline_skybox|pipeline_post|model_manager|texture_manager|render_world):/,
+const broadPassCapabilityPattern = /\b(?:resources|pipelines|assets|renderer):\s*&'?[_A-Za-z0-9<> ,]*(?:FramePassResources|RenderPipelineScope|RenderAssetScope|Renderer)\b/;
+const renderPassContextWideHits = sourceRegexHits(renderPassModuleEntries, broadPassCapabilityPattern);
+const renderPassContextNegativeFixtureRejected = broadPassCapabilityPattern.test(
+  "resources: &'a FramePassResources<'a>",
 );
 const resourceRegistryBackingAgreement = frameGraphAuditSource.includes('backing_generation')
   && frameGraphAuditSource.includes('actual_texture_view')
-  && frameGraphAuditSource.includes('validate_backing_generation');
+  && frameGraphAuditSource.includes('actual_backing_identity')
+  && frameGraphAuditSource.includes('validate_backing(');
 const sessionStepBody = bodyOfFunction(vehiclePhysicsSession, 'func (s *VehiclePhysicsSession) Step');
 const sessionIsWrapperOnly = /FixedPhysicsStep\s*\(|StepAndSyncPhysics\s*\(/.test(sessionStepBody)
   || !/s\.(?:StepIndex|Telemetry|Replay|Backend|LastPacket|InvalidSample|Controller|Dynamics)/.test(sessionStepBody);
@@ -1253,7 +1264,7 @@ addRequiredSourceFact(
 );
 addRequiredSourceFact(
   'render_pass_context_narrow',
-  renderPassContextWideHits.length === 0,
+  renderPassContextWideHits.length === 0 && renderPassContextNegativeFixtureRejected,
   'render pass contexts expose only explicit pass resources and cannot bypass FrameGraph through large resource bundles',
   {
     owner: 'voplay/render',
@@ -1262,6 +1273,7 @@ addRequiredSourceFact(
     reason: 'RenderPassResources still exposes broad device, queue, pipelines, managers, and render_world access',
     requiredFix: 'Split pass contexts into narrow read/write contracts per RenderPassKind and remove broad resource bundles from pass dispatch.',
     renderPassContextWideHits: renderPassContextWideHits.slice(0, 40),
+    renderPassContextNegativeFixtureRejected,
   },
 );
 addRequiredSourceFact(
