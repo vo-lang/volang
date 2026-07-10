@@ -12,8 +12,16 @@ max_total_bytes = 35000000
 allowed_extensions = [".json", ".js", ".wasm", ".vpak"]
 inputs = [
   "apps/studio/scripts/package_blockkart_quickplay.mjs",
+  "scripts/ci/voplay_current_wasm.mjs",
   "eng/project.toml",
   "external:BlockKart",
+  "external:BlockKart/tools/pack_primitive_assets.vo",
+  "external:BlockKart/tools/generate_primitive_terrain.mjs",
+  "external:BlockKart/tools/paint_terrain_textures.mjs",
+  "external:BlockKart/tools/vpak_provenance.mjs",
+  "external:BlockKart/tools/terrain_heightfield_spec.mjs",
+  "external:BlockKart/tools/terrain_recipe.mjs",
+  "external:BlockKart/terrain/recipes/primitive_concept_v1.json",
   "first-party:voplay",
   "module-cache:vopack",
   "module-cache:vogui",

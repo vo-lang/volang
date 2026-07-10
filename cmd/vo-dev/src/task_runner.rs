@@ -15,7 +15,7 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
@@ -30,11 +30,13 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
     let config = load_tasks(root)?;
     let task_map = task_map(&config)?;
     let gate_plan_env = gate_plan_env(&config)?;
+    let ci_run_id = ci_run_id()?;
     for name in task_names {
         let task = task_map
             .get(name)
             .ok_or_else(|| anyhow!("unknown task: {name}"))?;
         ensure_task_tools(root, name)?;
+        prepare_task_outputs(root, task)?;
         let cwd = root.join(task.cwd.as_deref().unwrap_or("."));
         println!("\n==> {}", task.title);
         println!(
@@ -51,6 +53,7 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
         for (key, value) in &gate_plan_env {
             command.env(key, value);
         }
+        command.env("VO_DEV_CI_RUN_ID", &ci_run_id);
         for (key, value) in task_root_env(root, &task_map, name)? {
             command.env(key, value);
         }
@@ -63,6 +66,37 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
         validate_task_outputs(root, task)
             .with_context(|| format!("task {name} did not produce declared outputs"))?;
         println!("ok: {name} ({elapsed:.1}s)");
+    }
+    Ok(())
+}
+
+fn ci_run_id() -> Result<String> {
+    if let Ok(existing) = std::env::var("VO_DEV_CI_RUN_ID") {
+        if !existing.trim().is_empty() && existing.trim() == existing {
+            return Ok(existing);
+        }
+        bail!("VO_DEV_CI_RUN_ID must be non-empty and cannot contain surrounding whitespace");
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX epoch")?
+        .as_nanos();
+    Ok(format!("vo-dev-{nanos}-{}", std::process::id()))
+}
+
+fn prepare_task_outputs(root: &Path, task: &Task) -> Result<()> {
+    for output in &task.outputs {
+        if output != "target" && !output.starts_with("target/") {
+            continue;
+        }
+        let path = root.join(output);
+        if path.is_dir() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("could not clear stale task output {output}"))?;
+        } else if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("could not clear stale task output {output}"))?;
+        }
     }
     Ok(())
 }
@@ -326,6 +360,38 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn prepare_task_outputs_removes_only_ephemeral_target_outputs() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-vo-dev-stale-output-{stamp}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("target/report")).expect("target report dir");
+        fs::create_dir_all(root.join("checked-in/artifact")).expect("checked-in artifact dir");
+        fs::write(root.join("target/report/report.json"), "stale").expect("stale report");
+        fs::write(root.join("checked-in/artifact/data.json"), "source").expect("source artifact");
+        let task: crate::config::Task = toml::from_str(
+            r#"
+name = "evidence"
+title = "Evidence"
+command = ["true"]
+outputs = ["target/report", "checked-in/artifact"]
+tier = "contract"
+"#,
+        )
+        .expect("task");
+
+        prepare_task_outputs(&root, &task).expect("prepare outputs");
+
+        assert!(!root.join("target/report").exists());
+        assert!(root.join("checked-in/artifact/data.json").exists());
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn gate_plan_env_includes_resolved_task_dependencies_035() {

@@ -188,6 +188,63 @@ function progress(message) {
   console.error(`BlockKart baseline progress: ${message}`);
 }
 
+async function captureWithTelemetryHeartbeat(client, durationMs) {
+  const startedAt = Date.now();
+  const intervalMs = Math.min(15000, Math.max(1000, durationMs));
+  while (Date.now() - startedAt < durationMs) {
+    const remainingMs = durationMs - (Date.now() - startedAt);
+    await sleep(Math.min(intervalMs, remainingMs));
+    const snapshot = await client.evaluate(debugSnapshotExpression(), 5000).catch((error) => ({
+      perfReports: [],
+      telemetryError: error instanceof Error ? error.message : String(error),
+    }));
+    const perfSummary = summarizePerfReports(snapshot.perfReports ?? []).latestPerfSummary;
+    const renderer = perfSummary?.renderer ?? {};
+    const workload = perfSummary?.workload ?? {};
+    const passTimings = {
+      depth: Number(renderer.depthPassMs ?? 0),
+      shadow: Number(renderer.shadowPassMs ?? 0),
+      main: Number(renderer.mainPassMs ?? 0),
+      post: Number(renderer.postPassMs ?? 0),
+      overlay: Number(renderer.overlayPassMs ?? 0),
+      backendSubmit: Number(renderer.queueSubmitCpuMs ?? 0) + Number(renderer.presentCpuMs ?? 0),
+    };
+    const slowestPass = Object.entries(passTimings).sort((a, b) => b[1] - a[1])[0] ?? ['', 0];
+    const resourceChurn = Number(workload.bufferCreates ?? 0)
+      + Number(workload.bindGroupCreates ?? 0)
+      + Number(workload.textureUploads ?? 0)
+      + Number(workload.residentChunkRebuilds ?? 0);
+    progress(`telemetry ${JSON.stringify({
+      stage: 'capture',
+      elapsedMs: Date.now() - startedAt,
+      frameIndex: perfSummary?.frame ?? null,
+      pass: slowestPass[0] || null,
+      passMs: slowestPass[1] || 0,
+      frameP90Ms: perfSummary?.window?.frameP90Ms ?? null,
+      frameP99Ms: perfSummary?.window?.frameP99Ms ?? null,
+      resourceChurn,
+      lastTelemetryPacket: perfSummary ? {
+        status: perfSummary.status ?? null,
+        failure: perfSummary.failure ?? null,
+        drawCalls: workload.drawCalls ?? 0,
+        frameGraphFailures: workload.frameGraphFailures ?? 0,
+        missingResources: workload.missingResources ?? 0,
+        invalidBatches: workload.invalidBatches ?? 0,
+        fallbackPaths: workload.fallbackPaths ?? 0,
+        missingModels: workload.missingModels ?? 0,
+        missingMeshes: workload.missingMeshes ?? 0,
+        missingTextures: workload.missingTextures ?? 0,
+        missingBindGroups: workload.missingBindGroups ?? 0,
+        missingChunks: workload.missingChunks ?? 0,
+        missingTargets: workload.missingTargets ?? 0,
+        invalidBatchIndices: workload.invalidBatchIndices ?? 0,
+        incompatibleDraws: workload.incompatibleDraws ?? 0,
+      } : null,
+      telemetryError: snapshot.telemetryError ?? null,
+    })}`);
+  }
+}
+
 function withTimeout(promise, timeoutMs, label) {
   let timer = null;
   const timeout = new Promise((_, reject) => {
@@ -2657,18 +2714,29 @@ function normalizePerfReports(debugReports, endpointReports) {
 function summarizePerfReports(perfReports) {
   const byKind = new Map();
   let latestPerfSummary = null;
+  let latestPerfSkipSummary = null;
   for (const report of perfReports ?? []) {
     const kind = report?.kind ?? 'unknown';
     byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
     if (kind === 'perf-summary') {
       latestPerfSummary = report;
     }
+    if (kind === 'perf-skip-summary') {
+      latestPerfSkipSummary = report;
+    }
+  }
+  if (latestPerfSummary && latestPerfSkipSummary) {
+    latestPerfSummary = {
+      ...latestPerfSummary,
+      workload: { ...(latestPerfSummary.workload ?? {}), ...(latestPerfSkipSummary.workload ?? {}) },
+    };
   }
   return {
     count: perfReports?.length ?? 0,
     byKind: Object.fromEntries([...byKind.entries()].sort(([a], [b]) => String(a).localeCompare(String(b)))),
     last: perfReports?.slice?.(-5) ?? [],
     latestPerfSummary,
+    latestPerfSkipSummary,
   };
 }
 
@@ -3043,7 +3111,7 @@ async function main() {
     }
     if (firstFrame.ok && !firstFrame.skipped && captureMs > 0) {
       progress(`capture sleep start ms=${captureMs}`);
-      await sleep(captureMs);
+      await captureWithTelemetryHeartbeat(client, captureMs);
       progress('capture sleep done');
     }
     progress('final state evaluate start');

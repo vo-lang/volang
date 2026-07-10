@@ -688,16 +688,16 @@ fn auto_download_project_deps(
         }
     }
 
-    vo_module::lifecycle::download_locked_dependencies(mod_cache, lock_file, registry).map_err(
-        |e| {
+    let install_lock = lock_file_for_project_deps(lock_file, project_deps);
+    vo_module::lifecycle::download_locked_dependencies(mod_cache, &install_lock, registry)
+        .map_err(|e| {
             ModuleSystemError::new(
                 ModuleSystemStage::DependencyDownload,
                 ModuleSystemErrorKind::DownloadFailed,
                 format!("failed to download dependencies: {}", e),
             )
             .with_path(mod_cache)
-        },
-    )?;
+        })?;
 
     for (module, version, cached) in dependency_state {
         if !cached {
@@ -710,6 +710,22 @@ fn auto_download_project_deps(
     }
 
     Ok(())
+}
+
+fn lock_file_for_project_deps(
+    lock_file: &vo_module::schema::lockfile::LockFile,
+    project_deps: &ProjectDeps,
+) -> vo_module::schema::lockfile::LockFile {
+    let allowed = project_deps
+        .locked_modules()
+        .iter()
+        .map(|locked| locked.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut filtered = lock_file.clone();
+    filtered
+        .resolved
+        .retain(|locked| allowed.contains(locked.path.as_str()));
+    filtered
 }
 
 pub fn default_mod_cache_root() -> PathBuf {

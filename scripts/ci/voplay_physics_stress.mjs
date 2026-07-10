@@ -125,6 +125,9 @@ function validateReport(report) {
     'wall-ride',
     'water-skim',
     'surface-transition',
+    'road-edge-assist',
+    'sleep-wake',
+    'pose-reset',
     'recovery',
     'multi-vehicle-scripted-soak',
   ];
@@ -153,11 +156,11 @@ function validateReport(report) {
     if ((scenario.packetErrors ?? 0) > 0) {
       issues.push({ code: 'physics.packet_errors', severity: 0, detail: String(scenario.packetErrors), scenario: scenario.name });
     }
-    if ((scenario.directBypassHits ?? 0) > 0) {
-      issues.push({ code: 'physics.direct_bypass', severity: 0, detail: String(scenario.directBypassHits), scenario: scenario.name });
+    if ((scenario.rejectedBackendCommands ?? 0) > 0) {
+      issues.push({ code: 'physics.backend_command_rejected', severity: 0, detail: String(scenario.rejectedBackendCommands), scenario: scenario.name });
     }
-    if ((scenario.constraintBypassHits ?? 0) > 0) {
-      issues.push({ code: 'physics.constraint_bypass', severity: 0, detail: String(scenario.constraintBypassHits), scenario: scenario.name });
+    if ((scenario.droppedFixedSteps ?? 0) > 0) {
+      issues.push({ code: 'physics.fixed_steps_dropped', severity: 0, detail: String(scenario.droppedFixedSteps), scenario: scenario.name });
     }
     if (Number.isFinite(maxVelocity) && Number(scenario.maxSpeed ?? 0) > maxVelocity) {
       issues.push({ code: 'physics.excessive_velocity_budget', severity: 0, detail: `${scenario.maxSpeed} > ${maxVelocity}`, scenario: scenario.name });
@@ -172,6 +175,51 @@ function validateReport(report) {
       issues.push({ code: 'physics.multi_vehicle_count', severity: 0, detail: `${scenario.vehicleCount ?? 0} < 24`, scenario: scenario.name });
     }
   }
+  for (const [scenarioName, commandKind, minimum] of [
+    ['road-edge-assist', 'target', 1],
+    ['sleep-wake', 'sleep_state', 2],
+    ['pose-reset', 'pose_reset', 2],
+    ['recovery', 'recovery', 1],
+  ]) {
+    const count = Number(byName.get(scenarioName)?.backendCommandSamples?.[commandKind] ?? 0);
+    if (count < minimum) {
+      issues.push({ code: 'physics.backend_command_coverage', severity: 1, detail: `${commandKind}=${count} < ${minimum}`, scenario: scenarioName });
+    }
+  }
+  const replayByScenario = new Map((report.replays ?? []).map((replay) => [replay.referenceScenario, replay]));
+  if ((report.replays ?? []).length !== required.length) {
+    issues.push({ code: 'physics.replay_scenario_count', severity: 1, detail: `${report.replays?.length ?? 0} != ${required.length}` });
+  }
+  for (const scenarioName of required) {
+    const replay = replayByScenario.get(scenarioName);
+    const scenario = byName.get(scenarioName);
+    if (!replay) {
+      issues.push({ code: 'physics.replay_scenario_missing', severity: 1, detail: scenarioName });
+      continue;
+    }
+    for (const issue of replay.issues ?? []) {
+      issues.push({ ...issue, scenario: scenarioName });
+    }
+    const expectedSamples = Number(scenario?.steps ?? 0) * Number(scenario?.vehicleCount ?? 0);
+    const replayReady = replay.status === 'pass'
+      && replay.name === 'PhysicsReplayVerifier'
+      && replay.freshProcess === true
+      && Number(replay.mismatches ?? Infinity) === 0
+      && Number(replay.samples ?? 0) === expectedSamples
+      && Number(replay.vehicleCount ?? 0) === Number(scenario?.vehicleCount ?? 0)
+      && Number(replay.backendCommandCount ?? 0) > 0
+      && Number.isFinite(Number(replay.stepHash))
+      && Number.isFinite(Number(replay.backendPacketHash))
+      && Number.isFinite(Number(replay.backendCommandHash))
+      && Number(replay.backendCommandHash) > 0;
+    if (!replayReady) {
+      issues.push({ code: 'physics.replay_scenario_contract', severity: 1, detail: JSON.stringify({ expectedSamples, replay }), scenario: scenarioName });
+    }
+  }
+  const fleetReplay = replayByScenario.get('multi-vehicle-scripted-soak');
+  if (Number(fleetReplay?.vehicleCount ?? 0) !== 24 || Number(fleetReplay?.samples ?? 0) !== 240 * 24) {
+    issues.push({ code: 'physics.replay_fleet_coverage', severity: 1, detail: JSON.stringify(fleetReplay ?? {}) });
+  }
   for (const issue of report.replay?.issues ?? []) {
     issues.push({ ...issue, scenario: report.replay.name });
   }
@@ -180,6 +228,8 @@ function validateReport(report) {
   }
   const replayHasExecutableContract = Number.isFinite(Number(report.replay?.stepHash))
     && Number.isFinite(Number(report.replay?.backendPacketHash))
+    && Number.isFinite(Number(report.replay?.backendCommandHash))
+    && Number(report.replay?.backendCommandHash) > 0
     && Number(report.replay?.samples ?? 0) > 0
     && Number(report.replay?.mismatches ?? Infinity) === 0
     && report.replay?.freshProcess === true
@@ -202,7 +252,8 @@ function markdownReport(report, gate) {
   const lines = ['# voplay physics stress', ''];
   lines.push(`- Status: ${gate.p0 === 0 && gate.p1 === 0 ? 'pass' : 'fail'}`);
   lines.push(`- Scenario count: ${report.scenarios?.length ?? 0}`);
-  lines.push(`- Replay: ${report.replay?.name || '(missing)'} samples=${report.replay?.samples ?? '(missing)'} mismatches=${report.replay?.mismatches ?? '(missing)'} stepHash=${report.replay?.stepHash ?? '(missing)'} backendPacketHash=${report.replay?.backendPacketHash ?? '(missing)'}`);
+  lines.push(`- Replay: ${report.replay?.name || '(missing)'} samples=${report.replay?.samples ?? '(missing)'} mismatches=${report.replay?.mismatches ?? '(missing)'} stepHash=${report.replay?.stepHash ?? '(missing)'} backendPacketHash=${report.replay?.backendPacketHash ?? '(missing)'} backendCommandHash=${report.replay?.backendCommandHash ?? '(missing)'}`);
+  lines.push(`- Scenario replays: ${(report.replays ?? []).length}`);
   lines.push(`- Budget: ${path.relative(root, budgetPath)}`);
   lines.push(`- Velocity budget: ${formatNumber(physicsBudget.maxVelocity)} m/s`);
   lines.push(`- Angular velocity budget: ${formatNumber(physicsBudget.maxAngularVelocity)} rad/s`);
@@ -220,12 +271,19 @@ function markdownReport(report, gate) {
     lines.push(`- Max angular velocity: ${formatNumber(scenario.maxAngularVelocity)} rad/s`);
     lines.push(`- Max landing impulse proxy: ${formatNumber(scenario.maxLandingImpulse)}`);
     lines.push(`- Contacts: wheels=${scenario.maxContactCount} bodyEvents=${scenario.maxContactEvents} fallback=${scenario.fallbackContactEvents ?? 0} normalImpulse=${formatNumber(scenario.maxNormalImpulse)} tangentImpulse=${formatNumber(scenario.maxTangentImpulse)}`);
-    lines.push(`- Backend safety: packetErrors=${scenario.packetErrors ?? 0} directBypassHits=${scenario.directBypassHits ?? 0} constraintBypassHits=${scenario.constraintBypassHits ?? 0}`);
+    lines.push(`- Backend safety: packetErrors=${scenario.packetErrors ?? 0} rejectedBackendCommands=${scenario.rejectedBackendCommands ?? 0} droppedFixedSteps=${scenario.droppedFixedSteps ?? 0}`);
     lines.push(`- Surfaces: ${JSON.stringify(scenario.surfaceSamples ?? {})}`);
     lines.push(`- Recovery requests: ${scenario.recoveryRequests}`);
     for (const issue of scenario.issues ?? []) {
       lines.push(`- Issue ${issue.code}: ${issue.detail}`);
     }
+    lines.push('');
+  }
+  for (const replay of report.replays ?? []) {
+    lines.push(`## Replay ${replay.referenceScenario}`);
+    lines.push(`- Status/fresh process: ${replay.status}/${replay.freshProcess === true}`);
+    lines.push(`- Vehicles/samples/commands: ${replay.vehicleCount}/${replay.samples}/${replay.backendCommandCount}`);
+    lines.push(`- Hashes/mismatches: ${replay.stepHash}/${replay.backendPacketHash}/${replay.backendCommandHash}/${replay.mismatches}`);
     lines.push('');
   }
   if (gate.issues.length > 0) {

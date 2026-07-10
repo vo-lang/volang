@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { requireRepoRoot } from './repo_roots.mjs';
 import { sourceBoundEvidence } from './source_bound_evidence.mjs';
+import { analyzeBlockKartBoundary } from './blockkart_boundary_facts.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
@@ -43,6 +44,7 @@ function writeReport(status) {
       ],
       gateFiles: [
         'scripts/ci/blockkart_product_boundary_strict.mjs',
+        'scripts/ci/blockkart_boundary_facts.mjs',
         'scripts/ci/repo_roots.mjs',
         'scripts/ci/source_bound_evidence.mjs',
         'eng/tasks.toml',
@@ -126,6 +128,7 @@ function scan(pattern, allow = () => false) {
 }
 
 const blockKartVoFiles = listVoFiles(blockKartRoot);
+const boundaryFacts = analyzeBlockKartBoundary(blockKartVoFiles);
 const world = readProjectFile(blockKartRoot, 'world.vo');
 const primitiveWorld = readProjectFile(blockKartRoot, 'primitive_world.vo');
 const productFoundation = readProjectFile(blockKartRoot, 'product_foundation.vo');
@@ -150,7 +153,14 @@ const worldFields = worldBody
   .split(/\r?\n/)
   .map((line, index) => ({ line: index + 1, text: line.trim() }))
   .filter((entry) => /^[A-Za-z_][A-Za-z0-9_]*\s+/.test(entry.text));
-const worldForbiddenFieldHits = worldFields.filter((entry) => /\b(scene|camera|player|vehicle|kartController|racingInput|touch|vehicleAudio|assets|primitive|track|checkpoint|raceState|courseTime|finishTime|collected|lap|kart|boost|drift|collectibles|checkpoints|boostPads|obstacles|debugHud|perf|physics)/i.test(entry.text));
+const worldAllowedStateGroups = new Set([
+  'core BlockKartRuntimeCore',
+  'input BlockKartRuntimeInputState',
+  'race BlockKartRuntimeRaceState',
+  'kart BlockKartRuntimeKartState',
+  'hud BlockKartRuntimeHudState',
+]);
+const worldForbiddenFieldHits = worldFields.filter((entry) => !worldAllowedStateGroups.has(entry.text));
 const runtimeContextFields = runtimeContextBody
   .split(/\r?\n/)
   .map((line, index) => ({ line: index + 1, text: line.trim() }))
@@ -215,11 +225,12 @@ check(blockKartNamedAuthoringHits.length === 0, 'blockkart.blockkart_named_autho
 check(directIntentBypassHits.length === 0, 'blockkart.direct_vehicle_intent_bypass', 'BlockKart product runtime updates controller/vehicle intent outside VehiclePhysicsSession', { directIntentBypassHits });
 check(directConstraintHits.length === 0, 'blockkart.direct_physics_constraint', 'BlockKart product runtime applies low-level physics constraints directly', { directConstraintHits });
 check(rawRenderKnobHits.length === 0, 'blockkart.raw_render_knob', 'BlockKart product runtime writes or exposes low-level render knobs directly', { rawRenderKnobHits });
-check(worldFields.length <= 28 && worldForbiddenFieldHits.length === 0, 'blockkart.world_mega_owner', 'World must stay a lifecycle composition root with product owner state held by RaceSession/KartRig/TrackRuntime/HUDPresenter/PerfReporter', { fieldCount: worldFields.length, worldForbiddenFieldHits });
-check(runtimeContextFields.length <= 8 && runtimeContextForbiddenFieldHits.length === 0 && runtimeContextFields.every((entry) => runtimeContextAllowedGroups.has(entry.text)), 'blockkart.runtime_context_mega_owner', 'BlockKartRuntimeContext must not replace World as the hidden mega-owner for scene, vehicle, assets, track, race, kart, HUD, perf, or debug state', { fieldCount: runtimeContextFields.length, runtimeContextForbiddenFieldHits, runtimeContextFields });
+check(worldFields.length === worldAllowedStateGroups.size && worldForbiddenFieldHits.length === 0 && worldFields.every((entry) => worldAllowedStateGroups.has(entry.text)), 'blockkart.world_mega_owner', 'World must stay a lifecycle composition root containing only explicit core/input/race/kart/HUD owner state groups', { fieldCount: worldFields.length, worldForbiddenFieldHits, worldFields });
+check(runtimeContextBody.trim() === '' && runtimeContextFields.length === 0 && runtimeContextForbiddenFieldHits.length === 0, 'blockkart.runtime_context_mega_owner', 'BlockKartRuntimeContext broad wrapper must remain removed', { fieldCount: runtimeContextFields.length, runtimeContextForbiddenFieldHits, runtimeContextFields });
 check(worldReceiverHits.length === 0, 'blockkart.world_receiver_too_wide', 'World receiver methods must stay at lifecycle/composition boundary', { worldReceiverHits });
 check(ownerWorldContextHits.length === 0, 'blockkart.owner_methods_take_world', 'Runtime owner methods must not use *World as the mutation context for cross-domain state', { ownerWorldContextHits: ownerWorldContextHits.slice(0, 80) });
 check(ownerRuntimeContextHits.length === 0, 'blockkart.owner_methods_take_runtime_context', 'Runtime owner methods must not use *BlockKartRuntimeContext as the mutation context for cross-domain state', { ownerRuntimeContextHits: ownerRuntimeContextHits.slice(0, 80) });
+check(boundaryFacts.wideOwnerParameters.length === 0, 'blockkart.owner_ports_semantically_narrow', 'Runtime owner ports must remain narrow after alias and wrapper expansion', { wideOwnerParameters: boundaryFacts.wideOwnerParameters.slice(0, 120), stateGroupsByType: boundaryFacts.stateGroupsByType });
 check(runtimeOwnerFacts.every((entry) => entry.methods.length > 0 && entry.calledByProduct), 'blockkart.empty_runtime_owner', 'runtime_owners.vo owners must own production methods and be called by runtime', { runtimeOwnerFacts });
 
 check(vehicle.includes('ProductVehicleTelemetry') || blockKartVoFiles.some((entry) => entry.source.includes('ProductVehicleTelemetry')), 'blockkart.product_vehicle_telemetry_missing', 'BlockKart strict boundary needs structured voplay product vehicle telemetry', {

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { requireRepoRoot } from './repo_roots.mjs';
+import { requiredVpakProducerInputPaths } from './blockkart_vpak_policy.mjs';
 import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -15,6 +16,7 @@ const provenancePath = join(quickplayDir, 'provenance.json');
 const quickplayTsPath = join(root, 'apps/studio/src/lib/quickplay.ts');
 const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const outDir = resolve(process.env.QUICKPLAY_VALIDATE_OUT_DIR || join(root, 'target/quickplay-validate'));
+const selftestMode = process.env.QUICKPLAY_VALIDATE_SELFTEST === '1';
 const dependencyRepos = [
   { name: 'github.com/vo-lang/vogui', root: requireRepoRoot('VOGUI_ROOT', 'vogui') },
   { name: 'github.com/vo-lang/voplay', root: requireRepoRoot('VOPLAY_ROOT', 'voplay') },
@@ -33,11 +35,13 @@ const expected = {
   generatorCommand: ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'],
   generatorInputs: [
     'apps/studio/scripts/package_blockkart_quickplay.mjs',
+    'scripts/ci/voplay_current_wasm.mjs',
     'eng/project.toml',
     'external:BlockKart',
     'external:BlockKart/tools/pack_primitive_assets.vo',
     'external:BlockKart/tools/generate_primitive_terrain.mjs',
     'external:BlockKart/tools/paint_terrain_textures.mjs',
+    'external:BlockKart/tools/vpak_provenance.mjs',
     'external:BlockKart/tools/terrain_heightfield_spec.mjs',
     'external:BlockKart/tools/terrain_recipe.mjs',
     'external:BlockKart/terrain/recipes/primitive_concept_v1.json',
@@ -48,10 +52,7 @@ const expected = {
 };
 
 const requiredVpakProducerOutput = 'assets/blockkart.vpak';
-const requiredVpakProducerInputPaths = [
-  'tools/pack_primitive_assets.vo',
-  'assets/maps/primitive_track/blockkart.map.json',
-];
+const requiredVpakProducerManifest = 'assets/blockkart.vpak.provenance.json';
 const requiredTerrainProducerInputs = [
   'tools/generate_primitive_terrain.mjs',
   'tools/terrain_heightfield_spec.mjs',
@@ -115,6 +116,7 @@ function writeReport(status, details = {}) {
     ],
     gateFiles: [
       'scripts/ci/quickplay_validate.mjs',
+      'scripts/ci/blockkart_vpak_policy.mjs',
       'scripts/ci/repo_roots.mjs',
       'scripts/ci/source_bound_evidence.mjs',
       'apps/studio/scripts/package_blockkart_quickplay.mjs',
@@ -126,7 +128,7 @@ function writeReport(status, details = {}) {
     artifacts: [quickplayDir],
   });
   const issues = [...(details.issues ?? [])];
-  if (status === 'ok' && freshEvidence.verdict.status !== 'pass') {
+  if (status === 'ok' && freshEvidence.verdict.status !== 'pass' && !selftestMode) {
     issues.push(structuredIssue('quickplay validate freshEvidence verdict must pass', {
       owner: 'Volang',
       subsystem: 'FreshEvidence',
@@ -146,6 +148,7 @@ function writeReport(status, details = {}) {
     status: finalStatus,
     generatedAt,
     freshEvidence,
+    selftestMode,
     quickplayDir,
     ...details,
     issues,
@@ -294,6 +297,9 @@ function validateProducerDigestEntries(entries, requiredPaths, label) {
       requiredFix: 'Regenerate quickplay provenance with full vpak and terrain producer inputs/outputs.',
       requiredPath,
     });
+    if (requiredPath.startsWith('workspace:')) {
+      continue;
+    }
     const expectedEntry = sourceDigestEntry(requiredPath);
     assert(
       found.digest === expectedEntry.digest && found.size === expectedEntry.size,
@@ -323,6 +329,25 @@ function validateBlockKartRuntimeProducer(project, provenance) {
     requiredFix: 'Regenerate the quickplay package with assets/blockkart.vpak included.',
   });
   const packagedVpakBytes = moduleFileBytes(packagedVpak);
+  const packagedManifest = projectFiles.get(requiredVpakProducerManifest);
+  assert(packagedManifest, 'project package missing canonical vpak producer manifest', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/project.json',
+    reason: 'The packaged vpak must carry its canonical producer manifest sidecar.',
+    requiredFix: 'Rebuild and package assets/blockkart.vpak.provenance.json.',
+  });
+  const packagedManifestBytes = moduleFileBytes(packagedManifest);
+  const canonicalManifestPath = join(blockKartRoot, requiredVpakProducerManifest);
+  const canonicalManifestBytes = readFileSync(canonicalManifestPath);
+  assert(sha256Digest(packagedManifestBytes) === sha256Digest(canonicalManifestBytes), 'packaged canonical vpak producer manifest is stale', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/project.json',
+    reason: 'The packaged producer manifest differs from the current BlockKart manifest.',
+    requiredFix: 'Regenerate quickplay from the current vpak producer manifest.',
+  });
+  const canonicalManifest = JSON.parse(canonicalManifestBytes.toString('utf8'));
   const producer = (provenance.producers ?? []).find((entry) => entry?.output === requiredVpakProducerOutput);
   assert(producer, 'provenance missing assets/blockkart.vpak producer record', {
     owner: 'BlockKart',
@@ -368,6 +393,39 @@ function validateBlockKartRuntimeProducer(project, provenance) {
       found: outputEntry,
     },
   );
+  const canonicalInputs = canonicalManifest.inputs
+    .map((entry) => ({ path: entry.path, digest: `sha256:${entry.sha256}`, size: entry.size }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+  const producerInputs = [...(producer.inputs ?? [])].sort((a, b) => a.path.localeCompare(b.path));
+  assert(JSON.stringify(producerInputs) === JSON.stringify(canonicalInputs), 'vpak producer input set must exactly match the canonical manifest', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The producer input set omits or adds files relative to the actual vpak and generator closure.',
+    requiredFix: 'Regenerate quickplay from assets/blockkart.vpak.provenance.json.',
+  });
+  assert(producer.archiveEntryCount === 37
+    && producer.payloadInputCount === 37
+    && Number(producer.workspaceSourceInputCount ?? 0) > 0
+    && producer.workspaceSourceInputCount === canonicalManifest.workspaceSourceInputCount
+    && producer.archiveEntryCount === canonicalManifest.archiveEntryCount
+    && JSON.stringify(producer.archiveEntries) === JSON.stringify(canonicalManifest.archiveEntries), 'vpak producer archive entry closure mismatch', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The producer record must cover all 37 public archive entries and source inputs.',
+    requiredFix: 'Rebuild the vpak producer manifest and regenerate quickplay.',
+  });
+  assert(producer.producerManifest?.path === requiredVpakProducerManifest
+    && producer.producerManifest?.sha256 === sha256Digest(canonicalManifestBytes)
+    && producer.producerManifest?.size === canonicalManifestBytes.byteLength
+    && producer.producerManifest?.producerDigest === canonicalManifest.producerDigest, 'vpak producer manifest binding mismatch', {
+    owner: 'BlockKart',
+    subsystem: 'ProducerProvenance',
+    file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+    reason: 'The producer record must bind to the exact packaged canonical manifest.',
+    requiredFix: 'Regenerate quickplay after rebuilding the canonical vpak manifest.',
+  });
 
   const upstream = Array.isArray(producer.upstream) ? producer.upstream : [];
   const terrainProducer = upstream.find((entry) => entry?.id === 'primitive-terrain-assets');

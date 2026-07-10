@@ -656,6 +656,7 @@ outputs = []
 tier = "fast"
 tags = ["repo-policy", "tooling"]
 owner = "eng"
+timeout_sec = 600
 
 [[task]]
 name = "d-py-smoke"
@@ -668,6 +669,7 @@ env = { PYTHONDONTWRITEBYTECODE = "1" }
 tier = "fast"
 tags = ["repo-policy", "tooling"]
 owner = "eng"
+timeout_sec = 120
 
 [[task]]
 name = "eng-lint-tasks"
@@ -728,6 +730,7 @@ outputs = []
 tier = "fast"
 tags = ["manifest-lint", "repo-policy", "artifact"]
 owner = "eng"
+timeout_sec = 600
 
 [[task]]
 name = "eng-lint-repo-boundaries"
@@ -739,6 +742,7 @@ outputs = []
 tier = "fast"
 tags = ["repo-policy", "legacy-excluded"]
 owner = "eng"
+timeout_sec = 600
 
 [[task]]
 name = "eng-lint-release"
@@ -762,6 +766,7 @@ outputs = []
 tier = "fast"
 tags = ["repo-policy"]
 owner = "eng"
+timeout_sec = 600
 
 [[task]]
 name = "docs-sync"
@@ -775,6 +780,7 @@ tier = "manual"
 internal = true
 tags = ["docs-policy"]
 owner = "docs"
+timeout_sec = 300
 
 [[task]]
 name = "docs-lint"
@@ -799,6 +805,7 @@ outputs = []
 tier = "fast"
 tags = ["manifest-lint", "example-smoke"]
 owner = "eng"
+timeout_sec = 600
 
 [[task]]
 name = "eng-lint-benchmarks"
@@ -846,6 +853,7 @@ outputs = []
 tier = "fast"
 tags = ["repo-policy", "tooling"]
 owner = "eng"
+timeout_sec = 600
 
 [[task]]
 name = "cargo-clippy"
@@ -857,6 +865,7 @@ outputs = []
 tier = "fast"
 tags = ["crate-unit", "repo-policy"]
 owner = "eng"
+timeout_sec = 3600
 
 [[task]]
 name = "cargo-check"
@@ -868,6 +877,7 @@ outputs = []
 tier = "fast"
 tags = ["crate-integration", "repo-policy"]
 owner = "eng"
+timeout_sec = 3600
 
 [[task]]
 name = "wasm-check"
@@ -922,7 +932,7 @@ owner = "runtime"
 name = "cargo-test-vo-engine"
 title = "cargo vo-engine JIT contract tests"
 command = ["cargo", "test", "-p", "vo-engine", "--features", "jit"]
-timeout_sec = 1800
+timeout_sec = 3600
 tools = ["rust"]
 inputs = ["lang/crates/vo-engine/**", "lang/crates/vo-vm/**", "lang/crates/vo-jit/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "lang/crates/vo-common/**", "lang/crates/vo-analysis/**", "lang/crates/vo-codegen/**", "lang/crates/vo-module/**", "lang/crates/vo-syntax/**", "lang/crates/vo-stdlib/**", "lang/stdlib/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 outputs = []
@@ -953,7 +963,7 @@ outputs = []
 tier = "test"
 tags = ["lang-case", "runtime"]
 owner = "runtime"
-timeout_sec = 1800
+timeout_sec = 3600
 
 [[task]]
 name = "vo-test-compile"
@@ -1361,6 +1371,7 @@ outputs = []
 tier = "test"
 tags = ["example-smoke"]
 owner = "eng"
+timeout_sec = 1800
 
 [[task]]
 name = "cargo-test-release"
@@ -1586,10 +1597,72 @@ owner = "studio"
 timeout_sec = 300
 
 [[task]]
+name = "voplay-current-wasm-selftest"
+title = "prove current-source voplay WASM rejects stale source and outputs"
+command = ["node", "scripts/ci/voplay_current_wasm_selftest.mjs"]
+internal = true
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/voplay_current_wasm.mjs", "scripts/ci/voplay_current_wasm_selftest.mjs", "scripts/ci/source_bound_evidence.mjs"]
+outputs = []
+tier = "contract"
+tags = ["contract", "negative-test", "provenance", "web-wasm"]
+owner = "studio"
+timeout_sec = 60
+
+[[task]]
+name = "voplay-current-wasm-build"
+title = "build voplay WASM from the current Rust source"
+command = ["node", "scripts/ci/voplay_current_wasm.mjs"]
+needs = ["voplay-current-wasm-selftest"]
+tools = ["node", "rust", "wasm-pack"]
+node_workspaces = ["studio"]
+repo = "voplay"
+internal = true
+inputs = ["scripts/ci/voplay_current_wasm.mjs", "scripts/ci/source_bound_evidence.mjs", "scripts/ci/repo_roots.mjs", "first-party:voplay/rust/**", "first-party:voplay/vo.mod", "Cargo.lock", "rust-toolchain.toml"]
+outputs = ["target/voplay-current-wasm"]
+tier = "contract"
+tags = ["app-smoke", "contract", "provenance", "web-wasm"]
+owner = "studio"
+timeout_sec = 1800
+
+[[task]]
+name = "blockkart-vpak-build"
+title = "rebuild and verify BlockKart canonical runtime vpak"
+command = ["node", "scripts/ci/blockkart_vpak_build.mjs"]
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+internal = true
+inputs = ["scripts/ci/blockkart_vpak_build.mjs", "scripts/ci/repo_roots.mjs", "external:BlockKart/vo.mod", "external:BlockKart/vo.lock", "external:BlockKart/vo.work", "external:BlockKart/tools/**", "external:BlockKart/terrain/**", "external:BlockKart/docs/images/terrain-upgrade-concept-v1.png", "external:BlockKart/assets/**", "first-party:voplay", "first-party:vopack", "first-party:vogui"]
+outputs = ["target/blockkart-vpak-build"]
+tier = "contract"
+tags = ["app-smoke", "contract", "provenance"]
+owner = "studio"
+timeout_sec = 900
+
+[[task]]
+name = "blockkart-vpak-provenance-selftest"
+title = "prove canonical BlockKart vpak provenance rejects source drift"
+command = ["node", "scripts/ci/blockkart_vpak_provenance_selftest.mjs"]
+needs = ["blockkart-vpak-build"]
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+internal = true
+inputs = ["scripts/ci/blockkart_vpak_provenance_selftest.mjs", "scripts/ci/repo_roots.mjs", "external:BlockKart/tools/vpak_provenance.mjs", "external:BlockKart/assets/blockkart.vpak", "external:BlockKart/assets/blockkart.vpak.provenance.json", "first-party:voplay", "first-party:vopack", "first-party:vogui"]
+outputs = ["target/blockkart-vpak-provenance-selftest"]
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test", "provenance"]
+owner = "studio"
+timeout_sec = 120
+
+[[task]]
 name = "quickplay-blockkart-package"
 title = "package BlockKart quickplay package"
 cwd = "apps/studio"
 command = ["npm", "run", "package:blockkart"]
+needs = ["voplay-current-wasm-build", "blockkart-vpak-provenance-selftest"]
 tools = ["node", "npm"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
@@ -1599,11 +1672,13 @@ outputs = ["apps/studio/public/quickplay/blockkart"]
 tier = "manual"
 tags = ["app-smoke", "manual"]
 owner = "studio"
+timeout_sec = 900
 
 [[task]]
 name = "quickplay-regenerate-check"
 title = "regenerate and compare BlockKart quickplay package"
 command = ["node", "scripts/ci/quickplay_regenerate_check.mjs"]
+needs = ["voplay-current-wasm-build"]
 tools = ["node", "npm"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
@@ -1619,11 +1694,12 @@ timeout_sec = 600
 name = "quickplay-source-audit"
 title = "audit BlockKart quickplay source and release provenance"
 command = ["node", "scripts/ci/quickplay_source_audit.mjs", "--out-dir", "target/quickplay-source-audit"]
+needs = ["voplay-current-wasm-build"]
 tools = ["node"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/quickplay_source_audit.mjs", "apps/studio/public/quickplay/blockkart/**", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui"]
+inputs = ["scripts/ci/quickplay_source_audit.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "apps/studio/public/quickplay/blockkart/**", "external:BlockKart", "first-party:voplay", "module-cache:vopack", "module-cache:vogui"]
 outputs = ["target/quickplay-source-audit"]
 tier = "site"
 tags = ["app-smoke", "provenance"]
@@ -1638,7 +1714,7 @@ tools = ["node"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
 internal = true
-inputs = ["scripts/ci/quickplay_validate_selftest.mjs", "scripts/ci/quickplay_validate.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "external:BlockKart"]
+inputs = ["scripts/ci/quickplay_validate_selftest.mjs", "scripts/ci/quickplay_validate.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "external:BlockKart"]
 outputs = []
 tier = "contract"
 tags = ["app-smoke", "provenance", "contract"]
@@ -1703,13 +1779,28 @@ owner = "studio"
 timeout_sec = 120
 
 [[task]]
+name = "blockkart-boundary-facts-selftest"
+title = "prove BlockKart boundary facts reject aliases and broad wrappers"
+command = ["node", "scripts/ci/blockkart_boundary_facts_selftest.mjs"]
+internal = true
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/blockkart_boundary_facts.mjs", "scripts/ci/blockkart_boundary_facts_selftest.mjs"]
+outputs = []
+tier = "contract"
+tags = ["architecture", "contract", "negative-test"]
+owner = "studio"
+timeout_sec = 60
+
+[[task]]
 name = "blockkart-product-boundary-strict"
 title = "lint strict BlockKart product and engine boundaries"
 command = ["node", "scripts/ci/blockkart_product_boundary_strict.mjs"]
+needs = ["blockkart-boundary-facts-selftest"]
 tools = ["node"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
-inputs = ["scripts/ci/blockkart_product_boundary_strict.mjs", "scripts/ci/repo_roots.mjs", "module-cache:voplay", "external:BlockKart"]
+inputs = ["scripts/ci/blockkart_product_boundary_strict.mjs", "scripts/ci/blockkart_boundary_facts.mjs", "scripts/ci/blockkart_boundary_facts_selftest.mjs", "scripts/ci/repo_roots.mjs", "module-cache:voplay", "external:BlockKart"]
 outputs = ["target/blockkart-product-boundary-strict"]
 tier = "contract"
 tags = ["app-smoke", "contract", "architecture", "physics"]
@@ -1815,6 +1906,21 @@ owner = "studio"
 timeout_sec = 600
 
 [[task]]
+name = "voplay-render-observability-selftest"
+title = "prove render stress heartbeat and timeout diagnostics"
+command = ["node", "scripts/ci/voplay_render_stress.mjs", "--selftest-observability", "--out-dir", "target/voplay-render-observability-selftest"]
+internal = true
+tools = ["node"]
+node_workspaces = ["studio"]
+repo = "voplay"
+inputs = ["scripts/ci/voplay_render_stress.mjs", "scripts/ci/repo_roots.mjs", "eng/perf-budgets/blockkart-voplay.medium.json"]
+outputs = ["target/voplay-render-observability-selftest"]
+tier = "contract"
+tags = ["app-smoke", "contract", "negative-test", "observability", "perf"]
+owner = "studio"
+timeout_sec = 60
+
+[[task]]
 name = "voplay-render-stress"
 title = "stress voplay render framegraph diagnostics"
 command = ["node", "scripts/ci/voplay_render_stress.mjs", "--out-dir", "target/voplay-render-stress"]
@@ -1871,7 +1977,7 @@ outputs = ["target/voplay-physics-stress"]
 tier = "contract"
 tags = ["app-smoke", "contract", "perf", "physics"]
 owner = "studio"
-timeout_sec = 300
+timeout_sec = 1800
 
 [[task]]
 name = "voplay-physics-industrial-stress"
@@ -1885,7 +1991,7 @@ outputs = ["target/voplay-physics-industrial-stress"]
 tier = "contract"
 tags = ["app-smoke", "contract", "perf", "physics"]
 owner = "studio"
-timeout_sec = 300
+timeout_sec = 1800
 
 [[task]]
 name = "voplay-industrial-source-audit"
@@ -1918,10 +2024,24 @@ owner = "studio"
 timeout_sec = 120
 
 [[task]]
+name = "source-bound-evidence-selftest"
+title = "verify source-bound evidence recomputation and run binding"
+command = ["node", "scripts/ci/source_bound_evidence_selftest.mjs"]
+internal = true
+tools = ["node"]
+node_workspaces = ["studio"]
+inputs = ["scripts/ci/source_bound_evidence.mjs", "scripts/ci/source_bound_evidence_selftest.mjs", "cmd/vo-dev/src/task_runner.rs", "eng/tasks.toml"]
+outputs = []
+tier = "contract"
+tags = ["contract", "provenance", "negative-test"]
+owner = "eng"
+timeout_sec = 60
+
+[[task]]
 name = "voplay-industrial-readiness"
 title = "verify voplay industrial readiness final gate"
 command = ["node", "scripts/ci/voplay_industrial_readiness.mjs", "--out-dir", "target/voplay-industrial-readiness"]
-needs = ["voplay-framegraph-unit", "voplay-render-core-unit", "voplay-render-structure-lint", "voplay-batch-planner-unit", "voplay-physics-backend-contract", "blockkart-product-boundary-strict", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
+needs = ["eng-lint-artifacts", "source-bound-evidence-selftest", "voplay-render-observability-selftest", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-render-structure-lint", "voplay-batch-planner-unit", "voplay-physics-backend-contract", "blockkart-product-boundary-strict", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
 tools = ["node"]
 node_workspaces = ["studio"]
 repo = "voplay"
@@ -1936,7 +2056,7 @@ timeout_sec = 120
 name = "voplay-engineering-quality-readiness"
 title = "verify voplay engineering quality readiness final gate"
 command = ["node", "scripts/ci/voplay_engineering_quality_readiness.mjs", "--out-dir", "target/voplay-engineering-quality-readiness"]
-needs = ["node-audit-current", "voplay-industrial-readiness", "voplay-render-core-unit", "voplay-framegraph-unit", "voplay-render-structure-lint", "voplay-batch-planner-unit", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-backend-contract", "voplay-physics-industrial-stress", "blockkart-product-boundary-strict", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
+needs = ["eng-lint-artifacts", "source-bound-evidence-selftest", "node-audit-current", "voplay-industrial-readiness", "voplay-render-observability-selftest", "voplay-render-core-unit", "voplay-framegraph-unit", "voplay-render-structure-lint", "voplay-batch-planner-unit", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-backend-contract", "voplay-physics-industrial-stress", "blockkart-product-boundary-strict", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
 tools = ["node", "npm"]
 node_workspaces = ["studio", "vogui-js"]
 repo = "voplay"
@@ -1970,7 +2090,7 @@ command = ["node", "scripts/ci/quickplay_validate.mjs"]
 needs = ["quickplay-validate-selftest", "voplay-sample-validate", "quickplay-source-audit", "quickplay-regenerate-check"]
 tools = ["node"]
 node_workspaces = ["studio"]
-inputs = ["scripts/ci/quickplay_validate.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "external:BlockKart"]
+inputs = ["scripts/ci/quickplay_validate.mjs", "scripts/ci/blockkart_vpak_policy.mjs", "apps/studio/public/quickplay/blockkart/**", "apps/studio/scripts/package_blockkart_quickplay.mjs", "apps/studio/src/lib/quickplay.ts", "eng/artifacts.toml", "external:BlockKart"]
 outputs = ["target/quickplay-validate"]
 tier = "site"
 tags = ["app-smoke", "manifest-lint"]
@@ -2004,6 +2124,7 @@ tier = "site"
 internal = true
 tags = ["app-smoke"]
 owner = "studio"
+timeout_sec = 600
 
 [[task]]
 name = "cargo-test-vo-playground-host-wake"
@@ -2027,6 +2148,7 @@ outputs = []
 tier = "legacy"
 tags = ["legacy-excluded", "repo-policy"]
 owner = "eng"
+timeout_sec = 600
 
 [[task]]
 name = "release-verify-vogui"

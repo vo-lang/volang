@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use super::super::{
     compile, compile_source_at, compile_string, compile_with_auto_install_using_registry,
-    compile_with_cache, with_mod_cache_root_override, CompileError, ModuleSystemErrorKind,
-    ModuleSystemStage,
+    compile_with_cache, lock_file_for_project_deps, with_mod_cache_root_override, CompileError,
+    ModuleSystemErrorKind, ModuleSystemStage,
 };
 use super::{
     current_target_triple, installed_module_release_manifest_digest, load_project_deps_for_engine,
@@ -1652,6 +1652,9 @@ fn test_read_external_module_plan_keeps_locked_transitive_external_modules_for_w
     assert_eq!(plan.allowed_modules(), &[core_module_str.to_string()]);
     assert_eq!(plan.locked_modules().len(), 1);
     assert_eq!(plan.locked_modules()[0].path.as_str(), core_module_str);
+    let install_lock = lock_file_for_project_deps(plan.lock_file().unwrap(), &plan);
+    assert_eq!(install_lock.resolved.len(), 1);
+    assert_eq!(install_lock.resolved[0].path.as_str(), core_module_str);
 }
 
 #[test]

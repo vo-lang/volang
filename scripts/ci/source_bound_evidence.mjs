@@ -16,6 +16,38 @@ function digestJson(value) {
   return sha256(Buffer.from(JSON.stringify(value), 'utf8'));
 }
 
+function normalizedPaths(values) {
+  return [...new Set((values ?? []).map((value) => String(value)))].sort();
+}
+
+function repoDigestEntries(repoEntries) {
+  return repoEntries.map(({ name, commit, dirty, sourceDigest }) => ({
+    name,
+    commit,
+    dirty,
+    sourceDigest,
+  }));
+}
+
+function repoSummary(repoEntries) {
+  return {
+    testedCommits: Object.fromEntries(repoEntries.map((repo) => [repo.name, repo.commit])),
+    dirtyFlags: Object.fromEntries(repoEntries.map((repo) => [repo.name, repo.dirty])),
+  };
+}
+
+function bindingDigest({ gate, ciRunId, sourceDigest, gateDigest, artifactDigest, testedCommits, dirtyFlags }) {
+  return digestJson({
+    gate,
+    ciRunId,
+    sourceDigest,
+    gateDigest,
+    artifactDigest,
+    testedCommits,
+    dirtyFlags,
+  });
+}
+
 function gitOutput(args, cwd) {
   try {
     return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -130,6 +162,8 @@ export function sourceBoundEvidence({
   gateFiles,
   artifacts = [],
 }) {
+  const normalizedGateFiles = normalizedPaths(gateFiles);
+  const normalizedArtifacts = normalizedPaths(artifacts);
   const repoEntries = repos.map((repo) => ({
     name: repo.name,
     root: repo.root,
@@ -137,16 +171,10 @@ export function sourceBoundEvidence({
     dirty: gitDirty(repo.root),
     sourceDigest: sourceTreeDigest(repo.root),
   }));
-  const testedCommits = Object.fromEntries(repoEntries.map((repo) => [repo.name, repo.commit]));
-  const dirtyFlags = Object.fromEntries(repoEntries.map((repo) => [repo.name, repo.dirty]));
-  const sourceDigest = digestJson(repoEntries.map(({ name, commit, dirty, sourceDigest }) => ({
-    name,
-    commit,
-    dirty,
-    sourceDigest,
-  })));
-  const gateDigest = fileSetDigest(root, gateFiles);
-  const artifactDigest = artifactSetDigest(root, artifacts);
+  const { testedCommits, dirtyFlags } = repoSummary(repoEntries);
+  const sourceDigest = digestJson(repoDigestEntries(repoEntries));
+  const gateDigest = fileSetDigest(root, normalizedGateFiles);
+  const artifactDigest = artifactSetDigest(root, normalizedArtifacts);
   const missingCommitRepos = repoEntries
     .filter((repo) => !repo.commit)
     .map((repo) => repo.name);
@@ -154,8 +182,10 @@ export function sourceBoundEvidence({
     .filter((repo) => repo.dirty)
     .map((repo) => repo.name);
   const verdictStatus = missingCommitRepos.length === 0 && dirtyRepos.length === 0 ? 'pass' : 'fail';
-  const runBindingDigest = digestJson({
+  const ciRunId = process.env.VO_DEV_CI_RUN_ID || `standalone:${randomUUID()}`;
+  const runBindingDigest = bindingDigest({
     gate,
+    ciRunId,
     sourceDigest,
     gateDigest,
     artifactDigest,
@@ -163,8 +193,9 @@ export function sourceBoundEvidence({
     dirtyFlags,
   });
   return {
-    schemaVersion: 1,
-    taskRunId: `${gate}:${randomUUID()}`,
+    schemaVersion: 2,
+    ciRunId,
+    taskRunId: `${gate}:${ciRunId}`,
     gate,
     generatedAt,
     sourceDigest,
@@ -173,6 +204,10 @@ export function sourceBoundEvidence({
     runBindingDigest,
     testedCommits,
     dirtyFlags,
+    inputs: {
+      gateFiles: normalizedGateFiles,
+      artifacts: normalizedArtifacts,
+    },
     verdict: {
       status: verdictStatus,
       dirtyProvenance: dirtyRepos.length > 0,
@@ -181,4 +216,120 @@ export function sourceBoundEvidence({
     },
     repos: repoEntries,
   };
+}
+
+export function verifySourceBoundEvidence({
+  evidence,
+  expectedGate,
+  root,
+  expectedCiRunId = null,
+}) {
+  const issues = [];
+  if (!evidence || typeof evidence !== 'object') {
+    return ['missing freshEvidence'];
+  }
+  if (evidence.schemaVersion !== 2) {
+    issues.push(`schemaVersion ${evidence.schemaVersion ?? '(missing)'} did not match 2`);
+  }
+  if (evidence.gate !== expectedGate) {
+    issues.push(`gate ${evidence.gate ?? '(missing)'} did not match ${expectedGate}`);
+  }
+  if (typeof evidence.ciRunId !== 'string' || evidence.ciRunId.length === 0) {
+    issues.push('ciRunId missing');
+  } else if (expectedCiRunId && evidence.ciRunId !== expectedCiRunId) {
+    issues.push(`ciRunId ${evidence.ciRunId} did not match current run ${expectedCiRunId}`);
+  }
+  if (evidence.taskRunId !== `${evidence.gate}:${evidence.ciRunId}`) {
+    issues.push('taskRunId does not bind gate and ciRunId');
+  }
+  if (typeof evidence.generatedAt !== 'string' || Number.isNaN(Date.parse(evidence.generatedAt))) {
+    issues.push('generatedAt missing or invalid');
+  }
+
+  const gateFiles = normalizedPaths(evidence.inputs?.gateFiles);
+  const artifacts = normalizedPaths(evidence.inputs?.artifacts);
+  if (!Array.isArray(evidence.inputs?.gateFiles) || gateFiles.length === 0) {
+    issues.push('gateFiles missing');
+  }
+  if (!Array.isArray(evidence.inputs?.artifacts)) {
+    issues.push('artifacts missing');
+  }
+  if (JSON.stringify(evidence.inputs?.gateFiles) !== JSON.stringify(gateFiles)) {
+    issues.push('gateFiles are not canonical');
+  }
+  if (JSON.stringify(evidence.inputs?.artifacts) !== JSON.stringify(artifacts)) {
+    issues.push('artifacts are not canonical');
+  }
+
+  const declaredRepos = Array.isArray(evidence.repos) ? evidence.repos : [];
+  if (declaredRepos.length === 0) {
+    issues.push('repos missing');
+  }
+  const currentRepos = declaredRepos.map((repo) => ({
+    name: repo?.name,
+    root: repo?.root,
+    commit: repo?.root ? gitCommit(repo.root) : null,
+    dirty: repo?.root ? gitDirty(repo.root) : null,
+    sourceDigest: repo?.root ? sourceTreeDigest(repo.root) : null,
+  }));
+  for (let index = 0; index < declaredRepos.length; index++) {
+    const declared = declaredRepos[index];
+    const current = currentRepos[index];
+    if (!declared?.name || !declared?.root) {
+      issues.push(`repo evidence ${index} missing name or root`);
+      continue;
+    }
+    for (const field of ['commit', 'dirty', 'sourceDigest']) {
+      if (declared[field] !== current[field]) {
+        issues.push(`${declared.name} ${field} does not match current source`);
+      }
+    }
+  }
+
+  const { testedCommits, dirtyFlags } = repoSummary(currentRepos);
+  const sourceDigest = digestJson(repoDigestEntries(currentRepos));
+  const gateDigest = fileSetDigest(root, gateFiles);
+  const artifactDigest = artifactSetDigest(root, artifacts);
+  const runBindingDigest = bindingDigest({
+    gate: evidence.gate,
+    ciRunId: evidence.ciRunId,
+    sourceDigest,
+    gateDigest,
+    artifactDigest,
+    testedCommits,
+    dirtyFlags,
+  });
+  for (const [field, expected] of Object.entries({
+    sourceDigest,
+    gateDigest,
+    artifactDigest,
+    runBindingDigest,
+  })) {
+    if (evidence[field] !== expected) {
+      issues.push(`${field} does not match recomputed value`);
+    }
+  }
+  if (JSON.stringify(evidence.testedCommits) !== JSON.stringify(testedCommits)) {
+    issues.push('testedCommits do not match current repos');
+  }
+  if (JSON.stringify(evidence.dirtyFlags) !== JSON.stringify(dirtyFlags)) {
+    issues.push('dirtyFlags do not match current repos');
+  }
+
+  const missingCommitRepos = currentRepos.filter((repo) => !repo.commit).map((repo) => repo.name);
+  const dirtyRepos = currentRepos.filter((repo) => repo.dirty).map((repo) => repo.name);
+  const verdictStatus = missingCommitRepos.length === 0 && dirtyRepos.length === 0 ? 'pass' : 'fail';
+  if (evidence.verdict?.status !== verdictStatus) {
+    issues.push(`freshEvidence verdict ${evidence.verdict?.status ?? '(missing)'} did not match ${verdictStatus}`);
+  }
+  if (Boolean(evidence.verdict?.dirtyProvenance) !== (dirtyRepos.length > 0)) {
+    issues.push('freshEvidence dirtyProvenance does not match current repos');
+  }
+  if (JSON.stringify(evidence.verdict?.missingCommitRepos) !== JSON.stringify(missingCommitRepos)) {
+    issues.push('freshEvidence missingCommitRepos do not match current repos');
+  }
+  if (JSON.stringify(evidence.verdict?.dirtyRepos) !== JSON.stringify(dirtyRepos)) {
+    issues.push('freshEvidence dirtyRepos do not match current repos');
+  }
+  return issues;
 }

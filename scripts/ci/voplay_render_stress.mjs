@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,7 @@ const perfBudget = readJson(budgetPath);
 const targetFps = positiveInt(perfBudget?.target?.fps, 60);
 const targetFrameMs = 1000 / targetFps;
 const renderBudget = perfBudget?.render ?? {};
+const heartbeatIntervalMs = positiveInt(process.env.VOPLAY_RENDER_STRESS_HEARTBEAT_MS, 15000);
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -81,7 +82,7 @@ function fail(message) {
   process.exit(1);
 }
 
-function runBaseline(name, args, options = {}) {
+async function runBaseline(name, args, options = {}) {
   const sceneOut = path.join(outDir, name);
   rmSync(sceneOut, { recursive: true, force: true });
   mkdirSync(sceneOut, { recursive: true });
@@ -94,23 +95,24 @@ function runBaseline(name, args, options = {}) {
     ...(pulseMode ? ['--pulse-mode', pulseMode] : []),
     ...args,
   ];
-  const result = spawnSync(process.execPath, command, {
-    cwd: root,
-    env: { ...process.env },
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const timeoutMs = positiveInt(options.timeoutMs, Math.max(360000, Number(options.captureMs ?? captureMs) + restartCount * 30000 + 240000));
+  const heartbeatPath = path.join(sceneOut, 'heartbeat.json');
+  const result = await runObservedProcess(name, command, heartbeatPath, timeoutMs);
   const logPath = path.join(sceneOut, 'baseline-run.log');
   writeFileSync(logPath, `${result.stdout ?? ''}${result.stderr ?? ''}`);
   const jsonPath = path.join(sceneOut, 'blockkart-baseline.json');
   const markdownPath = path.join(sceneOut, 'blockkart-baseline.md');
   if (result.status !== 0 && !(options.allowBaselineFailureWithJson && existsSync(jsonPath))) {
+    const issue = result.timedOut
+      ? { code: 'baseline.timeout', severity: 0, detail: JSON.stringify(result.timeoutDiagnostic) }
+      : { code: 'baseline.command_failed', severity: 0, detail: tail(`${result.stdout ?? ''}${result.stderr ?? ''}`) };
     return {
       name,
       status: 'fail',
       command: [process.execPath, ...command],
-      artifacts: { directory: sceneOut, log: logPath, json: existsSync(jsonPath) ? jsonPath : null, markdown: existsSync(markdownPath) ? markdownPath : null },
-      issues: [{ code: 'baseline.command_failed', severity: 0, detail: tail(`${result.stdout ?? ''}${result.stderr ?? ''}`) }],
+      artifacts: { directory: sceneOut, log: logPath, heartbeat: heartbeatPath, json: existsSync(jsonPath) ? jsonPath : null, markdown: existsSync(markdownPath) ? markdownPath : null },
+      observability: result.observability,
+      issues: [issue],
     };
   }
   if (!existsSync(jsonPath)) {
@@ -118,11 +120,145 @@ function runBaseline(name, args, options = {}) {
       name,
       status: 'fail',
       command: [process.execPath, ...command],
-      artifacts: { directory: sceneOut, log: logPath, json: null, markdown: existsSync(markdownPath) ? markdownPath : null },
+      artifacts: { directory: sceneOut, log: logPath, heartbeat: heartbeatPath, json: null, markdown: existsSync(markdownPath) ? markdownPath : null },
+      observability: result.observability,
       issues: [{ code: 'baseline.missing_json', severity: 0, detail: `${jsonPath} was not written` }],
     };
   }
-  return summarizeBaselineScene(name, readJson(jsonPath), { sceneOut, logPath, jsonPath, markdownPath, command: [process.execPath, ...command] }, options);
+  return summarizeBaselineScene(name, readJson(jsonPath), { sceneOut, logPath, heartbeatPath, jsonPath, markdownPath, command: [process.execPath, ...command], observability: result.observability }, options);
+}
+
+function runObservedProcess(scene, command, heartbeatPath, timeoutMs) {
+  const startedAt = Date.now();
+  let stdout = '';
+  let stderr = '';
+  let stage = 'spawn';
+  let lastTelemetry = null;
+  let lastOutputAt = startedAt;
+  let timedOut = false;
+  let settled = false;
+  const timeline = [{ at: new Date(startedAt).toISOString(), elapsedMs: 0, stage, detail: command.join(' ') }];
+  const child = spawn(process.execPath, command, {
+    cwd: root,
+    env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const recordStage = (nextStage, detail = '') => {
+    if (!nextStage || (nextStage === stage && detail === '')) return;
+    stage = nextStage;
+    timeline.push({ at: new Date().toISOString(), elapsedMs: Date.now() - startedAt, stage, detail });
+    writeHeartbeat('running');
+  };
+  const consume = (stream, chunk) => {
+    const text = chunk.toString();
+    if (stream === 'stdout') stdout += text;
+    else stderr += text;
+    lastOutputAt = Date.now();
+    for (const line of text.split(/\r?\n/)) {
+      const match = line.match(/BlockKart baseline progress:\s*(.+)/);
+      if (!match) continue;
+      const detail = match[1].trim();
+      const telemetryMatch = detail.match(/^telemetry\s+(.+)$/);
+      if (telemetryMatch) {
+        try {
+          lastTelemetry = JSON.parse(telemetryMatch[1]);
+        } catch {
+          lastTelemetry = { telemetryError: 'malformed baseline telemetry progress', raw: tail(telemetryMatch[1]) };
+        }
+      }
+      recordStage(baselineProgressStage(detail, lastTelemetry), detail);
+    }
+  };
+  function heartbeat(status) {
+    return {
+      schemaVersion: 1,
+      kind: 'voplay.renderStressHeartbeat',
+      scene,
+      status,
+      stage,
+      elapsedMs: Date.now() - startedAt,
+      timeoutMs,
+      pid: child.pid ?? null,
+      lastOutputAgoMs: Date.now() - lastOutputAt,
+      stdoutBytes: Buffer.byteLength(stdout),
+      stderrBytes: Buffer.byteLength(stderr),
+      frameIndex: lastTelemetry?.frameIndex ?? null,
+      lastPass: lastTelemetry?.pass ?? null,
+      frameP90Ms: lastTelemetry?.frameP90Ms ?? null,
+      frameP99Ms: lastTelemetry?.frameP99Ms ?? null,
+      resourceChurn: lastTelemetry?.resourceChurn ?? null,
+      lastTelemetryPacket: lastTelemetry?.lastTelemetryPacket ?? null,
+      updatedAt: new Date().toISOString(),
+      timeline,
+    };
+  }
+  function writeHeartbeat(status) {
+    writeFileSync(heartbeatPath, `${JSON.stringify(heartbeat(status), null, 2)}\n`);
+  }
+  child.stdout.on('data', (chunk) => consume('stdout', chunk));
+  child.stderr.on('data', (chunk) => consume('stderr', chunk));
+  writeHeartbeat('running');
+  const interval = setInterval(() => {
+    writeHeartbeat('running');
+    console.error(`voplay render stress heartbeat: scene=${scene} stage=${stage} elapsedMs=${Date.now() - startedAt} lastOutputAgoMs=${Date.now() - lastOutputAt}`);
+  }, heartbeatIntervalMs);
+  return new Promise((resolve) => {
+    const finish = (status, signal, error = null) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(interval);
+      clearTimeout(timeout);
+      recordStage(timedOut ? 'timeout' : (status === 0 ? 'complete' : 'failed'), error?.message ?? signal ?? '');
+      writeHeartbeat(timedOut ? 'timeout' : (status === 0 ? 'pass' : 'fail'));
+      const observability = heartbeat(timedOut ? 'timeout' : (status === 0 ? 'pass' : 'fail'));
+      resolve({
+        status: Number.isInteger(status) ? status : 1,
+        signal,
+        stdout,
+        stderr: `${stderr}${error ? `\n${error.stack ?? error.message}` : ''}`,
+        timedOut,
+        observability,
+        timeoutDiagnostic: timedOut ? {
+          code: 'voplay.renderStress.timeout',
+          scene,
+          stage,
+          elapsedMs: Date.now() - startedAt,
+          timeoutMs,
+          lastOutputAgoMs: Date.now() - lastOutputAt,
+          frameIndex: lastTelemetry?.frameIndex ?? null,
+          lastPass: lastTelemetry?.pass ?? null,
+          frameP90Ms: lastTelemetry?.frameP90Ms ?? null,
+          frameP99Ms: lastTelemetry?.frameP99Ms ?? null,
+          resourceChurn: lastTelemetry?.resourceChurn ?? null,
+          lastTelemetryPacket: lastTelemetry?.lastTelemetryPacket ?? null,
+          timeline,
+        } : null,
+      });
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      recordStage('timeout-signal', `SIGTERM after ${timeoutMs}ms`);
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (!settled) child.kill('SIGKILL');
+      }, 3000).unref();
+    }, timeoutMs);
+    child.once('error', (error) => finish(1, null, error));
+    child.once('close', (status, signal) => finish(status, signal));
+  });
+}
+
+function baselineProgressStage(detail, telemetry) {
+  if (detail.startsWith('telemetry ')) {
+    return `baseline.${telemetry?.stage ?? 'telemetry'}`;
+  }
+  const normalized = detail
+    .replace(/\b(?:port|debugPort|ms|count|profile|completed|ok|skipped|entry|reason|renderers|quiesce|stopped)=\S+/g, '')
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
+  return `baseline.${normalized || 'progress'}`;
 }
 
 function summarizeBaselineScene(name, baseline, meta, options = {}) {
@@ -225,6 +361,17 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
   if ((workload.frameGraphTargets ?? 0) > 0 && workload.frameGraphReadyTargets !== workload.frameGraphTargets) {
     issues.push({ code: 'render.target_not_ready', severity: 0, detail: `${workload.frameGraphReadyTargets}/${workload.frameGraphTargets} targets ready` });
   }
+  for (const [field, code] of [
+    ['frameGraphFailures', 'render.frame_graph_failure'],
+    ['missingResources', 'render.resource_miss'],
+    ['invalidBatches', 'render.invalid_batch'],
+    ['fallbackPaths', 'render.fallback_path'],
+  ]) {
+    const count = numberOr(workload[field], 0);
+    if (count > 0) {
+      issues.push({ code, severity: 0, detail: `${field}=${count}` });
+    }
+  }
   if (strictBudget && resourceChurnOverBudget) {
     issues.push({ code: 'render.resource_churn_over_budget', severity: 1, detail: `${resourceChurnEvents} > ${budgetResourceChurn}` });
   }
@@ -253,6 +400,7 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
     artifacts: {
       directory: meta.sceneOut,
       log: meta.logPath,
+      heartbeat: meta.heartbeatPath,
       json: meta.jsonPath,
       markdown: meta.markdownPath,
       viewportScreenshot: baseline.artifacts?.viewportScreenshot ?? null,
@@ -296,6 +444,20 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
       instances: workload.instances ?? 0,
       triangles: workload.triangles ?? 0,
       postEffects: workload.postEffects ?? 0,
+      frameGraphSkippedPasses: workload.frameGraphSkippedPasses ?? 0,
+      frameGraphFailures: workload.frameGraphFailures ?? 0,
+      filteredDraws: workload.filteredDraws ?? 0,
+      missingResources: workload.missingResources ?? 0,
+      invalidBatches: workload.invalidBatches ?? 0,
+      fallbackPaths: workload.fallbackPaths ?? 0,
+      missingModels: workload.missingModels ?? 0,
+      missingMeshes: workload.missingMeshes ?? 0,
+      missingTextures: workload.missingTextures ?? 0,
+      missingBindGroups: workload.missingBindGroups ?? 0,
+      missingChunks: workload.missingChunks ?? 0,
+      missingTargets: workload.missingTargets ?? 0,
+      invalidBatchIndices: workload.invalidBatchIndices ?? 0,
+      incompatibleDraws: workload.incompatibleDraws ?? 0,
       bufferCreates,
       bindGroupCreates,
       textureUploads,
@@ -328,13 +490,16 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
       resourceFailures,
       restart: baseline.restart,
     },
+    observability: meta.observability,
     issues,
   };
 }
 
 function latestPerfSummary(baseline) {
   const reports = (baseline.perfReports ?? []).filter((report) => report?.kind === 'perf-summary');
-  return reports.at(-1) ?? null;
+  const summary = reports.at(-1) ?? null;
+  const skips = (baseline.perfReports ?? []).filter((report) => report?.kind === 'perf-skip-summary').at(-1) ?? null;
+  return summary ? { ...summary, workload: { ...(summary.workload ?? {}), ...(skips?.workload ?? {}) } } : null;
 }
 
 function shouldIgnoreBaselineIssue(issue, options) {
@@ -511,6 +676,35 @@ function formatMs(value) {
   return Number.isFinite(number) ? `${number.toFixed(2)}ms` : 'n/a';
 }
 
+if (process.argv.includes('--selftest-observability')) {
+  const selftestDir = path.join(outDir, 'observability-selftest');
+  const heartbeatPath = path.join(selftestDir, 'heartbeat.json');
+  rmSync(selftestDir, { recursive: true, force: true });
+  mkdirSync(selftestDir, { recursive: true });
+  const result = await runObservedProcess(
+    'timeout-negative-fixture',
+    ['-e', `console.error('BlockKart baseline progress: telemetry ${JSON.stringify({ stage: 'capture', frameIndex: 42, pass: 'main', frameP90Ms: 16.7, frameP99Ms: 16.7, resourceChurn: 3, lastTelemetryPacket: { status: 'pass', frameGraphFailures: 0 } })}'); setInterval(() => {}, 1000)`],
+    heartbeatPath,
+    100,
+  );
+  const timeoutStageRecorded = result.observability?.timeline?.some((entry) => entry.stage === 'timeout-signal') === true;
+  const telemetryRecorded = result.timeoutDiagnostic?.frameIndex === 42
+    && result.timeoutDiagnostic?.lastPass === 'main'
+    && result.timeoutDiagnostic?.lastTelemetryPacket?.frameGraphFailures === 0;
+  if (!result.timedOut || result.timeoutDiagnostic?.code !== 'voplay.renderStress.timeout' || !timeoutStageRecorded || !telemetryRecorded || !existsSync(heartbeatPath)) {
+    fail(`observability selftest failed: ${JSON.stringify(result)}`);
+  }
+  writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    kind: 'voplay.renderStressObservabilitySelftest',
+    status: 'pass',
+    timeoutDiagnostic: result.timeoutDiagnostic,
+    heartbeat: result.observability,
+  }, null, 2)}\n`);
+  console.log('voplay render stress observability selftest: ok');
+  process.exit(0);
+}
+
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 const baselinePerfArgs = ['--perf-mode', 'stats', '--perf-console', '0', '--perf-gpu-probe', '0', '--perf-diag', 'pulseHybrid'];
@@ -520,20 +714,18 @@ const coverageBudgetOptions = {
   ignoreBaselineSlowFrameIssue: !budgetAllScenes,
 };
 const scenes = [
-  runBaseline(soakOnly ? 'blockkart-quickplay-baseline-soak-10m' : 'blockkart-quickplay-baseline', baselinePerfArgs, { strictBudget: true, captureMs }),
+  await runBaseline(soakOnly ? 'blockkart-quickplay-baseline-soak-10m' : 'blockkart-quickplay-baseline', baselinePerfArgs, { strictBudget: true, captureMs }),
 ];
 if (!soakOnly) {
-  scenes.push(
-    runBaseline('blockkart-primitive-10k', [...coverageArgs, '--stress-profile', 'primitive10k'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }),
-    runBaseline('blockkart-water', [...coverageArgs, '--stress-profile', 'water'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }),
-    runBaseline('blockkart-resource-churn-soak', [...coverageArgs, '--stress-profile', 'resource-churn'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }),
-    runBaseline('blockkart-chunked-world-drive', [...coverageArgs, '--stress-profile', 'chunked-world-drive'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }),
-    runBaseline('blockkart-shadow-post-matrix', [...coverageArgs, '--stress-profile', 'shadow-post-matrix'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }),
-    runBaseline('blockkart-resize-recreate-targets', [...coverageArgs, '--resize-cycle'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }),
-  );
+  scenes.push(await runBaseline('blockkart-primitive-10k', [...coverageArgs, '--stress-profile', 'primitive10k'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
+  scenes.push(await runBaseline('blockkart-water', [...coverageArgs, '--stress-profile', 'water'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
+  scenes.push(await runBaseline('blockkart-resource-churn-soak', [...coverageArgs, '--stress-profile', 'resource-churn'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
+  scenes.push(await runBaseline('blockkart-chunked-world-drive', [...coverageArgs, '--stress-profile', 'chunked-world-drive'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
+  scenes.push(await runBaseline('blockkart-shadow-post-matrix', [...coverageArgs, '--stress-profile', 'shadow-post-matrix'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
+  scenes.push(await runBaseline('blockkart-resize-recreate-targets', [...coverageArgs, '--resize-cycle'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
 }
 if (!soakOnly && restartCount > 0) {
-  scenes.push(runBaseline(`blockkart-restart-${restartCount}`, ['--no-fail-on-issues', ...baselinePerfArgs, '--restart-count', String(restartCount)], { ...coverageBudgetOptions, requirePerfSummary: false, allowBaselineFailureWithJson: true }));
+  scenes.push(await runBaseline(`blockkart-restart-${restartCount}`, ['--no-fail-on-issues', ...baselinePerfArgs, '--restart-count', String(restartCount)], { ...coverageBudgetOptions, requirePerfSummary: false, allowBaselineFailureWithJson: true }));
 }
 
 const p0 = scenes.flatMap((scene) => scene.issues.filter((issue) => issue.severity === 0)).length;

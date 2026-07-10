@@ -4,7 +4,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { requireRepoRoot } from './repo_roots.mjs';
-import { gitDirty, sourceBoundEvidence, sourceTreeDigest } from './source_bound_evidence.mjs';
+import {
+  sourceBoundEvidence,
+  verifySourceBoundEvidence,
+} from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
@@ -29,6 +32,7 @@ const checks = [];
 const gateReports = [];
 const evidenceTable = [];
 const sourceFactRequirements = [];
+const currentCiRunId = process.env.VO_DEV_CI_RUN_ID ?? null;
 
 function addCheck(phase, code, status, detail, evidence = {}) {
   const evidenceItems = Array.isArray(evidence) ? evidence : Object.values(evidence ?? {});
@@ -539,58 +543,12 @@ function activePlanSnapshot(activePlanSource) {
 }
 
 function freshEvidenceIssues(report, expectedGate) {
-  const evidence = report?.freshEvidence;
-  const issues = [];
-  if (!evidence || typeof evidence !== 'object') {
-    return ['missing freshEvidence'];
-  }
-  if (expectedGate && evidence.gate !== expectedGate) {
-    issues.push(`gate ${evidence.gate ?? '(missing)'} did not match ${expectedGate}`);
-  }
-  for (const [field, prefix] of [
-    ['taskRunId', expectedGate ? `${expectedGate}:` : ''],
-    ['sourceDigest', 'sha256:'],
-    ['gateDigest', 'sha256:'],
-    ['artifactDigest', 'sha256:'],
-    ['runBindingDigest', 'sha256:'],
-  ]) {
-    if (typeof evidence[field] !== 'string' || evidence[field].length === 0) {
-      issues.push(`${field} missing`);
-    } else if (prefix && !evidence[field].startsWith(prefix)) {
-      issues.push(`${field} has unexpected prefix`);
-    }
-  }
-  if (typeof evidence.generatedAt !== 'string' || Number.isNaN(Date.parse(evidence.generatedAt))) {
-    issues.push('generatedAt missing or invalid');
-  }
-  if (!evidence.testedCommits || typeof evidence.testedCommits !== 'object' || Object.keys(evidence.testedCommits).length === 0) {
-    issues.push('testedCommits missing');
-  }
-  if (!evidence.dirtyFlags || typeof evidence.dirtyFlags !== 'object' || Object.keys(evidence.dirtyFlags).length === 0) {
-    issues.push('dirtyFlags missing');
-  }
-  if (!evidence.verdict || evidence.verdict.status !== 'pass') {
-    issues.push('freshEvidence verdict is missing or not pass');
-  }
-  for (const repo of evidence.repos ?? []) {
-    if (!repo?.root || !repo?.name) {
-      issues.push('repo evidence missing name or root');
-      continue;
-    }
-    const currentCommit = gitCommit(repo.root);
-    const currentDirty = gitDirty(repo.root);
-    const currentSourceDigest = sourceTreeDigest(repo.root);
-    if (repo.commit !== currentCommit) {
-      issues.push(`${repo.name} commit ${repo.commit ?? '(missing)'} does not match current ${currentCommit ?? '(missing)'}`);
-    }
-    if (repo.dirty !== currentDirty) {
-      issues.push(`${repo.name} dirty flag ${repo.dirty} does not match current ${currentDirty}`);
-    }
-    if (repo.sourceDigest !== currentSourceDigest) {
-      issues.push(`${repo.name} sourceDigest does not match current source tree`);
-    }
-  }
-  return issues;
+  return verifySourceBoundEvidence({
+    evidence: report?.freshEvidence,
+    expectedGate,
+    expectedCiRunId: currentCiRunId,
+    root,
+  });
 }
 
 function checkReport(file, phase, code, validate, expectedFreshGate = null) {
@@ -624,6 +582,25 @@ function sceneNames(report) {
 
 function allScenesPass(report) {
   return (report?.scenes || []).every((scene) => scene.status === 'pass');
+}
+
+function sceneObservabilityFailures(report) {
+  return (report?.scenes || []).flatMap((scene) => {
+    const heartbeat = scene?.observability;
+    const complete = heartbeat?.status === 'pass'
+      && heartbeat?.stage === 'complete'
+      && Array.isArray(heartbeat?.timeline)
+      && heartbeat.timeline.length > 0
+      && Number.isFinite(heartbeat?.frameIndex)
+      && typeof heartbeat?.lastPass === 'string'
+      && heartbeat.lastPass.length > 0
+      && Number.isFinite(heartbeat?.frameP90Ms)
+      && Number.isFinite(heartbeat?.frameP99Ms)
+      && Number.isFinite(heartbeat?.resourceChurn)
+      && heartbeat?.lastTelemetryPacket
+      && typeof heartbeat.lastTelemetryPacket === 'object';
+    return complete ? [] : [{ scene: scene?.name ?? null, heartbeat: heartbeat ?? null }];
+  });
 }
 
 function scenarioNames(report) {
@@ -1016,10 +993,11 @@ const executableReplayTokens = [
 ];
 const executableReplayMissingTokens = executableReplayTokens.filter((token) => !replay.includes(token) && !physicsStressSource.includes(token));
 const replayUsesRecordedTrace = /runScenarioWithReplay\s*\([^)]*true/.test(physicsStressSource)
-  && /for[^\n]*sample[^\n]*range\s+trace\.Samples/.test(physicsStressSource)
-  && /sample\.BackendApplyHash/.test(physicsStressSource)
-  && /sample\.PoseHash/.test(physicsStressSource)
-  && /sample\.TelemetryHash/.test(physicsStressSource);
+  && physicsStressSource.includes('Replays []ReplayReport')
+  && physicsStressSource.includes('for _, def := range defs')
+  && physicsStressSource.includes('ValidatePhysicsReplaySample')
+  && physicsStressSource.includes('ValidatePhysicsBackendCommandReplay')
+  && physicsStressSource.includes('StepFleet');
 const freshProcessReplayReady = physicsStressSource.includes('RunPhysicsReplayVerifierProcess')
   || physicsStressSource.includes('execPhysicsReplayVerifier')
   || physicsStressSource.includes('--verify-replay-trace');
@@ -1039,6 +1017,17 @@ const blockKartDirectIntentBypassHits = sourceRegexHits(
   /UpdateIntentFromSyncedState\s*\(|\b[A-Za-z_][A-Za-z0-9_]*\.UpdateIntent\s*\(/,
 );
 const blockKartRuntimeContextBody = bodyOfType(blockKartWorld, 'BlockKartRuntimeContext');
+const blockKartWorldFields = bodyOfType(blockKartWorld, 'World')
+  .split(/\r?\n/)
+  .map((line) => line.trim())
+  .filter((line) => /^[A-Za-z_][A-Za-z0-9_]*\s+/.test(line));
+const blockKartWorldAllowedGroups = new Set([
+  'core BlockKartRuntimeCore',
+  'input BlockKartRuntimeInputState',
+  'race BlockKartRuntimeRaceState',
+  'kart BlockKartRuntimeKartState',
+  'hud BlockKartRuntimeHudState',
+]);
 const blockKartRuntimeContextFields = blockKartRuntimeContextBody
   .split(/\r?\n/)
   .map((line, index) => ({ line: index + 1, text: line.trim() }))
@@ -1078,9 +1067,10 @@ const constraintBypassHits = [
   ...sourceRegexHits([{ path: 'scene3d/physics.vo', source: physics }], /\b(ApplyEntityPhysicsTarget|ApplyEntityPhysicsConstraint)\(/),
   ...sourceRegexHits([{ path: 'scene3d/vehicle_road_edge_assist.vo', source: readText(path.join(voplayRoot, 'scene3d/vehicle_road_edge_assist.vo')) || '' }], /\bvehicleBackendConstraintCommand\b/),
 ];
-const physicsStressBypassCountersReady = physicsStressSource.includes('PacketErrors')
-  && physicsStressSource.includes('DirectBypassHits')
-  && physicsStressSource.includes('ConstraintBypassHits');
+const physicsStressCommandFailureCountersReady = physicsStressSource.includes('PacketErrors')
+  && physicsStressSource.includes('RejectedBackendCommands')
+  && physicsStressSource.includes('DroppedFixedSteps')
+  && physicsStressSource.includes('PhysicsRejectedCommandCount');
 const expectedCommits = parseExpectedCommits(projectToml);
 const planSnapshot = activePlanSnapshot(activeQualityPlanSource);
 const acceptedVolangPlanCommits = [gitCommit(root), gitRev(root, 'HEAD^')].filter(Boolean);
@@ -1091,6 +1081,7 @@ const activePlanSnapshotFresh =
   && planSnapshot.BlockKart === expectedCommits.get('BlockKart')
   && planSnapshot.BlockKart === gitCommit(blockKartRoot);
 
+addCheck('phase-0', 'evidence.ci_run_id_present', Boolean(currentCiRunId), 'industrial readiness must run through vo-dev with a shared CI run id', { currentCiRunId });
 addCheck('phase-0', 'report.phase_claims_guarded', scanScriptIndustrialClaims().length === 0, 'phase scripts do not claim industrial readiness', { offenders: scanScriptIndustrialClaims() });
 addCheck('phase-1', 'renderer.submit_frame_size', submitFrameLines <= 220, 'submit_frame is only an orchestration body', { lines: submitFrameLines, budget: 220 });
 addCheck('phase-1', 'renderer.file_size', rendererLines <= 1600, 'renderer.rs is reduced to orchestration and backend glue', { lines: rendererLines, budget: 1600 });
@@ -1459,16 +1450,16 @@ addRequiredSourceFact(
   { executableReplayMissingTokens, replayUsesRecordedTrace, freshProcessReplayReady, sameRuntimeReplayDriftOnly },
 );
 addRequiredSourceFact(
-  'physics_stress_reports_packet_and_bypass_counters',
-  physicsStressBypassCountersReady,
-  'industrial physics stress reports packetErrors, directBypassHits, and constraintBypassHits with zero-tolerance gates',
+  'physics_stress_reports_packet_and_command_failure_counters',
+  physicsStressCommandFailureCountersReady,
+  'industrial physics stress reports packet errors and rejected backend commands with zero-tolerance gates',
   {
     owner: 'voplay/scene3d',
     file: 'examples/physics_stress/main.vo',
     line: lineOf(physicsStressSource, 'type ScenarioReport struct'),
-    reason: 'physics stress report lacks packetErrors/directBypassHits/constraintBypassHits fields and gates',
-    requiredFix: 'Emit packetErrors, directBypassHits, and constraintBypassHits from every scenario and fail industrial stress when any counter is nonzero.',
-    physicsStressBypassCountersReady,
+    reason: 'physics stress report lacks packet error or rejected backend command fields and gates',
+    requiredFix: 'Emit packet errors and rejected backend commands from every scenario and fail industrial stress when either counter is nonzero.',
+    physicsStressCommandFailureCountersReady,
   },
 );
 addRequiredSourceFact(
@@ -1509,15 +1500,17 @@ addRequiredSourceFact(
 );
 addRequiredSourceFact(
   'blockkart_runtime_context_not_mega_owner',
-  blockKartRuntimeContextFields.length <= 8
-    && blockKartRuntimeContextForbiddenFields.length === 0
-    && blockKartRuntimeContextFields.every((entry) => blockKartRuntimeContextAllowedGroups.has(entry.text))
+  blockKartRuntimeContextBody.trim() === ''
+    && blockKartRuntimeContextFields.length === 0
+    && blockKartWorldFields.length === blockKartWorldAllowedGroups.size
+    && blockKartWorldFields.every((entry) => blockKartWorldAllowedGroups.has(entry))
     && blockKartOwnerRuntimeContextHits.length === 0,
-  'BlockKartRuntimeContext does not replace World as a hidden mega-owner and owner methods do not mutate through a broad runtime context',
+  'BlockKartRuntimeContext is removed, World contains only explicit owner state groups, and owner methods do not mutate through a broad runtime context',
   {
     fieldCount: blockKartRuntimeContextFields.length,
     forbiddenFields: blockKartRuntimeContextForbiddenFields.slice(0, 40),
     ownerRuntimeContextHits: blockKartOwnerRuntimeContextHits.slice(0, 40),
+    worldFields: blockKartWorldFields,
   },
 );
 addRequiredSourceFact(
@@ -1867,7 +1860,8 @@ const renderStress = checkReport(path.join(root, 'target/voplay-render-stress-bu
   const names = sceneNames(report);
   const missing = required.filter((name) => !names.has(name));
   const sourceMismatches = sceneSourceMismatches(report);
-  const ok = report.status === 'pass' && allScenesPass(report) && missing.length === 0 && sourceMismatches.length === 0;
+  const observabilityFailures = sceneObservabilityFailures(report);
+  const ok = report.status === 'pass' && allScenesPass(report) && missing.length === 0 && sourceMismatches.length === 0 && observabilityFailures.length === 0;
   return {
     ok,
     detail: 'render stress budgeted report passes all required industrial scenes',
@@ -1875,6 +1869,7 @@ const renderStress = checkReport(path.join(root, 'target/voplay-render-stress-bu
       status: report.status,
       missingScenes: missing,
       sourceMismatches,
+      observabilityFailures,
       sceneCount: report.scenes?.length || 0,
       summary: report.summary || null,
     },
@@ -1883,12 +1878,14 @@ const renderStress = checkReport(path.join(root, 'target/voplay-render-stress-bu
 
 checkReport(path.join(root, 'target/voplay-render-soak-10m/report.json'), 'phase-5', 'gate.render_soak_10m', (report) => {
   const sourceMismatches = sceneSourceMismatches(report);
+  const observabilityFailures = sceneObservabilityFailures(report);
   return {
-    ok: report.status === 'pass' && allScenesPass(report) && sourceMismatches.length === 0,
+    ok: report.status === 'pass' && allScenesPass(report) && sourceMismatches.length === 0 && observabilityFailures.length === 0,
     detail: 'ten minute render soak report exists and passes',
     evidence: {
       status: report.status,
       sourceMismatches,
+      observabilityFailures,
       sceneCount: report.scenes?.length || 0,
       summary: report.summary || null,
     },
@@ -1896,16 +1893,35 @@ checkReport(path.join(root, 'target/voplay-render-soak-10m/report.json'), 'phase
 }, 'voplay-render-soak-10m');
 
 checkReport(path.join(root, 'target/voplay-physics-industrial-stress/report.json'), 'phase-5', 'gate.physics_industrial_stress', (report) => {
-  const required = ['skidpad', 'slalom', 'drift-turbo', 'boost-pad', 'offroad-transition', 'surface-transition', 'jump-landing', 'wall-impact', 'rail-ride', 'wall-ride', 'water-skim', 'recovery', 'multi-vehicle-scripted-soak'];
+  const required = ['skidpad', 'slalom', 'drift-turbo', 'boost-pad', 'offroad-transition', 'surface-transition', 'jump-landing', 'wall-impact', 'rail-ride', 'wall-ride', 'water-skim', 'road-edge-assist', 'sleep-wake', 'pose-reset', 'recovery', 'multi-vehicle-scripted-soak'];
   const names = scenarioNames(report);
   const missing = required.filter((name) => !names.has(name));
+  const scenarioByName = new Map((report.scenarios ?? []).map((scenario) => [scenario.name, scenario]));
+  const replayByScenario = new Map((report.replays ?? []).map((replay) => [replay.referenceScenario, replay]));
+  const replayScenarioFailures = required.filter((name) => {
+    const replay = replayByScenario.get(name);
+    const scenario = scenarioByName.get(name);
+    return !replay
+      || replay.status !== 'pass'
+      || replay.freshProcess !== true
+      || Number(replay.mismatches ?? Infinity) !== 0
+      || Number(replay.samples ?? 0) !== Number(scenario?.steps ?? 0) * Number(scenario?.vehicleCount ?? 0)
+      || Number(replay.vehicleCount ?? 0) !== Number(scenario?.vehicleCount ?? 0)
+      || Number(replay.backendCommandCount ?? 0) <= 0;
+  });
+  const fleetReplay = replayByScenario.get('multi-vehicle-scripted-soak');
   const replayOk = report.replay?.status === 'pass'
     && Number(report.replay?.samples ?? 0) > 0
     && Number(report.replay?.mismatches ?? Infinity) === 0
     && report.replay?.freshProcess === true
     && Number.isFinite(Number(report.replay?.stepHash))
     && Number.isFinite(Number(report.replay?.backendPacketHash))
-    && (!Number.isFinite(Number(report.replay?.driftMeters)) || Number(report.replay?.driftMeters) <= 0.01);
+    && Number.isFinite(Number(report.replay?.backendCommandHash))
+    && Number(report.replay?.backendCommandHash) > 0
+    && (report.replays ?? []).length === required.length
+    && replayScenarioFailures.length === 0
+    && Number(fleetReplay?.vehicleCount ?? 0) === 24
+    && Number(fleetReplay?.samples ?? 0) === 240 * 24;
   const ok = report.status === 'pass' && allIndustrialPhysicsSamplesClean(report) && missing.length === 0 && replayOk;
   return {
     ok,
@@ -1914,6 +1930,9 @@ checkReport(path.join(root, 'target/voplay-physics-industrial-stress/report.json
       status: report.status,
       missingScenarios: missing,
       scenarioCount: report.scenarios?.length || 0,
+      replayScenarioCount: report.replays?.length || 0,
+      replayScenarioFailures,
+      fleetReplay: fleetReplay || null,
       replay: report.replay || null,
       summary: report.summary || null,
     },
@@ -2090,7 +2109,7 @@ const sourceFacts = {
   rawPhysicsBypassHits,
   productPhysicsBypassHits,
   constraintBypassHits,
-  physicsStressBypassCountersReady,
+  physicsStressCommandFailureCountersReady,
   invalidTelemetryStressBypass,
   executableReplayMissingTokens,
   sameRuntimeReplayDriftOnly,
@@ -2105,6 +2124,55 @@ const sourceFacts = {
   soakReportExists: existsSync(path.join(root, 'target/voplay-render-soak-10m/report.json')),
   requiredFalseFacts,
 };
+const generatedAt = new Date().toISOString();
+const freshEvidence = sourceBoundEvidence({
+  gate: 'voplay-industrial-readiness',
+  generatedAt,
+  root,
+  repos: [
+    { name: 'volang', root },
+    { name: 'voplay', root: voplayRoot },
+    { name: 'BlockKart', root: blockKartRoot },
+  ],
+  gateFiles: [
+    'scripts/ci/voplay_industrial_readiness.mjs',
+    'scripts/ci/repo_roots.mjs',
+    'scripts/ci/source_bound_evidence.mjs',
+    'scripts/ci/voplay_render_architecture_lint.mjs',
+    'scripts/ci/blockkart_product_boundary_strict.mjs',
+    'scripts/ci/quickplay_source_audit.mjs',
+    'scripts/ci/voplay_render_stress.mjs',
+    'scripts/ci/voplay_physics_stress.mjs',
+    'scripts/ci/blockkart_baseline.mjs',
+    'eng/tasks.toml',
+    'eng/ci.toml',
+    'eng/project.toml',
+  ],
+  artifacts: [
+    'apps/studio/public/quickplay/blockkart/project.json',
+    'apps/studio/public/quickplay/blockkart/deps.json',
+    'apps/studio/public/quickplay/blockkart/provenance.json',
+    'target/voplay-render-stress-budgeted/report.json',
+    'target/voplay-render-soak-10m/report.json',
+    'target/voplay-physics-industrial-stress/report.json',
+    'target/blockkart-baseline/blockkart-baseline.json',
+    'target/blockkart-baseline-restart-50/blockkart-baseline.json',
+  ],
+});
+const selfFreshEvidenceIssues = verifySourceBoundEvidence({
+  evidence: freshEvidence,
+  expectedGate: 'voplay-industrial-readiness',
+  expectedCiRunId: currentCiRunId,
+  root,
+});
+addCheck(
+  'phase-0',
+  'evidence.self_fresh',
+  selfFreshEvidenceIssues.length === 0 && freshEvidence.verdict.status === 'pass',
+  'industrial readiness final verdict is bound to its own fresh current-source evidence',
+  { freshnessIssues: selfFreshEvidenceIssues, verdict: freshEvidence.verdict },
+);
+
 const failures = checks.filter((check) => check.status !== 'pass');
 const sourceAuditFailures = failures.filter((failure) => (
   failure.phase === 'source-audit'
@@ -2154,47 +2222,37 @@ const firstPrinciplesVerdict = {
 };
 const industrialReady = failures.length === 0;
 const dirtyProvenance = dirtyProvenanceEntries.length > 0;
-const generatedAt = new Date().toISOString();
-const freshEvidence = sourceBoundEvidence({
-  gate: 'voplay-industrial-readiness',
-  generatedAt,
-  root,
-  repos: [
-    { name: 'volang', root },
-    { name: 'voplay', root: voplayRoot },
-    { name: 'BlockKart', root: blockKartRoot },
-  ],
-  gateFiles: [
-    'scripts/ci/voplay_industrial_readiness.mjs',
-    'scripts/ci/repo_roots.mjs',
-    'scripts/ci/source_bound_evidence.mjs',
-    'scripts/ci/voplay_render_architecture_lint.mjs',
-    'scripts/ci/blockkart_product_boundary_strict.mjs',
-    'scripts/ci/quickplay_source_audit.mjs',
-    'scripts/ci/voplay_render_stress.mjs',
-    'scripts/ci/voplay_physics_stress.mjs',
-    'scripts/ci/blockkart_baseline.mjs',
-    'eng/tasks.toml',
-    'eng/ci.toml',
-    'eng/project.toml',
-  ],
-  artifacts: [
-    'apps/studio/public/quickplay/blockkart/project.json',
-    'apps/studio/public/quickplay/blockkart/deps.json',
-    'apps/studio/public/quickplay/blockkart/provenance.json',
-    'target/voplay-render-stress-budgeted/report.json',
-    'target/voplay-render-soak-10m/report.json',
-    'target/voplay-physics-industrial-stress/report.json',
-    'target/blockkart-baseline/blockkart-baseline.json',
-    'target/blockkart-baseline-restart-50/blockkart-baseline.json',
-  ],
-});
+const freshSourceBoundReports = selfFreshEvidenceIssues.length === 0
+  && freshEvidence.verdict.status === 'pass'
+  && failures.every((failure) => !String(failure.code ?? '').includes('fresh'));
+const artifactSourceAgreement = !dirtyProvenance && industrialReady;
+const architectureEleganceReady = industrialReady
+  && sourceAuditFailures.length === 0
+  && firstPrinciplesVerdict.status === 'pass';
 const readiness = {
   schemaVersion: 1,
   kind: 'voplay.industrialReadinessReport',
   generatedAt,
   freshEvidence,
   industrialReady,
+  architectureEleganceReady,
+  sourceFirstPrinciplesReview: firstPrinciplesVerdict.status,
+  freshSourceBoundReports,
+  artifactSourceAgreement,
+  reportValidity: {
+    status: industrialReady && freshSourceBoundReports ? 'pass' : 'fail',
+    ciRunId: currentCiRunId,
+    selfFreshnessIssues: selfFreshEvidenceIssues,
+    failureCount: failures.length,
+  },
+  architectureEvidence: {
+    status: architectureEleganceReady ? 'pass' : 'fail',
+    requiredSourceFactsPass: requiredFalseFacts.length === 0,
+    sourceAuditPass: sourceAuditFailures.length === 0,
+    firstPrinciplesPass: firstPrinciplesVerdict.status === 'pass',
+    renderStressPass: renderStress?.status === 'pass',
+  },
+  sourceReviewEvidence: firstPrinciplesVerdict,
   completionPolicy: 'phase gates may pass; only this Final Gate may report industrialReady true',
   strictMode: !allowNotReady,
   roots: {

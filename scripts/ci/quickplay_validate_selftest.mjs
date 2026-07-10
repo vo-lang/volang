@@ -2,6 +2,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,6 +12,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requiredVpakProducerInputPaths } from './blockkart_vpak_policy.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const validator = path.join(root, 'scripts/ci/quickplay_validate.mjs');
@@ -84,6 +86,7 @@ function initBlockKartRepo(repoRoot) {
   writeFile(path.join(repoRoot, 'vo.mod'), 'module github.com/vo-lang/blockkart\nvo ^0.1.0\n\nrequire github.com/vo-lang/vogui v0.1.15\nrequire github.com/vo-lang/voplay v0.1.28\n');
   writeFile(path.join(repoRoot, 'assets/blockkart.vpak'), asset);
   writeFile(path.join(repoRoot, 'tools/pack_primitive_assets.vo'), 'package main\n\nfunc main() {}\n');
+  writeFile(path.join(repoRoot, 'tools/vpak_provenance.mjs'), 'export const provenance = true;\n');
   writeFile(path.join(repoRoot, 'tools/generate_primitive_terrain.mjs'), 'export const generated = true;\n');
   writeFile(path.join(repoRoot, 'tools/paint_terrain_textures.mjs'), 'export const painted = true;\n');
   writeFile(path.join(repoRoot, 'tools/terrain_heightfield_spec.mjs'), 'export const heightmapSize = 8;\n');
@@ -103,6 +106,11 @@ function initBlockKartRepo(repoRoot) {
     'assets/maps/primitive_track/terrain_splat_large.png',
   ]) {
     writeFile(path.join(repoRoot, relative), Buffer.from(`selftest ${relative}\n`, 'utf8'));
+  }
+  for (const relative of requiredVpakProducerInputPaths.filter((entry) => !entry.startsWith('workspace:'))) {
+    if (!existsSync(path.join(repoRoot, relative))) {
+      writeFile(path.join(repoRoot, relative), Buffer.from(`selftest ${relative}\n`, 'utf8'));
+    }
   }
   git(repoRoot, ['init']);
   git(repoRoot, ['config', 'user.email', 'quickplay-selftest@example.invalid']);
@@ -300,9 +308,6 @@ size = ${voplayWasm.byteLength}
 digest = "${sha256Digest(voplayWasm)}"
 `;
   writeFile(path.join(blockKartRoot, 'vo.lock'), lock);
-  git(blockKartRoot, ['add', '.']);
-  git(blockKartRoot, ['commit', '-m', 'selftest fixture']);
-  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: blockKartRoot, encoding: 'utf8' }).trim();
   const sourceAllowlist = [
     {
       path: 'tools/pack_primitive_assets.vo',
@@ -316,6 +321,7 @@ digest = "${sha256Digest(voplayWasm)}"
   ];
   const vpakInputs = [
     'tools/pack_primitive_assets.vo',
+    'tools/vpak_provenance.mjs',
     'assets/maps/primitive_track/blockkart.map.json',
     'assets/maps/primitive_track/lowpoly_terrain.glb',
     'assets/maps/primitive_track/lowpoly_terrain_lod.glb',
@@ -348,6 +354,67 @@ digest = "${sha256Digest(voplayWasm)}"
     'assets/maps/primitive_track/lowpoly_terrain_height_grid.bin',
     'assets/maps/primitive_track/terrain_splat_large.png',
   ];
+  const canonicalInputPaths = [...new Set([
+    ...requiredVpakProducerInputPaths.filter((entry) => !entry.startsWith('workspace:')),
+    ...vpakInputs,
+    ...paintInputs,
+    ...paintOutputs,
+    ...terrainInputs,
+    ...terrainOutputs,
+  ])].sort();
+  const canonicalInputs = repoFileEntries(blockKartRoot, canonicalInputPaths).map((entry) => ({
+    path: entry.path,
+    sha256: entry.digest.slice('sha256:'.length),
+    size: entry.size,
+  }));
+  for (const workspacePath of [
+    ...requiredVpakProducerInputPaths.filter((entry) => entry.startsWith('workspace:')),
+    'workspace:github.com/vo-lang/voplay/scene3d/blockkart_pack.vo',
+  ]) {
+    canonicalInputs.push({
+      path: workspacePath,
+      sha256: createHash('sha256').update(`selftest ${workspacePath}`).digest('hex'),
+      size: Buffer.byteLength(`selftest ${workspacePath}`),
+    });
+  }
+  canonicalInputs.sort((a, b) => a.path.localeCompare(b.path));
+  const archiveEntries = Array.from({ length: 37 }, (_, index) => ({
+    path: `assets/selftest-${String(index).padStart(2, '0')}.bin`,
+    kind: 'selftest',
+    sourcePath: `assets/selftest-${String(index).padStart(2, '0')}.bin`,
+    sourceSha256: createHash('sha256').update(`selftest-${index}`).digest('hex'),
+    sourceSize: index + 1,
+    contentHash: `crc32:${index.toString(16).padStart(8, '0')}`,
+    dependencies: [],
+    compression: 0,
+    rawSize: index + 1,
+    storedSize: index + 1,
+    storedChecksum: index,
+  }));
+  const canonicalManifest = {
+    schemaVersion: 1,
+    kind: 'blockkart.vpakProducerManifest',
+    owner: 'BlockKart',
+    command: ['vo', 'run', 'tools/pack_primitive_assets.vo'],
+    pack: {
+      path: 'assets/blockkart.vpak',
+      sha256: sha256Digest(assetBytes).slice('sha256:'.length),
+      size: assetBytes.byteLength,
+    },
+    inputs: canonicalInputs,
+    payloadInputCount: 37,
+    archiveEntryCount: 37,
+    workspaceSourceInputCount: 1,
+    archiveEntries,
+    internalManifest: { pack: 'BlockKart', version: 'selftest', assetCount: 37, sha256: createHash('sha256').update('selftest manifest').digest('hex') },
+    upstream: [],
+  };
+  canonicalManifest.producerDigest = createHash('sha256').update(JSON.stringify(canonicalManifest)).digest('hex');
+  const canonicalManifestBytes = Buffer.from(jsonText(canonicalManifest), 'utf8');
+  writeFile(path.join(blockKartRoot, 'assets/blockkart.vpak.provenance.json'), canonicalManifestBytes);
+  git(blockKartRoot, ['add', '.']);
+  git(blockKartRoot, ['commit', '-m', 'selftest fixture']);
+  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: blockKartRoot, encoding: 'utf8' }).trim();
 
   const project = {
     schemaVersion: 1,
@@ -359,6 +426,7 @@ digest = "${sha256Digest(voplayWasm)}"
     sourceAllowlist,
     files: [
       { path: 'assets/blockkart.vpak', contentBase64: assetBytes.toString('base64') },
+      { path: 'assets/blockkart.vpak.provenance.json', content: canonicalManifestBytes.toString('utf8') },
       { path: 'main.vo', content: readFileSync(path.join(blockKartRoot, 'main.vo'), 'utf8') },
       { path: 'vo.lock', content: lock },
       { path: 'vo.mod', content: readFileSync(path.join(blockKartRoot, 'vo.mod'), 'utf8') },
@@ -400,11 +468,13 @@ digest = "${sha256Digest(voplayWasm)}"
     },
     inputs: [
       'apps/studio/scripts/package_blockkart_quickplay.mjs',
+      'scripts/ci/voplay_current_wasm.mjs',
       'eng/project.toml',
       'external:BlockKart',
       'external:BlockKart/tools/pack_primitive_assets.vo',
       'external:BlockKart/tools/generate_primitive_terrain.mjs',
       'external:BlockKart/tools/paint_terrain_textures.mjs',
+      'external:BlockKart/tools/vpak_provenance.mjs',
       'external:BlockKart/tools/terrain_heightfield_spec.mjs',
       'external:BlockKart/tools/terrain_recipe.mjs',
       'external:BlockKart/terrain/recipes/primitive_concept_v1.json',
@@ -428,8 +498,18 @@ digest = "${sha256Digest(voplayWasm)}"
         kind: 'vpak',
         output: 'assets/blockkart.vpak',
         command: ['vo', 'run', 'tools/pack_primitive_assets.vo'],
-        inputs: repoFileEntries(blockKartRoot, vpakInputs),
+        inputs: canonicalInputs.map((entry) => ({ path: entry.path, digest: `sha256:${entry.sha256}`, size: entry.size })),
         outputs: repoFileEntries(blockKartRoot, ['assets/blockkart.vpak']),
+        producerManifest: {
+          path: 'assets/blockkart.vpak.provenance.json',
+          sha256: sha256Digest(canonicalManifestBytes),
+          size: canonicalManifestBytes.byteLength,
+          producerDigest: canonicalManifest.producerDigest,
+        },
+        archiveEntryCount: 37,
+        payloadInputCount: 37,
+        workspaceSourceInputCount: 1,
+        archiveEntries,
         upstream: [
           {
             id: 'painted-terrain-textures',
@@ -484,6 +564,7 @@ function runValidator(dir, blockKartRoot) {
       QUICKPLAY_DIR: dir,
       BLOCKKART_ROOT: blockKartRoot,
       BLOCKKART_EXPECTED_COMMIT: blockKartExpectedCommit,
+      QUICKPLAY_VALIDATE_SELFTEST: '1',
     },
     encoding: 'utf8',
     maxBuffer: 20 * 1024 * 1024,

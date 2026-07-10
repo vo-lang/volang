@@ -5,12 +5,15 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { requireRepoRoot } from './repo_roots.mjs';
+import { requiredVpakProducerInputPaths } from './blockkart_vpak_policy.mjs';
 import { sourceBoundEvidence } from './source_bound_evidence.mjs';
+import { verifyCurrentVoplayWasm } from './voplay_current_wasm.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const quickplayDir = resolve(process.env.QUICKPLAY_DIR ?? join(root, 'apps/studio/public/quickplay/blockkart'));
 const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const outDir = resolve(argValue('--out-dir') || process.env.QUICKPLAY_SOURCE_AUDIT_OUT_DIR || join(root, 'target/quickplay-source-audit'));
+const voplayCurrentWasmRoot = resolve(process.env.VOPLAY_CURRENT_WASM_OUT_DIR ?? join(root, 'target/voplay-current-wasm'));
 
 const dependencyRepos = new Map([
   ['github.com/vo-lang/vogui', requireRepoRoot('VOGUI_ROOT', 'vogui')],
@@ -227,10 +230,7 @@ function repoSourceBytesForAudit(mod, files, entry, sourceBytes) {
 }
 
 const requiredVpakProducerOutput = 'assets/blockkart.vpak';
-const requiredVpakProducerInputPaths = [
-  'tools/pack_primitive_assets.vo',
-  'assets/maps/primitive_track/blockkart.map.json',
-];
+const requiredVpakProducerManifest = 'assets/blockkart.vpak.provenance.json';
 const requiredTerrainProducerInputs = [
   'tools/generate_primitive_terrain.mjs',
   'tools/terrain_heightfield_spec.mjs',
@@ -275,7 +275,6 @@ function validateDigestEntries(entries, requiredPaths, issues, owner, subsystem,
   const entriesByPath = entryMap(entries);
   for (const requiredPath of requiredPaths) {
     const actual = entriesByPath.get(requiredPath);
-    const expected = sourceDigestEntry(requiredPath);
     if (!actual) {
       issue(issues, owner, subsystem, 'P0', `${producerLabel} missing producer digest entry for ${requiredPath}`, {
         file: 'apps/studio/public/quickplay/blockkart/provenance.json',
@@ -285,6 +284,10 @@ function validateDigestEntries(entries, requiredPaths, issues, owner, subsystem,
       });
       continue;
     }
+    if (requiredPath.startsWith('workspace:')) {
+      continue;
+    }
+    const expected = sourceDigestEntry(requiredPath);
     if (expected.missing || actual.digest !== expected.digest || actual.size !== expected.size) {
       issue(issues, owner, subsystem, 'P0', `${producerLabel} producer digest entry is stale for ${requiredPath}`, {
         file: 'apps/studio/public/quickplay/blockkart/provenance.json',
@@ -299,6 +302,20 @@ function validateDigestEntries(entries, requiredPaths, issues, owner, subsystem,
 }
 
 function validateBlockKartProducerProvenance(project, provenance, packaged, issues) {
+  try {
+    execFileSync(process.execPath, ['tools/vpak_provenance.mjs', '--check'], {
+      cwd: blockKartRoot,
+      env: process.env,
+      stdio: 'pipe',
+    });
+  } catch (error) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'Current BlockKart vpak failed canonical manifest verification', {
+      file: 'assets/blockkart.vpak.provenance.json',
+      needle: '"producerDigest"',
+      detail: String(error?.stderr || error?.message || error),
+      requiredFix: 'Rebuild assets/blockkart.vpak and its canonical producer manifest before quickplay packaging.',
+    });
+  }
   const packagedVpak = packaged.get(requiredVpakProducerOutput);
   const packagedVpakBytes = fileBytes(packagedVpak);
   if (!packagedVpakBytes) {
@@ -308,6 +325,25 @@ function validateBlockKartProducerProvenance(project, provenance, packaged, issu
       requiredFix: 'Regenerate the quickplay package with the BlockKart runtime vpak embedded.',
     });
     return;
+  }
+  const packagedManifestBytes = fileBytes(packaged.get(requiredVpakProducerManifest));
+  const currentManifestPath = join(blockKartRoot, requiredVpakProducerManifest);
+  const currentManifestBytes = existsSync(currentManifestPath) ? readFileSync(currentManifestPath) : null;
+  let canonicalManifest = null;
+  if (!packagedManifestBytes || !currentManifestBytes) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'Quickplay package must include the canonical vpak producer manifest', {
+      file: 'apps/studio/public/quickplay/blockkart/project.json',
+      needle: requiredVpakProducerManifest,
+      requiredFix: 'Rebuild assets/blockkart.vpak and package its canonical producer manifest sidecar.',
+    });
+  } else if (sha256(packagedManifestBytes) !== sha256(currentManifestBytes)) {
+    issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'Packaged vpak producer manifest differs from current BlockKart source', {
+      file: 'apps/studio/public/quickplay/blockkart/project.json',
+      needle: requiredVpakProducerManifest,
+      requiredFix: 'Regenerate quickplay from the current canonical vpak producer manifest.',
+    });
+  } else {
+    canonicalManifest = JSON.parse(currentManifestBytes.toString('utf8'));
   }
 
   const producer = (provenance.producers ?? []).find((entry) => entry?.output === requiredVpakProducerOutput);
@@ -364,6 +400,32 @@ function validateBlockKartProducerProvenance(project, provenance, packaged, issu
       requiredFix: 'Regenerate quickplay provenance from the current packaged vpak bytes.',
     });
   }
+  if (canonicalManifest) {
+    const expectedInputs = canonicalManifest.inputs
+      .map((entry) => ({ path: entry.path, digest: `sha256:${entry.sha256}`, size: entry.size }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    const foundInputs = [...(producer.inputs ?? [])].sort((a, b) => a.path.localeCompare(b.path));
+    const manifestFact = producer.producerManifest;
+    const manifestMatches = manifestFact?.path === requiredVpakProducerManifest
+      && manifestFact?.sha256 === sha256(currentManifestBytes)
+      && manifestFact?.size === currentManifestBytes.byteLength
+      && manifestFact?.producerDigest === canonicalManifest.producerDigest;
+    if (JSON.stringify(foundInputs) !== JSON.stringify(expectedInputs)
+      || producer.archiveEntryCount !== canonicalManifest.archiveEntryCount
+      || producer.payloadInputCount !== canonicalManifest.payloadInputCount
+      || producer.workspaceSourceInputCount !== canonicalManifest.workspaceSourceInputCount
+      || JSON.stringify(producer.archiveEntries) !== JSON.stringify(canonicalManifest.archiveEntries)
+      || !manifestMatches) {
+      issue(issues, 'BlockKart', 'ProducerProvenance', 'P0', 'Quickplay vpak producer record is not the canonical 37-entry manifest', {
+        file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+        needle: '"archiveEntries"',
+        expectedArchiveEntryCount: canonicalManifest.archiveEntryCount,
+        foundArchiveEntryCount: producer.archiveEntryCount ?? null,
+        manifestMatches,
+        requiredFix: 'Regenerate quickplay after rebuilding and checking the BlockKart canonical vpak producer manifest.',
+      });
+    }
+  }
 
   const upstream = Array.isArray(producer.upstream) ? producer.upstream : [];
   const terrainProducer = upstream.find((entry) => entry?.id === 'primitive-terrain-assets');
@@ -419,6 +481,57 @@ function validateBlockKartProducerProvenance(project, provenance, packaged, issu
       'painted-terrain-textures',
       'Record current painted texture output digests.',
     );
+  }
+}
+
+function validateVoplayWasmProducerProvenance(provenance, issues) {
+  const voplayRoot = dependencyRepos.get('github.com/vo-lang/voplay');
+  const verification = verifyCurrentVoplayWasm({
+    voplayRoot,
+    outDir: voplayCurrentWasmRoot,
+    expectedCiRunId: process.env.VO_DEV_CI_RUN_ID ?? null,
+  });
+  if (verification.issues.length > 0) {
+    issue(issues, 'voplay/rust', 'ProducerProvenance', 'P0', 'Current-source voplay WASM producer evidence is stale', {
+      file: 'target/voplay-current-wasm/producer-manifest.json',
+      freshnessIssues: verification.issues,
+      requiredFix: 'Rebuild voplay-current-wasm from the current Rust source in the same task run.',
+    });
+    return;
+  }
+  const producer = (provenance.producers ?? []).find((entry) => entry?.id === 'voplay-current-source-wasm');
+  if (!producer) {
+    issue(issues, 'voplay/rust', 'ProducerProvenance', 'P0', 'Quickplay provenance must include the current-source voplay WASM producer', {
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      needle: '"producers"',
+      requiredFix: 'Regenerate quickplay with the voplay-current-wasm-build producer output.',
+    });
+    return;
+  }
+  if (JSON.stringify(producer.command) !== JSON.stringify(verification.manifest.command)
+      || JSON.stringify(producer.source) !== JSON.stringify(verification.manifest.source)
+      || JSON.stringify(producer.outputs) !== JSON.stringify(verification.manifest.outputs)) {
+    issue(issues, 'voplay/rust', 'ProducerProvenance', 'P0', 'Quickplay voplay WASM producer record does not match the current build manifest', {
+      file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+      needle: 'voplay-current-source-wasm',
+      expected: verification.manifest,
+      found: producer,
+      requiredFix: 'Regenerate quickplay after rebuilding voplay-current-wasm in the same task run.',
+    });
+  }
+  const dependency = (provenance.dependencies ?? []).find((entry) => entry?.module === 'github.com/vo-lang/voplay');
+  const artifactByName = new Map((dependency?.artifacts ?? []).map((artifact) => [posix.basename(artifact.path), artifact]));
+  for (const output of verification.manifest.outputs) {
+    const packaged = artifactByName.get(output.name);
+    if (!packaged || packaged.digest !== output.digest || packaged.size !== output.size) {
+      issue(issues, 'voplay/rust', 'ProducerProvenance', 'P0', `Packaged ${output.name} does not match current-source WASM output`, {
+        file: 'apps/studio/public/quickplay/blockkart/provenance.json',
+        needle: output.name,
+        expected: output,
+        found: packaged ?? null,
+        requiredFix: 'Regenerate quickplay from target/voplay-current-wasm.',
+      });
+    }
   }
 }
 
@@ -670,6 +783,7 @@ const deps = readJson(join(quickplayDir, 'deps.json'));
 const provenance = readJson(join(quickplayDir, 'provenance.json'));
 const issues = [];
 auditBlockKart(project, provenance, issues);
+validateVoplayWasmProducerProvenance(provenance, issues);
 const projectFiles = new Map((project.files ?? []).map((file) => [file.path, file]));
 const locked = parseVoLockResolved(fileBytes(projectFiles.get('vo.lock')).toString('utf8'));
 const provenanceDependencies = new Map((provenance.dependencies ?? []).map((entry) => [entry.module, entry]));
@@ -696,6 +810,7 @@ const freshEvidence = sourceBoundEvidence({
   ],
   gateFiles: [
     'scripts/ci/quickplay_source_audit.mjs',
+    'scripts/ci/blockkart_vpak_policy.mjs',
     'scripts/ci/repo_roots.mjs',
     'scripts/ci/source_bound_evidence.mjs',
     'apps/studio/scripts/package_blockkart_quickplay.mjs',

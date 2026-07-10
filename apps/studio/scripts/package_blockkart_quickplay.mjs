@@ -4,15 +4,22 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { requireRepoRoot, requireVolangRoot } from '../../../scripts/ci/repo_roots.mjs';
+import { verifyCurrentVoplayWasm } from '../../../scripts/ci/voplay_current_wasm.mjs';
 
 const STUDIO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const VOLANG_ROOT = requireVolangRoot(path.resolve(STUDIO_ROOT, '../..'));
 const BLOCKKART_ROOT = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
 const MOD_CACHE_ROOT = path.resolve(process.env.VO_MOD_CACHE ?? path.join(os.homedir(), '.vo', 'mod'));
 const VOPLAY_ROOT = requireRepoRoot('VOPLAY_ROOT', 'voplay');
+const VOPLAY_CURRENT_WASM_ROOT = path.resolve(
+  process.env.VOPLAY_CURRENT_WASM_OUT_DIR ?? path.join(VOLANG_ROOT, 'target', 'voplay-current-wasm'),
+);
 const OUT_ROOT = path.resolve(process.env.BLOCKKART_QUICKPLAY_OUT_ROOT ?? path.join(STUDIO_ROOT, 'public', 'quickplay', 'blockkart'));
 const WASM_TARGET = 'wasm32-unknown-unknown';
-const BLOCKKART_RUNTIME_ASSETS = ['assets/blockkart.vpak'];
+const BLOCKKART_RUNTIME_ASSETS = [
+  'assets/blockkart.vpak',
+  'assets/blockkart.vpak.provenance.json',
+];
 const BLOCKKART_SOURCE_ALLOWLIST = [
   {
     path: 'tools/pack_primitive_assets.vo',
@@ -27,11 +34,13 @@ const QUICKPLAY_TASK_ID = 'quickplay-blockkart-package';
 const QUICKPLAY_GENERATOR_COMMAND = ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'];
 const QUICKPLAY_GENERATOR_INPUTS = [
   'apps/studio/scripts/package_blockkart_quickplay.mjs',
+  'scripts/ci/voplay_current_wasm.mjs',
   'eng/project.toml',
   'external:BlockKart',
   'external:BlockKart/tools/pack_primitive_assets.vo',
   'external:BlockKart/tools/generate_primitive_terrain.mjs',
   'external:BlockKart/tools/paint_terrain_textures.mjs',
+  'external:BlockKart/tools/vpak_provenance.mjs',
   'external:BlockKart/tools/terrain_heightfield_spec.mjs',
   'external:BlockKart/tools/terrain_recipe.mjs',
   'external:BlockKart/terrain/recipes/primitive_concept_v1.json',
@@ -659,9 +668,9 @@ async function dependencyModuleDir(locked) {
     return {
       cacheDir: `${cacheKey(locked.path)}/${locked.version}`,
       commit: head,
-      dirty: false,
-      moduleDir: clean ? VOPLAY_ROOT : await cleanGitSnapshot(VOPLAY_ROOT, 'voplay'),
-      source: clean ? 'external' : 'external-git-head',
+      dirty: !clean,
+      moduleDir: VOPLAY_ROOT,
+      source: clean ? 'external' : 'external-working-tree',
     };
   }
   const key = cacheKey(locked.path);
@@ -678,7 +687,19 @@ async function dependencyModuleDir(locked) {
   };
 }
 
-async function dependencyArtifactSourcePath(moduleDir, artifact) {
+async function dependencyArtifactSourcePath(moduleDir, artifact, locked) {
+  if (locked.path === 'github.com/vo-lang/voplay') {
+    const verification = verifyCurrentVoplayWasm({
+      voplayRoot: VOPLAY_ROOT,
+      outDir: VOPLAY_CURRENT_WASM_ROOT,
+      expectedCiRunId: process.env.VO_DEV_CI_RUN_ID ?? null,
+      requireClean: false,
+    });
+    if (verification.issues.length > 0) {
+      throw new Error(`Current-source voplay WASM is invalid: ${verification.issues.join('; ')}`);
+    }
+    return path.join(VOPLAY_CURRENT_WASM_ROOT, artifact.name);
+  }
   const candidates = [
     path.join(moduleDir, 'artifacts', artifact.name),
     path.join(moduleDir, 'web-artifacts', artifact.name),
@@ -751,7 +772,7 @@ async function buildDependencyPackage(lockModules) {
     for (const artifact of locked.artifacts) {
       if (artifact.target !== WASM_TARGET) continue;
       if (artifact.kind !== 'extension-wasm' && artifact.kind !== 'extension-js-glue') continue;
-      const sourcePath = await dependencyArtifactSourcePath(moduleDir, artifact);
+      const sourcePath = await dependencyArtifactSourcePath(moduleDir, artifact, locked);
       const bytes = await fs.readFile(sourcePath);
       const outRelative = path.posix.join('artifacts', key, locked.version, artifact.name);
       artifacts.push({
@@ -824,46 +845,65 @@ async function dependencyProvenance(module) {
 }
 
 async function buildRuntimeAssetProducerProvenance() {
-  const terrainDirectoryOutputs = await digestBlockKartDirectory('assets/maps/primitive_track');
-  const terrainOutputPaths = new Set(terrainDirectoryOutputs.map((entry) => entry.path));
-  for (const required of BLOCKKART_TERRAIN_REQUIRED_OUTPUTS) {
-    if (!terrainOutputPaths.has(required)) {
-      throw new Error(`Missing required generated terrain output for provenance: ${required}`);
-    }
+  const currentWasm = verifyCurrentVoplayWasm({
+    voplayRoot: VOPLAY_ROOT,
+    outDir: VOPLAY_CURRENT_WASM_ROOT,
+    expectedCiRunId: process.env.VO_DEV_CI_RUN_ID ?? null,
+  });
+  if (currentWasm.issues.length > 0) {
+    throw new Error(`Current-source voplay WASM provenance is invalid: ${currentWasm.issues.join('; ')}`);
   }
-  const vpakInputPaths = [
-    'tools/pack_primitive_assets.vo',
-    'assets/maps/primitive_track/blockkart.map.json',
-    ...terrainDirectoryOutputs.map((entry) => entry.path),
-    ...BLOCKKART_RUNTIME_EXTRA_ASSETS,
-  ];
+  execFileSync(process.execPath, ['tools/vpak_provenance.mjs', '--check'], {
+    cwd: BLOCKKART_ROOT,
+    env: process.env,
+    stdio: 'pipe',
+  });
+  const vpakManifestPath = path.join(BLOCKKART_ROOT, 'assets/blockkart.vpak.provenance.json');
+  const vpakManifestBytes = await fs.readFile(vpakManifestPath);
+  const vpakManifest = JSON.parse(vpakManifestBytes.toString('utf8'));
+  const toQuickplayDigest = (entry) => ({
+    path: entry.path,
+    digest: `sha256:${entry.sha256}`,
+    size: entry.size,
+  });
+  const vpakUpstream = (vpakManifest.upstream ?? []).map((entry) => ({
+    ...entry,
+    owner: 'BlockKart',
+    kind: entry.id === 'painted-terrain-textures'
+      ? 'offline-texture-generation'
+      : 'offline-terrain-generation',
+    inputs: (entry.inputs ?? []).map(toQuickplayDigest),
+    outputs: (entry.outputs ?? []).map(toQuickplayDigest),
+  }));
   return [
+    {
+      id: 'voplay-current-source-wasm',
+      owner: 'voplay/rust',
+      kind: 'wasm-bindgen',
+      command: currentWasm.manifest.command,
+      source: currentWasm.manifest.source,
+      toolchain: currentWasm.manifest.toolchain,
+      outputs: currentWasm.manifest.outputs,
+    },
     {
       id: 'blockkart-runtime-vpak',
       owner: 'BlockKart',
       kind: 'vpak',
       output: 'assets/blockkart.vpak',
-      command: ['vo', 'run', 'tools/pack_primitive_assets.vo'],
-      inputs: await digestBlockKartPaths(vpakInputPaths),
-      outputs: await digestBlockKartPaths(['assets/blockkart.vpak']),
-      upstream: [
-        {
-          id: 'painted-terrain-textures',
-          owner: 'BlockKart',
-          kind: 'offline-texture-generation',
-          command: ['node', 'tools/paint_terrain_textures.mjs'],
-          inputs: await digestBlockKartPaths(BLOCKKART_TERRAIN_PAINT_INPUTS),
-          outputs: await digestBlockKartPaths(BLOCKKART_TERRAIN_PAINT_OUTPUTS),
-        },
-        {
-          id: 'primitive-terrain-assets',
-          owner: 'BlockKart',
-          kind: 'offline-terrain-generation',
-          command: ['node', 'tools/generate_primitive_terrain.mjs'],
-          inputs: await digestBlockKartPaths(BLOCKKART_TERRAIN_GENERATOR_INPUTS),
-          outputs: terrainDirectoryOutputs,
-        },
-      ],
+      command: vpakManifest.command,
+      inputs: vpakManifest.inputs.map(toQuickplayDigest),
+      outputs: [toQuickplayDigest(vpakManifest.pack)],
+      upstream: vpakUpstream,
+      producerManifest: {
+        path: 'assets/blockkart.vpak.provenance.json',
+        sha256: sha256Digest(vpakManifestBytes),
+        size: vpakManifestBytes.length,
+        producerDigest: vpakManifest.producerDigest,
+      },
+      archiveEntryCount: vpakManifest.archiveEntryCount,
+      payloadInputCount: vpakManifest.payloadInputCount,
+      workspaceSourceInputCount: vpakManifest.workspaceSourceInputCount,
+      archiveEntries: vpakManifest.archiveEntries,
     },
   ];
 }

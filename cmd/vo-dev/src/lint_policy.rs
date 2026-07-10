@@ -56,9 +56,24 @@ pub(crate) fn validate_structured_input_reference(
     input: &str,
     project: &ProjectFile,
 ) -> Result<()> {
-    let Some((scheme, repo)) = input.split_once(':') else {
+    let Some((scheme, reference)) = input.split_once(':') else {
         return Ok(());
     };
+    let (repo, repo_path) = reference
+        .split_once('/')
+        .map_or((reference, None), |(repo, path)| (repo, Some(path)));
+    if repo.trim().is_empty() || repo.trim() != repo {
+        bail!("{owner_kind} {owner_name} input {scheme}: reference has an invalid repository name");
+    }
+    if let Some(repo_path) = repo_path {
+        validate_repo_path_like(
+            owner_kind,
+            owner_name,
+            "structured input path",
+            repo_path,
+            false,
+        )?;
+    }
     match scheme {
         "external" => {
             if !project
@@ -88,6 +103,76 @@ pub(crate) fn validate_structured_input_reference(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_structured_input_reference;
+    use crate::config::{ProjectFile, ProjectRepo, Repo};
+
+    fn project() -> ProjectFile {
+        ProjectFile {
+            version: 1,
+            repo: Repo {
+                name: "volang".into(),
+                module: "github.com/vo-lang/volang".into(),
+            },
+            first_party: vec![ProjectRepo {
+                name: "voplay".into(),
+                repository: None,
+                local_hint: None,
+                expected_commit: None,
+                ci_checkout: None,
+                workspace: Vec::new(),
+            }],
+            external_project: vec![ProjectRepo {
+                name: "BlockKart".into(),
+                repository: None,
+                local_hint: None,
+                expected_commit: None,
+                ci_checkout: None,
+                workspace: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn structured_input_accepts_declared_repo_subpaths() {
+        let project = project();
+        validate_structured_input_reference(
+            "artifact",
+            "quickplay",
+            "external:BlockKart/tools/pack_primitive_assets.vo",
+            &project,
+        )
+        .unwrap();
+        validate_structured_input_reference(
+            "task",
+            "render",
+            "first-party:voplay/rust/src/renderer.rs",
+            &project,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn structured_input_rejects_undeclared_repo_and_invalid_subpath() {
+        let project = project();
+        assert!(validate_structured_input_reference(
+            "artifact",
+            "quickplay",
+            "external:Unknown/tools/pack.vo",
+            &project,
+        )
+        .is_err());
+        assert!(validate_structured_input_reference(
+            "artifact",
+            "quickplay",
+            "external:BlockKart/tools/../pack.vo",
+            &project,
+        )
+        .is_err());
+    }
 }
 
 pub(crate) fn contains_glob_meta(value: &str) -> bool {

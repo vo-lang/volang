@@ -4,11 +4,15 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { requireRepoRoot } from './repo_roots.mjs';
-import { sourceBoundEvidence } from './source_bound_evidence.mjs';
+import {
+  sourceBoundEvidence,
+  verifySourceBoundEvidence,
+} from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const blockKartRoot = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
+const currentCiRunId = process.env.VO_DEV_CI_RUN_ID ?? null;
 const args = process.argv.slice(2);
 let outDir = path.join(root, 'target', 'voplay-engineering-quality-readiness');
 for (let i = 0; i < args.length; i++) {
@@ -741,10 +745,11 @@ function sourceAuditFailuresFromSource({
   ];
   const missingReplayTokens = replayTokens.filter((token) => !replaySource.includes(token) && !physicsStressSource.includes(token));
   const replayUsesRecordedTrace = /runScenarioWithReplay\s*\([^)]*true/.test(physicsStressSource)
-    && /for[^\n]*sample[^\n]*range\s+trace\.Samples/.test(physicsStressSource)
-    && /sample\.BackendApplyHash/.test(physicsStressSource)
-    && /sample\.PoseHash/.test(physicsStressSource)
-    && /sample\.TelemetryHash/.test(physicsStressSource);
+    && physicsStressSource.includes('Replays []ReplayReport')
+    && physicsStressSource.includes('for _, def := range defs')
+    && physicsStressSource.includes('ValidatePhysicsReplaySample')
+    && physicsStressSource.includes('ValidatePhysicsBackendCommandReplay')
+    && physicsStressSource.includes('StepFleet');
   const freshProcessReplayReady = physicsStressSource.includes('RunPhysicsReplayVerifierProcess')
     || physicsStressSource.includes('execPhysicsReplayVerifier')
     || physicsStressSource.includes('--verify-replay-trace');
@@ -794,7 +799,7 @@ function sourceAuditFailuresFromSource({
         !allowedContextGroups.has(entry.text)
         && /\b(scene|camera|player|vehicle|kartController|racingInput|touch|vehicleAudio|assets|primitive|track|checkpoint|raceState|courseTime|finishTime|collected|lap|kart|boost|drift|collectibles|checkpoints|boostPads|obstacles|debugHud|perf|physics)/i.test(entry.text)
       ));
-      if (contextFields.length > 8 || forbiddenContextFields.length > 0 || !contextFields.every((entry) => allowedContextGroups.has(entry.text))) {
+      if (contextBody.trim() !== '' || contextFields.length > 0 || forbiddenContextFields.length > 0 || !contextFields.every((entry) => allowedContextGroups.has(entry.text))) {
         blockKartRuntimeContextMegaOwner.push({ path: file.rel, line: lineOf(file.source, 'type BlockKartRuntimeContext struct'), fieldCount: contextFields.length, forbiddenFields: forbiddenContextFields.slice(0, 20) });
       }
     }
@@ -1508,7 +1513,20 @@ const renderStressStructuredReady = renderStressReport?.status === 'pass'
   && renderStressReport?.coverage?.resourceChurnSoak === true
   && renderStressReport?.coverage?.realPerfSamples === true
   && renderStressReport?.summary?.p0 === 0
-  && renderStressReport?.summary?.p1 === 0;
+  && renderStressReport?.summary?.p1 === 0
+  && renderStressScenes.every((scene) => (
+    scene?.observability?.status === 'pass'
+    && scene?.observability?.stage === 'complete'
+    && Array.isArray(scene?.observability?.timeline)
+    && scene.observability.timeline.length > 0
+    && Number.isFinite(scene?.observability?.frameIndex)
+    && typeof scene?.observability?.lastPass === 'string'
+    && scene.observability.lastPass.length > 0
+    && Number.isFinite(scene?.observability?.frameP90Ms)
+    && Number.isFinite(scene?.observability?.frameP99Ms)
+    && Number.isFinite(scene?.observability?.resourceChurn)
+    && scene?.observability?.lastTelemetryPacket
+  ));
 const physicsAuthorityStructuredReady = physicsContractReport?.status === 'pass'
   && !sourceAuditFailures.some((entry) => entry.code.startsWith('physics.'));
 const blockKartProductStructuredReady = !sourceAuditFailures.some((entry) => entry.code.startsWith('blockkart.'))
@@ -1700,26 +1718,49 @@ const industrialReportPath = path.join(root, 'target/voplay-industrial-readiness
 const industrialReport = existsSync(industrialReportPath)
   ? JSON.parse(readText(industrialReportPath))
   : null;
+const industrialFreshEvidenceIssues = verifySourceBoundEvidence({
+  evidence: industrialReport?.freshEvidence,
+  expectedGate: 'voplay-industrial-readiness',
+  expectedCiRunId: currentCiRunId,
+  root,
+});
+if (!currentCiRunId) {
+  failures.push({
+    code: 'Q-P0-CI-RUN-ID',
+    severity: 'P0',
+    owner: 'eng',
+    expected: 'Engineering readiness must run through vo-dev with a shared CI run id.',
+    gate: './d.py ci task voplay-engineering-quality-readiness',
+    evidence: { currentCiRunId },
+  });
+}
+if (industrialFreshEvidenceIssues.length > 0 || industrialReport?.freshEvidence?.verdict?.status !== 'pass') {
+  failures.push({
+    code: 'Q-P0-INDUSTRIAL-FRESH-EVIDENCE',
+    severity: 'P0',
+    owner: 'eng',
+    expected: 'Consumed industrial readiness must have recomputed current-source evidence from the same CI run.',
+    gate: './d.py ci task voplay-industrial-readiness',
+    evidence: {
+      freshnessIssues: industrialFreshEvidenceIssues,
+      verdict: industrialReport?.freshEvidence?.verdict ?? null,
+    },
+  });
+}
 const industrialReadyDependency =
   industrialReport?.industrialReady === true
   && Array.isArray(industrialReport?.failures)
   && industrialReport.failures.length === 0
   && Array.isArray(industrialReport?.sourceAuditFailures)
   && industrialReport.sourceAuditFailures.length === 0
+  && industrialFreshEvidenceIssues.length === 0
+  && industrialReport?.freshEvidence?.verdict?.status === 'pass'
+  && industrialReport?.reportValidity?.status === 'pass'
+  && industrialReport?.architectureEleganceReady === true
+  && industrialReport?.sourceFirstPrinciplesReview === 'pass'
+  && industrialReport?.freshSourceBoundReports === true
+  && industrialReport?.artifactSourceAgreement === true
   && !dirtyProvenance;
-const qualityReady =
-  failures.length === 0
-  && sourceAuditFailures.length === 0
-  && !dirtyProvenance
-  && crossRepoHeadMismatchesList.length === 0
-  && stringOnlyChecks.length === 0
-  && fileBudgetFailures.length === 0
-  && openP0.length === 0
-  && openP1.length === 0
-  && openP2Expired.length === 0
-  && p2MetadataReady
-  && codeOwnershipPass
-  && industrialReadyDependency;
 const generatedAt = new Date().toISOString();
 const freshEvidence = sourceBoundEvidence({
   gate: 'voplay-engineering-quality-readiness',
@@ -1752,12 +1793,90 @@ const freshEvidence = sourceBoundEvidence({
     'target/blockkart-baseline-restart-50/blockkart-baseline.json',
   ],
 });
+const selfFreshEvidenceIssues = verifySourceBoundEvidence({
+  evidence: freshEvidence,
+  expectedGate: 'voplay-engineering-quality-readiness',
+  expectedCiRunId: currentCiRunId,
+  root,
+});
+if (selfFreshEvidenceIssues.length > 0 || freshEvidence.verdict.status !== 'pass') {
+  failures.push({
+    code: 'Q-P0-SELF-FRESH-EVIDENCE',
+    severity: 'P0',
+    owner: 'eng',
+    expected: 'Engineering readiness final verdict must include its own fresh current-source evidence.',
+    gate: './d.py ci task voplay-engineering-quality-readiness',
+    evidence: { freshnessIssues: selfFreshEvidenceIssues, verdict: freshEvidence.verdict },
+  });
+}
+const architectureEleganceReady = sourceAuditFailures.length === 0
+  && stringOnlyChecks.length === 0
+  && fileBudgetFailures.length === 0
+  && emptyOwnerModulesList.length === 0
+  && codeOwnershipPass
+  && renderStressStructuredReady
+  && physicsAuthorityStructuredReady
+  && blockKartProductStructuredReady;
+const sourceFirstPrinciplesReview = industrialReport?.firstPrinciplesVerdict?.status === 'pass'
+  && sourceAuditFailures.length === 0
+  ? 'pass'
+  : 'fail';
+const freshSourceBoundReports = selfFreshEvidenceIssues.length === 0
+  && freshEvidence.verdict.status === 'pass'
+  && industrialFreshEvidenceIssues.length === 0
+  && industrialReport?.freshSourceBoundReports === true;
+const artifactSourceAgreement = !dirtyProvenance
+  && crossRepoHeadMismatchesList.length === 0
+  && industrialReport?.artifactSourceAgreement === true;
+const qualityReady =
+  failures.length === 0
+  && sourceAuditFailures.length === 0
+  && !dirtyProvenance
+  && crossRepoHeadMismatchesList.length === 0
+  && stringOnlyChecks.length === 0
+  && fileBudgetFailures.length === 0
+  && openP0.length === 0
+  && openP1.length === 0
+  && openP2Expired.length === 0
+  && p2MetadataReady
+  && codeOwnershipPass
+  && architectureEleganceReady
+  && sourceFirstPrinciplesReview === 'pass'
+  && freshSourceBoundReports
+  && artifactSourceAgreement
+  && industrialReadyDependency
+  && freshEvidence.verdict.status === 'pass';
 
 const report = {
   schema: 'voplay.engineeringQualityReadiness.v1',
   generatedAt,
   freshEvidence,
   qualityReady,
+  architectureEleganceReady,
+  sourceFirstPrinciplesReview,
+  freshSourceBoundReports,
+  artifactSourceAgreement,
+  reportValidity: {
+    status: freshSourceBoundReports && industrialReadyDependency ? 'pass' : 'fail',
+    ciRunId: currentCiRunId,
+    selfFreshnessIssues: selfFreshEvidenceIssues,
+    industrialFreshnessIssues: industrialFreshEvidenceIssues,
+  },
+  architectureEvidence: {
+    status: architectureEleganceReady ? 'pass' : 'fail',
+    fileBudgetsPass: fileBudgetFailures.length === 0,
+    codeOwnershipPass,
+    semanticSourceAuditPass: sourceAuditFailures.length === 0,
+    stringOnlyChecks,
+    renderStressStructuredReady,
+    physicsAuthorityStructuredReady,
+    blockKartProductStructuredReady,
+  },
+  sourceReviewEvidence: {
+    status: sourceFirstPrinciplesReview,
+    sourceAuditFailures,
+    industrialFirstPrinciplesVerdict: industrialReport?.firstPrinciplesVerdict ?? null,
+  },
   industrialReadyDependency,
   dirtyProvenance,
   crossRepoHeadMismatches: crossRepoHeadMismatchesList,
