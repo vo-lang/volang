@@ -487,6 +487,42 @@ async function fetchVoplayPerfEndpoint(baseUrl) {
   };
 }
 
+async function waitForVoplayRendererReady(baseUrl, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let reportCount = 0;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const endpoint = await fetchVoplayPerfEndpoint(baseUrl);
+      reportCount = endpoint.count;
+      const report = endpoint.reports.find((record) => {
+        const payload = record?.payload;
+        return payload?.source === 'blockkart'
+          && payload?.kind === 'perf-summary'
+          && Number.isFinite(payload?.frame);
+      });
+      if (report) {
+        return {
+          ready: true,
+          frame: Number(report.payload.frame),
+          reportCount,
+          failure: null,
+        };
+      }
+      lastError = null;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(100);
+  }
+  return {
+    ready: false,
+    frame: null,
+    reportCount,
+    failure: lastError ?? `renderer perf-summary was not emitted within ${timeoutMs}ms`,
+  };
+}
+
 function perfEndpointTelemetryFacts(records) {
   let firstReportAt = null;
   let lastReportAt = null;
@@ -3143,9 +3179,6 @@ async function main() {
       quickplayUrl.searchParams.set('voplayPerfGpu', '1');
     }
     quickplayUrl.searchParams.set('voplayRendererPerf', '1');
-    if (renderStressProfile) {
-      quickplayUrl.searchParams.set('blockkartRenderStress', renderStressProfile);
-    }
     if (resizeCycleRequested) {
       quickplayUrl.searchParams.set('blockkartResizeCycle', '1');
     }
@@ -3177,6 +3210,9 @@ async function main() {
       latestSceneReport: collectBlockKartDiagnostics(events.console, []).latestSceneReport,
     };
     if (renderStressProfile !== '') {
+      progress(`renderer readiness wait start profile=${renderStressProfile}`);
+      const rendererReadiness = await waitForVoplayRendererReady(baseUrl, firstFrameTimeoutMs);
+      progress(`renderer readiness wait done ready=${rendererReadiness.ready} frame=${rendererReadiness.frame ?? 'none'} reports=${rendererReadiness.reportCount}`);
       progress(`render stress start profile=${renderStressProfile}`);
       if (!firstFrame.ok || firstFrame.skipped) {
         renderStressScenario.skipped = true;
@@ -3184,6 +3220,10 @@ async function main() {
       } else if (expectedLifecycleState !== 'Running') {
         renderStressScenario.skipped = true;
         renderStressScenario.skipReason = `render stress mode requires expected lifecycle Running, got ${expectedLifecycleState}`;
+      } else if (!rendererReadiness.ready) {
+        renderStressScenario.skipped = false;
+        renderStressScenario.skipReason = null;
+        renderStressScenario.failure = rendererReadiness.failure;
       } else {
         renderStressScenario = await runRenderStressScenario(client, events, renderStressProfile, restartWaitTimeoutMs);
       }
