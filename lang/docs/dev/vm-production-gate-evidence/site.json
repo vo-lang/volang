@@ -3,7 +3,7 @@
   "selector": "site",
   "changed": false,
   "passed": true,
-  "source_state": "vm-production-current-source:3081a3c0ee44e603215b75c62472699a7c3ca0b0fc32e62d7f24671cdab7c99f",
+  "source_state": "vm-production-current-source:abc684f83d125078f07cb2c0312e98340056250a9e72589603a72822296373fb",
   "tasks": [
     "node-audit-current",
     "vo-web-wasm-build",
@@ -18,6 +18,7 @@
     "voplay-render-architecture-lint",
     "blockkart-engine-boundary-lint",
     "voplay-render-structure-lint",
+    "blockkart-boundary-facts-selftest",
     "blockkart-product-boundary-strict",
     "voplay-framegraph-unit",
     "voplay-render-core-unit",
@@ -26,6 +27,8 @@
     "voplay-vehicle-model-unit",
     "voplay-physics-backend-unit",
     "voplay-physics-backend-contract",
+    "voplay-current-wasm-selftest",
+    "voplay-current-wasm-build",
     "quickplay-source-audit",
     "quickplay-regenerate-check",
     "quickplay-validate",
@@ -43,6 +46,9 @@
     "blockkart-smoke-static",
     "voplay-industrial-source-audit",
     "voplay-industrial-readiness-report",
+    "eng-lint-artifacts",
+    "source-bound-evidence-selftest",
+    "voplay-render-observability-selftest",
     "voplay-industrial-readiness",
     "voplay-engineering-quality-readiness"
   ]
