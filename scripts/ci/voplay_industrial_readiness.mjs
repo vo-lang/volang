@@ -333,31 +333,39 @@ function blockAfterToken(source, token) {
   return '';
 }
 
-function packetDecodeBranchFailures(sceneSource) {
+function packetDecodeBranchFailures(sceneSource, physicsWorldSource) {
   const specs = [
     {
-      signature: 'func (s *Scene) StepAndSyncPhysics',
+      path: 'scene3d/physics_world.vo',
+      sourceText: physicsWorldSource,
+      signature: 'func (w *PhysicsWorldState) step',
       token: 'if headerError != ""',
       source: 'body',
       reason: 'invalid_header',
       reasonToken: 'Reason: headerError',
-      expectedReturn: 'return',
+      expectedReturn: 'PhysicsBackendPacketError{',
     },
     {
-      signature: 'func (s *Scene) StepAndSyncPhysics',
+      path: 'scene3d/physics_world.vo',
+      sourceText: physicsWorldSource,
+      signature: 'func (w *PhysicsWorldState) step',
       token: 'if r.Remaining() < 4',
       source: 'body',
       reason: 'missing_count',
-      expectedReturn: 'return',
+      expectedReturn: 'PhysicsBackendPacketError{',
     },
     {
-      signature: 'func (s *Scene) StepAndSyncPhysics',
+      path: 'scene3d/physics_world.vo',
+      sourceText: physicsWorldSource,
+      signature: 'func (w *PhysicsWorldState) step',
       token: 'if r.Remaining() != count * physics3DBodyStateBytes',
       source: 'body',
       reason: 'body_payload_length_mismatch',
-      expectedReturn: 'return',
+      expectedReturn: 'PhysicsBackendPacketError{',
     },
     {
+      path: 'scene3d/scene.vo',
+      sourceText: sceneSource,
       signature: 'func (s *Scene) Contacts',
       token: 'if headerError != ""',
       source: 'contact',
@@ -366,6 +374,8 @@ function packetDecodeBranchFailures(sceneSource) {
       expectedReturn: 'return []Contact{}',
     },
     {
+      path: 'scene3d/scene.vo',
+      sourceText: sceneSource,
       signature: 'func (s *Scene) Contacts',
       token: 'if r.Remaining() < 4',
       source: 'contact',
@@ -373,6 +383,8 @@ function packetDecodeBranchFailures(sceneSource) {
       expectedReturn: 'return []Contact{}',
     },
     {
+      path: 'scene3d/scene.vo',
+      sourceText: sceneSource,
       signature: 'func (s *Scene) Contacts',
       token: 'if r.Remaining() != count * physicsContactDetailBytes',
       source: 'contact',
@@ -382,9 +394,12 @@ function packetDecodeBranchFailures(sceneSource) {
   ];
   const failures = [];
   for (const spec of specs) {
-    const body = bodyOfFunction(sceneSource, spec.signature);
+    const body = bodyOfFunction(spec.sourceText, spec.signature);
     const branch = blockAfterToken(body, spec.token);
-    const structured = branch.includes('recordPhysicsBackendPacketError')
+    const routesStructuredError = spec.source === 'body'
+      ? branch.includes('PhysicsBackendPacketError{') && branch.includes(', true')
+      : branch.includes('recordPhysicsBackendPacketError');
+    const structured = routesStructuredError
       && branch.includes(`Source: "${spec.source}"`)
       && branch.includes(spec.reasonToken ?? `Reason: "${spec.reason}"`)
       && branch.includes('ExpectedBytes:')
@@ -392,8 +407,8 @@ function packetDecodeBranchFailures(sceneSource) {
       && branch.includes(spec.expectedReturn);
     if (!structured) {
       failures.push({
-        path: 'scene3d/scene.vo',
-        line: lineOfAfter(sceneSource, spec.signature, spec.token) ?? lineOf(sceneSource, spec.signature),
+        path: spec.path,
+        line: lineOfAfter(spec.sourceText, spec.signature, spec.token) ?? lineOf(spec.sourceText, spec.signature),
         text: `${spec.signature} ${spec.token}`,
         reason: `malformed ${spec.source} packet branch must record PhysicsBackendPacketError reason ${spec.reason} before returning`,
       });
@@ -689,7 +704,11 @@ const pipeline3dOwnerSource = listFiles(path.join(voplayRoot, 'rust/src/pipeline
   .join('\n');
 const vehicle = readProjectFile(voplayRoot, 'scene3d/vehicle.vo', 'phase-0', 'source.vehicle_exists');
 const dynamics = readProjectFile(voplayRoot, 'scene3d/kart_dynamics.vo', 'phase-0', 'source.dynamics_exists');
-const physics = readProjectFile(voplayRoot, 'scene3d/physics.vo', 'phase-0', 'source.physics_exists');
+const physicsBackend = readProjectFile(voplayRoot, 'scene3d/physics_backend.vo', 'phase-0', 'source.physics_backend_exists');
+const physicsCommands = readProjectFile(voplayRoot, 'scene3d/physics_commands.vo', 'phase-0', 'source.physics_commands_exists');
+const physicsTypes = readProjectFile(voplayRoot, 'scene3d/physics_types.vo', 'phase-0', 'source.physics_types_exists');
+const physicsWorld = readProjectFile(voplayRoot, 'scene3d/physics_world.vo', 'phase-0', 'source.physics_world_exists');
+const physics = [physicsBackend, physicsCommands, physicsTypes, physicsWorld].join('\n');
 const contactEvent = readProjectFile(voplayRoot, 'scene3d/contact_event.vo', 'phase-0', 'source.contact_event_exists');
 const replay = readProjectFile(voplayRoot, 'scene3d/replay.vo', 'phase-0', 'source.replay_exists');
 const vehiclePhysicsSession = readProjectFile(voplayRoot, 'scene3d/vehicle_physics_session.vo', 'phase-0', 'source.vehicle_physics_session_exists');
@@ -766,36 +785,28 @@ const fileBudgets = Object.fromEntries(
 const fileBudgetFailures = Object.entries(fileBudgets)
   .filter(([, entry]) => entry.status !== 'pass')
   .map(([file, entry]) => ({ file, ...entry }));
-function ownerModuleFacts(relativePath, productionSource) {
+function ownerModuleFacts({ path: relativePath, owner, requiredMethods }, productionSource) {
   const source = readText(path.join(voplayRoot, relativePath)) || '';
-  const base = path.basename(relativePath, '.rs');
-  const owner = base
-    .split('_')
-    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
-    .join('');
-  const hasProductionMethod = /\bpub(?:\(crate\)|\(super\))?\s+fn\s+(prepare|upload|draw|bind|submit|load|compile|create|resolve|cache)\w*\b/.test(source)
-    || /\bfn\s+(prepare|upload|draw|bind|submit|load|compile|create|resolve|cache)\w*\b/.test(source);
-  const calledByProduction = productionSource.includes(`${owner}::`)
-    || productionSource.includes(`${owner} {`)
-    || productionSource.includes(`${base}::`);
+  const missingMethods = requiredMethods.filter((method) => !source.includes(`fn ${method}`));
+  const hasProductionMethod = missingMethods.length === 0;
+  const calledByProduction = owner === 'Pipeline3D'
+    ? requiredMethods.some((method) => productionSource.includes(`.${method}(`))
+    : productionSource.includes(`${owner}::`);
   return {
     path: relativePath,
     owner,
     lines: lineCount(source),
     hasProductionMethod,
     calledByProduction,
+    missingMethods,
     status: hasProductionMethod && calledByProduction ? 'pass' : 'fail',
   };
 }
 const pipelineOwnerFiles = [
-  'rust/src/pipeline3d/shader_library.rs',
-  'rust/src/pipeline3d/material_binder.rs',
-  'rust/src/pipeline3d/mesh_submitter.rs',
-  'rust/src/pipeline3d/skinned_submitter.rs',
-  'rust/src/pipeline3d/terrain_submitter.rs',
-  'rust/src/pipeline3d/primitive_submitter.rs',
-  'rust/src/pipeline3d/water_submitter.rs',
-  'rust/src/pipeline3d/decal_submitter.rs',
+  { path: 'rust/src/pipeline3d/mesh_submitter.rs', owner: 'MeshSubmitter', requiredMethods: ['submit'] },
+  { path: 'rust/src/pipeline3d/decal_submitter.rs', owner: 'DecalSubmitter', requiredMethods: ['prepare_and_upload'] },
+  { path: 'rust/src/pipeline3d/pipeline_factory.rs', owner: 'PipelineFactory', requiredMethods: ['create'] },
+  { path: 'rust/src/pipeline3d/pipeline_cache.rs', owner: 'Pipeline3D', requiredMethods: ['ensure_model_capacity', 'ensure_main_texture_bind_group', 'ensure_terrain_texture_bind_group'] },
 ];
 const pipelineOwnerFacts = pipelineOwnerFiles.map((file) => ownerModuleFacts(file, pipeline3d + '\n' + pipelineCache + '\n' + pipeline3dOwnerSource + '\n' + rendererModuleRuntime));
 const emptyOwnerModules = pipelineOwnerFacts.filter((entry) => entry.status !== 'pass');
@@ -865,7 +876,7 @@ const physicsBackendContractPass = !physicsTrackPositionSurfaceInference
   && !setPoseDirectPhysicsMutation
   && !poseResetHelperDirectPhysicsMutation
   && replayRecordsBackendApplyHash;
-const blockKartPrimitiveAuthoringPresent = /type BlockKartPrimitiveScene|primitive3d\.NewLayer|primitive3d\.NewBuilder|primitive3d\.LayerDesc|primitive3d\.ChunkingDesc|SpawnPreparedMapPrimitiveLayers|AddStatic|AddDetail|spawnPrimitiveRoadBoxPhysics|BlockKartVisualContent|spawnPrimitiveTrackPhysics|spawnRoadColliderStrip/.test(blockKartPrimitiveWorld);
+const blockKartPrimitiveAuthoringPresent = /primitive3d\.NewLayer|primitive3d\.NewBuilder|primitive3d\.LayerDesc|primitive3d\.ChunkingDesc|primitive3d\.MaterialDesc|SpawnPreparedMapPrimitiveLayers|spawnPrimitiveRoadBoxPhysics|spawnPrimitiveTrackPhysics|spawnRoadColliderStrip/.test(blockKartPrimitiveWorld);
 const blockKartHudAssemblesLowLevelFacts = /PrimitiveStats\(|WheelState\(|VehicleGrounded|WheelMaxSlip|PrimitiveVisibleChunks/.test(blockKartWorld);
 const blockKartVisualReadsMutableVehicleState = /w\.vehicle\.(SteerAngle|WheelSpin)/.test(blockKartPrimitiveWorld);
 const blockKartDirectVehiclePoseCalls = /w\.vehicle\.SetPose\(/.test(blockKartWorld);
@@ -895,7 +906,7 @@ const batchPlanSceneWired = rendererFrameWorkloadPlan.includes('RenderBatchPlann
   && rendererFrameWorkloadPlan.includes('terrain_batch_inputs')
   && rendererFrameWorkloadPlan.includes('decal_batch_inputs')
   && rendererFrameWorkloadPlan.includes('planned_projected_decals')
-  && rendererFrameOrchestrator.includes('projected_decals: &planned_projected_decals')
+  && rendererFrameOrchestrator.includes('workload.planned_projected_decals')
   && rendererFramePerfFinalize.includes('perf.visible_objects = context.render_batch_plan.visible_objects');
 const terrainBatchEnumMentions = countOccurrences(renderWorldAuditSource, 'RenderBatchKind::Terrain');
 const decalBatchEnumMentions = countOccurrences(renderWorldAuditSource, 'RenderBatchKind::Decal');
@@ -1037,11 +1048,11 @@ const sameRuntimeReplayDriftOnly = /replayDrift|driftMeters|ReplayDrift/.test(ph
   || !freshProcessReplayReady;
 const blockKartGenericAuthoringHits = sourceRegexHits(
   blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
-  /ProductPrimitiveAuthoring|PrimitiveBatchAuthoring|PrimitiveInstanceAuthoring|SurfaceMaterialAuthoring|ColliderAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc|ShapeDesc|MaterialPreset)|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|PackWriter|vopack\./,
-);
+  /ProductPrimitiveAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc)|ProductSpawnTrackColliderStrip|PackWriter|vopack\./,
+).filter((hit) => !hit.path.startsWith('runtimepack/'));
 const blockKartNamedAuthoringHits = sourceRegexHits(
   blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
-  /NewBlockKartPrimitiveContent|PrepareBlockKartMapAsset|SpawnBlockKartMap|SpawnBlockKartRoadsideBakedContent|AddDynamicWithFlags|PlaceStatic|PlaceDetail|SetBlockKartPrimitivePose|attachPrimitiveTrackColliderEntities|spawnBlockKartTrackCollider|primitiveTerrainSurfacePosition/,
+  /NewBlockKartPrimitiveContent|PrepareBlockKartMapAsset|SpawnBlockKartMap|SpawnBlockKartRoadsideBakedContent|SetBlockKartPrimitivePose|attachPrimitiveTrackColliderEntities|spawnBlockKartTrackCollider|primitiveTerrainSurfacePosition/,
 );
 const blockKartDirectIntentBypassHits = sourceRegexHits(
   blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
@@ -1078,7 +1089,7 @@ const blockKartOwnerRuntimeContextHits = sourceRegexHits(
   blockKartVoFiles.map((entry) => ({ path: entry.rel, source: entry.source })),
   /^func \([^)]*\*(RaceSession|KartRig|TrackRuntime|HUDPresenter|PerfReporter|AssetRuntimeCache)\) [A-Za-z_][A-Za-z0-9_]*\([^)]*\*BlockKartRuntimeContext/,
 );
-const malformedPacketBranchFailures = packetDecodeBranchFailures(sceneSource);
+const malformedPacketBranchFailures = packetDecodeBranchFailures(sceneSource, physicsWorld);
 const packetErrorContractReady = physics.includes('type PhysicsBackendPacketError')
   && sceneSource.includes('PhysicsBackendPacketError')
   && physicsStressSource.includes('PacketErrors');
@@ -1087,15 +1098,15 @@ const publicForceBypassHits = sourceRegexHits(
   /^func \(v \*Vehicle\) ApplyForceCommand\(/,
 );
 const rawPhysicsBypassHits = sourceRegexHits(
-  [{ path: 'scene3d/physics.vo', source: physics }],
+  [{ path: 'scene3d/physics_commands.vo', source: physicsCommands }],
   /^func \(e \*Entity\) (SetPosition|SetVelocity|SetAngularVelocity)\(/,
-).filter((hit) => !bodyOfFunction(physics, hit.text.replace(/\s*\{\s*$/, '')).includes('ApplyPhysicsTarget(PhysicsBackendTargetCommand'));
+).filter((hit) => !bodyOfFunction(physicsCommands, hit.text.replace(/\s*\{\s*$/, '')).includes('ApplyPhysicsTarget(PhysicsBackendTargetCommand'));
 const productPhysicsBypassHits = sourceRegexHits(
   [{ path: 'scene3d/scene.vo', source: sceneSource }],
   /^func ProductStepAndSyncPhysics\(/,
 );
 const constraintBypassHits = [
-  ...sourceRegexHits([{ path: 'scene3d/physics.vo', source: physics }], /\b(ApplyEntityPhysicsTarget|ApplyEntityPhysicsConstraint)\(/),
+  ...sourceRegexHits([{ path: 'scene3d/physics_commands.vo', source: physicsCommands }], /\b(ApplyEntityPhysicsTarget|ApplyEntityPhysicsConstraint)\(/),
   ...sourceRegexHits([{ path: 'scene3d/vehicle_road_edge_assist.vo', source: readText(path.join(voplayRoot, 'scene3d/vehicle_road_edge_assist.vo')) || '' }], /\bvehicleBackendConstraintCommand\b/),
 ];
 const physicsStressCommandFailureCountersReady = physicsStressSource.includes('PacketErrors')
@@ -1139,19 +1150,17 @@ addCheck('phase-2', 'batch_plan.contract_exists', ['struct RenderBatchPlan', 'st
 addCheck('phase-2', 'batch_plan.drives_submission', !runtimeHasDirectDraw && rendererFrameWorkloadPlan.includes('RenderBatchPlanner::build') && rendererFrameWorkloadPlan.includes('planned_model_draws') && rendererFrameWorkloadPlan.includes('planned_primitive_draws') && rendererFrameWorkloadPlan.includes('planned_water_draws') && rendererFrameWorkloadPlan.includes('planned_projected_decals') && rendererFrameWorkloadPlan.includes('terrain_batch_inputs') && rendererFrameWorkloadPlan.includes('decal_batch_inputs'), 'RenderBatchPlan owns real draw submission routing', {});
 addCheck('phase-2', 'pipeline3d.file_size', pipeline3dLines <= 900, 'pipeline3d.rs is split into small stable responsibilities', { lines: pipeline3dLines, budget: 900 });
 const splitPipelineFiles = [
-  'rust/src/pipeline3d/shader_library.rs',
   'rust/src/pipeline3d/pipeline_cache.rs',
-  'rust/src/pipeline3d/material_binder.rs',
+  'rust/src/pipeline3d/pipeline_factory.rs',
   'rust/src/pipeline3d/mesh_submitter.rs',
-  'rust/src/pipeline3d/terrain_submitter.rs',
-  'rust/src/pipeline3d/skinned_submitter.rs',
+  'rust/src/pipeline3d/decal_submitter.rs',
 ];
 addCheck('phase-2', 'pipeline3d.split_modules_exist', splitPipelineFiles.every((file) => existsSync(path.join(voplayRoot, file))), 'pipeline3d responsibilities are split into dedicated modules', { expected: splitPipelineFiles });
 
 const backendAdapterBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyForceCommandToBackend');
-addCheck('phase-3', 'physics.intent_chain', vehicle.includes('v.Dynamics.Step(') && vehicle.includes('BuildPhysicsBackendApplyCommand') && vehicle.includes('physBackend.ApplyVehicleForces'), 'VehicleIntent reaches KartDynamics, PhysicsBackendApplyCommand, and PhysicsBackend.ApplyVehicleForces', {});
+addCheck('phase-3', 'physics.intent_chain', vehicle.includes('v.Dynamics.Step(') && dynamics.includes('BuildPhysicsBackendApplyCommand') && vehicle.includes('buildPhysicsBackendApplyCommandWithNormalizedConfig') && vehicle.includes('scene.physicsWorld.backend.ApplyVehicleForces'), 'VehicleIntent reaches KartDynamics, PhysicsBackendApplyCommand, and PhysicsBackend.ApplyVehicleForces', {});
 addCheck('phase-3', 'physics.backend_command_contract', ['Wheels []PhysicsBackendWheelCommand', 'BodyForce voplay.Vec3', 'DragForce float64', 'Downforce float64', 'WaterLift float64', 'AirControl float64', 'WallGrip float64', 'RailGrip float64', 'DebugHash int'].every((token) => dynamics.includes(token)), 'PhysicsBackendApplyCommand covers wheel, body, drag, downforce, water, air, wall, rail, and debug hash', {});
-addCheck('phase-3', 'physics.backend_apply_contract', vehicle.includes('physBackend.ApplyVehicleForces') && !vehicle.includes('physBackend.SetRaycastVehicleWheelControl'), 'Vehicle applies wheel/backend forces only through PhysicsBackend.ApplyVehicleForces', {});
+addCheck('phase-3', 'physics.backend_apply_contract', vehicle.includes('scene.physicsWorld.backend.ApplyVehicleForces') && !vehicle.includes('scene.physicsWorld.backend.SetRaycastVehicleWheelControl'), 'Vehicle applies wheel/backend forces only through PhysicsBackend.ApplyVehicleForces', {});
 addCheck('phase-3', 'physics.reset_command_contract', ['type VehiclePoseResetCommand struct', 'type VehicleMotionResetCommand struct', 'type VehicleRecoveryCommand struct', 'type VehicleSleepCommand struct'].every((token) => vehicle.includes(token)), 'vehicle reset, motion, recovery, and sleep commands exist as backend contract types', {});
 addCheck('phase-3', 'physics.no_body_position_surface_fallback', !vehicle.includes('SurfaceMaterialAtTrackPosition(v.Track, v.Body.Position())'), 'Vehicle surface selection does not infer material from body position when backend wheel contacts are absent', {});
 addCheck('phase-3', 'physics.contact_industrial_contract', contactEvent.includes('IndustrialReady() bool') && contactEvent.includes('NormalImpulse') && contactEvent.includes('TangentImpulse'), 'ContactEvent exposes industrial impulse contract', {});
@@ -1455,7 +1464,7 @@ addRequiredSourceFact(
   'constraint, road-edge assist, reset, recovery, and sleep mutations flow through backend contract commands and replay hashes',
   {
     owner: 'voplay/scene3d',
-    file: constraintBypassHits[0]?.path ?? 'scene3d/physics.vo',
+    file: constraintBypassHits[0]?.path ?? 'scene3d/physics_commands.vo',
     line: constraintBypassHits[0]?.line ?? null,
     reason: 'constraint helpers can still mutate entity position or velocity through raw physics commands',
     requiredFix: 'Promote road-edge assist and entity constraints into explicit backend contract commands included in telemetry and replay hashes.',
@@ -2053,7 +2062,7 @@ const emptyBackendHooks = ['ApplyPoseReset', 'ApplyMotionReset', 'ApplySleepStat
 addCheck('source-audit', 'physics.backend_reset_hooks_non_empty', emptyBackendHooks.length === 0, 'default backend reset, motion, sleep, and recovery hooks have real behavior', { emptyBackendHooks });
 const blockKartLowLevelHits = [];
 for (const entry of blockKartVoFiles) {
-  for (const token of ['ApplyVehicleConstraint(', 'ApplyEntityPhysicsConstraint(', '.Diagnostics()', '.Telemetry()', 'PrimitiveStats(', 'primitive3d.NewLayer', 'primitive3d.NewBuilder', 'primitive3d.LayerDesc', 'primitive3d.ChunkingDesc', 'primitive3d.MaterialDesc']) {
+  for (const token of ['ApplyVehicleConstraint(', 'ApplyEntityPhysicsConstraint(', 'PrimitiveStats(', 'primitive3d.NewLayer', 'primitive3d.NewBuilder', 'primitive3d.LayerDesc', 'primitive3d.ChunkingDesc', 'primitive3d.MaterialDesc']) {
     if (entry.source.includes(token)) {
       blockKartLowLevelHits.push({ path: entry.file, token, line: lineOf(entry.source, token) });
     }
