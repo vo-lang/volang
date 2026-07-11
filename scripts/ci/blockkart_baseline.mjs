@@ -1207,11 +1207,9 @@ function keyEventExpression(type, key) {
     if (canvas && typeof canvas.focus === 'function') {
       canvas.focus();
     }
-    const targets = [canvas, document, window].filter(Boolean);
-    for (const target of targets) {
-      target.dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, init));
-    }
-    return targets.length > 0;
+    const target = canvas ?? document;
+    target.dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, init));
+    return true;
   })()`;
 }
 
@@ -1491,7 +1489,7 @@ async function runRestartScenario(client, events, requested, timeoutMs) {
     const beforeRunningEvents = countLifecycleState(events, 'Running');
     const beforeRestartingEvents = countLifecycleState(events, 'Restarting');
     if (requested >= 10) {
-      console.log(`BlockKart baseline: restart ${index}/${requested} request`);
+      progress(`restart iteration request index=${index} count=${requested}`);
     }
     const request = await requestRestartWithConfirmation(client, events, beforeRestartingEvents, beforeRunningEvents, timeoutMs);
     const wait = countLifecycleState(events, 'Running') >= beforeRunningEvents + 1
@@ -1515,13 +1513,13 @@ async function runRestartScenario(client, events, requested, timeoutMs) {
       const requestDetail = request.ok ? `request confirmed via ${request.progress?.phase ?? 'progress'}` : `request was not confirmed after ${request.attempts.length} attempts`;
       scenario.failure = `restart ${index} did not return to Running within ${timeoutMs}ms (${requestDetail})`;
       if (requested >= 10) {
-        console.log(`BlockKart baseline: restart ${index}/${requested} failed running=${afterRunningEvents} restarting=${afterRestartingEvents}`);
+        progress(`restart iteration failed index=${index} count=${requested} running=${afterRunningEvents} restarting=${afterRestartingEvents}`);
       }
       break;
     }
     scenario.completed = index;
     if (requested >= 10) {
-      console.log(`BlockKart baseline: restart ${index}/${requested} ok running=${afterRunningEvents} restarting=${afterRestartingEvents}`);
+      progress(`restart iteration done index=${index} count=${requested} running=${afterRunningEvents} restarting=${afterRestartingEvents}`);
     }
     await sleep(150);
   }
@@ -3349,7 +3347,12 @@ async function main() {
     let viewportCapture = null;
     let viewportCaptureMode = 'cdp-page';
     let viewportCdpFailed = false;
+    const primaryCdpUnavailable = [rendererState.reason, rendererQuiesce.reason]
+      .some((reason) => /CDP websocket closed/i.test(String(reason ?? '')));
     try {
+      if (primaryCdpUnavailable) {
+        throw new Error('primary CDP websocket is already closed');
+      }
       progress('viewport capture cdp start');
       viewportAnalysis = await captureScreenshot(client, viewportScreenshot);
       viewportCapture = {
@@ -3367,15 +3370,20 @@ async function main() {
       viewportAnalysis = null;
       viewportCaptureMode = 'screencast';
       captureWarnings.push(`viewport CDP screenshot failed: ${error instanceof Error ? error.message : String(error)}`);
-      try {
-        progress('viewport capture screencast start');
-        viewportCapture = await captureViewportScreencast(client, viewportScreenshot);
-        viewportAnalysis = viewportCapture.analysis;
-        progress('viewport capture screencast done');
-      } catch (screencastError) {
+      if (primaryCdpUnavailable) {
         viewportCaptureMode = 'failed';
-        captureWarnings.push(`viewport screencast failed: ${screencastError instanceof Error ? screencastError.message : String(screencastError)}`);
-        progress('viewport capture failed');
+        progress('viewport capture skipped closed-cdp');
+      } else {
+        try {
+          progress('viewport capture screencast start');
+          viewportCapture = await captureViewportScreencast(client, viewportScreenshot);
+          viewportAnalysis = viewportCapture.analysis;
+          progress('viewport capture screencast done');
+        } catch (screencastError) {
+          viewportCaptureMode = 'failed';
+          captureWarnings.push(`viewport screencast failed: ${screencastError instanceof Error ? screencastError.message : String(screencastError)}`);
+          progress('viewport capture failed');
+        }
       }
     }
     let canvasAnalysis = null;
