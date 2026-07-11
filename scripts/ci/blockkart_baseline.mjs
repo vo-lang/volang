@@ -3348,7 +3348,7 @@ async function main() {
     let viewportCaptureMode = 'cdp-page';
     let viewportCdpFailed = false;
     const primaryCdpUnavailable = [rendererState.reason, rendererQuiesce.reason]
-      .some((reason) => /CDP websocket closed/i.test(String(reason ?? '')));
+      .some((reason) => /CDP (?:websocket closed|Runtime\.evaluate timed out)/i.test(String(reason ?? '')));
     try {
       if (primaryCdpUnavailable) {
         throw new Error('primary CDP websocket is already closed');

@@ -41,5 +41,5 @@ ci_checkout = true
 name = "BlockKart"
 repository = "vo-lang/BlockKart"
 local_hint = "../BlockKart"
-expected_commit = "8fc26740bf0059fcfde23b0fa89b523b0d2428ea"
+expected_commit = "19961d06d27a7dde3a418b42a9a39ff4e24199af"
 ci_checkout = true
