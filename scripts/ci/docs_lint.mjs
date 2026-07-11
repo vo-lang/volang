@@ -40,6 +40,25 @@ function gitHead(repoRoot) {
   return gitRev(repoRoot, 'HEAD');
 }
 
+function gitLastVolangSourceCommit(repoRoot, rev = 'HEAD') {
+  if (!existsSync(repoRoot)) return null;
+  const result = spawnSync('git', [
+    'log',
+    '-1',
+    '--format=%H',
+    rev,
+    '--',
+    '.',
+    ':(exclude)lang/docs/dev/vm-production-gate-evidence/**',
+    ':(exclude)lang/docs/dev/vm-production-readiness.md',
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) return null;
+  return result.stdout.trim() || null;
+}
+
 function parseProjectPins(projectText) {
   const pins = {};
   let section = null;
@@ -77,10 +96,14 @@ function assertActivePlanSnapshotFreshness() {
   const projectText = readFileSync(projectPath, 'utf8');
   const snapshot = parsePlanSnapshot(planText);
   const pins = parseProjectPins(projectText);
+  const volangSourceCommit = gitLastVolangSourceCommit(root) ?? gitHead(root);
   const expected = {
     volang: {
-      expectedCommit: gitHead(root),
-      acceptedCommits: [gitHead(root), gitRev(root, 'HEAD^')].filter(Boolean),
+      expectedCommit: volangSourceCommit,
+      acceptedCommits: [
+        volangSourceCommit,
+        volangSourceCommit ? gitLastVolangSourceCommit(root, `${volangSourceCommit}^`) : null,
+      ].filter(Boolean),
       repoRoot: root,
     },
     voplay: {
