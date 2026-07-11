@@ -187,6 +187,8 @@ const pipeline3dOwnerSource = listFiles(path.join(voplayRoot, 'rust/src/pipeline
   .join('\n');
 const rendererPerf = readProjectFile(voplayRoot, 'rust/src/renderer_perf.rs');
 const perfDiagnostics = readProjectFile(voplayRoot, 'perf_diagnostics.vo');
+const perfPacket = readProjectFile(voplayRoot, 'perf_packet.vo');
+const perfReport = readProjectFile(voplayRoot, 'perf_report.vo');
 const vehicle = readProjectFile(voplayRoot, 'scene3d/vehicle.vo');
 const contactEvent = readProjectFile(voplayRoot, 'scene3d/contact_event.vo');
 const kartDynamics = readProjectFile(voplayRoot, 'scene3d/kart_dynamics.vo');
@@ -268,9 +270,9 @@ function sourceHitsInFiles(files, pattern, allow = () => false) {
 }
 
 function meaningfulOwnerModule(source) {
-  const body = bodyOfFunction(source, 'impl ');
+  const body = runtimePart(source);
   const functionCount = (body.match(/\b(?:pub\(crate\)\s+)?fn\s+\w+/g) || []).length;
-  const realSideEffect = /\b(begin_render_pass|draw|draw_indexed|set_pipeline|set_bind_group|set_vertex_buffer|set_index_buffer|write_buffer|queue\.write|upload_|cache|report|stats|telemetry|bind_group|prepare_buffer|create_buffer|submit)\b|\.store\(/.test(body);
+  const realSideEffect = /\b(begin_render_pass|draw|draw_indexed|set_pipeline|set_bind_group|set_vertex_buffer|set_index_buffer|write_buffer|queue\.write|upload_|cache|report|stats|telemetry|bind_group|prepare_buffer|create_(?:shader_module|render_pipeline|bind_group_layout|pipeline_layout|buffer|bind_group|sampler)|submit)\b|\.store\(/.test(body);
   const facadeReturn = functionCount <= 1 && (
     /return\s+[^;]+;\s*\}\s*$/.test(body.trim())
     || /^\s*pub\(crate\)\s+fn\s+\w+[\s\S]*\{\s*(?:[A-Za-z0-9_:().&*\s]+|decals\.len\(\))\s*\}\s*$/.test(body.trim())
@@ -297,12 +299,8 @@ const renderFileBudgets = {
 };
 check(rendererFrameOrchestratorRuntime.trim().length === 0, 'render.orchestrator_runtime_sidecar', 'frame_orchestrator_runtime.rs must not exist; frame orchestration belongs to frame_orchestrator.rs and named owner modules');
 const ownerModuleFiles = [
-  'rust/src/pipeline3d/shader_library.rs',
-  'rust/src/pipeline3d/material_binder.rs',
+  'rust/src/pipeline3d/pipeline_factory.rs',
   'rust/src/pipeline3d/mesh_submitter.rs',
-  'rust/src/pipeline3d/skinned_submitter.rs',
-  'rust/src/pipeline3d/terrain_submitter.rs',
-  'rust/src/pipeline3d/primitive_submitter.rs',
   'rust/src/pipeline3d/decal_submitter.rs',
 ];
 const ownerModuleFacts = ownerModuleFiles.map((relativePath) => {
@@ -312,10 +310,10 @@ const ownerModuleFacts = ownerModuleFiles.map((relativePath) => {
     .split('_')
     .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
     .join('');
-  const hasProductionMethod = /\bpub(?:\(crate\)|\(super\))?\s+fn\s+(prepare|upload|draw|bind|submit|load|compile|create|resolve|cache)\w*\b/.test(source)
-    || /\bfn\s+(prepare|upload|draw|bind|submit|load|compile|create|resolve|cache)\w*\b/.test(source);
+  const hasProductionMethod = /\bpub(?:\(crate\)|\(super\))?\s+fn\s+(new|prepare|upload|draw|bind|submit|load|compile|create|resolve|cache)\w*\b/.test(source)
+    || /\bfn\s+(new|prepare|upload|draw|bind|submit|load|compile|create|resolve|cache)\w*\b/.test(source);
   const calledByProduction = [pipeline3d, pipelineCache, pipeline3dOwnerSource, rendererRuntime]
-    .some((productionSource) => productionSource.includes(`${owner}::`) || productionSource.includes(`${owner} {`) || productionSource.includes(`${base}::`));
+    .some((productionSource) => productionSource.includes(`${owner}::`) || productionSource.includes(`${owner} {`) || productionSource.includes(`${base}::`) || productionSource.includes(`mod ${base};`));
   return { path: relativePath, owner, hasProductionMethod, calledByProduction };
 });
 const receiverMaskDeclaredConditionally = /if\s+post_depth_active\s*\{[\s\S]*declare_target\(\s*RES_RECEIVER_MASK/.test(rendererRuntime);
@@ -362,7 +360,7 @@ const decodeOwnerMutationHits = sourceHits(
 const trackSurfaceAtHits = sourceHits(scene3dAuditSource, 'scene3d/**/*.vo', /\bTrack\.SurfaceAt\(/);
 const directConstraintHits = sourceHits(scene3dAuditSource, 'scene3d/**/*.vo', /\b(ApplyVehicleConstraint|VehicleConstraintCommand)\b/);
 const facadeOwnerModuleFacts = [
-  'rust/src/pipeline3d/primitive_submitter.rs',
+  'rust/src/pipeline3d/mesh_submitter.rs',
   'rust/src/pipeline3d/decal_submitter.rs',
 ].map((relativePath) => {
   const source = readProjectFile(voplayRoot, relativePath);
@@ -401,7 +399,7 @@ const dirtyRangePartialUploadVerified = /partial.*upload|upload.*partial/i.test(
   && /fn\s+upload_resident_dirty_range[\s\S]*queue\.write_buffer\([\s\S]*byte_offset[\s\S]*bytemuck::bytes_of/s.test(primitivePipelineAuditSource)
   && /full_rebuild_count\s*(?:[:=]|,)\s*0|fullRebuildCount\s*=\s*0/.test(primitivePipelineAuditSource);
 const facadeSubmitterReturnHits = [
-  ...sourceHits(readProjectFile(voplayRoot, 'rust/src/pipeline3d/primitive_submitter.rs'), 'rust/src/pipeline3d/primitive_submitter.rs', /->\s*crate::primitive_pipeline::PrimitiveRenderFilter|^\s*filter\s*$/),
+  ...sourceHits(readProjectFile(voplayRoot, 'rust/src/pipeline3d/mesh_submitter.rs'), 'rust/src/pipeline3d/mesh_submitter.rs', /->\s*crate::primitive_pipeline::PrimitiveRenderFilter|^\s*filter\s*$/),
   ...sourceHits(readProjectFile(voplayRoot, 'rust/src/pipeline3d/decal_submitter.rs'), 'rust/src/pipeline3d/decal_submitter.rs', /->\s*usize/),
 ];
 const structuredSkipCountersReady = renderWorldAuditSource.includes('invalid_batch_indices')
@@ -496,9 +494,9 @@ check(/frustum_culled_chunks\s*(?:\+=|=)/.test(renderBatchPlannerBuildBody), 're
 check(/distance_culled_chunks\s*(?:\+=|=)/.test(renderBatchPlannerBuildBody), 'render_world.distance_counters_not_mutated', 'distance_culled_chunks is not mutated from batch-planning decisions');
 check(rendererPerf.includes('RENDERER_PERF_PAYLOAD_VERSION: u32 = 8'), 'renderer_perf.payload_version', 'renderer perf payload was not upgraded to v8');
 check(renderWorldAuditSource.includes('struct RenderSkipStats') && renderWorldAuditSource.includes('missing_models') && renderWorldAuditSource.includes('missing_meshes') && renderWorldAuditSource.includes('missing_textures') && renderWorldAuditSource.includes('missing_bind_groups') && renderWorldAuditSource.includes('missing_chunks') && renderWorldAuditSource.includes('missing_targets') && renderWorldAuditSource.includes('invalid_batch_indices') && renderWorldAuditSource.includes('incompatible_draws') && rendererPerf.includes('render_skips'), 'renderer.skip_stats_unstructured', 'render skips lack a unified structured source of truth and perf payload');
-check(renderWorldTests.includes('render_skip_stats_preserve_structured_causes_and_derived_totals') && rendererPerf.includes('renderer_perf_v8_payload_preserves_structured_skip_causes') && perfDiagnostics.includes('EncodePerfSkipSummaryReport'), 'renderer.skip_stats_behavior_evidence_missing', 'render skip counters lack behavior-backed aggregation, wire encoding, or report projection evidence');
-check(perfDiagnostics.includes('version != 8') && perfDiagnostics.includes('version >= 8') && perfDiagnostics.includes('MissingModels') && perfDiagnostics.includes('MissingMeshes') && perfDiagnostics.includes('MissingTextures') && perfDiagnostics.includes('MissingBindGroups') && perfDiagnostics.includes('MissingChunks') && perfDiagnostics.includes('MissingTargets') && perfDiagnostics.includes('InvalidBatchIndices') && perfDiagnostics.includes('IncompatibleDraws'), 'perf_decode.v8_missing', 'Vo perf decoder does not expose v8 structured render skip diagnostics');
-check(perfDiagnostics.includes('EncodePerfSkipSummaryReport') && renderStressGate.includes("kind === 'perf-skip-summary'") && renderStressGate.includes('missingBindGroups') && renderStressGate.includes('invalidBatchIndices'), 'perf_skip.report_projection_missing', 'structured render skip telemetry is not projected into stress reports');
+check(renderWorldTests.includes('render_skip_stats_preserve_structured_causes_and_derived_totals') && rendererPerf.includes('renderer_perf_v8_payload_preserves_structured_skip_causes') && perfReport.includes('EncodePerfSkipSummaryReport'), 'renderer.skip_stats_behavior_evidence_missing', 'render skip counters lack behavior-backed aggregation, wire encoding, or report projection evidence');
+check(perfPacket.includes('version != 8') && perfPacket.includes('version >= 8') && perfPacket.includes('MissingModels') && perfPacket.includes('MissingMeshes') && perfPacket.includes('MissingTextures') && perfPacket.includes('MissingBindGroups') && perfPacket.includes('MissingChunks') && perfPacket.includes('MissingTargets') && perfPacket.includes('InvalidBatchIndices') && perfPacket.includes('IncompatibleDraws'), 'perf_decode.v8_missing', 'Vo perf decoder does not expose v8 structured render skip diagnostics');
+check(perfReport.includes('EncodePerfSkipSummaryReport') && renderStressGate.includes("kind === 'perf-skip-summary'") && renderStressGate.includes('missingBindGroups') && renderStressGate.includes('invalidBatchIndices'), 'perf_skip.report_projection_missing', 'structured render skip telemetry is not projected into stress reports');
 check(rendererFrameSurface.includes('voplay.render.failure') && rendererFrameSurface.includes('stage=surface_acquire') && rendererFrameSurface.includes('code={code}') && rendererFrameSurface.includes('action={action}') && rendererFrameSurface.includes('recoverable={recoverable}'), 'renderer.surface_failure_unstructured', 'surface acquire failures lack machine-attributable stage, code, action, and recovery fields');
 check(renderStressGate.includes('runObservedProcess') && renderStressGate.includes('voplay.renderStressHeartbeat') && renderStressGate.includes('timeoutDiagnostic') && renderStressGate.includes('timeline') && renderStressGate.includes('lastOutputAgoMs') && renderStressGate.includes('frameIndex') && renderStressGate.includes('lastPass') && renderStressGate.includes('frameP90Ms') && renderStressGate.includes('frameP99Ms') && renderStressGate.includes('resourceChurn') && renderStressGate.includes('lastTelemetryPacket'), 'render_stress.observability_missing', 'render stress and soak lack frame/pass telemetry heartbeat, stage timeline, or structured timeout diagnostics');
 check(primitivePipelineAuditSource.includes('draw_main_and_water') && primitivePipelineAuditSource.includes('PrimitiveRenderFilter::Water'), 'primitive.water_filter', 'primitive pipeline does not split main and water draw filters');
@@ -511,8 +509,11 @@ check(!vehicleIntentChain.includes('BuildVehicleForceCommand'), 'vehicle.intent_
 check(!vehicleIntentChain.includes('DefaultSurfaceMaterial()'), 'vehicle.intent_default_surface', 'Vehicle.UpdateIntent still uses default surface instead of sampled surface');
 check(vehicle.includes('func (v *Vehicle) applyForceCommandToBackend'), 'vehicle.backend_adapter_missing', 'Vehicle backend adapter is missing');
 const backendAdapterBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyForceCommandToBackend');
-check(backendAdapterBody.includes('BuildPhysicsBackendApplyCommand'), 'vehicle.backend_contract_not_used', 'Vehicle backend adapter does not use BuildPhysicsBackendApplyCommand');
-check(backendAdapterBody.includes('physBackend.ApplyVehicleForces') && !vehicle.includes('physBackend.SetRaycastVehicleWheelControl'), 'vehicle.backend_apply_contract_not_used', 'Vehicle backend adapter does not use PhysicsBackend.ApplyVehicleForces as the wheel/backend apply contract');
+const backendCommandBuilderReady = backendAdapterBody.includes('buildPhysicsBackendApplyCommandWithNormalizedConfig')
+  && kartDynamics.includes('func BuildPhysicsBackendApplyCommand')
+  && bodyOfFunction(kartDynamics, 'func BuildPhysicsBackendApplyCommand').includes('buildPhysicsBackendApplyCommandWithNormalizedConfig');
+check(backendCommandBuilderReady, 'vehicle.backend_contract_not_used', 'Vehicle backend adapter does not use the canonical PhysicsBackendApplyCommand builder');
+check(backendAdapterBody.includes('physicsWorld.backend.ApplyVehicleForces') && !vehicle.includes('SetRaycastVehicleWheelControl'), 'vehicle.backend_apply_contract_not_used', 'Vehicle backend adapter does not use PhysicsBackend.ApplyVehicleForces as the wheel/backend apply contract');
 check(!backendAdapterBody.includes('vehicleDriveWheelCount'), 'vehicle.backend_adapter_owns_distribution', 'Vehicle backend adapter still owns drive wheel force distribution');
 check(!vehicle.includes('v.applyControls(command.VehicleInput'), 'vehicle.command_folded_to_input', 'Vehicle.ApplyForceCommand still folds command back to VehicleInput');
 check(!vehicle.includes('func (v *Vehicle) applyControls'), 'vehicle.legacy_apply_controls', 'Vehicle still exposes the legacy direct applyControls path');
@@ -543,7 +544,7 @@ for (const scenario of ['road-edge-assist', 'sleep-wake', 'pose-reset', 'recover
 }
 check(physicsStress.includes('Code: "physics.contact_fallback", Severity: 0'), 'physics.fallback_not_p0', 'fallback contacts are not P0 in physics stress');
 check(vehicle.includes('RaycastVehicleStates') && vehicle.includes('PhysicsBackendVehicleFleetPacketKind') && vehicle.includes('vehicleByBackendID') && vehicle.includes('syncStateFromPacket'), 'physics.vehicle_fleet_snapshot_missing', 'vehicle synchronization lacks one stable fleet packet per physics step');
-check(contactEvent.includes('physicsContactEventsReady') && contactEvent.includes('contactEventsSnapshot') && vehicleTelemetry.includes('contactImpulseForEntity'), 'physics.contact_snapshot_missing', 'vehicle telemetry does not share the scene contact snapshot for a physics step');
+check(contactEvent.includes('snapshot.contactEventsReady') && contactEvent.includes('contactEventsSnapshot') && contactEvent.includes('contactImpulseForEntity') && vehicleTelemetry.includes('contactImpulseForEntity'), 'physics.contact_snapshot_missing', 'vehicle telemetry does not share the scene contact snapshot for a physics step');
 
 for (const token of ['BlockKartRenderBudget', 'PostProcessConfig', 'ShadowResolution', 'applyBlockKartRenderBudget', 'defaultBlockKartRenderBudget']) {
   for (const entry of blockKartVoFiles) {
