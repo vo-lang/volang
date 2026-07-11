@@ -2061,6 +2061,7 @@ tools = ["node", "npm"]
 node_workspaces = ["studio", "vogui-js"]
 repo = "voplay"
 inputs = [
+  "scripts/ci/active_plan_snapshot.mjs",
   "scripts/ci/voplay_engineering_quality_readiness.mjs",
   "scripts/ci/repo_roots.mjs",
   "eng/tasks.toml",

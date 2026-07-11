@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acceptedVolangPlanSnapshotCommits } from './active_plan_snapshot.mjs';
 import { requireRepoRoot } from './repo_roots.mjs';
 import {
   sourceBoundEvidence,
@@ -189,11 +190,6 @@ function activePlanSnapshot(activePlanSource) {
 function repoHead(projectRoot) {
   const head = gitOutput(['rev-parse', 'HEAD'], projectRoot);
   return head.ok ? head.stdout : null;
-}
-
-function repoRev(projectRoot, rev) {
-  const commit = gitOutput(['rev-parse', rev], projectRoot);
-  return commit.ok ? commit.stdout : null;
 }
 
 function tomlBlocks(source, header) {
@@ -1386,7 +1382,7 @@ const docsReady =
 const activeQualityPlanSource = activeVoplayQuality[0]?.source ?? '';
 const docsExpectedCommits = parseExpectedCommits(projectToml);
 const planSnapshot = activePlanSnapshot(activeQualityPlanSource);
-const acceptedVolangPlanCommits = [repoHead(root), repoRev(root, 'HEAD^')].filter(Boolean);
+const acceptedVolangPlanCommits = acceptedVolangPlanSnapshotCommits(root);
 const activePlanSnapshotFresh =
   acceptedVolangPlanCommits.includes(planSnapshot.volang)
   && planSnapshot.voplay === docsExpectedCommits.get('voplay')
@@ -1807,6 +1803,7 @@ const freshEvidence = sourceBoundEvidence({
   ],
   gateFiles: [
     'scripts/ci/voplay_engineering_quality_readiness.mjs',
+    'scripts/ci/active_plan_snapshot.mjs',
     'scripts/ci/repo_roots.mjs',
     'scripts/ci/source_bound_evidence.mjs',
     'scripts/ci/quickplay_source_audit.mjs',
