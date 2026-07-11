@@ -3199,6 +3199,20 @@ async function main() {
     progress(`hook ready entry=${hookState.entryPath ?? 'unknown'}`);
     const firstFrame = await waitForQuickplayFirstFrame(client, firstFrameTimeoutMs);
     progress(`first frame ok=${firstFrame.ok} skipped=${firstFrame.skipped}`);
+    let rendererReadiness = {
+      ready: false,
+      frame: null,
+      reportCount: 0,
+      failure: firstFrame.reason ?? 'first frame did not complete',
+    };
+    if (firstFrame.ok && !firstFrame.skipped && expectedLifecycleState === 'Running') {
+      progress('renderer readiness wait start');
+      rendererReadiness = await waitForVoplayRendererReady(baseUrl, firstFrameTimeoutMs);
+      progress(`renderer readiness wait done ready=${rendererReadiness.ready} frame=${rendererReadiness.frame ?? 'none'} reports=${rendererReadiness.reportCount}`);
+      if (!rendererReadiness.ready) {
+        throw new Error(`renderer readiness failed: ${rendererReadiness.failure}`);
+      }
+    }
     let renderStressScenario = {
       requested: renderStressProfile !== '',
       profile: renderStressProfile,
@@ -3210,9 +3224,6 @@ async function main() {
       latestSceneReport: collectBlockKartDiagnostics(events.console, []).latestSceneReport,
     };
     if (renderStressProfile !== '') {
-      progress(`renderer readiness wait start profile=${renderStressProfile}`);
-      const rendererReadiness = await waitForVoplayRendererReady(baseUrl, firstFrameTimeoutMs);
-      progress(`renderer readiness wait done ready=${rendererReadiness.ready} frame=${rendererReadiness.frame ?? 'none'} reports=${rendererReadiness.reportCount}`);
       progress(`render stress start profile=${renderStressProfile}`);
       if (!firstFrame.ok || firstFrame.skipped) {
         renderStressScenario.skipped = true;
