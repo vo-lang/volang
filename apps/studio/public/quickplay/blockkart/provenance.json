@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:83829f35956a746f67cb054b053904e4e1fc19909002bad51fc1b8c37df0c85e",
+    "voDevSourceDigest": "sha256:af766df2acb70f18c3c45ea96ebb3c81cf9fc2a3ef9d568dbf66025ca30bd80c",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -48,9 +48,9 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "4868e0d3b04729d9d63b51b39083dbcec977cd09",
+    "commit": "f137939f89ca503ac661fd8c673c75c26197d1b7",
     "dirty": false,
-    "filesDigest": "sha256:9a18144b2424ebcf735879c20f4a55ed055045255a6e9e3997c7193d0bb16489",
+    "filesDigest": "sha256:4a8342374dee13ccba4ee53e8a9c76cb250de346b991a6194871f36aa2f6e614",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
@@ -165,13 +165,13 @@
       },
       {
         "path": "performance_budget.vo",
-        "digest": "sha256:1badd2cb4cc79d4caa4d23b9dbefcccdac787f6fce2a33e204ff8b52b539b8e5",
-        "size": 19318
+        "digest": "sha256:635bb07d6a11fcd261ff8a31adb3ccc687987271ceec898c2257df334e7a97fb",
+        "size": 19826
       },
       {
         "path": "play_state.vo",
-        "digest": "sha256:1ef116b856bb3bd8b8c9299c07669d08a4d01d2216db5432f6c73666b1ab272a",
-        "size": 10039
+        "digest": "sha256:e80cafcb0936a9ed654bf37e75af4aa93cf048e2ee9ca2681d0b4977ff993150",
+        "size": 10182
       },
       {
         "path": "primitive_content.vo",
@@ -190,13 +190,13 @@
       },
       {
         "path": "race_session_runtime.vo",
-        "digest": "sha256:6689601c201c083f7ee57d057d21fda57fca59849db3f524e0f0d7accc7afe96",
-        "size": 7227
+        "digest": "sha256:730525386f2ba96245ecd1c68a3d0216fa421da55c3602dcca0ca1a0f58df279",
+        "size": 7226
       },
       {
         "path": "render_stress.vo",
-        "digest": "sha256:b4afcad815d6b3475d27ca8e145072bd2db2f8f484cd444a315f4366cb0b6d16",
-        "size": 9596
+        "digest": "sha256:08ed6b380c2c09b356782a750f1d8721ce75d26cdc1736f2c76c84ce0f405ccc",
+        "size": 9101
       },
       {
         "path": "runtime_owners.vo",
@@ -251,7 +251,7 @@
         "expiresAt": "2027-01-31T00:00:00.000Z"
       }
     ],
-    "sourceFilesDigest": "sha256:2dc66128e8aead66f9756e7f803078bd585f1850b89abd653550a9ac8e2ba553"
+    "sourceFilesDigest": "sha256:fd9c6155558111936203aa3a6466de5e1c54b284f2b4945c0cce00ad1625485a"
   },
   "producers": [
     {
@@ -2095,9 +2095,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:68751c07ffa10d026e5f8e9627193c56c4f19d215774719d9decb4acdfd034bd",
+      "digest": "sha256:2e5868e306fbde932237d1e243033d279f10861a65b8e91ccbd9b49476ee15ad",
       "path": "project.json",
-      "size": 22867272
+      "size": 22867427
     },
     {
       "digest": "sha256:cc99a073475002be39cef5e0fa9da0375117e46e899d560e9b581c4733d43e4f",
