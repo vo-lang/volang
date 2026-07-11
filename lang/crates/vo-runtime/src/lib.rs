@@ -6,7 +6,10 @@ extern crate alloc;
 extern crate self as vo_runtime;
 
 /// Cooperative instruction budget shared by interpreter and native tiers.
-pub const EXECUTION_TIMESLICE_INSTRUCTIONS: u32 = 1000;
+///
+/// The value keeps native and browser-hosted interpreter work preemptible while
+/// avoiding repeated host scheduling for ordinary frame-sized workloads.
+pub const EXECUTION_TIMESLICE_INSTRUCTIONS: u32 = 16_384;
 
 pub mod output;
 pub mod slot;

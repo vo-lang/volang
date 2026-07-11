@@ -72,18 +72,8 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
         return false;
     }
 
-    let expected_kind = if is_array {
-        ValueKind::Array
-    } else {
-        ValueKind::Slice
-    };
-    let Some(s) = gc.canonicalize_ref(s) else {
-        return false;
-    };
-    if unsafe { Gc::header(s) }.kind() != expected_kind {
-        return false;
-    }
-
+    // Safety: module verification fixes the operand kind and GC roots keep the
+    // handle live; the runtime helpers still validate every slice bound.
     let result = if is_array {
         if has_max {
             let max = stack_get(stack, bp + inst.c as usize + 2) as usize;
