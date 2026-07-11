@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:dd159bf46da45516abdeb2ee2f013f2572d2c5d46810e6473ba4bc7273664fde",
+    "voDevSourceDigest": "sha256:b5a6e4efdf30e815543e70f6dfc94acdc84af66d5eef4ec3c3895f4600b83171",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -48,14 +48,14 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "2aab1a52b632cb7703654c2126fb03bafa072bee",
+    "commit": "2105f64328b66b8f2ebd444ea281658743b352f3",
     "dirty": false,
-    "filesDigest": "sha256:89599ba92bee6d7614de1fe873088ea8759e4fce21cbaa68cec9fbfde10ea603",
+    "filesDigest": "sha256:b4f9ed015b348c5eb9648c4b12f89648864b730cfcf0bcb55c5eba7023d9531d",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
       "sourceDigest": "sha256:3121cb8c9d16f3a4372a9ef8f3ba9cff9086289bd0437fc59ede032dd8c2ad6d",
-      "packagedDigest": "sha256:23a9171d95a2655586cd516e070140c44cac27c63d66195e0fb96ee86cb231b0",
+      "packagedDigest": "sha256:f78c85ea1188a78fb2240f026c4cc9adca601aa211710ef69296e7429fb0796a",
       "modules": [
         {
           "module": "github.com/vo-lang/vogui",
@@ -84,9 +84,9 @@
         {
           "module": "github.com/vo-lang/voplay",
           "version": "v0.1.34",
-          "commit": "a7444336f9ee209344d9361745d1af82cf03a406",
-          "releaseManifestDigest": "sha256:da896605038364cc91be7466e9fe2116c9d9919d462d32dca6177244d483f637",
-          "sourceDigest": "sha256:2afb84eb1c6b262027ff6e4e0e2acacd981a5a9a6e92acc76507b483b1e0e133",
+          "commit": "d829949475086be7041b48f08cb81b06f60eaa03",
+          "releaseManifestDigest": "sha256:8b705402cbf4678ae8aead74aabfe3c75a4c03670585d6465a5ef7a21f44af48",
+          "sourceDigest": "sha256:69de3661458be25b4ad30acd9cea9c5b5383aeceb6779d6c12c88be42c1b3a8a",
           "artifacts": [
             {
               "kind": "extension-js-glue",
@@ -269,9 +269,9 @@
         "wasm-island"
       ],
       "source": {
-        "commit": "a7444336f9ee209344d9361745d1af82cf03a406",
+        "commit": "d829949475086be7041b48f08cb81b06f60eaa03",
         "dirty": false,
-        "digest": "sha256:e14ad21014a4275cdb880b1f7e05fb5b71da8875f36aec0b99f2fe5101ba3f6a"
+        "digest": "sha256:93c7d1e3821838bc87976d2c14c15d5adbb826208f5cac206c1d72acc758162f"
       },
       "toolchain": {
         "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
@@ -793,8 +793,8 @@
         },
         {
           "path": "workspace:github.com/vo-lang/voplay/assets.vo",
-          "digest": "sha256:7b78cfdbb690c55ccb5dcb273d0c8f5631787f13328dcbba80bb48ba3c82273f",
-          "size": 17922
+          "digest": "sha256:8555f4953c3f52ce90d544ff57ddf1a573ed2bdaa0b27655628a33180f4f3d8a",
+          "size": 18556
         },
         {
           "path": "workspace:github.com/vo-lang/voplay/audio.vo",
@@ -1238,7 +1238,7 @@
         },
         {
           "path": "workspace:github.com/vo-lang/voplay/vo.mod",
-          "digest": "sha256:8b58f53ba275385d64086e31806e48e9bf478d162f92544c93c7d76bb9da2bea",
+          "digest": "sha256:09cb7f9c035414a8aab2db1d4d88dc2cb68039e85273810ab8e67fe7891dd57e",
           "size": 788
         }
       ],
@@ -1519,9 +1519,9 @@
       ],
       "producerManifest": {
         "path": "assets/blockkart.vpak.provenance.json",
-        "sha256": "sha256:3539bde15f411a129b73c870a48254197ac238118bf51040550d9d8d59afb61e",
+        "sha256": "sha256:f814563eac1c8bc6b1b6a647defbc551d1cbae5db564bbd200c6230f94b9ef92",
         "size": 63343,
-        "producerDigest": "09b7b33523d80357505f36148482e4063b6c3c15df1e3a148bfa5d784da38d38"
+        "producerDigest": "5b61f5e8c80b285d71c44fd5f324b635f3261d639295fe47fffcc80b9eb8aaf4"
       },
       "archiveEntryCount": 37,
       "payloadInputCount": 37,
@@ -2081,23 +2081,23 @@
       ],
       "cacheDir": "github.com@vo-lang@voplay/v0.1.34",
       "dirty": false,
-      "filesDigest": "sha256:f5e150d515defff3a13e14252ed101b4575d54deb17f939497af8d178803746d",
+      "filesDigest": "sha256:6db82734d384875c3224bf9e3ab2983bbd3b88bd90c2e68ffb1542373378c2f3",
       "module": "github.com/vo-lang/voplay",
       "source": "external",
       "version": "v0.1.34",
-      "commit": "a7444336f9ee209344d9361745d1af82cf03a406"
+      "commit": "d829949475086be7041b48f08cb81b06f60eaa03"
     }
   ],
   "outputs": [
     {
-      "digest": "sha256:80cd58fa1949e35155bfd4e87d14c1d879b8013009a26f8bf2b77f3ea0465afc",
+      "digest": "sha256:2509d7122f4dc400b92c00e8e585dd62b1e35d7ea7a35f52ff93a58989b0dfac",
       "path": "project.json",
       "size": 22865814
     },
     {
-      "digest": "sha256:05b242c1ee32b233779a9a97aa8421468cdb7e6e88591adf947f85bbe6cc2a71",
+      "digest": "sha256:19f6449e803c55cf83c546b68fccb1ea90e2f9af95a0c0f95238c5a22ffa1eb2",
       "path": "deps.json",
-      "size": 2631539
+      "size": 2632898
     }
   ]
 }
