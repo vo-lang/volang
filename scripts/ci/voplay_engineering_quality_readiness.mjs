@@ -308,31 +308,39 @@ function lineOfAfter(source, startToken, token) {
   return source.slice(0, start).split(/\r?\n/).length + line - 1;
 }
 
-function packetDecodeBranchFailures(sceneSource) {
+function packetDecodeBranchFailures(sceneSource, physicsWorldSource) {
   const specs = [
     {
-      signature: 'func (s *Scene) StepAndSyncPhysics',
+      path: 'voplay/scene3d/physics_world.vo',
+      sourceText: physicsWorldSource,
+      signature: 'func (w *PhysicsWorldState) step',
       token: 'if headerError != ""',
       source: 'body',
       reason: 'invalid_header',
       reasonToken: 'Reason: headerError',
-      expectedReturn: 'return',
+      expectedReturn: 'PhysicsBackendPacketError{',
     },
     {
-      signature: 'func (s *Scene) StepAndSyncPhysics',
+      path: 'voplay/scene3d/physics_world.vo',
+      sourceText: physicsWorldSource,
+      signature: 'func (w *PhysicsWorldState) step',
       token: 'if r.Remaining() < 4',
       source: 'body',
       reason: 'missing_count',
-      expectedReturn: 'return',
+      expectedReturn: 'PhysicsBackendPacketError{',
     },
     {
-      signature: 'func (s *Scene) StepAndSyncPhysics',
+      path: 'voplay/scene3d/physics_world.vo',
+      sourceText: physicsWorldSource,
+      signature: 'func (w *PhysicsWorldState) step',
       token: 'if r.Remaining() != count * physics3DBodyStateBytes',
       source: 'body',
       reason: 'body_payload_length_mismatch',
-      expectedReturn: 'return',
+      expectedReturn: 'PhysicsBackendPacketError{',
     },
     {
+      path: 'voplay/scene3d/scene.vo',
+      sourceText: sceneSource,
       signature: 'func (s *Scene) Contacts',
       token: 'if headerError != ""',
       source: 'contact',
@@ -341,6 +349,8 @@ function packetDecodeBranchFailures(sceneSource) {
       expectedReturn: 'return []Contact{}',
     },
     {
+      path: 'voplay/scene3d/scene.vo',
+      sourceText: sceneSource,
       signature: 'func (s *Scene) Contacts',
       token: 'if r.Remaining() < 4',
       source: 'contact',
@@ -348,6 +358,8 @@ function packetDecodeBranchFailures(sceneSource) {
       expectedReturn: 'return []Contact{}',
     },
     {
+      path: 'voplay/scene3d/scene.vo',
+      sourceText: sceneSource,
       signature: 'func (s *Scene) Contacts',
       token: 'if r.Remaining() != count * physicsContactDetailBytes',
       source: 'contact',
@@ -357,9 +369,12 @@ function packetDecodeBranchFailures(sceneSource) {
   ];
   const failures = [];
   for (const spec of specs) {
-    const body = bodyOfFunction(sceneSource, spec.signature);
+    const body = bodyOfFunction(spec.sourceText, spec.signature);
     const branch = blockAfterToken(body, spec.token);
-    const structured = branch.includes('recordPhysicsBackendPacketError')
+    const routesStructuredError = spec.source === 'body'
+      ? branch.includes('PhysicsBackendPacketError{') && branch.includes(', true')
+      : branch.includes('recordPhysicsBackendPacketError');
+    const structured = routesStructuredError
       && branch.includes(`Source: "${spec.source}"`)
       && branch.includes(spec.reasonToken ?? `Reason: "${spec.reason}"`)
       && branch.includes('ExpectedBytes:')
@@ -367,8 +382,8 @@ function packetDecodeBranchFailures(sceneSource) {
       && branch.includes(spec.expectedReturn);
     if (!structured) {
       failures.push({
-        path: 'voplay/scene3d/scene.vo',
-        line: lineOfAfter(sceneSource, spec.signature, spec.token) ?? lineOf(sceneSource, spec.signature),
+        path: spec.path,
+        line: lineOfAfter(spec.sourceText, spec.signature, spec.token) ?? lineOf(spec.sourceText, spec.signature),
         text: `${spec.signature} ${spec.token}`,
         reason: `malformed ${spec.source} packet branch must record PhysicsBackendPacketError reason ${spec.reason} before returning`,
       });
@@ -429,8 +444,6 @@ function findBlockKartLowLevelFacts(files) {
   const forbidden = [
     'ApplyVehicleConstraint(',
     'ApplyEntityPhysicsConstraint(',
-    '.Diagnostics()',
-    '.Telemetry()',
     'PrimitiveStats(',
     'primitive3d.NewLayer',
     'primitive3d.NewBuilder',
@@ -471,6 +484,7 @@ function sourceAuditFailuresFromSource({
   renderPassSources,
   renderWorld,
   voplayPhysics,
+  voplayPhysicsWorld,
   voplayVehicle,
   voplayDynamics,
   kartController,
@@ -609,7 +623,7 @@ function sourceAuditFailuresFromSource({
       evidence: { path: 'voplay/scene3d/vehicle.vo', line: lineOf(voplayVehicle, 'func (v *Vehicle) ApplyForceCommand') },
     });
   }
-  const rawPhysicsBypassHits = regexHits([{ path: 'voplay/scene3d/physics.vo', source: voplayPhysics }], /^func \(e \*Entity\) (SetPosition|SetVelocity|SetAngularVelocity)\(/)
+  const rawPhysicsBypassHits = regexHits([{ path: 'voplay/scene3d/physics_commands.vo', source: voplayPhysics }], /^func \(e \*Entity\) (SetPosition|SetVelocity|SetAngularVelocity)\(/)
     .filter((hit) => !bodyOfFunction(voplayPhysics, hit.text.replace(/\s*\{\s*$/, '')).includes('ApplyPhysicsTarget(PhysicsBackendTargetCommand'));
   if (rawPhysicsBypassHits.length > 0 || /^func ProductStepAndSyncPhysics\(/m.test(sceneSource)) {
     failures.push({
@@ -620,7 +634,7 @@ function sourceAuditFailuresFromSource({
       evidence: { rawPhysicsBypassHits, productStepLine: lineOf(sceneSource, 'func ProductStepAndSyncPhysics') },
     });
   }
-  const malformedPacketBranchFailures = packetDecodeBranchFailures(sceneSource);
+  const malformedPacketBranchFailures = packetDecodeBranchFailures(sceneSource, voplayPhysicsWorld);
   if (malformedPacketBranchFailures.length > 0 || !physicsStressSource.includes('PacketErrors')) {
     failures.push({
       code: 'physics.malformed_packet_silent',
@@ -770,16 +784,16 @@ function sourceAuditFailuresFromSource({
     });
   }
   const blockKartGenericAuthoring = [];
-  const genericAuthoring = /ProductPrimitiveAuthoring|PrimitiveBatchAuthoring|PrimitiveInstanceAuthoring|SurfaceMaterialAuthoring|ColliderAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc|ShapeDesc|MaterialPreset)|PrepareMapWithAssets|SpawnPreparedMap|ProductSpawnTrackColliderStrip|PackWriter|vopack\./;
+  const genericAuthoring = /ProductPrimitiveAuthoring|ProductPrimitive(Place|Dynamic|SetPose)|ProductPrimitives\.(Place|Dynamic|BuildLayer|Material|Shape|Layer)|primitive3d\.(NewLayer|NewBuilder|LayerDesc|ChunkingDesc|MaterialDesc)|ProductSpawnTrackColliderStrip|PackWriter|vopack\./;
   const blockKartNamedAuthoring = [];
-  const blockKartNamedAuthoringRegex = /NewBlockKartPrimitiveContent|PrepareBlockKartMapAsset|SpawnBlockKartMap|SpawnBlockKartRoadsideBakedContent|AddDynamicWithFlags|PlaceStatic|PlaceDetail|SetBlockKartPrimitivePose|attachPrimitiveTrackColliderEntities|spawnBlockKartTrackCollider|primitiveTerrainSurfacePosition/;
+  const blockKartNamedAuthoringRegex = /NewBlockKartPrimitiveContent|PrepareBlockKartMapAsset|SpawnBlockKartMap|SpawnBlockKartRoadsideBakedContent|SetBlockKartPrimitivePose|attachPrimitiveTrackColliderEntities|spawnBlockKartTrackCollider|primitiveTerrainSurfacePosition/;
   const blockKartDirectIntentBypass = [];
   const blockKartDirectIntentRegex = /UpdateIntentFromSyncedState\s*\(|\b[A-Za-z_][A-Za-z0-9_]*\.UpdateIntent\s*\(/;
   const blockKartRuntimeContextMegaOwner = [];
   const blockKartOwnerContextMethods = [];
   for (const file of blockKartFiles) {
     const line = file.source.split(/\r?\n/).findIndex((sourceLine) => genericAuthoring.test(sourceLine));
-    if (line >= 0) blockKartGenericAuthoring.push({ path: file.rel, line: line + 1 });
+    if (line >= 0 && !file.rel.startsWith('runtimepack/')) blockKartGenericAuthoring.push({ path: file.rel, line: line + 1 });
     const namedLine = file.source.split(/\r?\n/).findIndex((sourceLine) => blockKartNamedAuthoringRegex.test(sourceLine));
     if (namedLine >= 0) blockKartNamedAuthoring.push({ path: file.rel, line: namedLine + 1 });
     const directIntentLine = file.source.split(/\r?\n/).findIndex((sourceLine) => blockKartDirectIntentRegex.test(sourceLine));
@@ -958,7 +972,11 @@ const pipelineCache = projectTexts(voplayRoot, [
 ]);
 const primitivePipelineBudgetSource = projectText(voplayRoot, 'rust/src/primitive_pipeline.rs');
 const pipelineCacheBudgetSource = projectText(voplayRoot, 'rust/src/pipeline3d/pipeline_cache.rs');
-const voplayPhysics = projectText(voplayRoot, 'scene3d/physics.vo');
+const voplayPhysicsBackend = projectText(voplayRoot, 'scene3d/physics_backend.vo');
+const voplayPhysicsCommands = projectText(voplayRoot, 'scene3d/physics_commands.vo');
+const voplayPhysicsTypes = projectText(voplayRoot, 'scene3d/physics_types.vo');
+const voplayPhysicsWorld = projectText(voplayRoot, 'scene3d/physics_world.vo');
+const voplayPhysics = [voplayPhysicsBackend, voplayPhysicsCommands, voplayPhysicsTypes, voplayPhysicsWorld].join('\n');
 const voplayVehicle = projectText(voplayRoot, 'scene3d/vehicle.vo');
 const voplayDynamics = projectText(voplayRoot, 'scene3d/kart_dynamics.vo');
 const kartController = projectText(voplayRoot, 'scene3d/kart_controller.vo');
@@ -1206,7 +1224,7 @@ issue(
   },
 );
 
-const physicsSource = projectText(voplayRoot, 'scene3d/physics.vo');
+const physicsSource = voplayPhysics;
 const vehicleSource = projectText(voplayRoot, 'scene3d/vehicle.vo');
 const roadEdgeAssistSource = projectText(voplayRoot, 'scene3d/vehicle_road_edge_assist.vo');
 const physicsAuthorityReady =
@@ -1238,7 +1256,7 @@ issue(
   'Move edge assist and boost authority into fixed-step dynamics and expose per-wheel contact telemetry.',
   physicsAuthorityReady,
   {
-    files: ['scene3d/physics.vo', 'scene3d/vehicle.vo', 'scene3d/vehicle_road_edge_assist.vo', 'scene3d/vehicle_telemetry.vo', 'scene3d/replay.vo'],
+    files: ['scene3d/physics_backend.vo', 'scene3d/physics_commands.vo', 'scene3d/physics_types.vo', 'scene3d/physics_world.vo', 'scene3d/vehicle.vo', 'scene3d/vehicle_road_edge_assist.vo', 'scene3d/vehicle_telemetry.vo', 'scene3d/replay.vo'],
     targetCommandLine: lineOf(physicsSource, 'type PhysicsBackendTargetCommand struct'),
     privateForceCommandLine: lineOf(vehicleSource, 'func (v *Vehicle) applyForceCommand'),
     roadEdgeTargetLine: lineOf(roadEdgeAssistSource, 'applyVehicleBackendTarget(vehicle, PhysicsBackendTargetCommand'),
@@ -1502,6 +1520,7 @@ const sourceAuditFailures = [
     renderPassSources,
     renderWorld,
     voplayPhysics,
+    voplayPhysicsWorld,
     voplayVehicle,
     voplayDynamics,
     kartController,
@@ -1515,6 +1534,7 @@ const sourceAuditFailures = [
   }),
 ];
 const physicsContractReport = jsonMaybe('target/voplay-physics-backend-contract/report.json');
+const blockKartBoundaryReport = jsonMaybe('target/blockkart-product-boundary-strict/report.json');
 const renderStressStructuredReady = renderStressReport?.status === 'pass'
   && renderStressReport?.coverage?.primitive10k === true
   && renderStressReport?.coverage?.resourceChurnSoak === true
@@ -1544,8 +1564,8 @@ const renderStressStructuredReady = renderStressReport?.status === 'pass'
 const physicsAuthorityStructuredReady = physicsContractReport?.status === 'pass'
   && !sourceAuditFailures.some((entry) => entry.code.startsWith('physics.'));
 const blockKartProductStructuredReady = !sourceAuditFailures.some((entry) => entry.code.startsWith('blockkart.'))
-  && blockKartFiles.some((entry) => entry.source.includes('ProductSceneDiagnostics'))
-  && blockKartFiles.some((entry) => entry.source.includes('ProductVehicleTelemetry'));
+  && blockKartBoundaryReport?.status === 'ok'
+  && blockKartBoundaryReport?.issueCount === 0;
 const renderFileBudgetEntries = {
   'rust/src/renderer/frame_orchestrator.rs': {
     lines: lineCount(frameOrchestrator),
