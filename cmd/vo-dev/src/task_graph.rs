@@ -199,11 +199,14 @@ fn collect_task_repos(
 }
 
 fn input_required_repo(input: &str) -> Option<&str> {
-    input
+    let reference = input
         .strip_prefix("external:")
         .or_else(|| input.strip_prefix("module-cache:"))
-        .or_else(|| input.strip_prefix("first-party:"))
-        .filter(|repo| !repo.trim().is_empty())
+        .or_else(|| input.strip_prefix("first-party:"))?;
+    let repo = reference
+        .split_once('/')
+        .map_or(reference, |(repo, _)| repo);
+    (!repo.trim().is_empty()).then_some(repo)
 }
 
 pub(crate) fn collect_task_node_workspaces(
@@ -260,4 +263,27 @@ pub(crate) fn task_to_json(task: &Task) -> serde_json::Value {
         "platforms": task.platforms,
         "shell": task.shell,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::input_required_repo;
+
+    #[test]
+    fn structured_inputs_require_the_declared_repo_only() {
+        assert_eq!(
+            input_required_repo("first-party:voplay/rust/**"),
+            Some("voplay")
+        );
+        assert_eq!(
+            input_required_repo("external:BlockKart/assets/**"),
+            Some("BlockKart")
+        );
+        assert_eq!(
+            input_required_repo("module-cache:vogui/artifact.wasm"),
+            Some("vogui")
+        );
+        assert_eq!(input_required_repo("Cargo.lock"), None);
+        assert_eq!(input_required_repo("first-party:/rust/**"), None);
+    }
 }
