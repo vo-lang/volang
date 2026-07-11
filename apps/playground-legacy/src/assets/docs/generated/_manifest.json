@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:9de18d1eef16974e544792abc0befe653d93ec68e6637cde84e29a79244093a8"
+    "voDevSourceDigest": "sha256:bc72f29b3ab89446da302a9d33ccf0e22a4d1ba0058551e2bdf6dd53049eb6ed"
   },
   "sourceRoots": {
     "volang": "/Users/macm1/code/github/volang"
