@@ -34,9 +34,14 @@ const BLOCKKART_SOURCE_ALLOWLIST = [
 ];
 const QUICKPLAY_ARTIFACT_NAME = 'studio.quickplay.blockkart';
 const QUICKPLAY_ARTIFACT_PATH = 'apps/studio/public/quickplay/blockkart';
-const QUICKPLAY_GENERATOR_VERSION = 7;
+const QUICKPLAY_GENERATOR_VERSION = 8;
 const QUICKPLAY_TASK_ID = 'quickplay-blockkart-package';
 const QUICKPLAY_GENERATOR_COMMAND = ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'];
+const QUICKPLAY_SOURCE_ROOTS = {
+  volang: '.',
+  blockKart: 'external:BlockKart',
+  voplay: 'first-party:voplay',
+};
 const QUICKPLAY_GENERATOR_INPUTS = [
   'apps/studio/scripts/package_blockkart_quickplay.mjs',
   'scripts/ci/voplay_current_wasm.mjs',
@@ -934,15 +939,11 @@ async function buildProvenance(projectPackage, dependencyPackage, outputBytes) {
       version: QUICKPLAY_GENERATOR_VERSION,
     },
     toolchain: {
-      node: process.version,
+      node: `v${process.versions.node.split('.')[0]}`,
       voDevSourceDigest: await volangGeneratorSourceDigest(),
       wasmTarget: WASM_TARGET,
     },
-    sourceRoots: {
-      volang: VOLANG_ROOT,
-      blockKart: BLOCKKART_ROOT,
-      voplay: VOPLAY_ROOT,
-    },
+    sourceRoots: QUICKPLAY_SOURCE_ROOTS,
     inputs: QUICKPLAY_GENERATOR_INPUTS,
     project: {
       commit: projectPackage.commit,

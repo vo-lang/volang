@@ -457,14 +457,14 @@ digest = "${sha256Digest(voplayWasm)}"
       version: 3,
     },
     toolchain: {
-      node: process.version,
+      node: `v${process.versions.node.split('.')[0]}`,
       voDevSourceDigest: sha256Digest(Buffer.from('quickplay-validate-selftest-generator')),
       wasmTarget: 'wasm32-unknown-unknown',
     },
     sourceRoots: {
-      volang: root,
-      blockKart: blockKartRoot,
-      voplay: root,
+      volang: '.',
+      blockKart: 'external:BlockKart',
+      voplay: 'first-party:voplay',
     },
     inputs: [
       'apps/studio/scripts/package_blockkart_quickplay.mjs',

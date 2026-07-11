@@ -19,17 +19,17 @@
       "task:quickplay-blockkart-package"
     ],
     "script": "apps/studio/scripts/package_blockkart_quickplay.mjs",
-    "version": 7
+    "version": 8
   },
   "toolchain": {
-    "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:2b6222b633c2b09b03c6981990c79305c421c23205359ba58818ff9590312c8d",
+    "node": "v24",
+    "voDevSourceDigest": "sha256:bc122f621490cbd4809f649dfc66f8b3ceb7140c1ef913ef89164833fce9b66f",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
-    "volang": "/Users/macm1/code/github/volang",
-    "blockKart": "/Users/macm1/code/github/BlockKart",
-    "voplay": "/Users/macm1/code/github/voplay"
+    "volang": ".",
+    "blockKart": "external:BlockKart",
+    "voplay": "first-party:voplay"
   },
   "inputs": [
     "apps/studio/scripts/package_blockkart_quickplay.mjs",

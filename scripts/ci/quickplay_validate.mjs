@@ -33,6 +33,11 @@ const expected = {
   artifactName: 'studio.quickplay.blockkart',
   artifactPath: 'apps/studio/public/quickplay/blockkart',
   generatorCommand: ['vo-dev', 'task', 'run', 'task:quickplay-blockkart-package'],
+  sourceRoots: {
+    volang: '.',
+    blockKart: 'external:BlockKart',
+    voplay: 'first-party:voplay',
+  },
   generatorInputs: [
     'apps/studio/scripts/package_blockkart_quickplay.mjs',
     'scripts/ci/voplay_current_wasm.mjs',
@@ -938,12 +943,13 @@ function validateProvenance(project, deps) {
     'provenance generator command mismatch',
   );
   assert(Number(provenance.generator?.version) >= 2, 'provenance generator version must be at least 2');
-  assert(typeof provenance.toolchain?.node === 'string' && provenance.toolchain.node.length > 0, 'provenance node toolchain version missing');
+  assert(/^v\d+$/.test(provenance.toolchain?.node ?? ''), 'provenance node toolchain must use a reproducible major version');
   assert(sha256Field(provenance.toolchain?.voDevSourceDigest), 'provenance vo-dev generator source digest missing');
   assert(provenance.toolchain?.wasmTarget === 'wasm32-unknown-unknown', 'provenance wasm target mismatch');
-  assert(typeof provenance.sourceRoots?.volang === 'string' && provenance.sourceRoots.volang.length > 0, 'provenance volang source root missing');
-  assert(typeof provenance.sourceRoots?.blockKart === 'string' && provenance.sourceRoots.blockKart.length > 0, 'provenance BlockKart source root missing');
-  assert(typeof provenance.sourceRoots?.voplay === 'string' && provenance.sourceRoots.voplay.length > 0, 'provenance voplay source root missing');
+  assert(
+    JSON.stringify(provenance.sourceRoots) === JSON.stringify(expected.sourceRoots),
+    'provenance source roots must use canonical repository identities',
+  );
   assert(
     sameStringArray(provenance.inputs, expected.generatorInputs),
     'provenance generator inputs mismatch',
@@ -998,7 +1004,9 @@ function validateProvenance(project, deps) {
     assert(typeof provenanceMod.dirty === 'boolean', `provenance dirty flag missing for ${mod.module}`);
     assert(provenanceMod.dirty === false, `provenance dirty flag must be false for ${mod.module}`);
     if (provenanceMod.source === 'external' && mod.module === 'github.com/vo-lang/voplay') {
-      assert(provenanceMod.dirty === gitDirty(provenance.sourceRoots.voplay), `provenance dirty flag mismatch for ${mod.module}`);
+      const voplayRepo = dependencyRepos.find((repo) => repo.name === mod.module);
+      assert(voplayRepo, `validator repo root missing for ${mod.module}`);
+      assert(provenanceMod.dirty === gitDirty(voplayRepo.root), `provenance dirty flag mismatch for ${mod.module}`);
     }
     assert(provenanceMod.filesDigest === packagedFilesDigest(mod.files), `provenance files digest mismatch for ${mod.module}`);
 
