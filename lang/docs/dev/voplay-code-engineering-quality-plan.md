@@ -60,9 +60,9 @@ artifact 或 target report 的任务。
 当前 checkout snapshot:
 
 ```text
-volang    f7b879fbd6dc068dabba2d1abc29b5df0fd5bdea
-voplay    55e4898e4f1b0af840011358adb993da664e1c6a
-BlockKart 49498844a61f081ea5bf6bd6687ffb9cfd35786c
+volang    c3162876393bf6c0b5391d8f4cdd8bb7a79667b8
+voplay    a7444336f9ee209344d9361745d1af82cf03a406
+BlockKart 2aab1a52b632cb7703654c2126fb03bafa072bee
 ```
 
 重构前 source-bound baseline reports:
@@ -155,10 +155,9 @@ voplay 的核心代码应该满足以下结构约束：
 ### 当前差距
 
 源码审查中的 P0/P1 架构缺口已经关闭。主 agent 完成第二轮关键源码终审，未发现新的 P0/P1 第一性
-反证；quickplay artifact 已从当前工作树重建，regenerate compare 通过。strict source audit 只保留三个
-仓库 dirty 与 provenance clean-signoff 对应的四项根因，旧 commit 对新文件产生的派生噪音已消除。剩余
-工作限于把三个工作树形成真实 commits，再运行 Final Gate、预算 stress、10 分钟 soak、physics replay 与
-readiness 最终报告。
+反证；三个仓库的源码重构已经形成独立提交，quickplay artifact 已从精确 pinned commits 重建。strict
+source audit 的架构事实全部通过。剩余签字工作限于在上述 clean snapshot 上运行 Final Gate、预算 stress、
+10 分钟 soak、physics replay 与 readiness 最终报告。
 
 ## 设计原则
 
