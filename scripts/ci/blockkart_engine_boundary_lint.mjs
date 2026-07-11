@@ -90,8 +90,16 @@ const blockKartVoFiles = listVoFiles(blockKartRoot);
 
 check(vehicle.includes('func (v *Vehicle) applyForceCommandToBackend'), 'voplay.backend_adapter_missing', 'voplay vehicle backend adapter is missing');
 const backendAdapterBody = bodyOfFunction(vehicle, 'func (v *Vehicle) applyForceCommandToBackend');
-check(backendAdapterBody.includes('BuildPhysicsBackendApplyCommand'), 'voplay.backend_apply_builder_not_used', 'voplay vehicle backend adapter does not build PhysicsBackendApplyCommand');
-check(backendAdapterBody.includes('physBackend.ApplyVehicleForces') && !vehicle.includes('physBackend.SetRaycastVehicleWheelControl'), 'voplay.backend_apply_contract_not_used', 'voplay vehicle backend adapter does not route wheel controls through PhysicsBackend.ApplyVehicleForces');
+check(
+  /\b(?:BuildPhysicsBackendApplyCommand|buildPhysicsBackendApplyCommandWithNormalizedConfig)\s*\(/.test(backendAdapterBody),
+  'voplay.backend_apply_builder_not_used',
+  'voplay vehicle backend adapter does not build PhysicsBackendApplyCommand',
+);
+check(
+  /\bphysicsWorld\.backend\.ApplyVehicleForces\s*\(/.test(backendAdapterBody) && !vehicle.includes('SetRaycastVehicleWheelControl'),
+  'voplay.backend_apply_contract_not_used',
+  'voplay vehicle backend adapter does not route wheel controls through PhysicsBackend.ApplyVehicleForces',
+);
 check(!vehicle.includes('func (v *Vehicle) applyControls'), 'voplay.legacy_apply_controls', 'voplay still exposes direct applyControls');
 check(!vehicle.includes('SurfaceMaterialAtTrackPosition'), 'voplay.vehicle_track_position_surface_inference', 'Vehicle still infers surface material from track position');
 check(!contactEvent.includes('SurfaceMaterialAtTrackPosition'), 'voplay.contact_track_position_surface_inference', 'ContactEvent still infers surface material from track position');
