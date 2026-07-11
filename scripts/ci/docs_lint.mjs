@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { acceptedVolangPlanSnapshotCommits } from './active_plan_snapshot.mjs';
 
 const root = path.resolve(new URL('../..', import.meta.url).pathname);
 const activePlanPath = path.join(root, 'lang/docs/dev/voplay-code-engineering-quality-plan.md');
@@ -40,25 +41,6 @@ function gitHead(repoRoot) {
   return gitRev(repoRoot, 'HEAD');
 }
 
-function gitLastVolangSourceCommit(repoRoot, rev = 'HEAD') {
-  if (!existsSync(repoRoot)) return null;
-  const result = spawnSync('git', [
-    'log',
-    '-1',
-    '--format=%H',
-    rev,
-    '--',
-    '.',
-    ':(exclude)lang/docs/dev/vm-production-gate-evidence/**',
-    ':(exclude)lang/docs/dev/vm-production-readiness.md',
-  ], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-  });
-  if (result.status !== 0) return null;
-  return result.stdout.trim() || null;
-}
-
 function parseProjectPins(projectText) {
   const pins = {};
   let section = null;
@@ -96,14 +78,12 @@ function assertActivePlanSnapshotFreshness() {
   const projectText = readFileSync(projectPath, 'utf8');
   const snapshot = parsePlanSnapshot(planText);
   const pins = parseProjectPins(projectText);
-  const volangSourceCommit = gitLastVolangSourceCommit(root) ?? gitHead(root);
+  const acceptedVolangCommits = acceptedVolangPlanSnapshotCommits(root);
+  const volangSourceCommit = acceptedVolangCommits[0] ?? gitHead(root);
   const expected = {
     volang: {
       expectedCommit: volangSourceCommit,
-      acceptedCommits: [
-        volangSourceCommit,
-        volangSourceCommit ? gitLastVolangSourceCommit(root, `${volangSourceCommit}^`) : null,
-      ].filter(Boolean),
+      acceptedCommits: acceptedVolangCommits,
       repoRoot: root,
     },
     voplay: {

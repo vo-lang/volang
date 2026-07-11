@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acceptedVolangPlanSnapshotCommits } from './active_plan_snapshot.mjs';
 import { requireRepoRoot } from './repo_roots.mjs';
 import {
   sourceBoundEvidence,
@@ -517,17 +518,6 @@ function gitCommit(projectRoot) {
     }
   }
   return null;
-}
-
-function gitRev(projectRoot, rev) {
-  const result = spawnSync('git', ['rev-parse', rev], {
-    cwd: projectRoot,
-    encoding: 'utf8',
-  });
-  if (result.status !== 0) {
-    return null;
-  }
-  return result.stdout.trim();
 }
 
 function parseExpectedCommits(projectSource) {
@@ -1115,7 +1105,7 @@ const physicsStressCommandFailureCountersReady = physicsStressSource.includes('P
   && physicsStressSource.includes('PhysicsRejectedCommandCount');
 const expectedCommits = parseExpectedCommits(projectToml);
 const planSnapshot = activePlanSnapshot(activeQualityPlanSource);
-const acceptedVolangPlanCommits = [gitCommit(root), gitRev(root, 'HEAD^')].filter(Boolean);
+const acceptedVolangPlanCommits = acceptedVolangPlanSnapshotCommits(root);
 const activePlanSnapshotFresh =
   acceptedVolangPlanCommits.includes(planSnapshot.volang)
   && planSnapshot.voplay === expectedCommits.get('voplay')
@@ -2179,6 +2169,7 @@ const freshEvidence = sourceBoundEvidence({
   ],
   gateFiles: [
     'scripts/ci/voplay_industrial_readiness.mjs',
+    'scripts/ci/active_plan_snapshot.mjs',
     'scripts/ci/repo_roots.mjs',
     'scripts/ci/source_bound_evidence.mjs',
     'scripts/ci/voplay_render_architecture_lint.mjs',

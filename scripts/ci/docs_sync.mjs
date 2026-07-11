@@ -43,6 +43,7 @@ async function volangGeneratorSourceDigest() {
   const inputs = [
     'scripts/ci/docs_sync.mjs',
     'scripts/ci/docs_lint.mjs',
+    'scripts/ci/active_plan_snapshot.mjs',
     'eng/project.toml',
     'eng/tasks.toml',
     'eng/ci.toml',
