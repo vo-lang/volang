@@ -123,8 +123,9 @@ fn write_json_string_extern(call: &mut ExternCallContext) -> ExternResult {
     let mut buf: Vec<u8> = if buf_ref.is_null() {
         Vec::new()
     } else {
-        let data = vo_runtime::objects::slice::data_ptr(buf_ref);
-        let len = vo_runtime::objects::slice::len(buf_ref);
+        // Safety: `buf_ref` is a rooted []byte extern argument.
+        let data = unsafe { vo_runtime::objects::slice::data_ptr(buf_ref) };
+        let len = unsafe { vo_runtime::objects::slice::len(buf_ref) };
         unsafe { core::slice::from_raw_parts(data, len).to_vec() }
     };
 

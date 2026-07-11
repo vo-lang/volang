@@ -54,19 +54,20 @@ pub fn exec_closure_get(
     let Some(c) = gc.canonicalize_ref(raw_closure) else {
         return Err(ClosureGetError::MissingClosure);
     };
-    let kind = Gc::header(c).kind();
+    let kind = unsafe { Gc::header(c) }.kind();
     if kind != ValueKind::Closure {
         return Err(ClosureGetError::NonClosure { kind });
     }
     let capture_index = inst.b as usize;
-    let capture_count = closure::capture_count(c);
+    // Safety: `c` was canonicalized and checked as a closure above.
+    let capture_count = unsafe { closure::capture_count(c) };
     if capture_index >= capture_count {
         return Err(ClosureGetError::CaptureOutOfRange {
             requested: capture_index,
             count: capture_count,
         });
     }
-    let val = closure::get_capture(c, inst.b as usize);
+    let val = unsafe { closure::get_capture(c, inst.b as usize) };
     stack_set(stack, bp + inst.a as usize, val);
     Ok(())
 }

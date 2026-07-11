@@ -26,7 +26,9 @@ use hashbrown::HashMap as HbHashMap;
 #[cfg(feature = "std")]
 use std::collections::{HashMap as StdHashMap, VecDeque};
 #[cfg(feature = "std")]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "std")]
+use std::sync::mpsc::Receiver;
 #[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "std")]
@@ -372,11 +374,22 @@ pub enum VmError {
     Jit(String),
 }
 
+/// Lifecycle events emitted by an island worker thread.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IslandThreadEvent {
+    Ready,
+    Failed(String),
+    Exited,
+}
+
 /// Active island thread info.
 #[cfg(feature = "std")]
 pub struct IslandThread {
     pub island_id: u32,
     pub join_handle: Option<JoinHandle<()>>,
+    pub events: Receiver<IslandThreadEvent>,
+    pub interrupt_flag: Arc<AtomicBool>,
 }
 
 /// VM mutable state that can be borrowed independently from scheduler.
@@ -728,6 +741,9 @@ impl Default for VmState {
 #[cfg(feature = "std")]
 impl Drop for VmState {
     fn drop(&mut self) {
+        for island in &self.island_threads {
+            island.interrupt_flag.store(true, Ordering::SeqCst);
+        }
         for island in &self.island_threads {
             let _ = self.try_send_to_island(island.island_id, IslandCommand::Shutdown);
         }

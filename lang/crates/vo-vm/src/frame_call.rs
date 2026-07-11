@@ -106,12 +106,13 @@ pub(crate) fn validate_call_return_window(
 impl ValidClosureTarget<'_> {
     #[inline]
     pub(crate) fn capture_count(&self) -> usize {
-        closure::capture_count(self.closure_gcref)
+        // Safety: `ValidClosureTarget` construction validates and roots this closure.
+        unsafe { closure::capture_count(self.closure_gcref) }
     }
 
     #[inline]
     pub(crate) fn capture(&self, index: usize) -> u64 {
-        closure::get_capture(self.closure_gcref, index)
+        unsafe { closure::get_capture(self.closure_gcref, index) }
     }
 
     pub(crate) fn user_arg_slots(&self, context: &str) -> Result<usize, String> {
@@ -275,11 +276,9 @@ impl<'a> FrameCallBuilder<'a> {
         );
         for i in 0..target.layout.receiver_capture_count {
             let stack = self.fiber.stack_ptr();
-            stack_set(
-                stack,
-                new_bp + i,
-                closure::get_capture(target.closure_gcref, i),
-            );
+            stack_set(stack, new_bp + i, unsafe {
+                closure::get_capture(target.closure_gcref, i)
+            });
         }
         if let Some(slot0_val) = target.layout.slot0 {
             let stack = self.fiber.stack_ptr();
@@ -389,11 +388,9 @@ impl<'a> FrameCallBuilder<'a> {
             .zero_slots_tail_at(new_bp, target.func.gc_scan_slots as usize, 0);
         let fstack = self.fiber.stack_ptr();
         for i in 0..target.layout.receiver_capture_count {
-            stack_set(
-                fstack,
-                new_bp + i,
-                closure::get_capture(target.closure_gcref, i),
-            );
+            stack_set(fstack, new_bp + i, unsafe {
+                closure::get_capture(target.closure_gcref, i)
+            });
         }
         if let Some(slot0_val) = target.layout.slot0 {
             stack_set(fstack, new_bp, slot0_val);
@@ -799,7 +796,7 @@ fn validate_extern_replay_concrete_arg(
         ));
     };
     values[slot_idx] = canonical as u64;
-    let header = Gc::header(canonical);
+    let header = unsafe { Gc::header(canonical) };
     if header.kind() != expected_header_kind {
         return Err(format!(
             "CallExtern closure replay param object kind {:?} does not match expected {:?} for value kind {:?} func_id={} name={} slot={}",
@@ -1008,7 +1005,7 @@ fn validate_extern_replay_interface_data_object(
         ));
     };
     values[slot_idx + 1] = canonical as u64;
-    let header = Gc::header(canonical);
+    let header = unsafe { Gc::header(canonical) };
     let Some(expected_meta) =
         module.canonical_value_meta_for_value_rttid(ValueRttid::new(rttid, value_kind))
     else {
@@ -1200,9 +1197,10 @@ fn validate_extern_replay_interface_array_data(
             ));
         }
     }
-    let actual_len = array::len(array_ref);
-    let actual_elem_meta = array::elem_meta(array_ref);
-    let actual_elem_bytes = array::elem_bytes(array_ref);
+    // Safety: the replay validator canonicalized the object and checked its array kind.
+    let actual_len = unsafe { array::len(array_ref) };
+    let actual_elem_meta = unsafe { array::elem_meta(array_ref) };
+    let actual_elem_bytes = unsafe { array::elem_bytes(array_ref) };
     if actual_len != expected_len
         || actual_elem_meta != expected_elem_meta
         || actual_elem_bytes != expected_elem_bytes
@@ -1411,7 +1409,7 @@ pub(crate) fn validate_closure_target<'a>(
             raw_ref as GcRef
         ));
     };
-    let kind = Gc::header(canonical_ref).kind();
+    let kind = unsafe { Gc::header(canonical_ref) }.kind();
     if kind != ValueKind::Closure {
         return Err(format!(
             "{context} requested non-closure object kind {:?} at {:p}",
@@ -1436,12 +1434,13 @@ pub(crate) fn validate_closure_target<'a>(
             closure::HEADER_SLOTS
         ));
     }
-    let func_id = closure::func_id(canonical_ref);
-    let capture_count = closure::capture_count(canonical_ref);
+    // Safety: the object was canonicalized and checked as a closure above.
+    let func_id = unsafe { closure::func_id(canonical_ref) };
+    let capture_count = unsafe { closure::capture_count(canonical_ref) };
     let expected_slots = closure::HEADER_SLOTS
         .checked_add(capture_count)
         .ok_or_else(|| format!("{context} closure layout slot count overflow"))?;
-    let header_slots = Gc::header(canonical_ref).slots as usize;
+    let header_slots = unsafe { Gc::header(canonical_ref) }.slots as usize;
     if header_slots != expected_slots || allocated_slots != expected_slots {
         return Err(format!(
             "{context} closure layout slot count mismatch for func_id={func_id}: expected {expected_slots}, header {header_slots}, allocation {allocated_slots}"
@@ -1461,12 +1460,15 @@ pub(crate) fn validate_closure_target<'a>(
             func.name
         ));
     }
-    let layout = closure_call_layout(
-        canonical_ref as u64,
-        canonical_ref,
-        func.recv_slots as usize,
-        func.is_closure,
-    )
+    // Safety: canonical_ref passed closure kind, allocation, and capture-count validation above.
+    let layout = unsafe {
+        closure_call_layout(
+            canonical_ref as u64,
+            canonical_ref,
+            func.recv_slots as usize,
+            func.is_closure,
+        )
+    }
     .map_err(|err| {
         format!(
             "{context} invalid closure layout for func_id={func_id} name={}: {}",
@@ -1493,7 +1495,7 @@ pub(crate) fn validate_island_handle(
             raw_ref as GcRef
         ));
     };
-    let kind = Gc::header(canonical_ref).kind();
+    let kind = unsafe { Gc::header(canonical_ref) }.kind();
     if kind != ValueKind::Island {
         return Err(format!(
             "{context} requested non-island object kind {:?} at {:p}",

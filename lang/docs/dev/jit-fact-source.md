@@ -116,6 +116,20 @@ blocking, and regular/prepared VM call materialization. Historical
 language-test manifest side-exit observation keys are parsed only at the test
 boundary and must map into side-exit fields before they reach runtime APIs.
 
+## Cooperative Scheduling Budget
+
+`Fiber::execution_budget` is the scheduling authority for one runnable-fiber
+turn. Interpreter execution, loop OSR, full-function JIT entry, and nested
+direct JIT calls consume the same counter. Native entry must inherit the
+remaining fiber budget and publish the remainder back on every return; a JIT
+function or nested call must not reset its own timeslice.
+
+Generated code charges bounded execution regions at function/loop entry,
+branch targets, fallthrough boundaries, and artificial straight-line
+checkpoints. The current maximum region span is 64 bytecode instructions.
+Budget exhaustion returns through the common cooperative-yield path so the VM
+can restore scheduler ownership and apply the ordinary runtime boundary.
+
 ## Fail-Fast Rules
 
 Strict JIT compile and verification must fail fast for:
@@ -152,3 +166,5 @@ When adding or changing an opcode:
    or semantic consistency tests.
 8. Run `cargo test -p vo-jit` and the relevant VM/codegen/language tests.
 9. Re-scan for duplicated opcode fact matches and misleading fallback names.
+10. Preserve the shared fiber execution budget across interpreter, OSR, and
+    nested native call paths.

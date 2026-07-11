@@ -268,6 +268,7 @@ fn vm_jit_iface_assert_layout_abi_061_rejects_width_drift_before_out_write() {
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
     };
     let flags =
         vo_common_core::instruction::pack_iface_assert_flags(0, true, 2).expect("test flags");
@@ -395,6 +396,7 @@ fn vm_jit_iface_assert_flags_width_abi_061_rejects_flags_drift_before_out_write(
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
     };
     let flags =
         vo_common_core::instruction::pack_iface_assert_flags(0, true, 2).expect("test flags");
@@ -533,6 +535,7 @@ fn vm_jit_iface_assert_has_ok_does_not_write_ok_before_success_materialization_0
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
     };
     let flags =
         vo_common_core::instruction::pack_iface_assert_flags(1, true, 2).expect("test flags");
@@ -690,13 +693,13 @@ fn vm_jit_map_helpers_abi_061_validate_raw_buffers_before_access() {
             "vo_map_iter_next key",
             map_iter_next,
             "validate_jit_raw_out_buffer(ctx, key_ptr, key_slots",
-            "write_bytes(key_ptr",
+            "jit_raw_out_slice(key_ptr",
         ),
         (
             "vo_map_iter_next value",
             map_iter_next,
             "validate_jit_raw_out_buffer(ctx, val_ptr, val_slots",
-            "write_bytes(val_ptr",
+            "jit_raw_out_slice(val_ptr",
         ),
     ] {
         let validation = body
@@ -903,6 +906,7 @@ fn vm_jit_map_get_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
     };
     let key = [11_u64];
     let mut ret = [0xaaaa_u64, 0xbbbb_u64];
@@ -1027,8 +1031,9 @@ fn vm_jit_map_iter_next_nil_abi_061_rejects_value_width_drift_before_zeroing() {
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
     };
-    let mut iter = crate::objects::map::iter_init(core::ptr::null_mut());
+    let mut iter = unsafe { crate::objects::map::iter_init(core::ptr::null_mut()) };
     let mut key = [0xaaaa_u64];
     let mut val = [0xbbbb_u64, 0xcccc_u64];
 
@@ -1324,6 +1329,7 @@ fn typed_write_barrier_helper_reports_invalid_struct_meta_as_jit_error() {
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
     };
 
     let result = vo_gc_typed_write_barrier_by_meta(
@@ -1430,6 +1436,7 @@ fn slice_append_metadata_drift_returns_sentinel_instead_of_panicking() {
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
     };
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1709,6 +1716,7 @@ fn call_extern_missing_callback_uses_infra_error_path() {
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: crate::EXECUTION_TIMESLICE_INSTRUCTIONS,
     };
 
     let result = vo_call_extern(&mut ctx, 7, core::ptr::null(), 0, core::ptr::null_mut(), 0);

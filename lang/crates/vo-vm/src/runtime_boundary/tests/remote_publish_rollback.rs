@@ -99,7 +99,6 @@ fn vm_queue_close_remote_proxy_late_reservation_failure_rolls_back_closed_059() 
     let endpoint_id = 42;
     let ch = queue::create_remote_proxy(
         &mut vm.state.gc,
-        QueueKind::Port,
         endpoint_id,
         home_island,
         1,
@@ -162,7 +161,6 @@ fn vm_endpoint_response_command_bridge_061_rejects_non_home_closed_response_befo
     let home_island = 9;
     let ch = queue::create_remote_proxy(
         &mut vm.state.gc,
-        QueueKind::Port,
         endpoint_id,
         home_island,
         1,
@@ -198,7 +196,6 @@ fn vm_endpoint_response_command_bridge_061_rejects_non_home_targeted_response_be
     let home_island = 9;
     let _ch = queue::create_remote_proxy(
         &mut vm.state.gc,
-        QueueKind::Port,
         endpoint_id,
         home_island,
         1,
@@ -245,7 +242,6 @@ fn vm_remote_send_transfer_txn_061_late_publish_failure_rolls_back_local_endpoin
     );
     let target = queue::create_remote_proxy(
         &mut vm.state.gc,
-        QueueKind::Port,
         0x700,
         home_island,
         1,

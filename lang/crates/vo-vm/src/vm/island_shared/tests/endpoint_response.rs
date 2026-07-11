@@ -380,7 +380,7 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
     vm.state.current_island_id = 0;
     let mut module = Module::new("same-island-endpoint-response".to_string());
     module.runtime_types = vec![RuntimeType::Basic(ValueKind::Int64)];
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let endpoint_id = 44;
     let ch = queue::create(
         &mut vm.state.gc,
@@ -429,13 +429,15 @@ fn vm_endpoint_response_source_019_same_island_request_replays_response_through_
         .as_ref()
         .expect("same-island response must materialize recv payload");
     let module = vm.module.as_ref().expect("test module");
-    let expected = vo_runtime::pack::pack_slots(
-        &vm.state.gc,
-        &[123],
-        ValueMeta::new(0, ValueKind::Int64),
-        &module.struct_metas,
-        &module.runtime_types,
-    )
+    let expected = unsafe {
+        vo_runtime::pack::pack_slots(
+            &vm.state.gc,
+            &[123],
+            ValueMeta::new(0, ValueKind::Int64),
+            &module.struct_metas,
+            &module.runtime_types,
+        )
+    }
     .into_data();
     assert_eq!(response.data, expected);
     assert!(!response.closed);
@@ -450,7 +452,7 @@ fn vm_endpoint_recv_gc_payload_marks_roots_dirty_061() {
         RuntimeType::Basic(ValueKind::Port),
         RuntimeType::Basic(ValueKind::Int64),
     ];
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let endpoint_id = 45;
     let ch = queue::create(
         &mut vm.state.gc,

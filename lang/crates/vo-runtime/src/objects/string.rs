@@ -18,7 +18,8 @@ pub fn create(gc: &mut Gc, bytes: &[u8]) -> GcRef {
         return core::ptr::null_mut();
     }
     let arr = array::create(gc, ValueMeta::new(0, ValueKind::Uint8), 1, bytes.len());
-    let arr_data_ptr = array::data_ptr_bytes(arr);
+    // Safety: `arr` is the live array allocated immediately above.
+    let arr_data_ptr = unsafe { array::data_ptr_bytes(arr) };
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), arr_data_ptr, bytes.len());
     }

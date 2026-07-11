@@ -728,8 +728,8 @@ fn vm_direct_endpoint_request_ingress_061_rejects_forged_transfer_source_before_
         1,
         0,
     );
-    vo_runtime::objects::queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
-    vo_runtime::objects::queue::add_home_peer(ch, forged_peer);
+    test_queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
+    test_queue::add_home_peer(ch, forged_peer);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
 
     let err = vm
@@ -750,7 +750,7 @@ fn vm_direct_endpoint_request_ingress_061_rejects_forged_transfer_source_before_
         "{err:?}"
     );
     assert!(
-        !vo_runtime::objects::queue::home_info(ch)
+        !test_queue::home_info(ch)
             .expect("home info")
             .peers
             .contains(&new_peer),
@@ -763,9 +763,9 @@ fn vm_direct_endpoint_request_ingress_061_rejects_forged_recv_source_before_wait
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
     vm.state.external_island_transport = true;
-    vm.module = Some(vo_common_core::bytecode::Module::new(
+    vm.module = Some(std::sync::Arc::new(vo_common_core::bytecode::Module::new(
         "direct-endpoint-forged-recv".to_string(),
-    ));
+    )));
     let endpoint_id = 0x0610_0000_0000_0701;
     let forged_peer = 7;
     let actual_source = 99;
@@ -777,8 +777,8 @@ fn vm_direct_endpoint_request_ingress_061_rejects_forged_recv_source_before_wait
         1,
         0,
     );
-    vo_runtime::objects::queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
-    vo_runtime::objects::queue::add_home_peer(ch, forged_peer);
+    test_queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
+    test_queue::add_home_peer(ch, forged_peer);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
 
     let err = vm
@@ -799,9 +799,7 @@ fn vm_direct_endpoint_request_ingress_061_rejects_forged_recv_source_before_wait
         "{err:?}"
     );
     assert_eq!(
-        vo_runtime::objects::queue::local_state(ch)
-            .waiting_receivers
-            .len(),
+        test_queue::local_state(ch).waiting_receivers.len(),
         0,
         "forged direct ingress must reject before requester registration"
     );

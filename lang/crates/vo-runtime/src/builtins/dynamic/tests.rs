@@ -417,7 +417,7 @@ fn dynamic_map_keys_use_target_rttid_before_raw_slot_reads_060() {
 fn dynamic_spread_reads_use_physical_element_layout_060() {
     let source = production_source_062();
     let pack_any_slice = source
-        .split("fn dyn_pack_any_slice(")
+        .split("unsafe fn dyn_pack_any_slice_raw(")
         .nth(1)
         .and_then(|rest| rest.split("fn dyn_type_assert_error(").next())
         .expect("dyn_pack_any_slice section");

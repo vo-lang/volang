@@ -137,7 +137,7 @@ fn jit_queue_get(
     ctx: *mut JitContext,
     chan: u64,
     out: *mut u64,
-    get: impl FnOnce(GcRef) -> usize,
+    get: unsafe fn(GcRef) -> usize,
     invalid_handle_detail: u64,
 ) -> JitResult {
     if let Err(result) = validate_callback_raw_slot_span(
@@ -166,7 +166,8 @@ fn jit_queue_get(
                 )
             }
         };
-        get(ch) as u64
+        // Safety: validate_queue_handle proved that ch is a live queue object.
+        unsafe { get(ch) as u64 }
     };
     unsafe {
         *out = value;
@@ -345,7 +346,8 @@ pub extern "C" fn jit_queue_send(
                 )
             }
         };
-        let queue_elem_slots = vo_runtime::objects::queue_state::elem_slots(ch) as usize;
+        // Safety: validate_queue_handle proved that ch is a live queue object.
+        let queue_elem_slots = unsafe { vo_runtime::objects::queue_state::elem_slots(ch) } as usize;
         if val_slots != queue_elem_slots {
             return set_jit_infra_error(
                 ctx,
@@ -367,11 +369,13 @@ pub extern "C" fn jit_queue_send(
     {
         return result;
     }
-    let src: Vec<u64> = (0..val_slots).map(|i| unsafe { *val_ptr.add(i) }).collect();
+    // Safety: callback ABI validation above established a readable payload span
+    // that remains live until the native helper returns.
+    let src = unsafe { core::slice::from_raw_parts(val_ptr, val_slots) };
 
     match queue_send_core_with_layout(
         ch,
-        &src,
+        src,
         elem_layout,
         vm.state.current_island_id,
         fiber.wake_key_packed(),
@@ -570,7 +574,8 @@ pub extern "C" fn jit_queue_recv(
                 )
             }
         };
-        let queue_elem_slots = vo_runtime::objects::queue_state::elem_slots(ch) as usize;
+        // Safety: validate_queue_handle proved that ch is a live queue object.
+        let queue_elem_slots = unsafe { vo_runtime::objects::queue_state::elem_slots(ch) } as usize;
         if elem_slots != queue_elem_slots {
             return set_jit_infra_error(
                 ctx,
@@ -597,11 +602,18 @@ pub extern "C" fn jit_queue_recv(
     };
 
     if let Some(recv_response) = fiber.remote_recv_response.clone() {
+        // Safety: the non-null handle was validated above and remains rooted by the fiber wait.
+        let (elem_meta, elem_rttid) = unsafe {
+            (
+                vo_runtime::objects::queue_state::elem_meta(ch),
+                vo_runtime::objects::queue_state::elem_rttid(ch),
+            )
+        };
         if crate::exec::replay_remote_queue_recv_response(
             &mut vm.state.gc,
             recv_response,
-            vo_runtime::objects::queue_state::elem_meta(ch),
-            vo_runtime::objects::queue_state::elem_rttid(ch),
+            elem_meta,
+            elem_rttid,
             elem_slots,
             has_ok,
             &module.struct_metas,
@@ -627,10 +639,13 @@ pub extern "C" fn jit_queue_recv(
     {
         return result;
     }
-    let remote_sender_rollback = if !ch.is_null()
-        && !vo_runtime::objects::queue::is_remote(ch)
-        && vo_runtime::objects::queue::next_recv_endpoint_sender(ch).is_some()
-    {
+    // Safety: every non-null handle reached here through validate_queue_handle.
+    let has_local_endpoint_sender = !ch.is_null()
+        && unsafe {
+            !vo_runtime::objects::queue::is_remote(ch)
+                && vo_runtime::objects::queue::next_recv_endpoint_sender(ch).is_some()
+        };
+    let remote_sender_rollback = if has_local_endpoint_sender {
         let Some(stack_slots) = fiber_stack_slot_snapshot(fiber, dst_ptr, dst_slots) else {
             return set_jit_infra_error(
                 ctx,

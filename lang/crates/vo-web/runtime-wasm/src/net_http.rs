@@ -190,7 +190,9 @@ fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
     if slice_ref.is_null() {
         return Vec::new();
     }
-    let len = slice::len(slice_ref);
+    // Safety: the resolved extern ABI verifies this argument as a rooted
+    // []string value before the host provider is invoked.
+    let len = unsafe { slice::len(slice_ref) };
     let elem_bytes = core::mem::size_of::<GcRef>();
     let mut result = Vec::with_capacity(len);
     for i in 0..len {

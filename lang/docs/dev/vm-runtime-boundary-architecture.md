@@ -1,6 +1,6 @@
 # VM Runtime Boundary Architecture
 
-Status, 2026-06-12: implemented VM runtime-boundary architecture after a
+Status, 2026-07-11: implemented VM runtime-boundary architecture after a
 source-backed review and landing pass across VM, JIT, extern, scheduler, and GC
 boundary code. This is a development architecture document, not a user-facing
 spec.
@@ -70,6 +70,8 @@ The implemented shape is:
   token data is the only cross-turn wake identity;
 - `GcRootEffect` plus typed pending-root containers is the only way a boundary
   can make root-set dirtiness visible to GC;
+- `Fiber::execution_budget` is the single per-scheduler-turn cooperative
+  execution budget shared by interpreter, OSR, and nested full-function JIT;
 - `vo-jit/src/semantics` remains the only opcode fact source.
 
 The interpreter, full JIT, OSR exits, extern bridge, queue/select helpers, host
@@ -155,6 +157,11 @@ The architecture is internally consistent after the adjustments below:
     lowering ownership, bad resolved extern ABI, and provider drift remain fatal
     JIT infrastructure errors. Legal side exits and VM call materialization must
     be explicit transitions only.
+19. Cooperative scheduling budget belongs to the fiber turn. Interpreter and
+    native execution consume one shared counter; native functions use bounded
+    execution regions and return through the common yield boundary when it is
+    exhausted. Per-function or per-loop budget resets can starve peer fibers and
+    must not be reintroduced.
 
 With those constraints, no blocking design contradiction was found. The
 implementation is treated as current only while the acceptance tests and source

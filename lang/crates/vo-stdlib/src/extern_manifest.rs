@@ -296,8 +296,12 @@ pub fn known_extern_allowed_effects(name: &str) -> Option<ExternEffects> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
+    #[cfg(feature = "std")]
+    use std::collections::BTreeSet;
+    #[cfg(feature = "std")]
     use std::fs;
+    #[cfg(feature = "std")]
     use std::path::{Path, PathBuf};
 
     use super::*;

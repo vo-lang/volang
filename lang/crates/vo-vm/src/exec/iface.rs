@@ -257,7 +257,8 @@ pub fn exec_iface_assert(
             let slots = target_slots.max(1);
             if slot1 != 0 {
                 // Copy data from after ArrayHeader (data_ptr_bytes skips ArrayHeader)
-                let data_ptr = array::data_ptr_bytes(gc_ref) as *const u64;
+                // Safety: assertion validation established a live array object.
+                let data_ptr = unsafe { array::data_ptr_bytes(gc_ref) } as *const u64;
                 for i in 0..slots {
                     out[i as usize] = unsafe { *data_ptr.add(i as usize) };
                 }
@@ -336,7 +337,8 @@ pub fn exec_iface_eq(
     let c0 = stack_get(stack, bp + inst.c as usize);
     let c1 = stack_get(stack, bp + inst.c as usize + 1);
 
-    let result = compare::iface_eq(b0, b1, c0, c1, module);
+    // Safety: verified interface operands stay rooted for this instruction.
+    let result = unsafe { compare::iface_eq(b0, b1, c0, c1, module) };
 
     if result == 2 {
         return ExecResult::Panic;

@@ -1,8 +1,13 @@
+#![allow(clippy::missing_safety_doc)]
 //! Pack/Unpack for cross-island value transfer.
 //!
 //! All sendable values are deep-copied when crossing island boundaries.
 //! Pack converts values to an island-independent representation.
 //! Unpack reconstructs values in the destination island's heap.
+//!
+//! # Safety contract
+//! Unsafe transfer helpers require rooted live objects matching the supplied
+//! canonical metadata until serialization or reconstruction completes.
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -145,7 +150,7 @@ pub fn sequence_element_layout(
 ///
 /// # Returns
 /// PackedValue containing the serialized data
-pub fn pack_slots(
+pub unsafe fn pack_slots(
     gc: &Gc,
     src: &[u64],
     value_meta: ValueMeta,
@@ -160,7 +165,7 @@ pub fn pack_slots(
     )
 }
 
-pub fn pack_slots_with_named_type_metas(
+pub unsafe fn pack_slots_with_named_type_metas(
     gc: &Gc,
     src: &[u64],
     value_meta: ValueMeta,
@@ -176,7 +181,7 @@ pub fn pack_slots_with_named_type_metas(
     )
 }
 
-fn pack_slots_with_context(
+unsafe fn pack_slots_with_context(
     gc: &Gc,
     src: &[u64],
     value_meta: ValueMeta,
@@ -195,7 +200,7 @@ fn pack_slots_with_context(
 /// - `dst`: Destination slots
 /// - `struct_metas`: Struct metadata for recursive unpacking
 /// - `runtime_types`: Runtime type info for looking up nested struct meta_ids
-pub fn unpack_slots(
+pub unsafe fn unpack_slots(
     gc: &mut Gc,
     packed: &PackedValue,
     dst: &mut [u64],
@@ -212,7 +217,7 @@ pub fn unpack_slots(
     );
 }
 
-pub fn unpack_slots_with_named_type_metas(
+pub unsafe fn unpack_slots_with_named_type_metas(
     gc: &mut Gc,
     packed: &PackedValue,
     dst: &mut [u64],
@@ -231,7 +236,7 @@ pub fn unpack_slots_with_named_type_metas(
     );
 }
 
-pub fn unpack_slots_with_queue_handle_resolver<F>(
+pub unsafe fn unpack_slots_with_queue_handle_resolver<F>(
     gc: &mut Gc,
     packed: &PackedValue,
     dst: &mut [u64],
@@ -254,7 +259,7 @@ pub fn unpack_slots_with_queue_handle_resolver<F>(
     );
 }
 
-pub fn unpack_slots_with_queue_handle_resolver_and_named_type_metas<F>(
+pub unsafe fn unpack_slots_with_queue_handle_resolver_and_named_type_metas<F>(
     gc: &mut Gc,
     packed: &PackedValue,
     dst: &mut [u64],
@@ -279,7 +284,7 @@ pub fn unpack_slots_with_queue_handle_resolver_and_named_type_metas<F>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas<F>(
+pub unsafe fn unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas<F>(
     gc: &mut Gc,
     packed: &PackedValue,
     dst: &mut [u64],
@@ -330,7 +335,7 @@ pub fn validate_packed_slots_expected_with_named_type_metas(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn unpack_slots_with_queue_handle_resolver_and_cache<F>(
+pub(crate) unsafe fn unpack_slots_with_queue_handle_resolver_and_cache<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -354,7 +359,7 @@ pub(crate) fn unpack_slots_with_queue_handle_resolver_and_cache<F>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn unpack_slots_expected_with_queue_handle_resolver_and_cache<F>(
+pub(crate) unsafe fn unpack_slots_expected_with_queue_handle_resolver_and_cache<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -549,7 +554,7 @@ fn pointer_target_struct_meta_id(
     }
 }
 
-fn pack_value(
+unsafe fn pack_value(
     packed: &mut PackedValue,
     gc: &Gc,
     src: &[u64],
@@ -638,7 +643,7 @@ fn pack_value(
     }
 }
 
-fn pack_string(packed: &mut PackedValue, str_ref: GcRef) {
+unsafe fn pack_string(packed: &mut PackedValue, str_ref: GcRef) {
     if str_ref.is_null() {
         // Null string: length = 0
         packed.data.extend_from_slice(&0u64.to_le_bytes());
@@ -651,7 +656,12 @@ fn pack_string(packed: &mut PackedValue, str_ref: GcRef) {
     }
 }
 
-fn pack_slice(packed: &mut PackedValue, gc: &Gc, slice_ref: GcRef, context: PackTypeContext<'_>) {
+unsafe fn pack_slice(
+    packed: &mut PackedValue,
+    gc: &Gc,
+    slice_ref: GcRef,
+    context: PackTypeContext<'_>,
+) {
     // Explicit null marker for all reference types
     if slice_ref.is_null() {
         packed.data.push(0); // null marker
@@ -697,7 +707,12 @@ fn pack_slice(packed: &mut PackedValue, gc: &Gc, slice_ref: GcRef, context: Pack
     }
 }
 
-fn pack_array(packed: &mut PackedValue, gc: &Gc, arr_ref: GcRef, context: PackTypeContext<'_>) {
+unsafe fn pack_array(
+    packed: &mut PackedValue,
+    gc: &Gc,
+    arr_ref: GcRef,
+    context: PackTypeContext<'_>,
+) {
     // Explicit null marker for all reference types
     if arr_ref.is_null() {
         packed.data.push(0); // null marker
@@ -749,7 +764,7 @@ struct ArrayValueLayout {
     elem_slots: usize,
 }
 
-fn pack_array_value_inline(
+unsafe fn pack_array_value_inline(
     packed: &mut PackedValue,
     gc: &Gc,
     src: &[u64],
@@ -792,7 +807,7 @@ fn pack_array_value_inline(
     }
 }
 
-fn pack_struct_inline(
+unsafe fn pack_struct_inline(
     packed: &mut PackedValue,
     gc: &Gc,
     src: &[u64],
@@ -831,7 +846,7 @@ fn pack_struct_inline(
     }
 }
 
-fn pack_pointer(
+unsafe fn pack_pointer(
     packed: &mut PackedValue,
     gc: &Gc,
     ptr_ref: GcRef,
@@ -884,7 +899,12 @@ fn pack_pointer(
     pack_value(packed, gc, &obj_slots, obj_meta, context);
 }
 
-fn pack_map(packed: &mut PackedValue, gc: &Gc, map_ref: GcRef, context: PackTypeContext<'_>) {
+unsafe fn pack_map(
+    packed: &mut PackedValue,
+    gc: &Gc,
+    map_ref: GcRef,
+    context: PackTypeContext<'_>,
+) {
     // Explicit null marker for all reference types
     if map_ref.is_null() {
         packed.data.push(0); // null marker
@@ -918,10 +938,14 @@ fn pack_map(packed: &mut PackedValue, gc: &Gc, map_ref: GcRef, context: PackType
 
     // Iterate and pack entries
     let mut iter = map::iter_init(map_ref);
-    while let Some((k, v)) = map::iter_next(&mut iter) {
-        pack_value(packed, gc, k, key_meta, context);
-        pack_value(packed, gc, v, val_meta, context);
-    }
+    while map::with_next(&mut iter, |entry| {
+        let Some((key, val)) = entry else {
+            return false;
+        };
+        pack_value(packed, gc, key, key_meta, context);
+        pack_value(packed, gc, val, val_meta, context);
+        true
+    }) {}
 }
 
 fn map_key_context_module(key_meta: ValueMeta, context: PackTypeContext<'_>) -> Option<Module> {
@@ -1284,7 +1308,7 @@ fn validate_packed_value(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn unpack_value<F>(
+unsafe fn unpack_value<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -1423,7 +1447,7 @@ fn unpack_string(gc: &mut Gc, data: &[u8], cursor: &mut usize) -> GcRef {
     string::create(gc, bytes)
 }
 
-fn unpack_slice<F>(
+unsafe fn unpack_slice<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -1490,7 +1514,7 @@ where
     new_slice
 }
 
-fn unpack_array<F>(
+unsafe fn unpack_array<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -1557,7 +1581,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn unpack_array_value_inline<F>(
+unsafe fn unpack_array_value_inline<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -1625,7 +1649,7 @@ fn unpack_array_value_inline<F>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn unpack_struct_inline<F>(
+unsafe fn unpack_struct_inline<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -1679,7 +1703,7 @@ fn unpack_struct_inline<F>(
     }
 }
 
-fn unpack_pointer<F>(
+unsafe fn unpack_pointer<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -1723,7 +1747,7 @@ where
     new_obj
 }
 
-fn unpack_map<F>(
+unsafe fn unpack_map<F>(
     gc: &mut Gc,
     data: &[u8],
     cursor: &mut usize,
@@ -1793,7 +1817,7 @@ where
 /// Pack a channel handle for cross-island transfer.
 /// Serializes: endpoint_id(8) + home_island(4) + cap(8) + meta_raw(4) + elem_slots(2) + closed(1)
 /// LOCAL channels MUST have HomeInfo installed before packing (call prepare_chans first).
-fn pack_queue_handle(packed: &mut PackedValue, chan_ref: GcRef) {
+unsafe fn pack_queue_handle(packed: &mut PackedValue, chan_ref: GcRef) {
     if chan_ref.is_null() {
         packed.data.push(0); // null marker
         return;
@@ -1802,17 +1826,17 @@ fn pack_queue_handle(packed: &mut PackedValue, chan_ref: GcRef) {
     pack_queue_handle_inner(packed, chan_ref);
 }
 
-fn pack_queue_handle_inner(packed: &mut PackedValue, chan_ref: GcRef) {
+unsafe fn pack_queue_handle_inner(packed: &mut PackedValue, chan_ref: GcRef) {
     let (kind, cap, elem_meta, elem_rttid, elem_slots) = queue::get_metadata(chan_ref);
     if kind != QueueKind::Port {
         panic!("pack_queue_handle: {:?} cannot cross islands", kind);
     }
 
     let (endpoint_id, home_island, closed) = if queue::is_remote(chan_ref) {
-        let proxy = queue::remote_proxy(chan_ref);
+        let proxy = unsafe { queue::remote_proxy(chan_ref) };
         (proxy.endpoint_id, proxy.home_island, proxy.closed)
     } else {
-        match queue::home_info(chan_ref) {
+        match unsafe { queue::home_info(chan_ref) } {
             Some(info) => (info.endpoint_id, info.home_island, queue::is_closed(chan_ref) && queue::len(chan_ref) == 0),
             None => panic!("pack_chan_handle: LOCAL channel without HomeInfo — call prepare_value_chans_for_transfer first"),
         }
@@ -1834,9 +1858,11 @@ fn pack_queue_handle_inner(packed: &mut PackedValue, chan_ref: GcRef) {
 
 /// Unpack a channel handle — creates a REMOTE proxy on the destination island.
 fn default_unpack_queue_handle(gc: &mut Gc, handle: QueueHandleInfo) -> GcRef {
+    if handle.kind != QueueKind::Port {
+        return core::ptr::null_mut();
+    }
     queue::create_remote_proxy_with_closed(
         gc,
-        handle.kind,
         handle.endpoint_id,
         handle.home_island,
         handle.cap,

@@ -1,7 +1,7 @@
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
 //! Loop compiler for OSR (On-Stack Replacement).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFlags, Value};
@@ -51,7 +51,7 @@ pub struct LoopCompiler<'a> {
     exit_block: Block,
     current_pc: usize,
     locals_ptr_var: Variable,
-    execution_budget: Variable,
+    execution_budget_regions: BTreeMap<usize, u32>,
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
@@ -95,7 +95,7 @@ impl<'a> LoopCompiler<'a> {
             exit_block,
             current_pc: 0,
             locals_ptr_var: Variable::from_u32(local_slots + 1000),
-            execution_budget: Variable::from_u32(local_slots + 1001),
+            execution_budget_regions: BTreeMap::new(),
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
@@ -140,9 +140,11 @@ impl<'a> LoopCompiler<'a> {
             self.loop_info.exit_pc,
             self.func_def.code.len(),
         );
-        for target in crate::compile_common::jump_targets_for_policy(&self.func_def.code, policy)? {
-            self.ensure_block(target);
+        let regions = crate::compile_common::execution_budget_regions(&self.func_def.code, policy)?;
+        for start in regions.keys().copied() {
+            self.ensure_block(start);
         }
+        self.execution_budget_regions = regions;
         Ok(())
     }
 
@@ -196,10 +198,6 @@ impl<'a> LoopCompiler<'a> {
         let params = self.builder.block_params(self.entry_block);
         self.ctx_ptr = params[0];
         let locals_ptr_init = params[1];
-        crate::compile_common::initialize_execution_budget(
-            &mut self.builder,
-            self.execution_budget,
-        );
         let current_func_id = self
             .builder
             .ins()
@@ -236,51 +234,29 @@ impl<'a> LoopCompiler<'a> {
 
     fn emit_cooperative_yield(&mut self, resume_pc: usize) {
         self.store_vars_to_memory();
-        let resume_pc = self.builder.ins().iconst(
-            types::I32,
-            i64::from(u32::try_from(resume_pc).unwrap_or(u32::MAX)),
-        );
-        self.builder.ins().store(
-            MemFlags::trusted(),
+        crate::compile_common::emit_cooperative_yield_return(
+            &mut self.builder,
+            self.ctx_ptr,
             resume_pc,
-            self.ctx_ptr,
-            JitContext::OFFSET_CALL_RESUME_PC,
         );
-        let call_kind = self
-            .builder
-            .ins()
-            .iconst(types::I8, i64::from(JitContext::CALL_KIND_YIELD));
-        self.builder.ins().store(
-            MemFlags::trusted(),
-            call_kind,
-            self.ctx_ptr,
-            JitContext::OFFSET_CALL_KIND,
-        );
-        let result = self
-            .builder
-            .ins()
-            .iconst(types::I32, i64::from(JitContext::JIT_RESULT_CALL));
-        self.builder.ins().return_(&[result]);
     }
 
-    fn emit_backedge_jump(&mut self, target: usize, target_block: Block) {
-        let cost = crate::compile_common::backedge_bytecode_cost(self.current_pc, target);
+    fn emit_execution_budget_checkpoint(&mut self, resume_pc: usize, cost: u32) {
         let poll = crate::compile_common::branch_on_execution_budget(
             &mut self.builder,
-            self.execution_budget,
+            self.ctx_ptr,
             cost,
         );
 
         self.builder.switch_to_block(poll.exhausted);
         self.builder.seal_block(poll.exhausted);
-        self.emit_cooperative_yield(target);
+        self.emit_cooperative_yield(resume_pc);
 
         crate::compile_common::continue_after_execution_budget_poll(
             &mut self.builder,
-            self.execution_budget,
+            self.ctx_ptr,
             &poll,
         );
-        self.builder.ins().jump(target_block, &[]);
     }
 
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
@@ -343,7 +319,7 @@ impl<'a> LoopCompiler<'a> {
         // Back-edge: jump to loop header (begin_pc = loop_start)
         if raw_target == self.loop_info.begin_pc {
             let loop_header = self.block_for_pc(self.loop_info.begin_pc, "loop header")?;
-            self.emit_backedge_jump(raw_target, loop_header);
+            self.builder.ins().jump(loop_header, &[]);
         } else if raw_target < self.loop_info.begin_pc || raw_target >= loop_end {
             // Jump outside loop - exit to VM
             self.store_vars_to_memory();
@@ -385,19 +361,9 @@ impl<'a> LoopCompiler<'a> {
         } else {
             // Target within loop - stay in JIT
             let target_block = self.block_for_pc(target, "conditional jump")?;
-            if target <= self.current_pc {
-                let poll_block = self.builder.create_block();
-                self.builder
-                    .ins()
-                    .brif(cmp, poll_block, &[], fall_through, &[]);
-                self.builder.switch_to_block(poll_block);
-                self.builder.seal_block(poll_block);
-                self.emit_backedge_jump(target, target_block);
-            } else {
-                self.builder
-                    .ins()
-                    .brif(cmp, target_block, &[], fall_through, &[]);
-            }
+            self.builder
+                .ins()
+                .brif(cmp, target_block, &[], fall_through, &[]);
         }
 
         self.builder.switch_to_block(fall_through);
@@ -430,19 +396,9 @@ impl<'a> LoopCompiler<'a> {
         if exit_pc >= self.loop_info.begin_pc && exit_pc <= self.loop_info.end_pc {
             // Exit within loop - continue in JIT
             let fall_through = self.builder.create_block();
-            if target <= self.current_pc {
-                let poll_block = self.builder.create_block();
-                self.builder
-                    .ins()
-                    .brif(continue_loop, poll_block, &[], fall_through, &[]);
-                self.builder.switch_to_block(poll_block);
-                self.builder.seal_block(poll_block);
-                self.emit_backedge_jump(target, target_block);
-            } else {
-                self.builder
-                    .ins()
-                    .brif(continue_loop, target_block, &[], fall_through, &[]);
-            }
+            self.builder
+                .ins()
+                .brif(continue_loop, target_block, &[], fall_through, &[]);
             self.builder.switch_to_block(fall_through);
             self.builder.seal_block(fall_through);
             self.clear_flow_facts();
@@ -450,19 +406,9 @@ impl<'a> LoopCompiler<'a> {
         } else {
             // Exit outside loop - return to VM
             let exit_block = self.builder.create_block();
-            if target <= self.current_pc {
-                let poll_block = self.builder.create_block();
-                self.builder
-                    .ins()
-                    .brif(continue_loop, poll_block, &[], exit_block, &[]);
-                self.builder.switch_to_block(poll_block);
-                self.builder.seal_block(poll_block);
-                self.emit_backedge_jump(target, target_block);
-            } else {
-                self.builder
-                    .ins()
-                    .brif(continue_loop, target_block, &[], exit_block, &[]);
-            }
+            self.builder
+                .ins()
+                .brif(continue_loop, target_block, &[], exit_block, &[]);
             self.builder.switch_to_block(exit_block);
             self.builder.seal_block(exit_block);
             self.store_vars_to_memory();
@@ -566,6 +512,9 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
             block_terminated,
         ) {
             self.clear_flow_facts();
+            if let Some(cost) = self.execution_budget_regions.get(&pc).copied() {
+                self.emit_execution_budget_checkpoint(pc, cost);
+            }
         }
         Ok(())
     }
@@ -599,7 +548,9 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
         self.store_vars_to_memory();
         let crate::compile_common::ControlPolicy::LoopOsr { exit_pc, .. } = self.control_policy()
         else {
-            unreachable!("LoopCompiler must use LoopOsr control policy");
+            return Err(JitError::Internal(
+                "LoopCompiler received a non-OSR control policy".to_string(),
+            ));
         };
         self.emit_loop_exit(exit_pc as u32);
         Ok(())

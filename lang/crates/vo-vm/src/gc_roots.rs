@@ -364,10 +364,10 @@ fn defer_entry_root_at(entry: &DeferEntry, cursor: usize) -> Option<Option<GcRef
             let arg_slots = entry.arg_layout.slot_types.len();
             if slot == 0 {
                 assert!(
-                    arg_slots <= vo_runtime::gc::Gc::header(entry.args).slots as usize,
+                    arg_slots <= unsafe { vo_runtime::gc::Gc::header(entry.args) }.slots as usize,
                     "defer root layout exceeds argument object: layout_slots={} object_slots={}",
                     arg_slots,
-                    vo_runtime::gc::Gc::header(entry.args).slots
+                    unsafe { vo_runtime::gc::Gc::header(entry.args) }.slots
                 );
             }
             if slot >= arg_slots {
@@ -984,7 +984,7 @@ impl Vm {
             self.mark_gc_fiber_roots_dirty(fiber_id);
         }
         let module = match &self.module {
-            Some(m) => m as *const crate::bytecode::Module,
+            Some(module) => module.as_ref() as *const crate::bytecode::Module,
             None => return,
         };
         // SAFETY: Split borrow via raw pointer. gc is exclusively accessed by step(),
@@ -1208,40 +1208,43 @@ impl Vm {
             }
 
             let mut violation: Option<String> = None;
-            vo_runtime::gc_types::trace_object_children_with_context(
-                parent,
-                vo_runtime::gc_types::GcScanContext::from_module_parts(
-                    &module.struct_metas,
-                    &module.named_type_metas,
-                    &module.runtime_types,
-                ),
-                &func_closure_scan_layout,
-                |child| {
-                    if violation.is_some() || child.is_null() {
-                        return;
-                    }
-                    let Some(child) = self.state.gc.canonicalize_ref(child) else {
-                        violation = Some(format!(
-                            "black object {:?} references non-live child {:?}",
-                            parent, child
-                        ));
-                        return;
-                    };
-                    let dangling_white = if self.state.gc.state() == GcState::Sweep {
-                        self.state.gc.is_dead_white(child)
-                    } else {
-                        self.state.gc.is_white(child)
-                    };
-                    if dangling_white {
-                        violation = Some(format!(
+            // Safety: `parent` comes from the collector's live object table.
+            unsafe {
+                vo_runtime::gc_types::trace_object_children_with_context(
+                    parent,
+                    vo_runtime::gc_types::GcScanContext::from_module_parts(
+                        &module.struct_metas,
+                        &module.named_type_metas,
+                        &module.runtime_types,
+                    ),
+                    &func_closure_scan_layout,
+                    |child| {
+                        if violation.is_some() || child.is_null() {
+                            return;
+                        }
+                        let Some(child) = self.state.gc.canonicalize_ref(child) else {
+                            violation = Some(format!(
+                                "black object {:?} references non-live child {:?}",
+                                parent, child
+                            ));
+                            return;
+                        };
+                        let dangling_white = if self.state.gc.state() == GcState::Sweep {
+                            self.state.gc.is_dead_white(child)
+                        } else {
+                            self.state.gc.is_white(child)
+                        };
+                        if dangling_white {
+                            violation = Some(format!(
                             "black object {:?} references unreachable white child {:?} during {:?}",
                             parent,
                             child,
                             self.state.gc.state()
                         ));
-                    }
-                },
-            );
+                        }
+                    },
+                )
+            };
             if let Some(err) = violation {
                 return Err(err);
             }

@@ -165,6 +165,7 @@ pub fn build_jit_context(
         prepare_closure_call_fn: Some(callbacks::jit_prepare_closure_call),
         prepare_iface_call_fn: Some(callbacks::jit_prepare_iface_call),
         ic_table,
+        execution_budget: fiber.execution_budget,
     };
 
     ctx.validate_required_callbacks().map_err(|field| {
@@ -195,5 +196,20 @@ mod tests {
             err.contains("initialized JIT manager"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn jit_context_inherits_active_fiber_scheduler_budget() {
+        let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("JIT VM");
+        let mut module = Module::new("jit-context-budget-test".to_string());
+        module.functions.push(function(1, 0));
+        vm.load(module).expect("load module");
+        let module = vm.module.as_ref().expect("loaded module").clone();
+        let mut fiber = Fiber::new(7);
+        fiber.execution_budget = 17;
+
+        let ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("JIT context");
+
+        assert_eq!(ctx.ctx.execution_budget, 17);
     }
 }

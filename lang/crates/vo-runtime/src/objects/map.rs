@@ -1,7 +1,12 @@
+#![allow(clippy::missing_safety_doc)]
 //! Map object operations.
 //!
 //! Layout: GcHeader + MapData
 //! Uses VoMap (custom hash map with iteration-safe semantics).
+//!
+//! # Safety contract
+//! Unsafe accessors require a canonical live map allocation and key/value
+//! slices whose widths match its recorded layout.
 //!
 //! Iteration safety:
 //! - Delete during iteration: tombstones ensure safe traversal
@@ -57,7 +62,11 @@ pub enum MapInner {
 pub enum MapKeyError {
     UnhashableInterfaceKey,
     SlotCountMismatch,
+    MissingModule,
 }
+
+pub type OwnedMapValue = Box<[u64]>;
+pub type OwnedMapEntry = (Box<[u64]>, Box<[u64]>);
 
 impl From<UnhashableType> for MapKeyError {
     fn from(_: UnhashableType) -> Self {
@@ -115,42 +124,47 @@ pub fn create(
 }
 
 #[inline]
-pub fn key_meta(m: GcRef) -> ValueMeta {
-    MapData::as_ref(m).key_meta
+pub unsafe fn key_meta(m: GcRef) -> ValueMeta {
+    unsafe { MapData::as_ref(m) }.key_meta
 }
 #[inline]
-pub fn val_meta(m: GcRef) -> ValueMeta {
-    MapData::as_ref(m).val_meta
+pub unsafe fn val_meta(m: GcRef) -> ValueMeta {
+    unsafe { MapData::as_ref(m) }.val_meta
 }
 #[inline]
-pub fn key_kind(m: GcRef) -> ValueKind {
+pub unsafe fn key_kind(m: GcRef) -> ValueKind {
     key_meta(m).value_kind()
 }
 #[inline]
-pub fn val_kind(m: GcRef) -> ValueKind {
+pub unsafe fn val_kind(m: GcRef) -> ValueKind {
     val_meta(m).value_kind()
 }
 #[inline]
-pub fn key_rttid(m: GcRef) -> u32 {
-    MapData::as_ref(m).key_rttid
+pub unsafe fn key_rttid(m: GcRef) -> u32 {
+    unsafe { MapData::as_ref(m) }.key_rttid
 }
 #[inline]
-pub fn key_slots(m: GcRef) -> u16 {
-    MapData::as_ref(m).key_slots
+pub unsafe fn key_slots(m: GcRef) -> u16 {
+    unsafe { MapData::as_ref(m) }.key_slots
 }
 #[inline]
-pub fn val_slots(m: GcRef) -> u16 {
-    MapData::as_ref(m).val_slots
+pub unsafe fn val_slots(m: GcRef) -> u16 {
+    unsafe { MapData::as_ref(m) }.val_slots
 }
 
 #[inline]
-fn get_inner(m: GcRef) -> &'static mut MapInner {
+unsafe fn inner_ref<'a>(m: GcRef) -> &'a MapInner {
+    unsafe { &*slot_to_ptr(MapData::as_ref(m).inner) }
+}
+
+#[inline]
+unsafe fn inner_mut<'a>(m: GcRef) -> &'a mut MapInner {
     unsafe { &mut *slot_to_ptr(MapData::as_ref(m).inner) }
 }
 
 #[inline]
-pub fn generation(m: GcRef) -> u32 {
-    match get_inner(m) {
+pub unsafe fn generation(m: GcRef) -> u32 {
+    match inner_ref(m) {
         MapInner::SingleKey(map) => map.generation(),
         MapInner::MultiKey(map) => map.generation(),
         MapInner::StringKey(map) => map.generation(),
@@ -160,13 +174,17 @@ pub fn generation(m: GcRef) -> u32 {
 }
 
 #[inline]
-fn struct_key_hash_checked(m: GcRef, key: &[u64], module: &Module) -> Result<u64, MapKeyError> {
+unsafe fn struct_key_hash_checked(
+    m: GcRef,
+    key: &[u64],
+    module: &Module,
+) -> Result<u64, MapKeyError> {
     let rttid = key_rttid(m);
     deep_hash_struct_inline_checked(key, rttid, module).map_err(Into::into)
 }
 
-pub fn len(m: GcRef) -> usize {
-    match get_inner(m) {
+pub unsafe fn len(m: GcRef) -> usize {
+    match inner_ref(m) {
         MapInner::SingleKey(map) => map.len(),
         MapInner::MultiKey(map) => map.len(),
         MapInner::StringKey(map) => map.len(),
@@ -175,58 +193,95 @@ pub fn len(m: GcRef) -> usize {
     }
 }
 
-pub fn get_checked(
+unsafe fn with_value_checked<R>(
     m: GcRef,
     key: &[u64],
     module: Option<&Module>,
-) -> Result<Option<&'static [u64]>, MapKeyError> {
-    match get_inner(m) {
-        MapInner::SingleKey(map) => Ok(map.get(&key[0]).map(|v| v.as_ref())),
-        MapInner::MultiKey(map) => {
-            let key_box: Box<[u64]> = key.into();
-            Ok(map.get(&key_box).map(|v| v.as_ref()))
-        }
+    consume: impl FnOnce(Option<&[u64]>) -> R,
+) -> Result<R, MapKeyError> {
+    if key.len() != key_slots(m) as usize {
+        return Err(MapKeyError::SlotCountMismatch);
+    }
+    match inner_ref(m) {
+        MapInner::SingleKey(map) => Ok(consume(map.get(&key[0]).map(AsRef::as_ref))),
+        MapInner::MultiKey(map) => Ok(consume(map.get_borrowed(key).map(AsRef::as_ref))),
         MapInner::StringKey(map) => {
             let str_ref = key[0] as GcRef;
             // Safety: string keys are live while the owning map operation runs.
-            let str_bytes: Box<[u8]> = unsafe { string::to_bytes(str_ref) }.into();
-            Ok(map.get(&str_bytes).map(|(_, v)| v.as_ref()))
+            let str_bytes = unsafe { string::bytes_unchecked(str_ref) };
+            Ok(consume(
+                map.get_borrowed(str_bytes).map(|(_, value)| value.as_ref()),
+            ))
         }
         MapInner::StructKey(map) => {
-            let module = module.expect("StructKey requires Module");
+            let module = module.ok_or(MapKeyError::MissingModule)?;
             let rttid = key_rttid(m);
             let hash = struct_key_hash_checked(m, key, module)?;
-            Ok(map
-                .find_by(hash, |_, entry| {
+            Ok(consume(
+                map.find_by(hash, |_, entry| {
                     deep_eq_struct_inline(key, &entry.key, rttid, module)
                 })
-                .map(|entry| entry.val.as_ref()))
+                .map(|entry| entry.val.as_ref()),
+            ))
         }
         MapInner::InterfaceKey(map) => {
-            let module = module.expect("InterfaceKey requires Module");
+            let module = module.ok_or(MapKeyError::MissingModule)?;
             let (slot0, slot1) = (key[0], key[1]);
             let hash = iface_hash_checked(slot0, slot1, module)?;
-            Ok(map
-                .find_by(hash, |_, entry| {
+            Ok(consume(
+                map.find_by(hash, |_, entry| {
                     iface_eq(slot0, slot1, entry.key[0], entry.key[1], module) == 1
                 })
-                .map(|entry| entry.val.as_ref()))
+                .map(|entry| entry.val.as_ref()),
+            ))
         }
     }
 }
 
-pub fn get_with_ok_checked(
+pub unsafe fn get_checked(
     m: GcRef,
     key: &[u64],
     module: Option<&Module>,
-) -> Result<(Option<&'static [u64]>, bool), MapKeyError> {
+) -> Result<Option<Box<[u64]>>, MapKeyError> {
+    with_value_checked(m, key, module, |value| value.map(Into::into))
+}
+
+/// Copy a map value into a caller-owned buffer without allocating.
+///
+/// Returns `true` when the key exists. A missing key zeroes `out` so callers
+/// can directly implement the language's zero-value lookup semantics.
+pub unsafe fn get_checked_into(
+    m: GcRef,
+    key: &[u64],
+    module: Option<&Module>,
+    out: &mut [u64],
+) -> Result<bool, MapKeyError> {
+    if out.len() != val_slots(m) as usize {
+        return Err(MapKeyError::SlotCountMismatch);
+    }
+    with_value_checked(m, key, module, |value| {
+        if let Some(value) = value {
+            out.copy_from_slice(value);
+            true
+        } else {
+            out.fill(0);
+            false
+        }
+    })
+}
+
+pub unsafe fn get_with_ok_checked(
+    m: GcRef,
+    key: &[u64],
+    module: Option<&Module>,
+) -> Result<(Option<OwnedMapValue>, bool), MapKeyError> {
     match get_checked(m, key, module)? {
         Some(v) => Ok((Some(v), true)),
         None => Ok((None, false)),
     }
 }
 
-pub fn validate_entry_slot_counts(
+pub unsafe fn validate_entry_slot_counts(
     m: GcRef,
     key_slots: usize,
     val_slots: usize,
@@ -252,7 +307,7 @@ pub unsafe fn set_checked(
 ) -> Result<(), MapKeyError> {
     validate_entry_slot_counts(m, key.len(), val.len())?;
     let val_box: Box<[u64]> = val.into();
-    match get_inner(m) {
+    match inner_mut(m) {
         MapInner::SingleKey(map) => {
             map.insert(key[0], val_box);
         }
@@ -266,7 +321,7 @@ pub unsafe fn set_checked(
             map.insert(str_bytes, (str_ref, val_box));
         }
         MapInner::StructKey(map) => {
-            let module = module.expect("StructKey requires Module");
+            let module = module.ok_or(MapKeyError::MissingModule)?;
             let hash = struct_key_hash_checked(m, key, module)?;
             let rttid = key_rttid(m);
             // Check if key exists and update (O(1) average via hash probe)
@@ -286,7 +341,7 @@ pub unsafe fn set_checked(
             );
         }
         MapInner::InterfaceKey(map) => {
-            let module = module.expect("InterfaceKey requires Module");
+            let module = module.ok_or(MapKeyError::MissingModule)?;
             let (slot0, slot1) = (key[0], key[1]);
             let hash = iface_hash_checked(slot0, slot1, module)?;
             // Check if key exists and update (O(1) average via hash probe)
@@ -309,23 +364,26 @@ pub unsafe fn set_checked(
     Ok(())
 }
 
-pub fn delete_checked(m: GcRef, key: &[u64], module: Option<&Module>) -> Result<(), MapKeyError> {
-    match get_inner(m) {
+pub unsafe fn delete_checked(
+    m: GcRef,
+    key: &[u64],
+    module: Option<&Module>,
+) -> Result<(), MapKeyError> {
+    match inner_mut(m) {
         MapInner::SingleKey(map) => {
             map.remove(&key[0]);
         }
         MapInner::MultiKey(map) => {
-            let key_box: Box<[u64]> = key.into();
-            map.remove(&key_box);
+            map.remove_borrowed(key);
         }
         MapInner::StringKey(map) => {
             let str_ref = key[0] as GcRef;
             // Safety: string keys are live while the owning map operation runs.
-            let str_bytes: Box<[u8]> = unsafe { string::to_bytes(str_ref) }.into();
-            map.remove(&str_bytes);
+            let str_bytes = unsafe { string::bytes_unchecked(str_ref) };
+            map.remove_borrowed(str_bytes);
         }
         MapInner::StructKey(map) => {
-            let module = module.expect("StructKey requires Module");
+            let module = module.ok_or(MapKeyError::MissingModule)?;
             let rttid = key_rttid(m);
             let hash = struct_key_hash_checked(m, key, module)?;
             map.remove_by(hash, |_, entry| {
@@ -333,7 +391,7 @@ pub fn delete_checked(m: GcRef, key: &[u64], module: Option<&Module>) -> Result<
             });
         }
         MapInner::InterfaceKey(map) => {
-            let module = module.expect("InterfaceKey requires Module");
+            let module = module.ok_or(MapKeyError::MissingModule)?;
             let (slot0, slot1) = (key[0], key[1]);
             let hash = iface_hash_checked(slot0, slot1, module)?;
             map.remove_by(hash, |_, entry| {
@@ -368,7 +426,7 @@ const TAG_STRUCT_KEY: u8 = 3;
 const TAG_INTERFACE_KEY: u8 = 4;
 const TAG_EXHAUSTED: u8 = 255;
 
-pub fn iter_init(m: GcRef) -> MapIterator {
+pub unsafe fn iter_init(m: GcRef) -> MapIterator {
     if m.is_null() {
         return MapIterator {
             tag: TAG_EXHAUSTED,
@@ -380,7 +438,7 @@ pub fn iter_init(m: GcRef) -> MapIterator {
         };
     }
 
-    let tag = match get_inner(m) {
+    let tag = match inner_ref(m) {
         MapInner::SingleKey(_) => TAG_SINGLE_KEY,
         MapInner::MultiKey(_) => TAG_MULTI_KEY,
         MapInner::StringKey(_) => TAG_STRING_KEY,
@@ -398,15 +456,30 @@ pub fn iter_init(m: GcRef) -> MapIterator {
     }
 }
 
-pub fn iter_next(iter: &mut MapIterator) -> Option<(&'static [u64], &'static [u64])> {
+pub unsafe fn iter_next(iter: &mut MapIterator) -> Option<OwnedMapEntry> {
+    unsafe {
+        with_next(iter, |entry| {
+            entry.map(|(key, value)| (key.into(), value.into()))
+        })
+    }
+}
+
+/// Advance an iterator while constraining borrowed entry slices to a callback.
+///
+/// This is the zero-copy traversal primitive for internal consumers that can
+/// finish all work before the map may be mutated or collected.
+pub unsafe fn with_next<R>(
+    iter: &mut MapIterator,
+    consume: impl FnOnce(Option<(&[u64], &[u64])>) -> R,
+) -> R {
     if iter.tag == TAG_EXHAUSTED {
-        return None;
+        return consume(None);
     }
 
     let m = iter.map_ref as GcRef;
     if m.is_null() {
         iter.tag = TAG_EXHAUSTED;
-        return None;
+        return consume(None);
     }
 
     // If rehash happened, update generation and continue from current index
@@ -419,57 +492,99 @@ pub fn iter_next(iter: &mut MapIterator) -> Option<(&'static [u64], &'static [u6
 
     let idx = iter.current_index as usize;
 
-    match get_inner(m) {
+    match inner_ref(m) {
         MapInner::SingleKey(map) => {
             if let Some((new_idx, k, v)) = map.iter_from_index(idx) {
                 iter.current_index = (new_idx + 1) as u64;
-                let k_slice = unsafe { core::slice::from_raw_parts(k, 1) };
-                Some((k_slice, v.as_ref()))
+                let key = [*k];
+                consume(Some((&key, v)))
             } else {
                 iter.tag = TAG_EXHAUSTED;
-                None
+                consume(None)
             }
         }
         MapInner::MultiKey(map) => {
             if let Some((new_idx, k, v)) = map.iter_from_index(idx) {
                 iter.current_index = (new_idx + 1) as u64;
-                Some((k.as_ref(), v.as_ref()))
+                consume(Some((k, v)))
             } else {
                 iter.tag = TAG_EXHAUSTED;
-                None
+                consume(None)
             }
         }
         MapInner::StringKey(map) => {
             if let Some((new_idx, _, (str_ref, v))) = map.iter_from_index(idx) {
                 iter.current_index = (new_idx + 1) as u64;
-                // Store GcRef as Slot in reserved space (works on both 32-bit and 64-bit)
-                iter._reserved[0] = ptr_to_slot(*str_ref);
-                let k_slice = unsafe { core::slice::from_raw_parts(&iter._reserved[0], 1) };
-                Some((k_slice, v.as_ref()))
+                let raw = ptr_to_slot(*str_ref);
+                iter._reserved[0] = raw;
+                let key = [raw];
+                consume(Some((&key, v)))
             } else {
                 iter.tag = TAG_EXHAUSTED;
-                None
+                consume(None)
             }
         }
         MapInner::StructKey(map) => {
             if let Some((new_idx, _, entry)) = map.iter_from_index(idx) {
                 iter.current_index = (new_idx + 1) as u64;
-                Some((entry.key.as_ref(), entry.val.as_ref()))
+                consume(Some((&entry.key, &entry.val)))
             } else {
                 iter.tag = TAG_EXHAUSTED;
-                None
+                consume(None)
             }
         }
         MapInner::InterfaceKey(map) => {
             if let Some((new_idx, _, entry)) = map.iter_from_index(idx) {
                 iter.current_index = (new_idx + 1) as u64;
-                Some((entry.key.as_slice(), entry.val.as_ref()))
+                consume(Some((&entry.key, &entry.val)))
             } else {
                 iter.tag = TAG_EXHAUSTED;
-                None
+                consume(None)
             }
         }
     }
+}
+
+/// Advance an iterator and copy the entry into caller-owned buffers.
+///
+/// This is the allocation-free hot-path API used by the interpreter and JIT.
+pub unsafe fn iter_next_into(
+    iter: &mut MapIterator,
+    key_out: &mut [u64],
+    val_out: &mut [u64],
+) -> Result<bool, MapKeyError> {
+    if iter.tag == TAG_EXHAUSTED {
+        key_out.fill(0);
+        val_out.fill(0);
+        return Ok(false);
+    }
+
+    let m = iter.map_ref as GcRef;
+    if m.is_null() {
+        iter.tag = TAG_EXHAUSTED;
+        key_out.fill(0);
+        val_out.fill(0);
+        return Ok(false);
+    }
+    validate_entry_slot_counts(m, key_out.len(), val_out.len())?;
+
+    let found = unsafe {
+        with_next(iter, |entry| {
+            let Some((key, value)) = entry else {
+                return false;
+            };
+            key_out.copy_from_slice(key);
+            val_out.copy_from_slice(value);
+            true
+        })
+    };
+
+    if !found {
+        iter.tag = TAG_EXHAUSTED;
+        key_out.fill(0);
+        val_out.fill(0);
+    }
+    Ok(found)
 }
 
 /// # Safety
@@ -517,8 +632,31 @@ mod tests {
             "raw map publication must reject keys wider than map key slots"
         );
         assert!(
-            get_checked(m, &[7], None).expect("map read").is_none(),
+            unsafe { get_checked(m, &[7], None) }
+                .expect("map read")
+                .is_none(),
             "rejected width drift must not publish an entry"
+        );
+    }
+
+    #[test]
+    fn metadata_dependent_keys_report_missing_module() {
+        let mut gc = Gc::new();
+        let struct_meta = ValueMeta::new(0, ValueKind::Struct);
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let m = create(&mut gc, struct_meta, int_meta, 1, 1, 7);
+
+        assert_eq!(
+            unsafe { set_checked(m, &[1], &[2], None) },
+            Err(MapKeyError::MissingModule)
+        );
+        assert_eq!(
+            unsafe { get_checked(m, &[1], None) },
+            Err(MapKeyError::MissingModule)
+        );
+        assert_eq!(
+            unsafe { delete_checked(m, &[1], None) },
+            Err(MapKeyError::MissingModule)
         );
     }
 }

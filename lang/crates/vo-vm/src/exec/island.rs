@@ -48,45 +48,53 @@ pub type QueueTransferResult = Result<(), String>;
 
 #[derive(Debug, Default)]
 pub struct QueueTransferCommit {
-    pub committed_local_endpoint_state: bool,
-    endpoint_registry_snapshot: Option<crate::vm::EndpointRegistrySnapshot>,
+    state: QueueTransferCommitState,
     home_info_snapshots: Vec<(GcRef, Option<vo_runtime::objects::queue::HomeInfoSnapshot>)>,
+}
+
+#[derive(Debug, Default)]
+enum QueueTransferCommitState {
+    #[default]
+    Uncommitted,
+    Committed {
+        endpoint_registry: crate::vm::EndpointRegistrySnapshot,
+    },
 }
 
 impl QueueTransferCommit {
     #[inline]
     pub fn requires_terminal_commit(&self) -> bool {
-        self.committed_local_endpoint_state
+        matches!(self.state, QueueTransferCommitState::Committed { .. })
     }
 
     fn snapshot_local_endpoint_state(&mut self, state: &crate::vm::VmState, chan_ref: GcRef) {
-        if self.endpoint_registry_snapshot.is_none() {
-            self.endpoint_registry_snapshot = Some(state.endpoint_registry.snapshot());
+        if matches!(self.state, QueueTransferCommitState::Uncommitted) {
+            self.state = QueueTransferCommitState::Committed {
+                endpoint_registry: state.endpoint_registry.snapshot(),
+            };
         }
         if !self
             .home_info_snapshots
             .iter()
             .any(|(existing, _)| *existing == chan_ref)
         {
-            self.home_info_snapshots.push((
-                chan_ref,
-                vo_runtime::objects::queue::home_info_snapshot(chan_ref),
-            ));
+            // Safety: transfer preflight stores only canonical live queue handles.
+            self.home_info_snapshots.push((chan_ref, unsafe {
+                vo_runtime::objects::queue::home_info_snapshot(chan_ref)
+            }));
         }
     }
 
     fn commit_local_endpoint_state(&mut self, state: &crate::vm::VmState, chan_ref: GcRef) {
         self.snapshot_local_endpoint_state(state, chan_ref);
-        self.committed_local_endpoint_state = true;
     }
 
     pub(crate) fn absorb(&mut self, other: Self) {
-        if !other.committed_local_endpoint_state {
+        let QueueTransferCommitState::Committed { endpoint_registry } = other.state else {
             return;
-        }
-        self.committed_local_endpoint_state = true;
-        if self.endpoint_registry_snapshot.is_none() {
-            self.endpoint_registry_snapshot = other.endpoint_registry_snapshot;
+        };
+        if matches!(self.state, QueueTransferCommitState::Uncommitted) {
+            self.state = QueueTransferCommitState::Committed { endpoint_registry };
         }
         for (chan_ref, snapshot) in other.home_info_snapshots {
             if !self
@@ -100,25 +108,20 @@ impl QueueTransferCommit {
     }
 
     pub(crate) fn restore_committed_local_endpoint_state(self, state: &mut crate::vm::VmState) {
-        if !self.committed_local_endpoint_state {
+        let QueueTransferCommitState::Committed { endpoint_registry } = self.state else {
             return;
-        }
-        let endpoint_registry = self.endpoint_registry_snapshot.expect(
-            "QueueTransferCommit marked local endpoint state committed without registry snapshot",
-        );
+        };
         for (chan_ref, snapshot) in self.home_info_snapshots {
-            vo_runtime::objects::queue::restore_home_info_snapshot(chan_ref, snapshot);
+            // Safety: snapshots retain their live queue handle until rollback.
+            unsafe { vo_runtime::objects::queue::restore_home_info_snapshot(chan_ref, snapshot) };
         }
         state.endpoint_registry.restore(endpoint_registry);
     }
 
     pub(crate) fn into_runtime_rollback(self) -> Option<RuntimeRollback> {
-        if !self.committed_local_endpoint_state {
+        let QueueTransferCommitState::Committed { endpoint_registry } = self.state else {
             return None;
-        }
-        let endpoint_registry = self.endpoint_registry_snapshot.expect(
-            "QueueTransferCommit marked local endpoint state committed without registry snapshot",
-        );
+        };
         Some(RuntimeRollback::endpoint_transfer(
             endpoint_registry,
             self.home_info_snapshots,
@@ -151,8 +154,9 @@ fn preflight_queue_transfer_route(
                 .can_route_to_island(target_island)
                 .map_err(|error| error.to_string())?;
         }
-        if vo_runtime::objects::queue::is_remote(chan_ref) {
-            let home_island = vo_runtime::objects::queue::remote_proxy(chan_ref).home_island;
+        if unsafe { vo_runtime::objects::queue::is_remote(chan_ref) } {
+            let home_island =
+                unsafe { vo_runtime::objects::queue::remote_proxy(chan_ref) }.home_island;
             if home_island != state.current_island_id {
                 state
                     .can_route_to_island(home_island)
@@ -734,7 +738,7 @@ fn validate_transfer_object_ref(
     if base != obj_ref {
         return Err(format!("{context} must be an object base"));
     }
-    let actual = vo_runtime::gc::Gc::header(base).kind();
+    let actual = unsafe { vo_runtime::gc::Gc::header(base) }.kind();
     if actual != expected {
         return Err(format!(
             "{context} expected {:?} object, got {:?}",
@@ -777,7 +781,7 @@ fn validate_transfer_object_layout(
     context: &str,
 ) -> Result<(vo_runtime::gc::GcRef, usize), String> {
     let obj_ref = validate_transfer_object_ref(gc, obj_ref, expected_meta.value_kind(), context)?;
-    let header = vo_runtime::gc::Gc::header(obj_ref);
+    let header = unsafe { vo_runtime::gc::Gc::header(obj_ref) };
     if header.value_meta() != expected_meta {
         return Err(format!(
             "{context} {:?} layout metadata mismatch: expected {:?}, got {:?}",
@@ -818,7 +822,7 @@ fn validate_fixed_transfer_object_layout(
 ) -> Result<vo_runtime::gc::GcRef, String> {
     let (obj_ref, allocated_slots) =
         validate_transfer_object_layout(gc, obj_ref, expected_meta, context)?;
-    let header_slots = vo_runtime::gc::Gc::header(obj_ref).slots as usize;
+    let header_slots = unsafe { vo_runtime::gc::Gc::header(obj_ref) }.slots as usize;
     if header_slots != expected_slots || allocated_slots != expected_slots {
         return Err(format!(
             "{context} {:?} layout slot count mismatch: expected {expected_slots}, header {header_slots}, allocation {allocated_slots}",
@@ -852,9 +856,10 @@ fn validate_heap_array_transfer_layout(
         ));
     }
 
-    let len = vo_runtime::objects::array::len(arr_ref);
-    let elem_meta = vo_runtime::objects::array::elem_meta(arr_ref);
-    let elem_bytes = vo_runtime::objects::array::elem_bytes(arr_ref);
+    // Safety: `validate_transfer_object_layout` established a live array object.
+    let len = unsafe { vo_runtime::objects::array::len(arr_ref) };
+    let elem_meta = unsafe { vo_runtime::objects::array::elem_meta(arr_ref) };
+    let elem_bytes = unsafe { vo_runtime::objects::array::elem_bytes(arr_ref) };
     let data_bytes = len.checked_mul(elem_bytes).ok_or_else(|| {
         format!("{context} Array layout data byte count overflow during queue transfer")
     })?;
@@ -862,7 +867,7 @@ fn validate_heap_array_transfer_layout(
     let expected_slots = vo_runtime::objects::array::HEADER_SLOTS
         .checked_add(data_slots)
         .ok_or_else(|| format!("{context} Array layout slot count overflow"))?;
-    let header_slots = vo_runtime::gc::Gc::header(arr_ref).slots as usize;
+    let header_slots = unsafe { vo_runtime::gc::Gc::header(arr_ref) }.slots as usize;
     if header_slots != 0 && header_slots != expected_slots {
         return Err(format!(
             "{context} Array layout header slots {header_slots} do not match payload slots {expected_slots}"
@@ -874,7 +879,7 @@ fn validate_heap_array_transfer_layout(
         ));
     }
 
-    let data_start = vo_runtime::objects::array::data_ptr_bytes(arr_ref) as usize;
+    let data_start = unsafe { vo_runtime::objects::array::data_ptr_bytes(arr_ref) } as usize;
     let data_end = data_start
         .checked_add(data_bytes)
         .ok_or_else(|| format!("{context} Array layout data pointer overflow"))?;
@@ -907,7 +912,8 @@ fn validate_slice_transfer_layout(
         vo_runtime::objects::slice::DATA_SLOTS as usize,
         context,
     )?;
-    let arr_ref = vo_runtime::objects::slice::array_ref(slice_ref);
+    // Safety: fixed-layout validation established a live slice object.
+    let arr_ref = unsafe { vo_runtime::objects::slice::array_ref(slice_ref) };
     if arr_ref.is_null() {
         return Err(format!(
             "{context} Slice layout is missing underlying Array"
@@ -915,15 +921,15 @@ fn validate_slice_transfer_layout(
     }
     let array_layout =
         validate_heap_array_transfer_layout(gc, arr_ref, "queue transfer Slice underlying Array")?;
-    let len = vo_runtime::objects::slice::len(slice_ref);
-    let cap = vo_runtime::objects::slice::cap(slice_ref);
+    let len = unsafe { vo_runtime::objects::slice::len(slice_ref) };
+    let cap = unsafe { vo_runtime::objects::slice::cap(slice_ref) };
     if len > cap || cap > array_layout.len {
         return Err(format!(
             "{context} Slice layout len/cap mismatch: len {len}, cap {cap}, array len {}",
             array_layout.len
         ));
     }
-    let data_ptr = vo_runtime::objects::slice::data_ptr(slice_ref);
+    let data_ptr = unsafe { vo_runtime::objects::slice::data_ptr(slice_ref) };
     if array_layout.elem_bytes != 0 {
         let read_bytes = len.checked_mul(array_layout.elem_bytes).ok_or_else(|| {
             format!("{context} Slice layout read byte count overflow during queue transfer")
@@ -968,7 +974,8 @@ fn validate_string_transfer_layout(
         vo_runtime::objects::slice::DATA_SLOTS as usize,
         context,
     )?;
-    let arr_ref = vo_runtime::objects::slice::array_ref(str_ref);
+    // Safety: fixed-layout validation established a live string object.
+    let arr_ref = unsafe { vo_runtime::objects::slice::array_ref(str_ref) };
     if arr_ref.is_null() {
         return Err(format!(
             "{context} String layout is missing underlying Array"
@@ -983,15 +990,15 @@ fn validate_string_transfer_layout(
             array_layout.elem_meta, array_layout.elem_bytes
         ));
     }
-    let len = vo_runtime::objects::slice::len(str_ref);
-    let cap = vo_runtime::objects::slice::cap(str_ref);
+    let len = unsafe { vo_runtime::objects::slice::len(str_ref) };
+    let cap = unsafe { vo_runtime::objects::slice::cap(str_ref) };
     if len > cap || cap > array_layout.len {
         return Err(format!(
             "{context} String layout len/cap mismatch: len {len}, cap {cap}, array len {}",
             array_layout.len
         ));
     }
-    let data_ptr = vo_runtime::objects::slice::data_ptr(str_ref);
+    let data_ptr = unsafe { vo_runtime::objects::slice::data_ptr(str_ref) };
     if len != 0 && data_ptr.is_null() {
         return Err(format!("{context} String layout has null data pointer"));
     }
@@ -1020,7 +1027,7 @@ fn validate_map_transfer_layout(
         vo_runtime::objects::map::DATA_SLOTS as usize,
         context,
     )?;
-    if vo_runtime::objects::map::MapData::as_ref(map_ref).inner == 0 {
+    if unsafe { vo_runtime::objects::map::MapData::as_ref(map_ref) }.inner == 0 {
         return Err(format!("{context} Map layout is missing backing storage"));
     }
     Ok(map_ref)
@@ -1136,7 +1143,7 @@ fn capture_value_slots_for_transfer(
         return Err(format!("{context} must be an object base"));
     }
 
-    let header = vo_runtime::gc::Gc::header(base);
+    let header = unsafe { vo_runtime::gc::Gc::header(base) };
     if header.is_value_slots_object() {
         return read_value_slot_capture_box(gc, base, value_meta, expected_slots, context);
     }
@@ -1620,7 +1627,7 @@ fn prepare_value_queue_handles_for_transfer_inner(
             let chan_ref =
                 super::queue::validate_queue_handle(&state.gc, chan_ref, "queue transfer value")?;
             let expected_kind = vo_runtime::objects::queue_state::QueueKind::from_value_kind(kind);
-            let actual_kind = vo_runtime::objects::queue_state::kind(chan_ref);
+            let actual_kind = unsafe { vo_runtime::objects::queue_state::kind(chan_ref) };
             if actual_kind != expected_kind {
                 return Err(format!(
                     "queue transfer value kind mismatch: metadata says {:?}, handle is {:?}",
@@ -1636,7 +1643,7 @@ fn prepare_value_queue_handles_for_transfer_inner(
                     notified_remote_endpoints,
                     island_effects,
                     commit,
-                );
+                )?;
             }
         }
 
@@ -1919,8 +1926,8 @@ fn prepare_value_queue_handles_for_transfer_inner(
             }
             let map_ref =
                 validate_map_transfer_layout(&state.gc, map_ref, "queue transfer map value")?;
-            let key_meta = vo_runtime::objects::map::key_meta(map_ref);
-            let val_meta = vo_runtime::objects::map::val_meta(map_ref);
+            let key_meta = unsafe { vo_runtime::objects::map::key_meta(map_ref) };
+            let val_meta = unsafe { vo_runtime::objects::map::val_meta(map_ref) };
             ensure_transfer_kind_is_sendable(
                 key_meta.value_kind(),
                 "map key during queue transfer",
@@ -1929,10 +1936,14 @@ fn prepare_value_queue_handles_for_transfer_inner(
                 val_meta.value_kind(),
                 "map value during queue transfer",
             )?;
-            let mut iter = vo_runtime::objects::map::iter_init(map_ref);
-            while let Some((k, v)) = vo_runtime::objects::map::iter_next(&mut iter) {
+            let mut iter = unsafe { vo_runtime::objects::map::iter_init(map_ref) };
+            let mut key = vec![0; unsafe { vo_runtime::objects::map::key_slots(map_ref) } as usize];
+            let mut val = vec![0; unsafe { vo_runtime::objects::map::val_slots(map_ref) } as usize];
+            while unsafe { vo_runtime::objects::map::iter_next_into(&mut iter, &mut key, &mut val) }
+                .map_err(|_| "queue transfer map iterator layout mismatch".to_string())?
+            {
                 prepare_value_queue_handles_for_transfer_inner(
-                    k,
+                    &key,
                     key_meta,
                     target_island,
                     struct_metas,
@@ -1945,7 +1956,7 @@ fn prepare_value_queue_handles_for_transfer_inner(
                     pass,
                 )?;
                 prepare_value_queue_handles_for_transfer_inner(
-                    v,
+                    &val,
                     val_meta,
                     target_island,
                     struct_metas,
@@ -1993,12 +2004,12 @@ pub fn prepare_remote_send_value_if_needed(
         return Ok(QueueTransferCommit::default());
     }
     let ch = super::queue::validate_queue_handle(&state.gc, ch, "remote queue send")?;
-    if !vo_runtime::objects::queue::is_remote(ch) {
+    if !unsafe { vo_runtime::objects::queue::is_remote(ch) } {
         return Ok(QueueTransferCommit::default());
     }
-    let elem_meta = vo_runtime::objects::queue_state::elem_meta(ch);
+    let elem_meta = unsafe { vo_runtime::objects::queue_state::elem_meta(ch) };
     ensure_transfer_kind_is_sendable(elem_meta.value_kind(), "remote queue element")?;
-    let target_island = vo_runtime::objects::queue::remote_proxy(ch).home_island;
+    let target_island = unsafe { vo_runtime::objects::queue::remote_proxy(ch) }.home_island;
     prepare_value_queue_handles_for_transfer_with_commit(
         slots,
         elem_meta,
@@ -2018,23 +2029,24 @@ fn prepare_single_queue_handle(
     notified_remote_endpoints: &mut HashSet<u64>,
     island_effects: &mut Vec<IslandCommandEffect>,
     commit: &mut QueueTransferCommit,
-) {
+) -> Result<(), String> {
     use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueBacking;
 
-    match vo_runtime::objects::queue_state::backing(chan_ref) {
+    match unsafe { vo_runtime::objects::queue_state::backing(chan_ref) } {
         QueueBacking::Local => {
             commit.commit_local_endpoint_state(state, chan_ref);
-            if queue::home_info(chan_ref).is_none() {
+            if unsafe { queue::home_info(chan_ref) }.is_none() {
                 let eid = state.allocate_endpoint_id();
-                queue::install_home_info(chan_ref, eid, state.current_island_id);
+                unsafe { queue::install_home_info(chan_ref, eid, state.current_island_id) };
             }
-            let endpoint_id = queue::add_home_peer(chan_ref, target_island);
+            let endpoint_id = unsafe { queue::add_home_peer(chan_ref, target_island) }
+                .map_err(|_| "local port transfer lost its HomeInfo".to_string())?;
             state.endpoint_registry.ensure_live(endpoint_id, chan_ref);
             state.mark_gc_all_roots_dirty();
         }
         QueueBacking::Remote => {
-            let proxy = queue::remote_proxy(chan_ref);
+            let proxy = unsafe { queue::remote_proxy(chan_ref) };
             if notified_remote_endpoints.insert(proxy.endpoint_id) {
                 island_effects.push(IslandCommandEffect::endpoint_transfer_request(
                     proxy.home_island,
@@ -2045,6 +2057,7 @@ fn prepare_single_queue_handle(
             }
         }
     }
+    Ok(())
 }
 
 fn may_contain_queue_handle(vk: vo_runtime::ValueKind) -> bool {

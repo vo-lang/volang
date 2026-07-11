@@ -39,11 +39,13 @@ const MODE_DIR: u32 = 1 << 31;
 
 fn os_get_errors(call: &mut ExternCallContext) -> ExternResult {
     init_os_errors(call);
-    let errors = call
+    let Some(errors) = call
         .sentinel_errors()
         .get("os")
-        .expect("os sentinel error init failed")
-        .to_vec();
+        .map(|errors| errors.to_vec())
+    else {
+        return ExternResult::Panic("os sentinel error initialization failed".to_string());
+    };
     for (i, pair) in errors.into_iter().enumerate() {
         call.ret_interface_pair((i * 2) as u16, pair);
     }
@@ -97,7 +99,8 @@ fn open_file(call: &mut ExternCallContext) -> ExternResult {
 fn file_read(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
     let buf_ref = call.arg_ref(1);
-    let buf_len = slice::len(buf_ref);
+    // Safety: the resolved os.File.Read ABI supplies a rooted []byte argument.
+    let buf_len = unsafe { slice::len(buf_ref) };
 
     let (data, err) = vfs::read(fd, buf_len as u32);
 
@@ -106,7 +109,9 @@ fn file_read(call: &mut ExternCallContext) -> ExternResult {
         write_error_to(call, 1, &msg);
     } else {
         let n = data.len().min(buf_len);
-        let buf_ptr = slice::data_ptr(buf_ref);
+        // Safety: the verified []byte remains rooted for this extern call and
+        // `n` is bounded by its visible length.
+        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, n);
         }
@@ -123,8 +128,10 @@ fn file_read(call: &mut ExternCallContext) -> ExternResult {
 fn file_write(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
     let buf_ref = call.arg_ref(1);
-    let buf_len = slice::len(buf_ref);
-    let buf_ptr = slice::data_ptr(buf_ref);
+    // Safety: the resolved os.File.Write ABI supplies a rooted []byte argument.
+    let buf_len = unsafe { slice::len(buf_ref) };
+    // Safety: the slice remains rooted and readable for this synchronous call.
+    let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
     let data = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
 
     let (n, err) = vfs::write(fd, data);
@@ -143,7 +150,8 @@ fn file_read_at(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
     let buf_ref = call.arg_ref(1);
     let offset = call.arg_i64(2);
-    let buf_len = slice::len(buf_ref);
+    // Safety: the resolved os.File.ReadAt ABI supplies a rooted []byte argument.
+    let buf_len = unsafe { slice::len(buf_ref) };
 
     let (data, err) = vfs::read_at(fd, buf_len as u32, offset);
 
@@ -152,7 +160,9 @@ fn file_read_at(call: &mut ExternCallContext) -> ExternResult {
         write_error_to(call, 1, &msg);
     } else {
         let n = data.len().min(buf_len);
-        let buf_ptr = slice::data_ptr(buf_ref);
+        // Safety: the verified []byte remains rooted for this extern call and
+        // `n` is bounded by its visible length.
+        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, n);
         }
@@ -170,8 +180,10 @@ fn file_write_at(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(0) as i32;
     let buf_ref = call.arg_ref(1);
     let offset = call.arg_i64(2);
-    let buf_len = slice::len(buf_ref);
-    let buf_ptr = slice::data_ptr(buf_ref);
+    // Safety: the resolved os.File.WriteAt ABI supplies a rooted []byte argument.
+    let buf_len = unsafe { slice::len(buf_ref) };
+    // Safety: the slice remains rooted and readable for this synchronous call.
+    let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
     let data = unsafe { std::slice::from_raw_parts(buf_ptr, buf_len) };
 
     let (n, err) = vfs::write_at(fd, data, offset);
@@ -431,7 +443,8 @@ fn native_read_file(call: &mut ExternCallContext) -> ExternResult {
         let gc = call.gc();
         let elem_meta = ValueMeta::new(0, ValueKind::Uint8);
         let arr = array::create(gc, elem_meta, 1, 0);
-        let slice_ref = slice::from_array(gc, arr);
+        // Safety: `arr` was allocated above as a live byte array in this GC.
+        let slice_ref = unsafe { slice::from_array(gc, arr) };
         call.ret_ref(0, slice_ref);
         write_error_to(call, 1, &msg);
     } else {
@@ -505,7 +518,8 @@ fn native_environ(call: &mut ExternCallContext) -> ExternResult {
     let gc = call.gc();
     let elem_meta = ValueMeta::new(0, ValueKind::String);
     let arr = array::create(gc, elem_meta, 8, 0);
-    let slice_ref = slice::from_array(gc, arr);
+    // Safety: `arr` was allocated above as a live string-reference array.
+    let slice_ref = unsafe { slice::from_array(gc, arr) };
     call.ret_ref(0, slice_ref);
     ExternResult::Ok
 }
@@ -628,7 +642,8 @@ fn native_get_args(call: &mut ExternCallContext) -> ExternResult {
         let s = string::from_rust_str(gc, arg);
         unsafe { array::set(arr, i, s as u64, 8) };
     }
-    let slice_ref = slice::from_array(gc, arr);
+    // Safety: `arr` remains a live string-reference array rooted by the return.
+    let slice_ref = unsafe { slice::from_array(gc, arr) };
     call.ret_ref(0, slice_ref);
     ExternResult::Ok
 }

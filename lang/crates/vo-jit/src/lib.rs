@@ -37,6 +37,7 @@ pub use verifier::{
 };
 
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
 
 use cranelift_codegen::ir::{types, AbiParam, FuncRef, Signature};
 use cranelift_codegen::settings::{self, Configurable};
@@ -235,6 +236,9 @@ impl JitCache {
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
+    /// `self` must remain alive, unmoved through destruction, and not be dropped
+    /// until every invocation has returned and every copy of the pointer has
+    /// been permanently retired.
     unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
         self.functions
             .get(&func_id)
@@ -256,6 +260,7 @@ impl JitCache {
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
+    /// `self` must outlive every use and every copy of the returned pointer.
     unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
         self.loops
             .get(&(func_id, begin_pc))
@@ -288,7 +293,7 @@ impl Default for JitCache {
 // =============================================================================
 
 pub struct JitCompiler {
-    module: Option<JITModule>,
+    module: ManuallyDrop<JITModule>,
     ctx: cranelift_codegen::Context,
     cache: JitCache,
     func_decl_ids: HashMap<u32, FuncId>,
@@ -328,7 +333,7 @@ impl JitCompiler {
         let helper_funcs = helpers::declare_helpers(&mut module, ptr_type)?;
 
         Ok(Self {
-            module: Some(module),
+            module: ManuallyDrop::new(module),
             ctx,
             cache: JitCache::new(),
             func_decl_ids: HashMap::new(),
@@ -342,11 +347,7 @@ impl JitCompiler {
     }
 
     fn get_helper_refs(&mut self) -> HelperFuncs {
-        helpers::get_helper_refs(
-            self.module.as_mut().expect("live JIT module"),
-            &mut self.ctx.func,
-            &self.helper_funcs,
-        )
+        helpers::get_helper_refs(&mut self.module, &mut self.ctx.func, &self.helper_funcs)
     }
 
     fn verify_module_once(&mut self, vo_module: &VoModule) -> Result<(), JitError> {
@@ -439,8 +440,6 @@ impl JitCompiler {
             if let Some(&decl_id) = self.func_decl_ids.get(&callee_id) {
                 let callee_ref = self
                     .module
-                    .as_mut()
-                    .expect("live JIT module")
                     .declare_func_in_func(decl_id, &mut self.ctx.func);
                 refs[callee_id as usize] = Some(callee_ref);
             }
@@ -462,7 +461,7 @@ impl JitCompiler {
             eprintln!("[JIT VERIFY OK] {}", name);
         }
 
-        let module = self.module.as_mut().expect("live JIT module");
+        let module = &mut self.module;
         module.define_function(func_id_cl, &mut self.ctx)?;
         let code_size = self
             .ctx
@@ -494,7 +493,7 @@ impl JitCompiler {
         // Clear any residual state from previous compilation
         self.ctx.clear();
 
-        let module = self.module.as_ref().expect("live JIT module");
+        let module = &self.module;
         let ptr_type = module.target_config().pointer_type();
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr_type)); // ctx
@@ -503,11 +502,9 @@ impl JitCompiler {
         sig.returns.push(AbiParam::new(types::I32));
 
         let func_name = format!("vo_jit_{}", func_id);
-        let func_id_cl = self
-            .module
-            .as_mut()
-            .expect("live JIT module")
-            .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
+        let func_id_cl =
+            self.module
+                .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
         self.func_decl_ids.insert(func_id, func_id_cl);
 
         self.ctx.func.signature = sig;
@@ -518,8 +515,6 @@ impl JitCompiler {
         // Get FuncRef for self-recursive calls optimization
         let self_func_ref = self
             .module
-            .as_mut()
-            .expect("live JIT module")
             .declare_func_in_func(func_id_cl, &mut self.ctx.func);
         let mut callee_func_refs = std::mem::take(&mut self.callee_func_refs_buf);
         self.rebuild_callee_func_refs(
@@ -538,7 +533,7 @@ impl JitCompiler {
                 env,
                 helpers,
                 &callee_func_refs,
-            );
+            )?;
             compiler.compile()
         };
         self.callee_func_refs_buf = callee_func_refs;
@@ -586,7 +581,7 @@ impl JitCompiler {
         // Clear any residual state from previous compilation
         self.ctx.clear();
 
-        let module = self.module.as_ref().expect("live JIT module");
+        let module = &self.module;
         let ptr_type = module.target_config().pointer_type();
         let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr_type)); // ctx
@@ -594,11 +589,9 @@ impl JitCompiler {
         sig.returns.push(AbiParam::new(types::I32));
 
         let func_name = format!("vo_loop_{}_{}", func_id, begin_pc);
-        let func_id_cl = self
-            .module
-            .as_mut()
-            .expect("live JIT module")
-            .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
+        let func_id_cl =
+            self.module
+                .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)?;
 
         self.ctx.func.signature = sig;
         self.ctx.func.name =
@@ -665,12 +658,11 @@ impl JitCompiler {
 
 impl Drop for JitCompiler {
     fn drop(&mut self) {
-        let Some(module) = self.module.take() else {
-            return;
-        };
-        // SAFETY: JitCompiler owns every published code pointer. Its VM owner
-        // drops the compiler only after native execution has returned, and no
-        // pointer is exposed independently of that owner.
+        // SAFETY: Drop runs exactly once and `module` is never taken elsewhere.
+        let module = unsafe { ManuallyDrop::take(&mut self.module) };
+        // SAFETY: JitCompiler owns every published code pointer. Safe VM owners
+        // drop the compiler only after native execution has returned. Raw
+        // getters carry an explicit unsafe lifetime obligation for other users.
         unsafe { module.free_memory() };
     }
 }

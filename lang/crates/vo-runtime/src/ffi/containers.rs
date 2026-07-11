@@ -248,7 +248,8 @@ impl<T: VoElem> VoSlice<T> {
     /// Get slice length.
     #[inline]
     pub fn len(&self) -> usize {
-        slice::len(self.ptr)
+        // Safety: `from_ref` establishes the live typed-slice invariant.
+        unsafe { slice::len(self.ptr) }
     }
 
     /// Check if empty.
@@ -269,7 +270,8 @@ impl<T: VoElem> VoSlice<T> {
     pub fn set(&self, ctx: &mut ExternCallContext, idx: usize, val: T::Owned) {
         assert!(idx < self.len(), "slice index out of bounds");
         let child = T::gc_ref_for_barrier(&val);
-        let parent = slice::array_ref(self.ptr);
+        // Safety: `from_ref` establishes the live typed-slice invariant.
+        let parent = unsafe { slice::array_ref(self.ptr) };
         apply_element_write_barrier::<T>(ctx, parent, child);
         unsafe { T::write_to_slice(self.ptr, idx, val) };
     }
@@ -296,7 +298,8 @@ impl<T: VoElem> VoSliceCursor<T> {
     /// Get next element. Returns (index, value).
     #[inline]
     pub fn next(&mut self) -> Option<(usize, T::Owned)> {
-        let len = slice::len(self.ptr);
+        // Safety: the cursor inherits the live typed-slice invariant.
+        let len = unsafe { slice::len(self.ptr) };
         if self.idx >= len {
             return None;
         }
@@ -355,7 +358,8 @@ impl<K, V> VoMap<K, V> {
     /// Get map length.
     #[inline]
     pub fn len(&self) -> usize {
-        map::len(self.ptr)
+        // Safety: `from_ref` establishes the live-map invariant.
+        unsafe { map::len(self.ptr) }
     }
 
     /// Check if empty.
@@ -369,7 +373,8 @@ impl<K, V> VoMap<K, V> {
     pub fn cursor(&self) -> VoMapCursor<K, V> {
         VoMapCursor {
             ptr: self.ptr,
-            iter: map::iter_init(self.ptr),
+            // Safety: `from_ref` establishes the live-map invariant.
+            iter: unsafe { map::iter_init(self.ptr) },
             _marker: PhantomData,
         }
     }
@@ -378,12 +383,14 @@ impl<K, V> VoMap<K, V> {
 #[inline]
 fn assert_string_key_map(ptr: GcRef, context: &str) {
     assert_eq!(
-        map::key_kind(ptr),
+        // Safety: callers hold a typed accessor created through `from_ref`.
+        unsafe { map::key_kind(ptr) },
         ValueKind::String,
         "{context} requires a string-keyed map"
     );
     assert_eq!(
-        map::key_slots(ptr),
+        // Safety: callers hold a typed accessor created through `from_ref`.
+        unsafe { map::key_slots(ptr) },
         1,
         "{context} requires a one-slot string-key map"
     );
@@ -391,7 +398,8 @@ fn assert_string_key_map(ptr: GcRef, context: &str) {
 
 #[inline]
 fn assert_map_value_kind(ptr: GcRef, context: &str, expected: impl FnOnce(ValueKind) -> bool) {
-    let value_kind = map::val_kind(ptr);
+    // Safety: callers hold a typed accessor created through `from_ref`.
+    let value_kind = unsafe { map::val_kind(ptr) };
     assert!(
         expected(value_kind),
         "{context} value accessor does not match map value kind {value_kind:?}"
@@ -419,7 +427,9 @@ impl<V> VoMap<String, V> {
     #[inline]
     pub fn get_raw(&self, key_ref: GcRef) -> Option<u64> {
         let key = [key_ref as u64];
-        map::get_checked(self.ptr, &key, None)
+        // Safety: this accessor is a live map and the key width is checked by
+        // the typed string-key contract.
+        unsafe { map::get_checked(self.ptr, &key, None) }
             .expect("VoMap::get_raw string key must be hashable")
             .map(|v| v[0])
     }
@@ -430,13 +440,16 @@ impl<V> VoMap<String, V> {
         assert_string_key_map(self.ptr, "VoMap::set_raw");
         let key = [key_ref as u64];
         let val = [val];
-        map::validate_entry_slot_counts(self.ptr, key.len(), val.len())
+        // Safety: `self.ptr` is a live map established by `from_ref`.
+        unsafe { map::validate_entry_slot_counts(self.ptr, key.len(), val.len()) }
             .expect("VoMap::set_raw key/value slots must match map layout");
-        let key_meta = map::key_meta(self.ptr);
+        // Safety: `self.ptr` is a live map established by `from_ref`.
+        let key_meta = unsafe { map::key_meta(self.ptr) };
         if key_meta.value_kind().may_contain_gc_refs() {
             ctx.typed_write_barrier_by_meta(self.ptr, &key, key_meta);
         }
-        let val_meta = map::val_meta(self.ptr);
+        // Safety: `self.ptr` is a live map established by `from_ref`.
+        let val_meta = unsafe { map::val_meta(self.ptr) };
         if val_meta.value_kind().may_contain_gc_refs() {
             ctx.typed_write_barrier_by_meta(self.ptr, &val, val_meta);
         }
@@ -451,7 +464,8 @@ impl<V> VoMap<String, V> {
     #[inline]
     pub fn delete_raw(&self, key_ref: GcRef) {
         let key = [key_ref as u64];
-        map::delete_checked(self.ptr, &key, None)
+        // Safety: this accessor is a live string-keyed map.
+        unsafe { map::delete_checked(self.ptr, &key, None) }
             .expect("VoMap::delete_raw string key must be hashable");
     }
 }
@@ -545,7 +559,8 @@ impl<K, V> VoMapCursor<K, V> {
     /// Reset cursor.
     #[inline]
     pub fn reset(&mut self) {
-        self.iter = map::iter_init(self.ptr);
+        // Safety: the cursor inherits the live-map invariant.
+        self.iter = unsafe { map::iter_init(self.ptr) };
     }
 }
 
@@ -553,12 +568,17 @@ impl VoMapCursor<String, String> {
     /// Get next key-value pair.
     #[inline]
     pub fn next(&mut self) -> Option<(String, String)> {
-        map::iter_next(&mut self.iter).map(|(k, v)| {
-            // Safety: this typed cursor is backed by a live map[string]string.
-            let key = unsafe { string::to_rust_string(k[0] as GcRef) };
-            let val = unsafe { string::to_rust_string(v[0] as GcRef) };
-            (key, val)
-        })
+        // Safety: the cursor inherits the live map[string]string invariant.
+        unsafe {
+            map::with_next(&mut self.iter, |entry| {
+                entry.map(|(key, val)| {
+                    // Safety: this typed cursor is backed by a live map[string]string.
+                    let key = string::to_rust_string(key[0] as GcRef);
+                    let val = string::to_rust_string(val[0] as GcRef);
+                    (key, val)
+                })
+            })
+        }
     }
 }
 
@@ -566,12 +586,17 @@ impl VoMapCursor<String, i64> {
     /// Get next key-value pair.
     #[inline]
     pub fn next(&mut self) -> Option<(String, i64)> {
-        map::iter_next(&mut self.iter).map(|(k, v)| {
-            // Safety: this typed cursor is backed by a live string-keyed map.
-            let key = unsafe { string::to_rust_string(k[0] as GcRef) };
-            let val = v[0] as i64;
-            (key, val)
-        })
+        // Safety: the cursor inherits the live map[string]int invariant.
+        unsafe {
+            map::with_next(&mut self.iter, |entry| {
+                entry.map(|(key, val)| {
+                    // Safety: this typed cursor is backed by a live string-keyed map.
+                    let key = string::to_rust_string(key[0] as GcRef);
+                    let val = val[0] as i64;
+                    (key, val)
+                })
+            })
+        }
     }
 }
 
@@ -579,12 +604,17 @@ impl VoMapCursor<String, GcRef> {
     /// Get next key-value pair.
     #[inline]
     pub fn next(&mut self) -> Option<(String, GcRef)> {
-        map::iter_next(&mut self.iter).map(|(k, v)| {
-            // Safety: this typed cursor is backed by a live string-keyed map.
-            let key = unsafe { string::to_rust_string(k[0] as GcRef) };
-            let val = v[0] as GcRef;
-            (key, val)
-        })
+        // Safety: the cursor inherits the live map[string]GcRef invariant.
+        unsafe {
+            map::with_next(&mut self.iter, |entry| {
+                entry.map(|(key, val)| {
+                    // Safety: this typed cursor is backed by a live string-keyed map.
+                    let key = string::to_rust_string(key[0] as GcRef);
+                    let val = val[0] as GcRef;
+                    (key, val)
+                })
+            })
+        }
     }
 }
 
@@ -665,7 +695,8 @@ impl VoBytes {
     /// Get byte slice length.
     #[inline]
     pub fn len(&self) -> usize {
-        slice::len(self.ptr)
+        // Safety: `from_ref` establishes the live byte-slice invariant.
+        unsafe { slice::len(self.ptr) }
     }
 
     /// Check if empty.
@@ -955,7 +986,7 @@ mod tests {
     fn vo_slice_set_rejects_indices_outside_visible_len_before_mutation_054() {
         let mut gc = Gc::new();
         let slice_ref = slice::create(&mut gc, ValueMeta::new(0, ValueKind::Int), 8, 1, 2);
-        let backing_array = slice::array_ref(slice_ref);
+        let backing_array = unsafe { slice::array_ref(slice_ref) };
         unsafe { array::set(backing_array, 1, 99, 8) };
 
         let result = {
@@ -1016,7 +1047,7 @@ mod tests {
     fn vo_slice_get_rejects_indices_outside_visible_len_055() {
         let mut gc = Gc::new();
         let slice_ref = slice::create(&mut gc, ValueMeta::new(0, ValueKind::Int), 8, 1, 2);
-        let backing_array = slice::array_ref(slice_ref);
+        let backing_array = unsafe { slice::array_ref(slice_ref) };
         unsafe { array::set(backing_array, 1, 99, 8) };
 
         let slice = unsafe { VoSlice::<i64>::from_ref(slice_ref) };
@@ -1053,7 +1084,7 @@ mod tests {
             "VoMap<String, GcRef> must reject scalar-valued maps before publishing"
         );
         assert_eq!(
-            map::len(map_ref),
+            unsafe { map::len(map_ref) },
             0,
             "rejected typed map write must not mutate"
         );
@@ -1074,7 +1105,7 @@ mod tests {
 
         let result = with_extern_context(&mut gc, |ctx| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ctx.map_set_string_key(map_ref, "k", &[0]);
+                unsafe { ctx.map_set_string_key(map_ref, "k", &[0]) };
             }))
         });
 
@@ -1083,7 +1114,7 @@ mod tests {
             "ExternCallContext::map_set_string_key must reject non-string-keyed maps"
         );
         assert_eq!(
-            map::len(map_ref),
+            unsafe { map::len(map_ref) },
             0,
             "rejected raw string-key map write must not mutate"
         );

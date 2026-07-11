@@ -105,7 +105,10 @@ pub fn format_interface_with_ctx(
             }
             format!("0x{:x}", slot1)
         }
-        ValueKind::Slice => format_slice_value(slot1 as GcRef),
+        ValueKind::Slice => {
+            // Safety: the interface tag identifies slot1 as a rooted slice.
+            unsafe { format_slice_value(slot1 as GcRef) }
+        }
         ValueKind::Map => "map[...]".to_string(),
         ValueKind::Channel => format!("0x{:x}", slot1),
         ValueKind::Port => format!("0x{:x}", slot1),
@@ -148,7 +151,7 @@ fn format_error_chain(ptr: GcRef, field_offsets: [u16; 2], ctx: &ExternCallConte
 }
 
 /// Format a slice value for %v output.
-fn format_slice_value(slice_ref: GcRef) -> String {
+unsafe fn format_slice_value(slice_ref: GcRef) -> String {
     if slice_ref.is_null() {
         return "[]".to_string();
     }

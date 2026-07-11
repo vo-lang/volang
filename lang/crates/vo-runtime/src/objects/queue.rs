@@ -1,8 +1,13 @@
+#![allow(clippy::missing_safety_doc)]
 //! Unified queue operations for channels (local and remote/cross-island).
 //!
 //! QueueKind distinguishes local-only `chan` from remote-capable `port`.
 //! The backing field in QueueData distinguishes LOCAL (in-process state)
 //! from REMOTE (cross-island proxy).
+//!
+//! # Safety contract
+//! Unsafe accessors require a canonical live queue allocation with the stated
+//! backing, plus exclusive access whenever local state is mutated.
 //!
 //! Shared: QueueData, QueueState, capacity/elem_meta/elem_slots (in queue_state.rs)
 //! This module: create, create_remote_proxy, get_state, HomeInfo/RemoteProxy
@@ -24,13 +29,20 @@ use super::queue_state::{
     RemoteProxy, DATA_SLOTS,
 };
 
-pub use super::queue_state::{RecvResult, ResolvedSendResult, SendResult};
+pub use super::queue_state::{
+    BlockingRecvResult, BlockingSendResult, RecvResult, ResolvedSendResult, SendResult,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HomeInfoSnapshot {
     pub endpoint_id: u64,
     pub home_island: u32,
     pub peers: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueEndpointError {
+    MissingHomeInfo,
 }
 
 impl LocalQueueState {
@@ -71,7 +83,6 @@ pub fn create(
 #[allow(clippy::too_many_arguments)]
 pub fn create_remote_proxy(
     gc: &mut Gc,
-    kind: QueueKind,
     endpoint_id: u64,
     home_island: u32,
     cap: u64,
@@ -81,7 +92,6 @@ pub fn create_remote_proxy(
 ) -> GcRef {
     create_remote_proxy_with_closed(
         gc,
-        kind,
         endpoint_id,
         home_island,
         cap,
@@ -95,7 +105,6 @@ pub fn create_remote_proxy(
 #[allow(clippy::too_many_arguments)]
 pub fn create_remote_proxy_with_closed(
     gc: &mut Gc,
-    kind: QueueKind,
     endpoint_id: u64,
     home_island: u32,
     cap: u64,
@@ -104,10 +113,7 @@ pub fn create_remote_proxy_with_closed(
     elem_slots: u16,
     closed: bool,
 ) -> GcRef {
-    match kind {
-        QueueKind::Port => {}
-        QueueKind::Chan => panic!("create_remote_proxy_with_closed: chan cannot cross islands"),
-    }
+    let kind = QueueKind::Port;
     let chan = gc.alloc(ValueMeta::new(0, kind.value_kind()), DATA_SLOTS);
     let proxy = Box::new(RemoteProxy {
         endpoint_id,
@@ -217,8 +223,11 @@ pub enum QueueElementLayoutError {
     SlotMismatch,
 }
 
+/// # Safety
+/// `chan` must be a live local queue, and the caller must provide exclusive
+/// access to its state for the returned borrow.
 #[inline]
-pub fn local_state(chan: GcRef) -> &'static mut LocalQueueState {
+pub unsafe fn local_state<'a>(chan: GcRef) -> &'a mut LocalQueueState {
     debug_assert!(
         super::queue_state::backing(chan) == QueueBacking::Local,
         "get_state called on non-LOCAL queue"
@@ -226,45 +235,62 @@ pub fn local_state(chan: GcRef) -> &'static mut LocalQueueState {
     unsafe { &mut *slot_to_ptr(QueueData::as_ref(chan).state) }
 }
 
+/// # Safety
+/// `chan` must be a live local queue, and its state must remain allocated for
+/// the returned borrow.
+#[inline]
+pub unsafe fn local_state_ref<'a>(chan: GcRef) -> &'a LocalQueueState {
+    debug_assert!(
+        super::queue_state::backing(chan) == QueueBacking::Local,
+        "get_state_ref called on non-LOCAL queue"
+    );
+    unsafe { &*slot_to_ptr(QueueData::as_ref(chan).state) }
+}
+
 /// Check if this channel is a REMOTE proxy.
 #[inline]
-pub fn is_remote(chan: GcRef) -> bool {
+pub unsafe fn is_remote(chan: GcRef) -> bool {
     super::queue_state::backing(chan) == QueueBacking::Remote
 }
 
 #[inline]
-pub fn kind(chan: GcRef) -> QueueKind {
+pub unsafe fn kind(chan: GcRef) -> QueueKind {
     super::queue_state::kind(chan)
 }
 
 #[inline]
-pub fn is_port(chan: GcRef) -> bool {
+pub unsafe fn is_port(chan: GcRef) -> bool {
     kind(chan) == QueueKind::Port
 }
 
 /// Get RemoteProxy for a REMOTE channel.
+/// # Safety
+/// `chan` must be a live remote queue for the returned borrow.
 #[inline]
-pub fn remote_proxy(chan: GcRef) -> &'static RemoteProxy {
+pub unsafe fn remote_proxy<'a>(chan: GcRef) -> &'a RemoteProxy {
     debug_assert!(is_remote(chan), "remote_proxy called on LOCAL channel");
     unsafe { &*(QueueData::as_ref(chan).endpoint_ptr as *const RemoteProxy) }
 }
 
 /// Get mutable RemoteProxy for a REMOTE channel.
+/// # Safety
+/// `chan` must be a live remote queue, and the caller must provide exclusive
+/// access to its proxy state for the returned borrow.
 #[inline]
-pub fn remote_proxy_mut(chan: GcRef) -> &'static mut RemoteProxy {
+pub unsafe fn remote_proxy_mut<'a>(chan: GcRef) -> &'a mut RemoteProxy {
     debug_assert!(is_remote(chan), "remote_proxy_mut called on LOCAL channel");
     unsafe { &mut *(QueueData::as_ref(chan).endpoint_ptr as *mut RemoteProxy) }
 }
 
 #[inline]
-pub fn mark_remote_closed(chan: GcRef) {
-    remote_proxy_mut(chan).closed = true;
+pub unsafe fn mark_remote_closed(chan: GcRef) {
+    unsafe { remote_proxy_mut(chan).closed = true };
 }
 
 /// Get HomeInfo for a LOCAL channel that has been transferred cross-island.
 /// Returns None if never transferred (endpoint_ptr == 0).
-pub fn home_info(chan: GcRef) -> Option<&'static HomeInfo> {
-    let data = QueueData::as_ref(chan);
+pub unsafe fn home_info<'a>(chan: GcRef) -> Option<&'a HomeInfo> {
+    let data = unsafe { QueueData::as_ref(chan) };
     if super::queue_state::backing(chan) != QueueBacking::Local || data.endpoint_ptr == 0 {
         return None;
     }
@@ -272,16 +298,16 @@ pub fn home_info(chan: GcRef) -> Option<&'static HomeInfo> {
 }
 
 /// Get mutable HomeInfo for a LOCAL channel.
-pub fn home_info_mut(chan: GcRef) -> Option<&'static mut HomeInfo> {
-    let data = QueueData::as_ref(chan);
+pub unsafe fn home_info_mut<'a>(chan: GcRef) -> Option<&'a mut HomeInfo> {
+    let data = unsafe { QueueData::as_ref(chan) };
     if super::queue_state::backing(chan) != QueueBacking::Local || data.endpoint_ptr == 0 {
         return None;
     }
     Some(unsafe { &mut *(data.endpoint_ptr as *mut HomeInfo) })
 }
 
-pub fn home_info_snapshot(chan: GcRef) -> Option<HomeInfoSnapshot> {
-    home_info(chan).map(|info| {
+pub unsafe fn home_info_snapshot(chan: GcRef) -> Option<HomeInfoSnapshot> {
+    unsafe { home_info(chan) }.map(|info| {
         let mut peers: Vec<u32> = info.peers.iter().copied().collect();
         peers.sort_unstable();
         HomeInfoSnapshot {
@@ -293,7 +319,7 @@ pub fn home_info_snapshot(chan: GcRef) -> Option<HomeInfoSnapshot> {
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub fn restore_home_info_snapshot(chan: GcRef, snapshot: Option<HomeInfoSnapshot>) {
+pub unsafe fn restore_home_info_snapshot(chan: GcRef, snapshot: Option<HomeInfoSnapshot>) {
     // Safety: callers restore an already-live local queue object as part of a
     // VM transaction rollback. The pointer being replaced is non-GC metadata.
     let data = unsafe { QueueData::as_mut(chan) };
@@ -322,15 +348,15 @@ pub fn restore_home_info_snapshot(chan: GcRef, snapshot: Option<HomeInfoSnapshot
     }
 }
 
-pub fn add_home_peer(chan: GcRef, peer_island: u32) -> u64 {
-    let info = home_info_mut(chan).expect("add_home_peer: LOCAL port endpoint must have HomeInfo");
+pub unsafe fn add_home_peer(chan: GcRef, peer_island: u32) -> Result<u64, QueueEndpointError> {
+    let info = unsafe { home_info_mut(chan) }.ok_or(QueueEndpointError::MissingHomeInfo)?;
     info.peers.insert(peer_island);
-    info.endpoint_id
+    Ok(info.endpoint_id)
 }
 
 /// Install HomeInfo on a LOCAL channel for first-time cross-island transfer.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32) {
+pub unsafe fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32) {
     // Safety: `chan` is a live local queue object. The mutation installs a
     // non-GC HomeInfo pointer and does not publish GC-visible references.
     let data = unsafe { QueueData::as_mut(chan) };
@@ -352,8 +378,8 @@ pub fn install_home_info(chan: GcRef, endpoint_id: u64, home_island: u32) {
 }
 
 /// Get channel metadata for cross-island transfer.
-pub fn get_metadata(chan: GcRef) -> (QueueKind, u64, ValueMeta, ValueRttid, u16) {
-    let data = QueueData::as_ref(chan);
+pub unsafe fn get_metadata(chan: GcRef) -> (QueueKind, u64, ValueMeta, ValueRttid, u16) {
+    let data = unsafe { QueueData::as_ref(chan) };
     (
         kind(chan),
         data.cap,
@@ -365,16 +391,16 @@ pub fn get_metadata(chan: GcRef) -> (QueueKind, u64, ValueMeta, ValueRttid, u16)
 
 /// Access channel state via closure. LOCAL backing only.
 #[inline]
-pub fn with_local_state<T, F: FnOnce(&mut LocalQueueState) -> T>(chan: GcRef, f: F) -> T {
-    f(local_state(chan))
+pub unsafe fn with_local_state<T, F: FnOnce(&mut LocalQueueState) -> T>(chan: GcRef, f: F) -> T {
+    unsafe { f(local_state(chan)) }
 }
 
 #[inline]
-pub fn next_remote_direct_receiver(chan: GcRef, local_island: u32) -> Option<QueueWaiter> {
+pub unsafe fn next_remote_direct_receiver(chan: GcRef, local_island: u32) -> Option<QueueWaiter> {
     if is_remote(chan) {
         return None;
     }
-    local_state(chan)
+    unsafe { local_state(chan) }
         .waiting_receivers
         .front()
         .filter(|receiver| receiver.island_id != local_island || receiver.endpoint_wait_id() != 0)
@@ -382,11 +408,14 @@ pub fn next_remote_direct_receiver(chan: GcRef, local_island: u32) -> Option<Que
 }
 
 #[inline]
-pub fn next_local_select_recv_receiver(chan: GcRef, local_island: u32) -> Option<QueueWaiter> {
+pub unsafe fn next_local_select_recv_receiver(
+    chan: GcRef,
+    local_island: u32,
+) -> Option<QueueWaiter> {
     if is_remote(chan) {
         return None;
     }
-    let state = local_state(chan);
+    let state = unsafe { local_state(chan) };
     if state.is_closed() {
         return None;
     }
@@ -398,16 +427,16 @@ pub fn next_local_select_recv_receiver(chan: GcRef, local_island: u32) -> Option
 }
 
 #[inline]
-pub fn next_send_would_remote_direct(chan: GcRef, local_island: u32) -> bool {
+pub unsafe fn next_send_would_remote_direct(chan: GcRef, local_island: u32) -> bool {
     next_remote_direct_receiver(chan, local_island).is_some()
 }
 
 #[inline]
-pub fn next_recv_endpoint_sender(chan: GcRef) -> Option<QueueWaiter> {
+pub unsafe fn next_recv_endpoint_sender(chan: GcRef) -> Option<QueueWaiter> {
     if is_remote(chan) {
         return None;
     }
-    local_state(chan)
+    unsafe { local_state(chan) }
         .waiting_senders
         .front()
         .map(|(sender, _)| sender)
@@ -416,11 +445,11 @@ pub fn next_recv_endpoint_sender(chan: GcRef) -> Option<QueueWaiter> {
 }
 
 #[inline]
-pub fn has_endpoint_waiters(chan: GcRef) -> bool {
+pub unsafe fn has_endpoint_waiters(chan: GcRef) -> bool {
     if is_remote(chan) {
         return false;
     }
-    let state = local_state(chan);
+    let state = unsafe { local_state(chan) };
     state
         .waiting_receivers
         .iter()
@@ -432,67 +461,67 @@ pub fn has_endpoint_waiters(chan: GcRef) -> bool {
 }
 
 #[inline]
-pub fn len(chan: GcRef) -> usize {
+pub unsafe fn len(chan: GcRef) -> usize {
     if is_remote(chan) {
         return 0;
     }
-    local_state(chan).len()
+    unsafe { local_state(chan) }.len()
 }
 #[inline]
-pub fn is_closed(chan: GcRef) -> bool {
+pub unsafe fn is_closed(chan: GcRef) -> bool {
     if is_remote(chan) {
-        return remote_proxy(chan).closed;
+        return unsafe { remote_proxy(chan) }.closed;
     }
-    local_state(chan).is_closed()
+    unsafe { local_state(chan) }.is_closed()
 }
 #[inline]
-pub fn close(chan: GcRef) {
+pub unsafe fn close(chan: GcRef) {
     debug_assert!(
         !is_remote(chan),
         "close called on REMOTE channel — use message passing"
     );
-    local_state(chan).close();
+    unsafe { local_state(chan) }.close();
 }
 
 #[inline]
-pub fn send_ready(chan: GcRef) -> bool {
+pub unsafe fn send_ready(chan: GcRef) -> bool {
     let cap = super::queue_state::capacity(chan);
     with_local_state(chan, |s| s.is_send_ready(cap))
 }
 
 #[inline]
-pub fn recv_ready(chan: GcRef) -> bool {
+pub unsafe fn recv_ready(chan: GcRef) -> bool {
     with_local_state(chan, |s| s.is_recv_ready())
 }
 
 #[inline]
-pub fn try_send(chan: GcRef, value: QueueMessage) -> SendResult<QueueWaiter, QueueMessage> {
+pub unsafe fn try_send(chan: GcRef, value: QueueMessage) -> SendResult<QueueWaiter, QueueMessage> {
     let cap = super::queue_state::capacity(chan);
     with_local_state(chan, |s| s.try_send(value, cap))
 }
 
 #[inline]
-pub fn try_recv(chan: GcRef) -> (RecvResult<QueueWaiter>, Option<QueueMessage>) {
+pub unsafe fn try_recv(chan: GcRef) -> RecvResult<QueueWaiter, QueueMessage> {
     with_local_state(chan, |s| s.try_recv())
 }
 
 #[inline]
-pub fn register_sender(chan: GcRef, waiter: QueueWaiter, value: QueueMessage) {
+pub unsafe fn register_sender(chan: GcRef, waiter: QueueWaiter, value: QueueMessage) {
     with_local_state(chan, |s| s.register_sender(waiter, value))
 }
 
 #[inline]
-pub fn register_receiver(chan: GcRef, waiter: QueueWaiter) {
+pub unsafe fn register_receiver(chan: GcRef, waiter: QueueWaiter) {
     with_local_state(chan, |s| s.register_receiver(waiter))
 }
 
 #[inline]
-pub fn cancel_select_waiters(chan: GcRef, fiber_key: u64, select_id: u64) {
+pub unsafe fn cancel_select_waiters(chan: GcRef, fiber_key: u64, select_id: u64) {
     with_local_state(chan, |s| s.cancel_select_waiters(fiber_key, select_id))
 }
 
 #[inline]
-pub fn cancel_simple_waiter(
+pub unsafe fn cancel_simple_waiter(
     chan: GcRef,
     fiber_key: u64,
     kind: crate::objects::queue_state::SelectWaitKind,
@@ -501,17 +530,17 @@ pub fn cancel_simple_waiter(
 }
 
 /// Atomic send: try to send, if would block, register waiter in same operation.
-pub fn send_or_block(
+pub unsafe fn send_or_block(
     chan: GcRef,
     value: QueueMessage,
     waiter: QueueWaiter,
-) -> SendResult<QueueWaiter, QueueMessage> {
+) -> BlockingSendResult<QueueWaiter, QueueMessage> {
     let cap = super::queue_state::capacity(chan);
     with_local_state(chan, |s| s.send_or_block(value, cap, waiter))
 }
 
 #[inline]
-pub fn send_or_block_resolved(
+pub unsafe fn send_or_block_resolved(
     chan: GcRef,
     value: QueueMessage,
     waiter: QueueWaiter,
@@ -524,20 +553,20 @@ pub fn send_or_block_resolved(
 }
 
 /// Atomic recv: try to receive, if would block, register waiter in same operation.
-pub fn recv_or_block(
+pub unsafe fn recv_or_block(
     chan: GcRef,
     waiter: QueueWaiter,
-) -> (RecvResult<QueueWaiter>, Option<QueueMessage>) {
+) -> BlockingRecvResult<QueueWaiter, QueueMessage> {
     with_local_state(chan, |s| s.recv_or_block(waiter))
 }
 
 /// Take all waiting receivers (for close notification).
-pub fn take_waiting_receivers(chan: GcRef) -> Vec<QueueWaiter> {
+pub unsafe fn take_waiting_receivers(chan: GcRef) -> Vec<QueueWaiter> {
     with_local_state(chan, |s| s.take_waiting_receivers())
 }
 
 /// Take all waiting senders (for close notification).
-pub fn take_waiting_senders(chan: GcRef) -> Vec<(QueueWaiter, QueueMessage)> {
+pub unsafe fn take_waiting_senders(chan: GcRef) -> Vec<(QueueWaiter, QueueMessage)> {
     with_local_state(chan, |s| s.take_waiting_senders())
 }
 
@@ -570,34 +599,14 @@ pub unsafe fn drop_inner(chan: GcRef) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use crate::test_support::queue::{is_port, is_remote, remote_proxy};
     use vo_common_core::{RuntimeType, SlotType, StructMeta, ValueKind};
 
     #[test]
-    fn create_remote_proxy_rejects_chan() {
-        let mut gc = Gc::new();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            create_remote_proxy_with_closed(
-                &mut gc,
-                QueueKind::Chan,
-                7,
-                9,
-                4,
-                ValueMeta::new(0, ValueKind::Int64),
-                ValueRttid::new(0, ValueKind::Int64),
-                1,
-                false,
-            )
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn create_remote_proxy_allows_port() {
+    fn remote_proxy_is_always_a_port() {
         let mut gc = Gc::new();
         let port = create_remote_proxy_with_closed(
             &mut gc,
-            QueueKind::Port,
             7,
             9,
             4,

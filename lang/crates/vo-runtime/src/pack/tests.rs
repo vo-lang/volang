@@ -1,5 +1,14 @@
 use super::*;
-use crate::objects::{array, queue, queue_state::QueueKind, slice};
+use crate::objects::queue_state::QueueKind;
+use crate::test_support::{
+    array,
+    pack::{
+        pack_slots, pack_slots_with_named_type_metas, unpack_slots,
+        unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas,
+        unpack_slots_with_named_type_metas,
+    },
+    queue, slice,
+};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use vo_common_core::bytecode::FieldMeta;
 
@@ -12,7 +21,7 @@ fn make_byte_slice(gc: &mut Gc, bytes: &[u8]) -> GcRef {
         bytes.len(),
     );
     for (i, &byte) in bytes.iter().enumerate() {
-        unsafe { slice::set(slice_ref, i, byte as u64, 1) };
+        slice::set(slice_ref, i, byte as u64, 1);
     }
     slice_ref
 }
@@ -22,7 +31,7 @@ fn assert_byte_slice_eq(slice_ref: GcRef, expected: &[u8]) {
     assert_eq!(slice::elem_meta(slice_ref).value_kind(), ValueKind::Uint8);
     assert_eq!(slice::len(slice_ref), expected.len());
     for (i, &byte) in expected.iter().enumerate() {
-        assert_eq!(unsafe { slice::get(slice_ref, i, 1) }, byte as u64);
+        assert_eq!(slice::get(slice_ref, i, 1), byte as u64);
     }
 }
 
@@ -712,10 +721,10 @@ fn unpack_struct_key_map_uses_checked_key_context_050() {
     );
 
     let unpacked = dst[0] as GcRef;
-    let found = map::get_checked(unpacked, &[42], Some(&module))
+    let found = unsafe { map::get_checked(unpacked, &[42], Some(&module)) }
         .expect("unpacked struct map key should remain hashable")
         .expect("unpacked struct-key map should contain copied entry");
-    assert_eq!(found, &[99]);
+    assert_eq!(found.as_ref(), &[99]);
 }
 
 #[test]
@@ -893,7 +902,7 @@ fn vm_transfer_nested_pointer_meta_012_pack_struct_field_uses_canonical_pointer_
 
     let inner_copy = dst[0] as GcRef;
     assert_eq!(
-        Gc::header(inner_copy).value_meta(),
+        unsafe { Gc::header(inner_copy) }.value_meta(),
         ValueMeta::new(1, ValueKind::Struct)
     );
     let copied_port = unsafe { Gc::read_slot(inner_copy, 0) } as GcRef;

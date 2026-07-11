@@ -1,9 +1,14 @@
+#![allow(clippy::missing_safety_doc)]
 //! Generic queue state for channel objects.
 //!
 //! This module provides:
 //! - Unified QueueData structure for all channel objects
 //! - Unified accessors: elem_meta, elem_slots, capacity, len, close, is_closed
 //! - Generic QueueState<W, M> state machine
+//!
+//! # Safety contract
+//! Unsafe raw accessors require a canonical live queue allocation; backing-
+//! specific state access must agree with `QueueData::backing`.
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -115,42 +120,42 @@ impl_gc_object!(QueueData);
 // =============================================================================
 
 #[inline]
-pub fn capacity(q: GcRef) -> usize {
-    slot_to_usize(QueueData::as_ref(q).cap)
+pub unsafe fn capacity(q: GcRef) -> usize {
+    slot_to_usize(unsafe { QueueData::as_ref(q) }.cap)
 }
 
 #[inline]
-pub fn elem_meta(q: GcRef) -> ValueMeta {
-    QueueData::as_ref(q).elem_meta
+pub unsafe fn elem_meta(q: GcRef) -> ValueMeta {
+    unsafe { QueueData::as_ref(q) }.elem_meta
 }
 
 #[inline]
-pub fn elem_kind(q: GcRef) -> ValueKind {
+pub unsafe fn elem_kind(q: GcRef) -> ValueKind {
     elem_meta(q).value_kind()
 }
 
 #[inline]
-pub fn elem_slots(q: GcRef) -> u16 {
-    QueueData::as_ref(q).elem_slots
+pub unsafe fn elem_slots(q: GcRef) -> u16 {
+    unsafe { QueueData::as_ref(q) }.elem_slots
 }
 
 #[inline]
-pub fn elem_rttid(q: GcRef) -> ValueRttid {
-    ValueRttid::from_raw(QueueData::as_ref(q).elem_rttid)
+pub unsafe fn elem_rttid(q: GcRef) -> ValueRttid {
+    ValueRttid::from_raw(unsafe { QueueData::as_ref(q) }.elem_rttid)
 }
 
 #[inline]
-pub fn kind(q: GcRef) -> QueueKind {
-    QueueKind::from_raw(QueueData::as_ref(q).kind)
+pub unsafe fn kind(q: GcRef) -> QueueKind {
+    QueueKind::from_raw(unsafe { QueueData::as_ref(q) }.kind)
 }
 
 #[inline]
-pub fn backing(q: GcRef) -> QueueBacking {
-    QueueBacking::from_raw(QueueData::as_ref(q).backing)
+pub unsafe fn backing(q: GcRef) -> QueueBacking {
+    QueueBacking::from_raw(unsafe { QueueData::as_ref(q) }.backing)
 }
 
 #[inline]
-pub fn is_port(q: GcRef) -> bool {
+pub unsafe fn is_port(q: GcRef) -> bool {
     kind(q) == QueueKind::Port
 }
 
@@ -337,14 +342,22 @@ pub struct RemoteProxy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendResult<W, M> {
     /// Value sent directly to a waiting receiver (receiver woken).
-    DirectSend(W),
+    DirectSend { receiver: W, payload: M },
     /// Value buffered successfully.
     Buffered,
     /// Would block - buffer full, no receivers. Returns the value back.
     WouldBlock(M),
-    /// Blocked - waiter registered atomically (used by send_or_block).
-    Blocked,
     /// Channel is closed.
+    Closed,
+}
+
+/// Result of an atomic send that registers `waiter` when immediate progress is
+/// unavailable. Its type excludes the impossible `WouldBlock` state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockingSendResult<W, M> {
+    DirectSend { receiver: W, payload: M },
+    Buffered,
+    Blocked,
     Closed,
 }
 
@@ -359,14 +372,21 @@ pub enum ResolvedSendResult<W, M> {
 
 /// Result of a receive operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecvResult<W> {
-    /// Successfully received, optionally woke a sender.
-    Success(Option<W>),
+pub enum RecvResult<W, M> {
+    /// Successfully received a payload and optionally woke a sender.
+    Success { woke_sender: Option<W>, payload: M },
     /// Would block - buffer empty, no senders.
     WouldBlock,
-    /// Blocked - waiter registered atomically (used by recv_or_block).
-    Blocked,
     /// Channel is closed.
+    Closed,
+}
+
+/// Result of an atomic receive that registers `waiter` when immediate progress
+/// is unavailable. Its type excludes the impossible `WouldBlock` state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockingRecvResult<W, M> {
+    Success { woke_sender: Option<W>, payload: M },
+    Blocked,
     Closed,
 }
 
@@ -401,28 +421,26 @@ impl<W, M> QueueState<W, M> {
         !self.buffer.is_empty() || !self.waiting_senders.is_empty() || self.closed
     }
 
-    fn send_impl(&mut self, value: M, cap: usize, waiter: Option<W>) -> SendResult<W, M> {
+    /// Try to send a value. Returns the value back if immediate progress is unavailable.
+    pub fn try_send(&mut self, value: M, cap: usize) -> SendResult<W, M> {
         if self.closed {
             return SendResult::Closed;
         }
         if let Some(receiver) = self.waiting_receivers.pop_front() {
-            self.buffer.push_back(value);
-            return SendResult::DirectSend(receiver);
+            return SendResult::DirectSend {
+                receiver,
+                payload: value,
+            };
         }
         if self.buffer.len() < cap {
             self.buffer.push_back(value);
             return SendResult::Buffered;
         }
-        match waiter {
-            Some(waiter) => {
-                self.waiting_senders.push_back((waiter, value));
-                SendResult::Blocked
-            }
-            None => SendResult::WouldBlock(value),
-        }
+        SendResult::WouldBlock(value)
     }
 
-    fn recv_impl(&mut self, waiter: Option<W>) -> (RecvResult<W>, Option<M>) {
+    /// Try to receive a value.
+    pub fn try_recv(&mut self) -> RecvResult<W, M> {
         if let Some(value) = self.buffer.pop_front() {
             let woke_sender = if let Some((sender, sender_value)) = self.waiting_senders.pop_front()
             {
@@ -431,44 +449,57 @@ impl<W, M> QueueState<W, M> {
             } else {
                 None
             };
-            return (RecvResult::Success(woke_sender), Some(value));
+            return RecvResult::Success {
+                woke_sender,
+                payload: value,
+            };
         }
         if let Some((sender, value)) = self.waiting_senders.pop_front() {
-            return (RecvResult::Success(Some(sender)), Some(value));
+            return RecvResult::Success {
+                woke_sender: Some(sender),
+                payload: value,
+            };
         }
         if self.closed {
-            (RecvResult::Closed, None)
+            RecvResult::Closed
         } else {
-            match waiter {
-                Some(waiter) => {
-                    self.waiting_receivers.push_back(waiter);
-                    (RecvResult::Blocked, None)
-                }
-                None => (RecvResult::WouldBlock, None),
-            }
+            RecvResult::WouldBlock
         }
-    }
-
-    /// Try to send a value. Returns the value back if would block.
-    pub fn try_send(&mut self, value: M, cap: usize) -> SendResult<W, M> {
-        self.send_impl(value, cap, None)
     }
 
     /// Atomic send: try to send, if would block, register waiter in same operation.
     /// This avoids TOCTOU race between try_send and register_sender.
-    pub fn send_or_block(&mut self, value: M, cap: usize, waiter: W) -> SendResult<W, M> {
-        self.send_impl(value, cap, Some(waiter))
-    }
-
-    /// Try to receive a value.
-    pub fn try_recv(&mut self) -> (RecvResult<W>, Option<M>) {
-        self.recv_impl(None)
+    pub fn send_or_block(&mut self, value: M, cap: usize, waiter: W) -> BlockingSendResult<W, M> {
+        match self.try_send(value, cap) {
+            SendResult::DirectSend { receiver, payload } => {
+                BlockingSendResult::DirectSend { receiver, payload }
+            }
+            SendResult::Buffered => BlockingSendResult::Buffered,
+            SendResult::WouldBlock(value) => {
+                self.waiting_senders.push_back((waiter, value));
+                BlockingSendResult::Blocked
+            }
+            SendResult::Closed => BlockingSendResult::Closed,
+        }
     }
 
     /// Atomic recv: try to receive, if would block, register waiter in same operation.
     /// This avoids TOCTOU race between try_recv and register_receiver.
-    pub fn recv_or_block(&mut self, waiter: W) -> (RecvResult<W>, Option<M>) {
-        self.recv_impl(Some(waiter))
+    pub fn recv_or_block(&mut self, waiter: W) -> BlockingRecvResult<W, M> {
+        match self.try_recv() {
+            RecvResult::Success {
+                woke_sender,
+                payload,
+            } => BlockingRecvResult::Success {
+                woke_sender,
+                payload,
+            },
+            RecvResult::WouldBlock => {
+                self.waiting_receivers.push_back(waiter);
+                BlockingRecvResult::Blocked
+            }
+            RecvResult::Closed => BlockingRecvResult::Closed,
+        }
     }
 
     pub fn register_sender(&mut self, waiter: W, value: M) {
@@ -493,12 +524,6 @@ impl<W, M> QueueState<W, M> {
 
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
-    }
-
-    fn take_direct_send_payload(&mut self) -> M {
-        self.buffer
-            .pop_back()
-            .expect("take_direct_send_payload: missing direct-send payload")
     }
 
     pub fn take_waiting_receivers(&mut self) -> Vec<W> {
@@ -541,26 +566,34 @@ impl<M> QueueState<QueueWaiter, M> {
         waiter: QueueWaiter,
         local_island: u32,
     ) -> ResolvedSendResult<QueueWaiter, M> {
-        match self.send_impl(value, cap, Some(waiter)) {
-            SendResult::DirectSend(receiver) => {
+        match self.send_or_block(value, cap, waiter) {
+            BlockingSendResult::DirectSend { receiver, payload } => {
                 if receiver.endpoint_wait_id() == 0 && receiver.island_id == local_island {
-                    let payload = receiver
+                    if receiver
                         .select
                         .as_ref()
-                        .filter(|select| select.kind == SelectWaitKind::Recv)
-                        .map(|_| self.take_direct_send_payload());
-                    ResolvedSendResult::Wake { receiver, payload }
-                } else {
-                    ResolvedSendResult::RemoteDirect {
-                        receiver,
-                        payload: self.take_direct_send_payload(),
+                        .is_some_and(|select| select.kind == SelectWaitKind::Recv)
+                    {
+                        ResolvedSendResult::Wake {
+                            receiver,
+                            payload: Some(payload),
+                        }
+                    } else {
+                        // A simple local receiver replays the ordinary receive path,
+                        // so publish the payload to the queue before waking it.
+                        self.buffer.push_back(payload);
+                        ResolvedSendResult::Wake {
+                            receiver,
+                            payload: None,
+                        }
                     }
+                } else {
+                    ResolvedSendResult::RemoteDirect { receiver, payload }
                 }
             }
-            SendResult::Buffered => ResolvedSendResult::Buffered,
-            SendResult::Blocked => ResolvedSendResult::Blocked,
-            SendResult::WouldBlock(_) => unreachable!("send_or_block never returns WouldBlock"),
-            SendResult::Closed => ResolvedSendResult::Closed,
+            BlockingSendResult::Buffered => ResolvedSendResult::Buffered,
+            BlockingSendResult::Blocked => ResolvedSendResult::Blocked,
+            BlockingSendResult::Closed => ResolvedSendResult::Closed,
         }
     }
 
@@ -638,63 +671,44 @@ mod tests {
     }
 
     #[test]
-    fn direct_send_pop_back_removes_phantom_entry() {
-        // Simulates the BUG-1 scenario:
-        //   1. A remote receiver is waiting.
-        //   2. send_or_block DirectSends — pushes value into buffer.
-        //   3. Caller pops the value back (for remote transport delivery).
-        //   4. Buffer must be empty afterwards.
+    fn direct_send_returns_payload_without_buffer_mutation() {
         let mut q = TestQueue::new(0); // unbuffered
         q.register_receiver(99); // remote receiver waiter
 
         let value = vec![42u64];
         match q.send_or_block(value, 0, 1 /* sender waiter */) {
-            SendResult::DirectSend(receiver) => {
+            BlockingSendResult::DirectSend { receiver, payload } => {
                 assert_eq!(receiver, 99);
-                // Buffer now has the phantom entry
-                assert_eq!(q.buffer.len(), 1);
-                assert_eq!(q.buffer[0], vec![42u64]);
-                // Pop it back — this is what the fix does
-                assert_eq!(q.take_direct_send_payload(), vec![42u64]);
-                assert_eq!(q.buffer.len(), 0);
+                assert_eq!(payload, vec![42u64]);
+                assert!(q.buffer.is_empty());
             }
             other => panic!("expected DirectSend, got {:?}", other),
         }
 
         // Subsequent recv must block (buffer empty, no senders).
-        let (result, _) = q.recv_or_block(100);
-        assert_eq!(result, RecvResult::Blocked);
+        assert_eq!(q.recv_or_block(100), BlockingRecvResult::Blocked);
     }
 
     #[test]
-    fn direct_send_without_pop_back_leaves_phantom() {
-        // Shows the bug: without pop_back, buffer retains a phantom entry
-        // and a subsequent recv incorrectly succeeds.
+    fn dropping_direct_send_result_cannot_leave_a_phantom_payload() {
         let mut q = TestQueue::new(0);
         q.register_receiver(99);
 
         let value = vec![42u64];
         match q.send_or_block(value, 0, 1) {
-            SendResult::DirectSend(receiver) => {
+            BlockingSendResult::DirectSend { receiver, payload } => {
                 assert_eq!(receiver, 99);
-                // WITHOUT pop_back — buffer still has the phantom
-                assert_eq!(q.buffer.len(), 1);
-                // A subsequent recv would incorrectly succeed
-                let (result, data) = q.try_recv();
-                assert!(matches!(result, RecvResult::Success(None)));
-                assert_eq!(data.unwrap(), vec![42u64]);
-                // Now buffer is empty
-                assert_eq!(q.buffer.len(), 0);
+                drop(payload);
+                assert!(q.buffer.is_empty());
             }
             other => panic!("expected DirectSend, got {:?}", other),
         }
+
+        assert_eq!(q.try_recv(), RecvResult::WouldBlock);
     }
 
     #[test]
-    fn direct_send_buffered_channel_pop_back_correct() {
-        // Buffered channel (cap=2) with a remote receiver waiting.
-        // DirectSend pushes to buffer, pop_back removes it.
-        // Pre-existing buffered values must remain intact.
+    fn direct_send_preserves_preexisting_buffered_values() {
         let mut q = TestQueue::new(2);
         // Pre-fill one value
         match q.try_send(vec![10u64], 2) {
@@ -707,13 +721,11 @@ mod tests {
 
         let value = vec![20u64];
         match q.send_or_block(value, 2, 1) {
-            SendResult::DirectSend(receiver) => {
+            BlockingSendResult::DirectSend { receiver, payload } => {
                 assert_eq!(receiver, 99);
-                // Buffer: [10, 20] — 10 was pre-existing, 20 is the DirectSend phantom
-                assert_eq!(q.buffer.len(), 2);
-                assert_eq!(q.take_direct_send_payload(), vec![20u64]);
+                assert_eq!(payload, vec![20u64]);
                 assert_eq!(q.buffer.len(), 1);
-                assert_eq!(q.buffer[0], vec![10u64]); // pre-existing value intact
+                assert_eq!(q.buffer[0], vec![10u64]);
             }
             other => panic!("expected DirectSend, got {:?}", other),
         }
@@ -725,7 +737,7 @@ mod tests {
         // the value goes into waiting_senders, not buffer. No phantom issue.
         let mut q = TestQueue::new(0); // unbuffered, no receiver
         match q.send_or_block(vec![99u64], 0, 1) {
-            SendResult::Blocked => {
+            BlockingSendResult::Blocked => {
                 assert_eq!(q.buffer.len(), 0);
                 assert_eq!(q.waiting_senders.len(), 1);
             }
@@ -739,7 +751,7 @@ mod tests {
         // into buffer legitimately. No pop_back needed.
         let mut q = TestQueue::new(5);
         match q.send_or_block(vec![77u64], 5, 1) {
-            SendResult::Buffered => {
+            BlockingSendResult::Buffered => {
                 assert_eq!(q.buffer.len(), 1);
                 assert_eq!(q.buffer[0], vec![77u64]);
             }

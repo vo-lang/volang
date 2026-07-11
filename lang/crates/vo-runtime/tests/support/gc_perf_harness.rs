@@ -353,7 +353,8 @@ fn count_phase(report: &mut GcPerfReport, state: GcState) {
 }
 
 fn scan_struct_like_object(gc: &mut Gc, obj: GcRef) {
-    let slots = Gc::header(obj).slots as usize;
+    // Safety: the harness scans objects allocated by this collector.
+    let slots = unsafe { Gc::header(obj) }.slots as usize;
     for idx in 0..slots {
         let raw = unsafe { Gc::read_slot(obj, idx) };
         if raw != 0 {

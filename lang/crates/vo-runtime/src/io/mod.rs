@@ -188,11 +188,17 @@ impl IoRuntime {
         self.completions.remove(&token)
     }
 
-    /// Take a completion, panics if not found.
+    /// Take a completion, returning a normal I/O error for a stale or unknown token.
     #[inline]
     pub fn take_completion(&mut self, token: IoToken) -> Completion {
         self.try_take_completion(token)
-            .unwrap_or_else(|| panic!("completion not found: token={}", token))
+            .unwrap_or_else(|| Completion {
+                token,
+                result: Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("completion not found: token={token}"),
+                )),
+            })
     }
 
     /// Check if a completion is ready.

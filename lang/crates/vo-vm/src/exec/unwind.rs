@@ -1758,11 +1758,15 @@ fn call_defer_entry(
     fiber.zero_slots_tail_at(args_start, func.gc_scan_slots as usize, arg_space);
     let stack = fiber.stack_ptr();
 
-    for i in 0..layout.receiver_capture_count {
-        let target = validated_closure
-            .as_ref()
-            .expect("receiver captures require validated closure target");
-        stack_set(stack, args_start + i, target.capture(i));
+    if layout.receiver_capture_count > 0 {
+        let Some(target) = validated_closure.as_ref() else {
+            return ExecResult::JitError(
+                "defer call layout contains receiver captures without a closure target".to_string(),
+            );
+        };
+        for i in 0..layout.receiver_capture_count {
+            stack_set(stack, args_start + i, target.capture(i));
+        }
     }
 
     // Set slot 0 if needed.

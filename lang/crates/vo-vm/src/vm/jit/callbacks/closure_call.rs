@@ -388,7 +388,8 @@ pub extern "C" fn jit_prepare_closure_call(
     }
 
     // Determine slot0_kind for IC population
-    let cap_count = closure::capture_count(closure_gcref);
+    // Safety: closure_gcref passed the object-kind and layout validation above.
+    let cap_count = unsafe { closure::capture_count(closure_gcref) };
     let slot0_kind = if layout.receiver_capture_count == 1 {
         DynCallIC::SLOT0_CAPTURE0
     } else if cap_count > 0 || func_def.is_closure {

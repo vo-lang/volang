@@ -64,7 +64,7 @@ fn builtin_assert(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
+unsafe fn builtin_copy_raw(call: &mut ExternCallContext) -> ExternResult {
     use crate::gc::Gc;
     use crate::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueKind;
@@ -80,7 +80,7 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     let dst_len = slice::len(dst);
 
     // Check if src is a string (copy([]byte, string) case)
-    let src_kind = Gc::header(src).value_meta.value_kind();
+    let src_kind = unsafe { Gc::header(src) }.value_meta.value_kind();
     let (src_len, src_ptr) = if src_kind == ValueKind::String {
         // Safety: the GC header above established that `src` is a live string.
         let len = unsafe { str_obj::len(src) };
@@ -118,9 +118,15 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
+    // Safety: builtin dispatch keeps verified slice/string arguments rooted
+    // throughout the call.
+    unsafe { builtin_copy_raw(call) }
+}
+
 /// append(slice, other...) - append all elements from other slice/string
 /// Works for both slice and string sources since they have identical memory layout.
-fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
+unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> ExternResult {
     use crate::objects::{array, slice};
 
     let dst = call.arg_ref(0);
@@ -226,10 +232,16 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
+    // Safety: builtin dispatch keeps both slice arguments rooted and codegen
+    // supplies their verified element layout.
+    unsafe { builtin_slice_append_slice_raw(call) }
+}
+
 /// Interface equality comparison
 /// Args: (left_slot0, left_slot1, right_slot0, right_slot1)
 /// Returns: bool (1 if equal, 0 if not)
-fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
+unsafe fn builtin_iface_eq_raw(call: &mut ExternCallContext) -> ExternResult {
     let result = crate::objects::compare::iface_eq(
         call.arg_u64(0),
         call.arg_u64(1),
@@ -247,6 +259,12 @@ fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
             "internal error: invalid interface equality result {code}"
         )),
     }
+}
+
+fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
+    // Safety: interface operands originate from verified VM slots and remain
+    // rooted for comparison.
+    unsafe { builtin_iface_eq_raw(call) }
 }
 
 // ==================== String Conversion Functions ====================
@@ -471,7 +489,7 @@ mod tests {
     fn builtin_copy_and_append_barrier_before_existing_array_mutation_052() {
         let source = production_source();
         let builtin_copy = source
-            .split("fn builtin_copy(")
+            .split("unsafe fn builtin_copy_raw(")
             .nth(1)
             .and_then(|rest| rest.split("/// append(slice, other...)").next())
             .expect("builtin_copy section");
@@ -510,7 +528,7 @@ mod tests {
     fn builtin_spread_append_derives_elem_meta_from_containers_057() {
         let source = production_source();
         let append = source
-            .split("fn builtin_slice_append_slice(")
+            .split("unsafe fn builtin_slice_append_slice_raw(")
             .nth(1)
             .and_then(|rest| rest.split("/// Interface equality comparison").next())
             .expect("builtin_slice_append_slice section");

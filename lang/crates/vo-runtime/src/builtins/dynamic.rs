@@ -232,7 +232,7 @@ fn call_protocol<const N: usize>(
 // ============================================================================
 
 /// Get a value by field name or index. Returns (slot0, slot1) in interface format.
-fn get_value(
+unsafe fn get_value(
     call: &mut ExternCallContext,
     base_slot0: u64,
     base_slot1: u64,
@@ -255,7 +255,7 @@ fn get_value(
 }
 
 /// Set a value by field name or index.
-fn set_value(
+unsafe fn set_value(
     call: &mut ExternCallContext,
     base_slot0: u64,
     base_slot1: u64,
@@ -354,7 +354,7 @@ fn set_via_protocol(
 // ============================================================================
 
 /// Get via reflection (built-in type handling)
-fn get_reflection(
+unsafe fn get_reflection(
     call: &mut ExternCallContext,
     _base_slot0: u64,
     base_slot1: u64,
@@ -408,7 +408,7 @@ fn get_reflection(
 
 /// Set a value by field name or index.
 #[allow(clippy::too_many_arguments)]
-fn set_reflection(
+unsafe fn set_reflection(
     call: &mut ExternCallContext,
     _base_slot0: u64,
     base_slot1: u64,
@@ -587,7 +587,7 @@ fn get_struct_field(
     Ok((boxed.slot0, boxed.slot1))
 }
 
-fn set_struct_field(
+unsafe fn set_struct_field(
     call: &mut ExternCallContext,
     data_ref: GcRef,
     effective_rttid: u32,
@@ -627,7 +627,7 @@ fn set_struct_field(
     let field_vk = field.value_kind;
     let field_slots = field.slot_count;
     let field_slot_types: Vec<_> = {
-        let parent_meta_id = Gc::header(current_ref).meta_id() as usize;
+        let parent_meta_id = unsafe { Gc::header(current_ref) }.meta_id() as usize;
         let struct_meta = call
             .struct_meta(parent_meta_id)
             .ok_or((DynErr::BadField, "struct metadata missing"))?;
@@ -672,7 +672,7 @@ fn set_struct_field(
 // Layer 3b: Map Handlers
 // ============================================================================
 
-fn get_map_string_key(
+unsafe fn get_map_string_key(
     call: &mut ExternCallContext,
     base_ref: GcRef,
     rttid: u32,
@@ -725,7 +725,7 @@ fn get_map_string_key(
     Ok((boxed.slot0, boxed.slot1))
 }
 
-fn set_map_string_key(
+unsafe fn set_map_string_key(
     call: &mut ExternCallContext,
     base_ref: GcRef,
     rttid: u32,
@@ -787,11 +787,14 @@ fn set_map_string_key(
     .map_err(|err| match err {
         map::MapKeyError::UnhashableInterfaceKey => (DynErr::BadField, "map key is not hashable"),
         map::MapKeyError::SlotCountMismatch => (DynErr::TypeMismatch, "map entry layout mismatch"),
+        map::MapKeyError::MissingModule => {
+            (DynErr::TypeMismatch, "map type metadata is unavailable")
+        }
     })?;
     Ok(())
 }
 
-fn get_map_index(
+unsafe fn get_map_index(
     call: &mut ExternCallContext,
     base_ref: GcRef,
     rttid: u32,
@@ -839,7 +842,7 @@ fn get_map_index(
     Ok((boxed.slot0, boxed.slot1))
 }
 
-fn set_map_index(
+unsafe fn set_map_index(
     call: &mut ExternCallContext,
     base_ref: GcRef,
     rttid: u32,
@@ -901,6 +904,9 @@ fn set_map_index(
     .map_err(|err| match err {
         map::MapKeyError::UnhashableInterfaceKey => (DynErr::BadIndex, "map key is not hashable"),
         map::MapKeyError::SlotCountMismatch => (DynErr::TypeMismatch, "map entry layout mismatch"),
+        map::MapKeyError::MissingModule => {
+            (DynErr::TypeMismatch, "map type metadata is unavailable")
+        }
     })?;
     Ok(())
 }
@@ -1094,7 +1100,7 @@ fn coerce_dynamic_integer_slot(target_kind: ValueKind, raw: u64) -> Option<u64> 
     }
 }
 
-fn read_boxed_array_value_slots(
+unsafe fn read_boxed_array_value_slots(
     call: &ExternCallContext,
     array_ref: GcRef,
     target_rttid: ValueRttid,
@@ -1130,7 +1136,7 @@ fn read_boxed_array_value_slots(
     Ok(raw_slots)
 }
 
-fn read_boxed_aggregate_value_slots(
+unsafe fn read_boxed_aggregate_value_slots(
     call: &ExternCallContext,
     target_rttid: ValueRttid,
     target_kind: ValueKind,
@@ -1149,7 +1155,7 @@ fn read_boxed_aggregate_value_slots(
     }
 }
 
-fn prepare_dynamic_value_for_target(
+unsafe fn prepare_dynamic_value_for_target(
     call: &mut ExternCallContext,
     target_rttid: ValueRttid,
     target_kind: ValueKind,
@@ -1288,7 +1294,7 @@ fn read_array_elem_logical_slots(
     let _ = elem_vk;
 }
 
-fn read_slice_elem_logical_slots(
+unsafe fn read_slice_elem_logical_slots(
     slice_ref: GcRef,
     idx: usize,
     elem_vk: ValueKind,
@@ -1312,7 +1318,7 @@ fn write_slice_elem_raw_slots(base_ref: GcRef, idx: usize, elem_bytes: usize, ra
     unsafe { slice::set_n(base_ref, idx, raw_slots, elem_bytes) };
 }
 
-fn get_slice_index(
+unsafe fn get_slice_index(
     call: &mut ExternCallContext,
     base_ref: GcRef,
     rttid: u32,
@@ -1341,7 +1347,7 @@ fn get_slice_index(
     Ok((boxed.slot0, boxed.slot1))
 }
 
-fn set_slice_index(
+unsafe fn set_slice_index(
     call: &mut ExternCallContext,
     base_ref: GcRef,
     rttid: u32,
@@ -1385,7 +1391,7 @@ fn set_slice_index(
     Ok(())
 }
 
-fn get_array_index(
+unsafe fn get_array_index(
     call: &mut ExternCallContext,
     base_ref: GcRef,
     rttid: u32,
@@ -1579,7 +1585,7 @@ fn output_slot_count(is_any: bool, vk: ValueKind, width: usize) -> u16 {
 // ============================================================================
 
 #[allow(clippy::too_many_arguments)]
-fn do_call(
+unsafe fn do_call(
     call: &mut ExternCallContext,
     closure_ref: GcRef,
     sig_rttid: u32,
@@ -1693,7 +1699,7 @@ fn do_call(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn do_method(
+unsafe fn do_method(
     call: &mut ExternCallContext,
     base_slot0: u64,
     base_slot1: u64,
@@ -1781,7 +1787,7 @@ fn get_method_via_protocol(
 // Layer 5: Arg/Return Packing
 // ============================================================================
 
-fn unpack_args(
+unsafe fn unpack_args(
     call: &mut ExternCallContext,
     args_slice_ref: GcRef,
     params: &[vo_common_core::types::ValueRttid],
@@ -1874,7 +1880,7 @@ fn unpack_args(
     Ok(args)
 }
 
-fn read_slice_elem(slice_ref: GcRef, idx: usize, elem_bytes: usize) -> (u64, u64) {
+unsafe fn read_slice_elem(slice_ref: GcRef, idx: usize, elem_bytes: usize) -> (u64, u64) {
     let base_ptr = slice::data_ptr(slice_ref);
     let elem_ptr = unsafe { base_ptr.add(idx * elem_bytes) };
     let slot0 = unsafe { *(elem_ptr as *const u64) };
@@ -2001,7 +2007,8 @@ fn dyn_field(call: &mut ExternCallContext) -> ExternResult {
         unsafe { str_obj::to_rust_string(field_name_ref) }
     };
 
-    match get_value(call, base_slot0, base_slot1, DynKey::Field(&field_name)) {
+    // Safety: verified bytecode supplied rooted interface and key arguments.
+    match unsafe { get_value(call, base_slot0, base_slot1, DynKey::Field(&field_name)) } {
         Ok((v0, v1)) => write_get_result(call, v0, v1, expected_rttid, expected_vk),
         Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
@@ -2020,12 +2027,15 @@ fn dyn_index(call: &mut ExternCallContext) -> ExternResult {
         return write_get_error(call, DynErr::NilBase, "cannot index nil");
     }
 
-    match get_value(
-        call,
-        base_slot0,
-        base_slot1,
-        DynKey::Index(key_slot0, key_slot1),
-    ) {
+    // Safety: verified bytecode supplied rooted interface and key arguments.
+    match unsafe {
+        get_value(
+            call,
+            base_slot0,
+            base_slot1,
+            DynKey::Index(key_slot0, key_slot1),
+        )
+    } {
         Ok((v0, v1)) => write_get_result(call, v0, v1, expected_rttid, expected_vk),
         Err(DynOrSuspend::Dyn(e, m)) => write_get_error(call, e, m.borrow()),
         Err(DynOrSuspend::Suspend(r)) => r,
@@ -2050,14 +2060,17 @@ fn dyn_set_field(call: &mut ExternCallContext) -> ExternResult {
         unsafe { str_obj::to_rust_string(field_name_ref) }
     };
 
-    match set_value(
-        call,
-        base_slot0,
-        base_slot1,
-        DynKey::Field(&field_name),
-        val_slot0,
-        val_slot1,
-    ) {
+    // Safety: verified bytecode supplied rooted interface, key, and value arguments.
+    match unsafe {
+        set_value(
+            call,
+            base_slot0,
+            base_slot1,
+            DynKey::Field(&field_name),
+            val_slot0,
+            val_slot1,
+        )
+    } {
         Ok(()) => {
             call.ret_nil(0);
             call.ret_nil(1);
@@ -2080,14 +2093,17 @@ fn dyn_set_index_unified(call: &mut ExternCallContext) -> ExternResult {
         return write_set_error(call, DynErr::NilBase, "cannot set index on nil");
     }
 
-    match set_value(
-        call,
-        base_slot0,
-        base_slot1,
-        DynKey::Index(key_slot0, key_slot1),
-        val_slot0,
-        val_slot1,
-    ) {
+    // Safety: verified bytecode supplied rooted interface, key, and value arguments.
+    match unsafe {
+        set_value(
+            call,
+            base_slot0,
+            base_slot1,
+            DynKey::Index(key_slot0, key_slot1),
+            val_slot0,
+            val_slot1,
+        )
+    } {
         Ok(()) => {
             call.ret_nil(0);
             call.ret_nil(1);
@@ -2141,16 +2157,19 @@ fn dyn_call(call: &mut ExternCallContext) -> ExternResult {
         );
     }
 
-    do_call(
-        call,
-        base_slot1 as GcRef,
-        rttid,
-        args_slice_ref,
-        ret_count,
-        metas_start,
-        is_any_start,
-        error_offset,
-    )
+    // Safety: the dynamic-call ABI keeps the closure and argument slice rooted.
+    unsafe {
+        do_call(
+            call,
+            base_slot1 as GcRef,
+            rttid,
+            args_slice_ref,
+            ret_count,
+            metas_start,
+            is_any_start,
+            error_offset,
+        )
+    }
 }
 
 fn dyn_method(call: &mut ExternCallContext) -> ExternResult {
@@ -2174,17 +2193,20 @@ fn dyn_method(call: &mut ExternCallContext) -> ExternResult {
 
     // Safety: the dynamic builtin ABI supplies a live string argument.
     let method_name = unsafe { str_obj::to_rust_string(method_name_ref) };
-    do_method(
-        call,
-        base_slot0,
-        base_slot1,
-        &method_name,
-        args_slice_ref,
-        ret_count,
-        metas_start,
-        is_any_start,
-        error_offset,
-    )
+    // Safety: the dynamic-call ABI keeps the receiver and argument slice rooted.
+    unsafe {
+        do_method(
+            call,
+            base_slot0,
+            base_slot1,
+            &method_name,
+            args_slice_ref,
+            ret_count,
+            metas_start,
+            is_any_start,
+            error_offset,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2360,7 +2382,8 @@ fn dyn_get_attr(call: &mut ExternCallContext) -> ExternResult {
         unsafe { str_obj::to_rust_string(name_ref) }
     };
 
-    match get_value(call, base_slot0, base_slot1, DynKey::Field(&field_name)) {
+    // Safety: the public dynamic ABI keeps the interface argument rooted.
+    match unsafe { get_value(call, base_slot0, base_slot1, DynKey::Field(&field_name)) } {
         Ok((v0, v1)) => {
             call.ret_u64(0, v0);
             call.ret_u64(1, v1);
@@ -2383,12 +2406,15 @@ fn dyn_get_index(call: &mut ExternCallContext) -> ExternResult {
         return write_get_error(call, DynErr::NilBase, "cannot index nil");
     }
 
-    match get_value(
-        call,
-        base_slot0,
-        base_slot1,
-        DynKey::Index(key_slot0, key_slot1),
-    ) {
+    // Safety: the public dynamic ABI keeps the interface argument rooted.
+    match unsafe {
+        get_value(
+            call,
+            base_slot0,
+            base_slot1,
+            DynKey::Index(key_slot0, key_slot1),
+        )
+    } {
         Ok((v0, v1)) => {
             call.ret_u64(0, v0);
             call.ret_u64(1, v1);
@@ -2419,14 +2445,17 @@ fn dyn_set_attr(call: &mut ExternCallContext) -> ExternResult {
         unsafe { str_obj::to_rust_string(name_ref) }
     };
 
-    match set_value(
-        call,
-        base_slot0,
-        base_slot1,
-        DynKey::Field(&field_name),
-        val_slot0,
-        val_slot1,
-    ) {
+    // Safety: the public dynamic ABI keeps interface and value arguments rooted.
+    match unsafe {
+        set_value(
+            call,
+            base_slot0,
+            base_slot1,
+            DynKey::Field(&field_name),
+            val_slot0,
+            val_slot1,
+        )
+    } {
         Ok(()) => {
             call.ret_nil(0);
             call.ret_nil(1);
@@ -2449,14 +2478,17 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
         return write_set_error(call, DynErr::NilBase, "cannot set index on nil");
     }
 
-    match set_value(
-        call,
-        base_slot0,
-        base_slot1,
-        DynKey::Index(key_slot0, key_slot1),
-        val_slot0,
-        val_slot1,
-    ) {
+    // Safety: the public dynamic ABI keeps interface and value arguments rooted.
+    match unsafe {
+        set_value(
+            call,
+            base_slot0,
+            base_slot1,
+            DynKey::Index(key_slot0, key_slot1),
+            val_slot0,
+            val_slot1,
+        )
+    } {
         Ok(()) => {
             call.ret_nil(0);
             call.ret_nil(1);
@@ -2471,7 +2503,7 @@ fn dyn_set_index(call: &mut ExternCallContext) -> ExternResult {
 // Layer 7a: dyn_pack_any_slice (used by codegen)
 // ============================================================================
 
-fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
+unsafe fn dyn_pack_any_slice_raw(call: &mut ExternCallContext) -> ExternResult {
     use vo_common_core::types::ValueMeta;
 
     let arg_count = call.arg_u64(0) as usize;
@@ -2602,6 +2634,12 @@ fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
     call.ret_nil(1);
     call.ret_nil(2);
     ExternResult::Ok
+}
+
+fn dyn_pack_any_slice(call: &mut ExternCallContext) -> ExternResult {
+    // Safety: this builtin is only registered for the verified codegen ABI;
+    // all object arguments remain rooted for the duration of the call.
+    unsafe { dyn_pack_any_slice_raw(call) }
 }
 
 fn dyn_type_assert_error(call: &mut ExternCallContext) -> ExternResult {

@@ -1,8 +1,8 @@
 use super::*;
 use crate::fiber::RemoteRecvResponse;
+use crate::test_support::{array, queue, queue_state, slice};
 use crate::vm::{EndpointRegistry, VmState};
 use vo_common_core::bytecode::{FieldMeta, Module, StructMeta};
-use vo_runtime::objects::{array, slice};
 use vo_runtime::{SlotType, ValueKind};
 
 fn port_i64_runtime_types() -> Vec<RuntimeType> {
@@ -66,7 +66,7 @@ fn port_container_i64_runtime_types(container_kind: ValueKind) -> Vec<RuntimeTyp
 
 fn make_unaligned_port_slice(state: &mut VmState, port: GcRef) -> GcRef {
     let backing = array::create(&mut state.gc, ValueMeta::new(0, ValueKind::Port), 8, 2);
-    unsafe { array::set(backing, 0, port as u64, 8) };
+    array::set(backing, 0, port as u64, 8);
     let slice_ref = slice::from_array_range(&mut state.gc, backing, 0, 1);
     let unaligned = unsafe { array::data_ptr_bytes(backing).add(1) };
     // Safety: this test intentionally corrupts a freshly allocated slice
@@ -85,7 +85,7 @@ fn make_byte_slice(gc: &mut Gc, bytes: &[u8]) -> GcRef {
         bytes.len(),
     );
     for (i, &byte) in bytes.iter().enumerate() {
-        unsafe { slice::set(slice_ref, i, byte as u64, 1) };
+        slice::set(slice_ref, i, byte as u64, 1);
     }
     slice_ref
 }
@@ -95,7 +95,7 @@ fn assert_byte_slice_eq(slice_ref: GcRef, expected: &[u8]) {
     assert_eq!(slice::elem_meta(slice_ref).value_kind(), ValueKind::Uint8);
     assert_eq!(slice::len(slice_ref), expected.len());
     for (i, &byte) in expected.iter().enumerate() {
-        assert_eq!(unsafe { slice::get(slice_ref, i, 1) }, byte as u64);
+        assert_eq!(slice::get(slice_ref, i, 1), byte as u64);
     }
 }
 
@@ -287,7 +287,9 @@ fn vm_queue_handle_validation_002_queue_ops_reject_non_queue_gcref() {
 
     let inst = Instruction::with_flags(crate::instruction::Opcode::QueueLen, 1, 0, 0, 0);
     let mut stack = vec![not_queue as u64, 0];
-    match exec_queue_get(stack.as_mut_ptr(), 0, &inst, &state.gc, queue_len) {
+    match exec_queue_get(stack.as_mut_ptr(), 0, &inst, &state.gc, |ch| unsafe {
+        queue_len(ch)
+    }) {
         QueueExecResult::Malformed(msg) => {
             assert!(msg.contains("expected queue handle"), "{msg}")
         }
@@ -1064,7 +1066,6 @@ fn remote_queue_send_rejects_non_sendable_metadata_before_pack() {
     state.external_island_transport = true;
     let ch = queue::create_remote_proxy(
         &mut state.gc,
-        QueueKind::Port,
         77,
         8,
         1,
@@ -1333,14 +1334,16 @@ fn replay_remote_queue_recv_response_restores_empty_byte_slice() {
     let mut endpoint_registry = EndpointRegistry::new();
     let slice_ref = make_byte_slice(&mut gc, &[]);
     let response = RemoteRecvResponse {
-        data: crate::exec::transport::pack_transport_message(
-            &gc,
-            &[slice_ref as u64],
-            ValueMeta::new(0, ValueKind::Slice),
-            &struct_metas,
-            &named_type_metas,
-            &runtime_types,
-        ),
+        data: unsafe {
+            crate::exec::transport::pack_transport_message(
+                &gc,
+                &[slice_ref as u64],
+                ValueMeta::new(0, ValueKind::Slice),
+                &struct_metas,
+                &named_type_metas,
+                &runtime_types,
+            )
+        },
         closed: false,
         rejected: false,
     };
@@ -1377,14 +1380,16 @@ fn replay_remote_queue_recv_response_restores_non_empty_byte_slice() {
     let mut endpoint_registry = EndpointRegistry::new();
     let slice_ref = make_byte_slice(&mut gc, &[30, 1, 0, 0, 0]);
     let response = RemoteRecvResponse {
-        data: crate::exec::transport::pack_transport_message(
-            &gc,
-            &[slice_ref as u64],
-            ValueMeta::new(0, ValueKind::Slice),
-            &struct_metas,
-            &named_type_metas,
-            &runtime_types,
-        ),
+        data: unsafe {
+            crate::exec::transport::pack_transport_message(
+                &gc,
+                &[slice_ref as u64],
+                ValueMeta::new(0, ValueKind::Slice),
+                &struct_metas,
+                &named_type_metas,
+                &runtime_types,
+            )
+        },
         closed: false,
         rejected: false,
     };
@@ -1632,7 +1637,6 @@ fn vm_queue_route_preflight_058_remote_close_missing_home_route_preserves_proxy(
     state.current_island_id = 0;
     let ch = queue::create_remote_proxy(
         &mut state.gc,
-        QueueKind::Port,
         42,
         7,
         1,

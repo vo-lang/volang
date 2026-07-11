@@ -32,6 +32,8 @@ pub mod runtime_boundary;
 pub mod scheduler;
 #[cfg(test)]
 pub(crate) mod source_contract;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod vm;
 
 // Re-export runtime bytecode modules

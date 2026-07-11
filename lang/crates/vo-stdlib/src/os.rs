@@ -302,8 +302,9 @@ fn handle_write_completion(
 fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
-    let buf_len = slice::len(buf_ref);
-    let buf_ptr = slice::data_ptr(buf_ref);
+    // Safety: `buf_ref` is a rooted []byte extern argument.
+    let buf_len = unsafe { slice::len(buf_ref) };
+    let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
     if buf_ptr.is_null() && buf_len > 0 {
         call.ret_i64(slots::RET_0, 0);
         write_error_to(call, slots::RET_1, "invalid buffer pointer");
@@ -406,8 +407,9 @@ fn os_file_read(call: &mut ExternCallContext) -> ExternResult {
 fn os_file_write(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
-    let buf_len = slice::len(buf_ref);
-    let buf_ptr = slice::data_ptr(buf_ref);
+    // Safety: `buf_ref` is a rooted []byte extern argument.
+    let buf_len = unsafe { slice::len(buf_ref) };
+    let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
     if buf_ptr.is_null() && buf_len > 0 {
         call.ret_i64(slots::RET_0, 0);
         write_error_to(call, slots::RET_1, "invalid buffer pointer");
@@ -506,8 +508,9 @@ fn os_file_read_at(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let offset = call.arg_i64(slots::ARG_OFF);
-    let buf_len = slice::len(buf_ref);
-    let buf_ptr = slice::data_ptr(buf_ref);
+    // Safety: `buf_ref` is a rooted []byte extern argument.
+    let buf_len = unsafe { slice::len(buf_ref) };
+    let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
 
     #[cfg(unix)]
     {
@@ -594,8 +597,9 @@ fn os_file_write_at(call: &mut ExternCallContext) -> ExternResult {
     let fd = call.arg_i64(slots::ARG_FD) as i32;
     let buf_ref = call.arg_ref(slots::ARG_B);
     let offset = call.arg_i64(slots::ARG_OFF);
-    let buf_len = slice::len(buf_ref);
-    let buf_ptr = slice::data_ptr(buf_ref);
+    // Safety: `buf_ref` is a rooted []byte extern argument.
+    let buf_len = unsafe { slice::len(buf_ref) };
+    let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
 
     #[cfg(unix)]
     {
@@ -972,7 +976,7 @@ fn os_read_dir(call: &mut ExternCallContext) -> ExternResult {
                 }
             }
             call.gc()
-                .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(result));
+                .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::array_ref(result) });
             call.ret_ref(slots::RET_0, result);
             write_nil_error(call, slots::RET_1);
         }

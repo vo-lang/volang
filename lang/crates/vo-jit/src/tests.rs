@@ -177,6 +177,7 @@ impl JitContextParts {
             prepare_closure_call_fn: None,
             prepare_iface_call_fn: None,
             ic_table: self.ic_table.as_mut_ptr(),
+            execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
         }
     }
 }

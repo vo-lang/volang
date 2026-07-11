@@ -736,6 +736,11 @@ pub struct Fiber {
     pub call_iface_ic_table: Vec<CallIfaceICEntry>,
     /// Closure callback suspend/replay state for extern functions.
     pub closure_replay: ClosureReplayState,
+    /// Instructions still available in the current scheduler turn.
+    /// Shared by interpreter execution, loop OSR, and nested full-function JIT calls.
+    pub(crate) execution_budget: u32,
+    /// Reused operand/result storage for interpreter map instructions.
+    pub(crate) map_scratch: crate::exec::MapScratch,
     /// JIT panic flag — set by JIT code when a runtime error occurs (nil deref, bounds check).
     /// Replaces the per-call Box<JitOwnedState> allocation.
     #[cfg(feature = "jit")]
@@ -790,6 +795,8 @@ impl Fiber {
             jit_extern_suspend: None,
             call_iface_ic_table: Vec::new(),
             closure_replay: ClosureReplayState::new(),
+            execution_budget: 0,
+            map_scratch: crate::exec::MapScratch::default(),
             #[cfg(feature = "jit")]
             jit_panic_flag: false,
             #[cfg(feature = "jit")]
@@ -993,6 +1000,7 @@ impl Fiber {
             }
         }
         self.closure_replay.reset();
+        self.execution_budget = 0;
         #[cfg(feature = "jit")]
         {
             self.jit_panic_flag = false;

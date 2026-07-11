@@ -1,9 +1,13 @@
+#![allow(clippy::missing_safety_doc)]
 //! Island data structure for multi-VM concurrency.
 //!
 //! An Island represents an independent VM instance with:
 //! - Its own GC/heap
 //! - Its own fiber scheduler
 //! - Communication via channels (cross-island)
+//!
+//! # Safety contract
+//! Unsafe accessors require a canonical live `ValueKind::Island` allocation.
 //!
 //! Each island runs on a dedicated OS thread.
 
@@ -124,6 +128,6 @@ pub fn create_main(gc: &mut Gc) -> GcRef {
 }
 
 #[inline]
-pub fn id(island: GcRef) -> u32 {
-    IslandData::as_ref(island).id
+pub unsafe fn id(island: GcRef) -> u32 {
+    unsafe { IslandData::as_ref(island) }.id
 }

@@ -20,6 +20,8 @@ pub mod island_transport;
 pub mod itab;
 pub mod objects;
 pub mod pack;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 // FFI core types (no_std compatible), registration requires std
 pub mod ffi;

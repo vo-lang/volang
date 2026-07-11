@@ -261,8 +261,8 @@ fn vm_runtime_transition_preflights_same_island_endpoint_request_before_block_05
         1,
         0,
     );
-    vo_runtime::objects::queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
-    vo_runtime::objects::queue::add_home_peer(ch, 7);
+    queue::install_home_info(ch, endpoint_id, vm.state.current_island_id);
+    queue::add_home_peer(ch, 7);
     vm.state.endpoint_registry.register_live(endpoint_id, ch);
     queue::register_sender(
         ch,

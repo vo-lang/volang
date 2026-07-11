@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(all(feature = "jit", feature = "std"))]
+use crate::test_support::queue as test_queue;
 
 #[cfg(all(feature = "jit", feature = "std"))]
 #[test]
@@ -22,7 +24,7 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
     vm.state
         .island_senders
         .insert(target_island, Arc::new(RejectingSender));
-    let ch = vo_runtime::objects::queue::create(
+    let ch = test_queue::create(
         &mut vm.state.gc,
         QueueKind::Port,
         ValueMeta::new(0, ValueKind::Int64),
@@ -30,8 +32,8 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
         1,
         0,
     );
-    vo_runtime::objects::queue::install_home_info(ch, 42, vm.state.current_island_id);
-    vo_runtime::objects::queue::register_receiver(
+    test_queue::install_home_info(ch, 42, vm.state.current_island_id);
+    test_queue::register_receiver(
         ch,
         QueueWaiter::endpoint(target_island, 0x0000_0002_0000_0003, 11),
     );
@@ -46,8 +48,8 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
 
     let mut rollback = crate::runtime_boundary::RuntimeRollback::local_queue(&vm.state, ch);
     rollback.push_stack_slot(0, vm.scheduler.get_fiber(current).stack[0]);
-    match vo_runtime::objects::queue::try_send(ch, vec![123].into_boxed_slice()) {
-        vo_runtime::objects::queue_state::SendResult::DirectSend(_) => {}
+    match test_queue::try_send(ch, vec![123].into_boxed_slice()) {
+        vo_runtime::objects::queue_state::SendResult::DirectSend { .. } => {}
         other => panic!("expected send to consume waiting endpoint receiver, got {other:?}"),
     }
     vm.scheduler.get_fiber_mut(current).stack[0] = 123;
@@ -79,9 +81,7 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
         .expect_err("failed merged pending response staging must roll back local effects");
 
     assert_eq!(
-        vo_runtime::objects::queue::local_state(ch)
-            .waiting_receivers
-            .len(),
+        test_queue::local_state(ch).waiting_receivers.len(),
         1,
         "merged pending rollback must restore consumed receiver"
     );
@@ -226,11 +226,13 @@ fn vm_osr_panic_pending_001_execution_owner_reattaches_before_pending_commit() {
         "implDropforDetachedFiberExecution<'_>{",
     )
     .expect("detached execution lease implementation");
-    let reattach =
-        compact_pattern_position(&lease, "reattach_after_execution(self.fiber_id,fiber)")
-            .expect("active fiber reattachment");
-    let restore_module = compact_pattern_position(&lease, "self.vm.module=Some(module)")
-        .expect("active module restoration");
+    compact_pattern_position(&lease, "reattach_after_execution(self.fiber_id,fiber)")
+        .expect("active fiber reattachment");
+    assert!(
+        compact_contains(&lease, "letmodule=vm.module.as_ref()?.clone()")
+            && !compact_contains(&lease, "vm.module.take()"),
+        "fiber execution must share the immutable module instead of detaching VM ownership"
+    );
     let drop_impl = compact_region_between_compact(
         &source,
         "implDropforDetachedFiberExecution<'_>{",
@@ -238,10 +240,8 @@ fn vm_osr_panic_pending_001_execution_owner_reattaches_before_pending_commit() {
     )
     .expect("detached execution drop implementation");
     assert!(
-        execution < attach
-            && reattach < restore_module
-            && compact_contains(&drop_impl, "self.restore()"),
-        "pending transition commit must follow panic-safe active owner restoration"
+        execution < attach && compact_contains(&drop_impl, "self.restore()"),
+        "pending transition commit must follow execution guarded by panic-safe fiber restoration"
     );
 }
 

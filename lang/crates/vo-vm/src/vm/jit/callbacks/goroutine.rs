@@ -355,7 +355,8 @@ pub extern "C" fn jit_go_island(
         Ok(target) => target,
         Err(_) => return reject_invalid_object_kind(ctx, closure_ref),
     };
-    let island_id = vo_runtime::island::id(island_handle);
+    // Safety: validate_island_handle proved that island_handle is a live island object.
+    let island_id = unsafe { vo_runtime::island::id(island_handle) };
     let supplied_arg_slots =
         match validate_closure_go_abi(ctx, &closure_target, args_ptr, arg_slots) {
             Ok(supplied_arg_slots) => supplied_arg_slots,

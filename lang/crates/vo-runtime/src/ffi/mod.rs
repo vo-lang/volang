@@ -1,7 +1,12 @@
+#![allow(clippy::missing_safety_doc)]
 //! FFI (Foreign Function Interface) for Vo native extensions.
 //!
 //! This module provides the interface for implementing Vo functions in Rust.
 //! Both VM interpreter and JIT compiler use these types.
+//!
+//! # Safety contract
+//! Unsafe FFI accessors require VM-owned call contexts and ABI buffers that
+//! stay live and layout-compatible for the complete native call.
 //!
 //! # Architecture
 //!
@@ -1092,8 +1097,10 @@ impl<'a> ExternCallContext<'a> {
         if ptr.is_null() {
             &[]
         } else {
-            let data_ptr = slice::data_ptr(ptr);
-            let len = slice::len(ptr);
+            // Safety: `arg_ref` reads a verified byte-slice argument rooted by
+            // this extern call context.
+            let data_ptr = unsafe { slice::data_ptr(ptr) };
+            let len = unsafe { slice::len(ptr) };
             unsafe { core::slice::from_raw_parts(data_ptr, len) }
         }
     }
@@ -1708,7 +1715,8 @@ impl<'a> ExternCallContext<'a> {
         let len = data.len();
         let elem_meta = ValueMeta::new(0, ValueKind::Uint8);
         let s = slice::create(self.gc, elem_meta, 1, len, len);
-        let dst = slice::data_ptr(s);
+        // Safety: `s` is the fresh byte slice allocated immediately above.
+        let dst = unsafe { slice::data_ptr(s) };
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), dst, len) };
         s
     }
@@ -1749,7 +1757,7 @@ impl<'a> ExternCallContext<'a> {
     /// `val` must be a slice of exactly `val_slots` u64 words.
     #[inline]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn map_set_string_key(&mut self, m: GcRef, key: &str, val: &[u64]) {
+    pub unsafe fn map_set_string_key(&mut self, m: GcRef, key: &str, val: &[u64]) {
         assert_eq!(
             crate::objects::map::key_kind(m),
             ValueKind::String,
@@ -1814,7 +1822,9 @@ impl<'a> ExternCallContext<'a> {
             // String is a GcRef (8 bytes), store as u64
             unsafe { slice::set(s, i, str_ref as u64, 8) };
         }
-        self.gc.mark_allocated_for_scan(slice::array_ref(s));
+        // Safety: `s` is the fresh string slice allocated above.
+        self.gc
+            .mark_allocated_for_scan(unsafe { slice::array_ref(s) });
         s
     }
 
@@ -2221,7 +2231,7 @@ impl<'a> ExternCallContext<'a> {
             )));
         };
         self.write_return_slot(slot_idx + 1, canonical as u64)?;
-        let header = Gc::header(canonical);
+        let header = unsafe { Gc::header(canonical) };
         match value_rttid.value_kind() {
             ValueKind::Struct | ValueKind::Pointer => {
                 self.verify_return_interface_data_kind(
@@ -2387,9 +2397,11 @@ impl<'a> ExternCallContext<'a> {
                 )));
             }
         }
-        let actual_len = array::len(array_ref);
-        let actual_elem_meta = array::elem_meta(array_ref);
-        let actual_elem_bytes = array::elem_bytes(array_ref);
+        // Safety: the return verifier canonicalized the object and established
+        // the array header kind above.
+        let actual_len = unsafe { array::len(array_ref) };
+        let actual_elem_meta = unsafe { array::elem_meta(array_ref) };
+        let actual_elem_bytes = unsafe { array::elem_bytes(array_ref) };
         if actual_len != expected_len
             || actual_elem_meta != expected_elem_meta
             || actual_elem_bytes != expected_elem_bytes

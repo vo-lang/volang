@@ -1,10 +1,10 @@
 use super::*;
+use crate::test_support::{array, queue, slice};
 use std::collections::{BTreeMap, HashMap};
 use vo_common_core::bytecode::{FieldMeta, MethodInfo, NamedTypeMeta, StructMeta};
 use vo_common_core::{ChanDir, RuntimeType};
 use vo_runtime::island::{EndpointRequestKind, IslandCommand};
 use vo_runtime::objects::queue_state::QueueKind;
-use vo_runtime::objects::{array, queue, slice};
 use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
 
 fn port_i64_runtime_types() -> Vec<RuntimeType> {
@@ -34,7 +34,7 @@ fn port_closure_i64_runtime_types() -> Vec<RuntimeType> {
 
 fn make_unaligned_port_slice(state: &mut crate::vm::VmState, port: GcRef) -> GcRef {
     let backing = array::create(&mut state.gc, ValueMeta::new(0, ValueKind::Port), 8, 2);
-    unsafe { array::set(backing, 0, port as u64, 8) };
+    array::set(backing, 0, port as u64, 8);
     let slice_ref = slice::from_array_range(&mut state.gc, backing, 0, 1);
     let unaligned = unsafe { array::data_ptr_bytes(backing).add(1) };
     // Safety: this test intentionally corrupts a freshly allocated slice
@@ -898,7 +898,7 @@ fn vm_goisland_transfer_txn_005_rejects_capture_box_allocation_drift_before_raw_
     let bad_box = state
         .gc
         .alloc(vo_runtime::island_msg::capture_box_meta(capture_meta), 0);
-    vo_runtime::gc::Gc::header_mut(bad_box).slots = 1;
+    unsafe { vo_runtime::gc::Gc::header_mut(bad_box) }.slots = 1;
     let result = GoIslandResult {
         island: core::ptr::null_mut(),
         func_id: 7,
@@ -1013,7 +1013,7 @@ fn vm_island_spawn_capture_root_005_heap_array_capture_prepare_scans_all_slots()
         0,
     );
     let captured_array = array::create(&mut state.gc, ValueMeta::new(0, ValueKind::Port), 8, 2);
-    unsafe { array::set(captured_array, 1, port as u64, 8) };
+    array::set(captured_array, 1, port as u64, 8);
     let result = GoIslandResult {
         island: core::ptr::null_mut(),
         func_id: 7,
@@ -2034,7 +2034,6 @@ fn queue_handle_transfer_stages_remote_transfer_as_runtime_effect() {
     state.current_island_id = 2;
     let port = queue::create_remote_proxy(
         &mut state.gc,
-        QueueKind::Port,
         0x0000_0009_0000_0042,
         9,
         1,

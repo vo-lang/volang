@@ -161,11 +161,47 @@ fn native_backedge_exhausts_budget_through_scheduler_yield_contract() {
     let mut ret = [0_u64; 1];
     let mut parts = JitContextParts::new();
     let mut ctx = parts.context(&module, &mut args);
+    ctx.execution_budget = 1;
     let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
 
     assert_eq!(result, JitResult::Call);
     assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
     assert_eq!(ctx.call_resume_pc, 0);
+    assert_eq!(ctx.execution_budget, 0);
+}
+
+#[test]
+fn native_straight_line_code_yields_at_bounded_region_checkpoint() {
+    let mut code = vec![Instruction::new(Opcode::LoadInt, 0, 7, 0); 129];
+    code.push(Instruction::new(Opcode::Return, 0, 0, 0));
+    let func = make_func_with_sig(code, 0, 0, 1, 0);
+    let mut module = VoModule::new("native-straight-line-timeslice".into());
+    module.functions.push(func);
+
+    let mut jit = JitCompiler::new().expect("create jit compiler");
+    let externs = ResolvedExternTable::empty();
+    jit.compile(
+        0,
+        &module.functions[0],
+        &module,
+        default_compile_env(&externs),
+        &[],
+    )
+    .expect("compile native straight-line function");
+    let jit_func = unsafe { jit.cache.get_func_ptr(0).expect("compiled entry") };
+
+    let mut args = [0_u64; 1];
+    let mut ret = [0_u64; 1];
+    let mut parts = JitContextParts::new();
+    let mut ctx = parts.context(&module, &mut args);
+    ctx.execution_budget = 64;
+
+    let result = jit_func(&mut ctx, args.as_mut_ptr(), ret.as_mut_ptr());
+
+    assert_eq!(result, JitResult::Call);
+    assert_eq!(ctx.call_kind, JitContext::CALL_KIND_YIELD);
+    assert_eq!(ctx.call_resume_pc, 64);
+    assert_eq!(ctx.execution_budget, 0);
 }
 
 #[test]

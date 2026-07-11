@@ -81,7 +81,7 @@ impl core::error::Error for QueueHandleValidationError {}
 
 pub type QueueHandleValidationResult<T> = Result<T, QueueHandleValidationError>;
 
-pub fn pack_transport_message(
+pub unsafe fn pack_transport_message(
     gc: &Gc,
     src: &[u64],
     elem_meta: ValueMeta,
@@ -101,24 +101,27 @@ pub fn pack_transport_message(
 }
 
 fn remote_handle_closed_state(ch: GcRef) -> bool {
-    queue::remote_proxy(ch).closed
+    unsafe { queue::remote_proxy(ch) }.closed
 }
 
 fn local_handle_closed_state(ch: GcRef) -> bool {
-    queue::is_closed(ch) && queue::len(ch) == 0
+    // Safety: callers validate live endpoint handles before inspecting state.
+    unsafe { queue::is_closed(ch) && queue::len(ch) == 0 }
 }
 
 fn endpoint_home_island(ch: GcRef) -> QueueHandleValidationResult<u32> {
-    match queue_state::backing(ch) {
-        QueueBacking::Remote => Ok(queue::remote_proxy(ch).home_island),
-        QueueBacking::Local => queue::home_info(ch)
+    // Safety: callers validate live endpoint handles before inspecting state.
+    match unsafe { queue_state::backing(ch) } {
+        QueueBacking::Remote => Ok(unsafe { queue::remote_proxy(ch) }.home_island),
+        QueueBacking::Local => unsafe { queue::home_info(ch) }
             .map(|info| info.home_island)
             .ok_or(QueueHandleValidationError::MissingEndpointContract { endpoint_id: 0 }),
     }
 }
 
 fn endpoint_closed_state(ch: GcRef) -> bool {
-    match queue_state::backing(ch) {
+    // Safety: callers validate live endpoint handles before inspecting state.
+    match unsafe { queue_state::backing(ch) } {
         QueueBacking::Remote => remote_handle_closed_state(ch),
         QueueBacking::Local => local_handle_closed_state(ch),
     }
@@ -134,16 +137,18 @@ fn validate_live_endpoint_handle(
             endpoint_id: handle.endpoint_id,
             field: QueueHandleMismatchField::Kind,
         })?;
-    if queue_state::kind(existing) != handle.kind {
+    if unsafe { queue_state::kind(existing) } != handle.kind {
         return Err(QueueHandleValidationError::LiveEndpointMismatch {
             endpoint_id: handle.endpoint_id,
             field: QueueHandleMismatchField::Kind,
         });
     }
 
-    let endpoint_id_matches = match queue_state::backing(existing) {
-        QueueBacking::Remote => queue::remote_proxy(existing).endpoint_id == handle.endpoint_id,
-        QueueBacking::Local => queue::home_info(existing)
+    let endpoint_id_matches = match unsafe { queue_state::backing(existing) } {
+        QueueBacking::Remote => {
+            unsafe { queue::remote_proxy(existing) }.endpoint_id == handle.endpoint_id
+        }
+        QueueBacking::Local => unsafe { queue::home_info(existing) }
             .map(|info| info.endpoint_id == handle.endpoint_id)
             .ok_or(QueueHandleValidationError::MissingEndpointContract {
                 endpoint_id: handle.endpoint_id,
@@ -175,25 +180,25 @@ fn validate_live_endpoint_handle(
         });
     }
 
-    if queue_state::capacity(existing) as u64 != handle.cap {
+    if unsafe { queue_state::capacity(existing) } as u64 != handle.cap {
         return Err(QueueHandleValidationError::LiveEndpointMismatch {
             endpoint_id: handle.endpoint_id,
             field: QueueHandleMismatchField::Capacity,
         });
     }
-    if queue_state::elem_meta(existing) != handle.elem_meta {
+    if unsafe { queue_state::elem_meta(existing) } != handle.elem_meta {
         return Err(QueueHandleValidationError::LiveEndpointMismatch {
             endpoint_id: handle.endpoint_id,
             field: QueueHandleMismatchField::ElemMeta,
         });
     }
-    if queue_state::elem_rttid(existing) != handle.elem_rttid {
+    if unsafe { queue_state::elem_rttid(existing) } != handle.elem_rttid {
         return Err(QueueHandleValidationError::LiveEndpointMismatch {
             endpoint_id: handle.endpoint_id,
             field: QueueHandleMismatchField::ElemRttid,
         });
     }
-    if queue_state::elem_slots(existing) != handle.elem_slots {
+    if unsafe { queue_state::elem_slots(existing) } != handle.elem_slots {
         return Err(QueueHandleValidationError::LiveEndpointMismatch {
             endpoint_id: handle.endpoint_id,
             field: QueueHandleMismatchField::ElemSlots,
@@ -227,7 +232,6 @@ pub fn try_resolve_unpacked_queue_handle(
 
     let queue_ref = queue::create_remote_proxy_with_closed(
         gc,
-        handle.kind,
         handle.endpoint_id,
         handle.home_island,
         handle.cap,
@@ -277,24 +281,28 @@ pub fn unpack_transport_message(
         endpoint_registry.restore(registry_snapshot);
         return Err(QueueHandleValidationError::MalformedPayload);
     }
-    unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas(
-        gc,
-        &packed,
-        &mut dst,
-        elem_meta,
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-        |gc, handle| match try_resolve_unpacked_queue_handle(gc, handle, endpoint_registry) {
-            Ok(queue_ref) => queue_ref,
-            Err(err) => {
-                if error.is_none() {
-                    error = Some(err);
+    // Safety: the packed payload was fully validated immediately above and
+    // `dst` matches the declared element slot width.
+    unsafe {
+        unpack_slots_expected_with_queue_handle_resolver_and_named_type_metas(
+            gc,
+            &packed,
+            &mut dst,
+            elem_meta,
+            struct_metas,
+            named_type_metas,
+            runtime_types,
+            |gc, handle| match try_resolve_unpacked_queue_handle(gc, handle, endpoint_registry) {
+                Ok(queue_ref) => queue_ref,
+                Err(err) => {
+                    if error.is_none() {
+                        error = Some(err);
+                    }
+                    core::ptr::null_mut()
                 }
-                core::ptr::null_mut()
-            }
-        },
-    );
+            },
+        )
+    };
     match error {
         Some(err) => {
             endpoint_registry.restore(registry_snapshot);

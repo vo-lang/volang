@@ -178,6 +178,7 @@ fn invoke_jit_and_handle(
     };
     let args_ptr = unsafe { fiber.stack_ptr().add(jit_bp) };
     let result = jit_func(ctx.as_ptr(), args_ptr, ret.as_mut_ptr());
+    fiber.execution_budget = ctx.ctx.execution_budget;
 
     handle_jit_result(vm, fiber, module, result, ctx, ret_slots, ret)
 }

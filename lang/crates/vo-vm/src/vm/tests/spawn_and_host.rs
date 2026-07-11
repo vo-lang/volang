@@ -222,7 +222,7 @@ fn spawn_call_transfer_contract_061_rejects_empty_param_types_with_gcref_suffix(
     module.functions[0].slot_types = vec![SlotType::GcRef, SlotType::GcRef];
     refresh_vm_test_function_metadata(&mut module.functions[0]);
     let mut vm = Vm::new();
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let receiver = string::new_from_string(&mut vm.state.gc, "receiver".to_string());
     let suffix = string::new_from_string(&mut vm.state.gc, "suffix".to_string());
 
@@ -502,6 +502,83 @@ fn create_island_without_module_returns_error_instead_of_expect_panic() {
         Ok(other) => panic!("create_island without module should be a VM error, got {other:?}"),
         Err(_) => panic!("create_island without module must not panic"),
     }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn island_worker_failure_is_reported_to_parent_vm() {
+    let mut vm = Vm::new();
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    vm.state.island_threads.push(IslandThread {
+        island_id: 7,
+        join_handle: None,
+        events: events_rx,
+        interrupt_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    events_tx
+        .send(super::super::types::IslandThreadEvent::Failed(
+            "forced worker failure".to_string(),
+        ))
+        .unwrap();
+
+    let error = vm.poll_island_thread_events().unwrap_err();
+
+    match error {
+        VmError::Jit(message) => {
+            assert!(message.contains("island 7 failed"), "{message}");
+            assert!(message.contains("forced worker failure"), "{message}");
+        }
+        other => panic!("island worker failure should surface as a VM error, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn dropping_vm_interrupts_running_island_before_join() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut vm = Vm::new();
+    let interrupt_flag = std::sync::Arc::new(AtomicBool::new(false));
+    let child_interrupt = interrupt_flag.clone();
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let join_handle = std::thread::spawn(move || {
+        while !child_interrupt.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let _ = events_tx.send(super::super::types::IslandThreadEvent::Exited);
+        done_tx.send(()).unwrap();
+    });
+    vm.state.island_threads.push(IslandThread {
+        island_id: 8,
+        join_handle: Some(join_handle),
+        events: events_rx,
+        interrupt_flag,
+    });
+
+    drop(vm);
+
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("VM drop must interrupt and join the island worker");
+}
+
+#[test]
+fn detached_execution_shares_loaded_module_ownership() {
+    let mut vm = Vm::new();
+    vm.finish_load(gc_test_module());
+    let fiber_id = vm.scheduler.spawn(Fiber::new(0));
+
+    {
+        let execution =
+            DetachedFiberExecution::try_new(&mut vm, fiber_id).expect("fiber execution lease");
+        let loaded = execution.vm.module.as_ref().expect("loaded module");
+        assert!(std::sync::Arc::ptr_eq(&execution.module, loaded));
+        assert_eq!(std::sync::Arc::strong_count(loaded), 2);
+    }
+
+    assert!(vm.module.is_some());
+    assert!(vm.scheduler.try_get_fiber(fiber_id).is_some());
 }
 
 #[cfg(feature = "std")]

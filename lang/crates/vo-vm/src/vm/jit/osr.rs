@@ -15,15 +15,15 @@ struct OsrBorrowBoundaryGuard {
 }
 
 impl OsrBorrowBoundaryGuard {
-    fn enter(vm: &mut Vm) -> Self {
+    fn try_enter(vm: &mut Vm) -> Result<Self, String> {
         vm.state.jit_osr_borrow_lease_depth = vm
             .state
             .jit_osr_borrow_lease_depth
             .checked_add(1)
-            .expect("OSR borrow lease depth overflow");
-        Self {
+            .ok_or_else(|| "OSR borrow lease depth overflow".to_string())?;
+        Ok(Self {
             depth: &mut vm.state.jit_osr_borrow_lease_depth,
-        }
+        })
     }
 }
 
@@ -59,7 +59,10 @@ pub fn dispatch_loop_osr(
     bp: usize,
     local_slots: usize,
 ) -> OsrResult {
-    let lease_guard = OsrBorrowBoundaryGuard::enter(vm);
+    let lease_guard = match OsrBorrowBoundaryGuard::try_enter(vm) {
+        Ok(guard) => guard,
+        Err(error) => return OsrResult::JitError(error),
+    };
     let (result, ctx) = {
         if let Some(jit_mgr) = vm.jit.manager_mut() {
             jit_mgr.record_loop_entry();
@@ -88,6 +91,7 @@ pub fn dispatch_loop_osr(
 
         // Call loop function
         let result = loop_func(ctx.as_ptr(), locals_ptr);
+        fiber.execution_budget = ctx.ctx.execution_budget;
         (result, ctx)
     };
     drop(lease_guard);
@@ -286,14 +290,13 @@ mod tests {
     }
 
     fn dispatch_test_loop(vm: &mut Vm, fid: FiberId, loop_func: vo_jit::LoopFunc) -> OsrResult {
-        let module = vm.module.take().expect("loaded module");
+        let module = vm.module.as_ref().cloned().expect("loaded module");
         let mut fiber = vm
             .scheduler
             .detach_for_execution(fid)
             .expect("active fiber");
         let result = dispatch_loop_osr(vm, &mut fiber, &module, loop_func, 0, 1);
         vm.scheduler.reattach_after_execution(fid, fiber);
-        vm.module = Some(module);
         result
     }
 

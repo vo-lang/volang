@@ -1,5 +1,6 @@
 use super::*;
 use crate::fiber::{BlockReason, Fiber, FiberState};
+use crate::test_support::{queue, queue_state as test_queue_state};
 use std::collections::BTreeMap;
 #[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
@@ -78,7 +79,6 @@ fn register_remote_proxy_for_home(vm: &mut Vm, endpoint_id: u64, home_island: u3
     let rttid = ValueRttid::new(0, ValueKind::Int64);
     let ch = queue::create_remote_proxy(
         &mut vm.state.gc,
-        QueueKind::Port,
         endpoint_id,
         home_island,
         1,

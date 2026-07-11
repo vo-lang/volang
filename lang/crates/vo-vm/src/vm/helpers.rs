@@ -225,13 +225,13 @@ pub fn user_panic(
 pub(crate) use vo_runtime::objects::closure::ClosureCallLayout;
 
 #[inline]
-pub(crate) fn closure_call_layout(
+pub(crate) unsafe fn closure_call_layout(
     closure_ref: u64,
     closure_gcref: GcRef,
     recv_slots: usize,
     is_closure: bool,
 ) -> Result<ClosureCallLayout, closure::ClosureCallLayoutError> {
-    closure::call_layout(closure_ref, closure_gcref, recv_slots, is_closure)
+    unsafe { closure::call_layout(closure_ref, closure_gcref, recv_slots, is_closure) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

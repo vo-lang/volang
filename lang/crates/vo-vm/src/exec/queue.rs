@@ -23,7 +23,7 @@ use vo_common_core::bytecode::{Module, StructMeta};
 use vo_common_core::instruction::QUEUE_KIND_PORT_FLAG;
 use vo_common_core::RuntimeType;
 use vo_runtime::gc::{Gc, GcRef};
-use vo_runtime::objects::queue::{self, RecvResult};
+use vo_runtime::objects::queue::{self, BlockingRecvResult};
 use vo_runtime::objects::queue_state::{
     self, QueueKind, QueueMessage, QueueWaiter, SelectWaitKind,
 };
@@ -43,7 +43,7 @@ pub fn validate_queue_handle(gc: &Gc, q: GcRef, context: &str) -> Result<GcRef, 
     if base != q {
         return Err(format!("{context}: queue handle must be an object base"));
     }
-    let kind = Gc::header(base).kind();
+    let kind = unsafe { Gc::header(base) }.kind();
     if !kind.is_queue() {
         return Err(format!("{context}: expected queue handle, got {:?}", kind));
     }
@@ -55,7 +55,8 @@ pub fn validate_queue_payload_slots(
     payload_slots: usize,
     context: &str,
 ) -> Result<(), String> {
-    let expected = queue_state::elem_slots(ch) as usize;
+    // Safety: callers validate the queue handle before payload validation.
+    let expected = unsafe { queue_state::elem_slots(ch) } as usize;
     if payload_slots != expected {
         return Err(format!(
             "{context} payload slots {payload_slots} do not match queue element slots {expected}"
@@ -68,8 +69,9 @@ pub fn select_woken_recv_slot_types(
     ch: GcRef,
     module: Option<&vo_runtime::bytecode::Module>,
 ) -> Result<Vec<SlotType>, String> {
-    let elem_meta = queue_state::elem_meta(ch);
-    let elem_slots = queue_state::elem_slots(ch) as usize;
+    // Safety: callers validate the queue handle before layout inspection.
+    let elem_meta = unsafe { queue_state::elem_meta(ch) };
+    let elem_slots = unsafe { queue_state::elem_slots(ch) } as usize;
     let kind = elem_meta.value_kind();
     Ok(match kind {
         ValueKind::Struct => {
@@ -91,7 +93,7 @@ pub fn select_woken_recv_slot_types(
             let rttid = if elem_meta.meta_id() != 0 {
                 ValueRttid::new(elem_meta.meta_id(), ValueKind::Array)
             } else {
-                queue_state::elem_rttid(ch)
+                unsafe { queue_state::elem_rttid(ch) }
             };
             select_woken_slot_types_for_rttid(rttid, module, 0)?
         }
@@ -145,14 +147,14 @@ pub fn preflight_queue_close_routes(state: &crate::vm::VmState, ch: GcRef) -> Re
     let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueClose") else {
         return Ok(());
     };
-    if queue::is_remote(ch) {
-        let proxy = queue::remote_proxy(ch);
+    if unsafe { queue::is_remote(ch) } {
+        let proxy = unsafe { queue::remote_proxy(ch) };
         if !proxy.closed {
             preflight_island_route(state, proxy.home_island, "QueueClose remote home route")?;
         }
         return Ok(());
     }
-    if let Some(info) = queue::home_info(ch) {
+    if let Some(info) = unsafe { queue::home_info(ch) } {
         for peer in info.peers.iter().copied() {
             preflight_island_route(state, peer, "QueueClose endpoint peer route")?;
         }
@@ -167,15 +169,17 @@ pub fn preflight_queue_send_routes(state: &crate::vm::VmState, ch: GcRef) -> Res
     let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueSend") else {
         return Ok(());
     };
-    if queue::is_remote(ch) {
-        let proxy = queue::remote_proxy(ch);
+    if unsafe { queue::is_remote(ch) } {
+        let proxy = unsafe { queue::remote_proxy(ch) };
         if !proxy.closed {
             preflight_island_route(state, proxy.home_island, "QueueSend remote home route")?;
         }
         return Ok(());
     }
-    if let Some(receiver) = queue::next_remote_direct_receiver(ch, state.current_island_id) {
-        if queue::home_info(ch).is_none() {
+    if let Some(receiver) =
+        unsafe { queue::next_remote_direct_receiver(ch, state.current_island_id) }
+    {
+        if unsafe { queue::home_info(ch) }.is_none() {
             return Err(format!(
                 "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
                 receiver.island_id, receiver.fiber_key
@@ -197,15 +201,15 @@ pub fn preflight_queue_recv_routes(state: &crate::vm::VmState, ch: GcRef) -> Res
     let Ok(ch) = validate_queue_handle(&state.gc, ch, "QueueRecv") else {
         return Ok(());
     };
-    if queue::is_remote(ch) {
-        let proxy = queue::remote_proxy(ch);
+    if unsafe { queue::is_remote(ch) } {
+        let proxy = unsafe { queue::remote_proxy(ch) };
         if !proxy.closed {
             preflight_island_route(state, proxy.home_island, "QueueRecv remote home route")?;
         }
         return Ok(());
     }
     queue_recv_endpoint_ack_preflight(ch)?;
-    if let Some(sender) = queue::next_recv_endpoint_sender(ch) {
+    if let Some(sender) = unsafe { queue::next_recv_endpoint_sender(ch) } {
         preflight_island_route(
             state,
             sender.island_id,
@@ -620,6 +624,29 @@ pub fn queue_new_trap_kind(flags: u8) -> RuntimeTrapKind {
 
 pub type QueueNewResult = Result<(), String>;
 
+enum QueueSendPayload<'a> {
+    Borrowed(&'a [u64]),
+    Owned(QueueMessage),
+}
+
+impl QueueSendPayload<'_> {
+    #[inline]
+    fn as_slice(&self) -> &[u64] {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+
+    #[inline]
+    fn into_owned(self) -> QueueMessage {
+        match self {
+            Self::Borrowed(value) => value.into(),
+            Self::Owned(value) => value,
+        }
+    }
+}
+
 #[inline]
 pub fn exec_queue_new(
     stack: *mut Slot,
@@ -684,6 +711,57 @@ pub fn queue_send_core_with_layout(
     runtime_types: &[RuntimeType],
     module: Option<&vo_runtime::bytecode::Module>,
 ) -> QueueExecResult {
+    queue_send_payload_core(
+        ch,
+        QueueSendPayload::Borrowed(src),
+        src_layout,
+        island_id,
+        fiber_key,
+        state,
+        struct_metas,
+        runtime_types,
+        module,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn queue_send_owned_core_with_layout(
+    ch: GcRef,
+    value: QueueMessage,
+    src_layout: Option<&[SlotType]>,
+    island_id: u32,
+    fiber_key: u64,
+    state: &mut crate::vm::VmState,
+    struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
+    module: Option<&vo_runtime::bytecode::Module>,
+) -> QueueExecResult {
+    queue_send_payload_core(
+        ch,
+        QueueSendPayload::Owned(value),
+        src_layout,
+        island_id,
+        fiber_key,
+        state,
+        struct_metas,
+        runtime_types,
+        module,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_send_payload_core(
+    ch: GcRef,
+    payload: QueueSendPayload<'_>,
+    src_layout: Option<&[SlotType]>,
+    island_id: u32,
+    fiber_key: u64,
+    state: &mut crate::vm::VmState,
+    struct_metas: &[StructMeta],
+    runtime_types: &[RuntimeType],
+    module: Option<&vo_runtime::bytecode::Module>,
+) -> QueueExecResult {
+    let src = payload.as_slice();
     if ch.is_null() {
         return QueueExecResult::Block { waiter: None };
     }
@@ -704,8 +782,8 @@ pub fn queue_send_core_with_layout(
     }
 
     // REMOTE channel — send via message passing
-    if queue::is_remote(ch) {
-        let proxy = queue::remote_proxy(ch);
+    if unsafe { queue::is_remote(ch) } {
+        let proxy = unsafe { queue::remote_proxy(ch) };
         if proxy.closed {
             return QueueExecResult::Trap(RuntimeTrapKind::SendOnClosedChannel);
         }
@@ -722,18 +800,22 @@ pub fn queue_send_core_with_layout(
             Ok(commit) => commit,
             Err(msg) => return QueueExecResult::Malformed(msg),
         };
-        let elem_meta = queue_state::elem_meta(ch);
+        let elem_meta = unsafe { queue_state::elem_meta(ch) };
         let result = QueueExecResult::RemoteSend {
             endpoint_id: proxy.endpoint_id,
             home_island: proxy.home_island,
-            data: super::transport::pack_transport_message(
-                &state.gc,
-                src,
-                elem_meta,
-                struct_metas,
-                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
-                runtime_types,
-            ),
+            // Safety: queue handle and payload layout were validated above and
+            // `src` remains rooted in the active fiber frame.
+            data: unsafe {
+                super::transport::pack_transport_message(
+                    &state.gc,
+                    src,
+                    elem_meta,
+                    struct_metas,
+                    module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+                    runtime_types,
+                )
+            },
             island_effects,
             transfer_commit,
         };
@@ -741,14 +823,14 @@ pub fn queue_send_core_with_layout(
         return result;
     }
 
-    let value: Box<[u64]> = src.iter().copied().collect();
+    let value = payload.into_owned();
 
     // Write barrier: type-aware to avoid UB on mixed-slot types.
     // Must be done before send_or_block because the value is moved into the buffer.
-    let em = queue_state::elem_meta(ch);
-    let remote_direct_receiver = queue::next_remote_direct_receiver(ch, island_id);
+    let em = unsafe { queue_state::elem_meta(ch) };
+    let remote_direct_receiver = unsafe { queue::next_remote_direct_receiver(ch, island_id) };
     if let Some(receiver) = remote_direct_receiver.as_ref() {
-        if queue::home_info(ch).is_none() {
+        if unsafe { queue::home_info(ch) }.is_none() {
             return QueueExecResult::Malformed(format!(
                 "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
                 receiver.island_id, receiver.fiber_key
@@ -779,23 +861,23 @@ pub fn queue_send_core_with_layout(
             }
         }
     }
-    let select_recv_slot_types = if queue::next_local_select_recv_receiver(ch, island_id).is_some()
-    {
-        match select_woken_recv_slot_types(ch, module).and_then(|slot_types| {
-            validate_select_woken_recv_payload_width(value.len(), slot_types.len())?;
-            Ok(slot_types)
-        }) {
-            Ok(slot_types) => Some(slot_types),
-            Err(msg) => return QueueExecResult::Malformed(msg),
-        }
-    } else {
-        None
-    };
+    let select_recv_slot_types =
+        if unsafe { queue::next_local_select_recv_receiver(ch, island_id) }.is_some() {
+            match select_woken_recv_slot_types(ch, module).and_then(|slot_types| {
+                validate_select_woken_recv_payload_width(value.len(), slot_types.len())?;
+                Ok(slot_types)
+            }) {
+                Ok(slot_types) => Some(slot_types),
+                Err(msg) => return QueueExecResult::Malformed(msg),
+            }
+        } else {
+            None
+        };
 
     let waiter = QueueWaiter::simple_queue(island_id, fiber_key, ch as u64, SelectWaitKind::Send);
     let mut select_recv_slot_types = select_recv_slot_types;
     let mut rollback = crate::runtime_boundary::RuntimeRollback::local_queue(state, ch);
-    match queue::send_or_block_resolved(ch, value, waiter.clone(), island_id) {
+    match unsafe { queue::send_or_block_resolved(ch, value, waiter.clone(), island_id) } {
         queue::ResolvedSendResult::Wake { receiver, payload } => {
             let payload = match payload {
                 Some(payload) => {
@@ -838,21 +920,25 @@ pub fn queue_send_core_with_layout(
                 rollback =
                     crate::runtime_boundary::RuntimeRollback::combine(rollback, endpoint_rollback);
             }
-            let Some(home_info) = queue::home_info(ch) else {
+            let Some(home_info) = (unsafe { queue::home_info(ch) }) else {
                 return QueueExecResult::Malformed(format!(
                     "RemoteDirect send missing HomeInfo for local port: receiver_island={} receiver_key={}",
                     receiver.island_id, receiver.fiber_key
                 ));
             };
             let endpoint_id = home_info.endpoint_id;
-            let data = super::transport::pack_transport_message(
-                &state.gc,
-                value.as_ref(),
-                em,
-                struct_metas,
-                module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
-                runtime_types,
-            );
+            // Safety: the validated queue metadata matches `value`, which remains
+            // rooted until the transport payload is materialized.
+            let data = unsafe {
+                super::transport::pack_transport_message(
+                    &state.gc,
+                    value.as_ref(),
+                    em,
+                    struct_metas,
+                    module.map(|m| m.named_type_metas.as_slice()).unwrap_or(&[]),
+                    runtime_types,
+                )
+            };
             QueueExecResult::RemoteRecvData {
                 endpoint_id,
                 target_island: receiver.island_id,
@@ -883,8 +969,8 @@ pub fn queue_recv_core(gc: &Gc, ch: GcRef, island_id: u32, fiber_key: u64) -> Qu
     };
 
     // REMOTE channel — recv via message passing
-    if queue::is_remote(ch) {
-        let proxy = queue::remote_proxy(ch);
+    if unsafe { queue::is_remote(ch) } {
+        let proxy = unsafe { queue::remote_proxy(ch) };
         if proxy.closed {
             return QueueRecvCoreResult::Closed;
         }
@@ -898,31 +984,24 @@ pub fn queue_recv_core(gc: &Gc, ch: GcRef, island_id: u32, fiber_key: u64) -> Qu
     }
 
     let waiter = QueueWaiter::simple_queue(island_id, fiber_key, ch as u64, SelectWaitKind::Recv);
-    let (result, value_opt) = queue::recv_or_block(ch, waiter.clone());
-
-    match result {
-        RecvResult::Success(woke_sender) => {
-            if let Some(data) = value_opt {
-                QueueRecvCoreResult::Success {
-                    data,
-                    wake_sender: woke_sender,
-                }
-            } else {
-                QueueRecvCoreResult::Malformed(
-                    "queue recv success returned without payload".to_string(),
-                )
-            }
-        }
-        RecvResult::Blocked | RecvResult::WouldBlock => QueueRecvCoreResult::WouldBlock {
+    match unsafe { queue::recv_or_block(ch, waiter.clone()) } {
+        BlockingRecvResult::Success {
+            woke_sender,
+            payload,
+        } => QueueRecvCoreResult::Success {
+            data: payload,
+            wake_sender: woke_sender,
+        },
+        BlockingRecvResult::Blocked => QueueRecvCoreResult::WouldBlock {
             waiter: Some(waiter),
         },
-        RecvResult::Closed => QueueRecvCoreResult::Closed,
+        BlockingRecvResult::Closed => QueueRecvCoreResult::Closed,
     }
 }
 
 pub fn queue_recv_endpoint_ack_preflight(ch: GcRef) -> Result<(), String> {
-    if let Some(sender) = queue::next_recv_endpoint_sender(ch) {
-        if queue::home_info(ch).is_none() {
+    if let Some(sender) = unsafe { queue::next_recv_endpoint_sender(ch) } {
+        if unsafe { queue::home_info(ch) }.is_none() {
             return Err(format!(
                 "remote endpoint sender missing HomeInfo: sender_island={} sender_key={}",
                 sender.island_id,
@@ -945,7 +1024,7 @@ pub fn queue_sender_ack_or_wake(
             payload: None,
         };
     }
-    let Some(home_info) = queue::home_info(ch) else {
+    let Some(home_info) = (unsafe { queue::home_info(ch) }) else {
         return QueueExecResult::Malformed(format!(
             "remote endpoint sender missing HomeInfo: sender_island={} sender_key={}",
             sender.island_id,
@@ -994,19 +1073,20 @@ pub fn exec_queue_recv(
     if let Err(msg) = preflight_queue_recv_routes(state, ch) {
         return QueueExecResult::Malformed(msg);
     }
-    let remote_sender_rollback =
-        if !ch.is_null() && !queue::is_remote(ch) && queue::next_recv_endpoint_sender(ch).is_some()
-        {
-            Some(
-                crate::runtime_boundary::RuntimeRollback::local_queue_with_stack_slots(
-                    state,
-                    ch,
-                    stack_slot_snapshot(stack, dst_start, elem_slots + usize::from(has_ok)),
-                ),
-            )
-        } else {
-            None
-        };
+    let remote_sender_rollback = if !ch.is_null()
+        && !unsafe { queue::is_remote(ch) }
+        && unsafe { queue::next_recv_endpoint_sender(ch) }.is_some()
+    {
+        Some(
+            crate::runtime_boundary::RuntimeRollback::local_queue_with_stack_slots(
+                state,
+                ch,
+                stack_slot_snapshot(stack, dst_start, elem_slots + usize::from(has_ok)),
+            ),
+        )
+    } else {
+        None
+    };
 
     match complete_queue_recv(
         queue_recv_core(&state.gc, ch, island_id, fiber_key),
@@ -1037,11 +1117,12 @@ pub fn exec_queue_recv(
 }
 
 #[inline]
-pub fn queue_len(ch: GcRef) -> usize {
+pub unsafe fn queue_len(ch: GcRef) -> usize {
     if ch.is_null() {
         return 0;
     }
-    queue::len(ch)
+    // Safety: callers validate non-null queue handles before using this helper.
+    unsafe { queue::len(ch) }
 }
 
 #[inline]
@@ -1079,15 +1160,15 @@ pub fn queue_close_core(state: &crate::vm::VmState, ch: GcRef) -> QueueExecResul
     };
 
     // REMOTE channel close — send message to home island
-    if queue::is_remote(ch) {
-        let proxy = queue::remote_proxy(ch);
+    if unsafe { queue::is_remote(ch) } {
+        let proxy = unsafe { queue::remote_proxy(ch) };
         if proxy.closed {
             return QueueExecResult::Continue;
         }
         let endpoint_id = proxy.endpoint_id;
         let home_island = proxy.home_island;
         let rollback = crate::runtime_boundary::RuntimeRollback::remote_queue_proxy(state, ch);
-        queue::mark_remote_closed(ch);
+        unsafe { queue::mark_remote_closed(ch) };
         return QueueExecResult::RemoteClose {
             endpoint_id,
             home_island,
@@ -1095,22 +1176,22 @@ pub fn queue_close_core(state: &crate::vm::VmState, ch: GcRef) -> QueueExecResul
         };
     }
 
-    if queue::is_closed(ch) {
+    if unsafe { queue::is_closed(ch) } {
         return QueueExecResult::Trap(RuntimeTrapKind::CloseClosedChannel);
     }
-    if queue::has_endpoint_waiters(ch) && queue::home_info(ch).is_none() {
+    if unsafe { queue::has_endpoint_waiters(ch) } && unsafe { queue::home_info(ch) }.is_none() {
         return QueueExecResult::Malformed(
             "QueueClose missing HomeInfo for remote endpoint waiters".to_string(),
         );
     }
     let rollback = crate::runtime_boundary::RuntimeRollback::local_queue(state, ch);
-    queue::close(ch);
-    let receivers = queue::take_waiting_receivers(ch);
-    let senders = queue::take_waiting_senders(ch)
+    unsafe { queue::close(ch) };
+    let receivers = unsafe { queue::take_waiting_receivers(ch) };
+    let senders = unsafe { queue::take_waiting_senders(ch) }
         .into_iter()
         .map(|(w, _)| w)
         .collect::<Vec<_>>();
-    let endpoint_id = queue::home_info(ch).map(|info| info.endpoint_id);
+    let endpoint_id = unsafe { queue::home_info(ch) }.map(|info| info.endpoint_id);
     if receivers.is_empty() && senders.is_empty() && endpoint_id.is_none() {
         QueueExecResult::Continue
     } else {

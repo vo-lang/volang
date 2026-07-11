@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::queue;
 use core::ffi::c_void;
 use std::collections::{BTreeMap, HashMap};
 use vo_common_core::bytecode::{FieldMeta, MethodInfo, NamedTypeMeta, StructMeta};
@@ -11,7 +12,6 @@ use vo_runtime::jit_api::{
 };
 use vo_runtime::objects::closure;
 use vo_runtime::objects::interface::InterfaceSlot;
-use vo_runtime::objects::queue;
 use vo_runtime::objects::queue_state::QueueKind;
 use vo_runtime::output::CaptureSink;
 use vo_runtime::{SlotType, ValueKind, ValueMeta, ValueRttid};
@@ -258,6 +258,7 @@ fn test_context<'a>(
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
     }
 }
 

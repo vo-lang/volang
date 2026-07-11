@@ -28,8 +28,9 @@ fn match_bytes(call: &mut ExternCallContext) -> ExternResult {
     use vo_runtime::objects::slice;
     let pattern = call.arg_str(slots::ARG_PATTERN);
     let b_ref = call.arg_ref(slots::ARG_B);
-    let b_len = slice::len(b_ref);
-    let b_ptr = slice::data_ptr(b_ref);
+    // Safety: `b_ref` is the rooted []byte argument for this extern call.
+    let b_len = unsafe { slice::len(b_ref) };
+    let b_ptr = unsafe { slice::data_ptr(b_ref) };
     let bytes = unsafe { core::slice::from_raw_parts(b_ptr, b_len) };
     let (matched, valid) = match Regex::new(pattern) {
         Ok(re) => match core::str::from_utf8(bytes) {
@@ -107,7 +108,8 @@ fn find_all_string(call: &mut ExternCallContext) -> ExternResult {
         unsafe { array::set(arr, i, str_ref as u64, 8) };
     }
     gc.mark_allocated_for_scan(arr);
-    let slice_ref = slice::from_array(gc, arr);
+    // Safety: `arr` is freshly allocated and initialized above.
+    let slice_ref = unsafe { slice::from_array(gc, arr) };
     call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok
 }
@@ -175,7 +177,8 @@ fn split_string(call: &mut ExternCallContext) -> ExternResult {
         unsafe { array::set(arr, i, str_ref as u64, 8) };
     }
     gc.mark_allocated_for_scan(arr);
-    let slice_ref = slice::from_array(gc, arr);
+    // Safety: `arr` is freshly allocated and initialized above.
+    let slice_ref = unsafe { slice::from_array(gc, arr) };
     call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok
 }
@@ -209,7 +212,8 @@ fn find_string_submatch(call: &mut ExternCallContext) -> ExternResult {
         unsafe { array::set(arr, i, str_ref as u64, 8) };
     }
     gc.mark_allocated_for_scan(arr);
-    let slice_ref = slice::from_array(gc, arr);
+    // Safety: `arr` is freshly allocated and initialized above.
+    let slice_ref = unsafe { slice::from_array(gc, arr) };
     call.ret_ref(slots::RET_0, slice_ref);
     ExternResult::Ok
 }

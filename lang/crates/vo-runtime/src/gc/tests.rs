@@ -1,4 +1,15 @@
 use super::*;
+use crate::test_support::{
+    array as test_array, scan_object as test_scan_object, slice as test_slice,
+};
+
+fn test_header(object: GcRef) -> &'static GcHeader {
+    unsafe { Gc::header(object) }
+}
+
+fn test_header_mut(object: GcRef) -> &'static mut GcHeader {
+    unsafe { Gc::header_mut(object) }
+}
 
 fn gc_step<R, S, F>(gc: &mut Gc, scan_roots: R, scan_object: S, finalize_object: F) -> usize
 where
@@ -86,7 +97,7 @@ fn vm_jit_typed_barrier_001_no_ref_struct_scalar_is_not_barriered() {
     let mut gc = Gc::new();
     let parent = gc.alloc(ValueMeta::new(0, ValueKind::Array), 1);
     let scalar_that_looks_like_ref = gc.alloc(ValueMeta::new(0, ValueKind::String), 1) as u64;
-    Gc::header_mut(parent).set_black();
+    test_header_mut(parent).set_black();
     gc.state = GcState::Propagate;
 
     crate::gc_types::try_typed_write_barrier_by_meta(
@@ -98,7 +109,7 @@ fn vm_jit_typed_barrier_001_no_ref_struct_scalar_is_not_barriered() {
     )
     .expect("no-ref struct scalar must not be treated as a GcRef");
 
-    assert!(Gc::header(parent).is_black());
+    assert!(test_header(parent).is_black());
     assert!(
         gc.grayagain.is_empty(),
         "no-ref struct scalar should not trigger a GC write barrier"
@@ -118,7 +129,7 @@ fn vm_value_slot_clone_lifecycle_006_ptr_clone_preserves_value_slot_scan_layout(
 
     let clone = unsafe { gc.ptr_clone(source) };
 
-    assert!(Gc::header(clone).is_value_slots_object());
+    assert!(test_header(clone).is_value_slots_object());
     let runtime_types = vec![
         vo_common_core::RuntimeType::Basic(ValueKind::String),
         vo_common_core::RuntimeType::Array {
@@ -127,7 +138,7 @@ fn vm_value_slot_clone_lifecycle_006_ptr_clone_preserves_value_slot_scan_layout(
         },
     ];
     let mut visited = Vec::new();
-    crate::gc_types::trace_object_children_with_context(
+    crate::test_support::trace_object_children_with_context(
         clone,
         crate::gc_types::GcScanContext::from_module_parts(&[], &[], &runtime_types),
         &empty_closure_scan_layout,
@@ -147,7 +158,7 @@ fn vm_value_slot_clone_lifecycle_006_zero_slot_array_box_size_uses_header_slots(
 
     assert_eq!(Gc::object_size_bytes(source), GcHeader::SIZE);
     let clone = unsafe { gc.ptr_clone(source) };
-    assert!(Gc::header(clone).is_value_slots_object());
+    assert!(test_header(clone).is_value_slots_object());
     assert_eq!(Gc::object_size_bytes(clone), GcHeader::SIZE);
 }
 
@@ -169,7 +180,7 @@ fn test_canonicalize_ref_large_array_far_interior_pointer() {
     let len = u16::MAX as usize + 32;
     let arr = crate::objects::array::create(&mut gc, ValueMeta::new(0, ValueKind::Uint64), 8, len);
     assert!(!arr.is_null());
-    assert_eq!(Gc::header(arr).slots, 0);
+    assert_eq!(test_header(arr).slots, 0);
 
     let far_interior =
         unsafe { crate::objects::array::data_ptr_bytes(arr).add((len - 1) * 8) as GcRef };
@@ -203,7 +214,7 @@ fn test_canonicalize_ref_forgets_freed_object_during_partial_sweep() {
     gc.state = GcState::Sweep;
     gc.sweep_pos = 0;
     gc.sweep_write_pos = 0;
-    Gc::header_mut(live).set_black();
+    test_header_mut(live).set_black();
 
     let dead_size = Gc::object_size_bytes(dead);
     let work = gc.sweep_step(&mut |dead| finalized.push(dead), dead_size);
@@ -366,14 +377,14 @@ fn test_sweep_write_barrier_rescues_old_white_child() {
     unsafe {
         Gc::write_slot(parent, 0, child as u64);
     }
-    Gc::header_mut(parent).set_black();
+    test_header_mut(parent).set_black();
 
-    assert_eq!(Gc::header(child).marked & WHITE_BITS, gc.other_white());
+    assert_eq!(test_header(child).marked & WHITE_BITS, gc.other_white());
     gc.write_barrier(parent, child);
-    assert!(Gc::header(child).is_gray());
+    assert!(test_header(child).is_gray());
 
     gc.atomic_phase(&mut |_, _| {});
-    assert!(Gc::header(child).is_black());
+    assert!(test_header(child).is_black());
 
     let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
 
@@ -575,9 +586,9 @@ fn test_sweep_write_barrier_rescues_old_white_parent() {
         Gc::write_slot(parent, 0, child as u64);
     }
 
-    assert_eq!(Gc::header(parent).marked & WHITE_BITS, gc.other_white());
+    assert_eq!(test_header(parent).marked & WHITE_BITS, gc.other_white());
     gc.write_barrier(parent, child);
-    assert!(Gc::header(parent).is_gray());
+    assert!(test_header(parent).is_gray());
 
     gc.atomic_phase(&mut |gc, obj| {
         let raw_child = unsafe { Gc::read_slot(obj, 0) };
@@ -585,7 +596,7 @@ fn test_sweep_write_barrier_rescues_old_white_parent() {
             gc.mark_gray(raw_child as GcRef);
         }
     });
-    assert!(Gc::header(parent).is_black());
+    assert!(test_header(parent).is_black());
 
     let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
 
@@ -603,7 +614,7 @@ fn test_sweep_write_barrier_rescans_rescued_string_child() {
     let meta = ValueMeta::new(1, ValueKind::Struct);
     let parent = gc.alloc(meta, 1);
     let child = crate::objects::string::create(&mut gc, b"hello");
-    let child_array = crate::objects::slice::array_ref(child);
+    let child_array = test_slice::array_ref(child);
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
@@ -613,13 +624,13 @@ fn test_sweep_write_barrier_rescans_rescued_string_child() {
     unsafe {
         Gc::write_slot(parent, 0, child as u64);
     }
-    Gc::header_mut(parent).set_black();
+    test_header_mut(parent).set_black();
 
     gc.write_barrier(parent, child);
-    assert!(Gc::header(child).is_gray());
+    assert!(test_header(child).is_gray());
 
     gc.atomic_phase(&mut |gc, obj| {
-        crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout);
+        test_scan_object(gc, obj, &[], &empty_closure_scan_layout);
     });
 
     let work = gc.sweep_step(&mut |dead| finalized.push(dead), usize::MAX);
@@ -638,7 +649,7 @@ fn test_sweep_write_barrier_rescans_rescued_string_child() {
 fn test_sweep_rescans_roots_added_after_atomic() {
     let mut gc = Gc::new();
     let late_root = crate::objects::string::create(&mut gc, b"late");
-    let late_root_array = crate::objects::slice::array_ref(late_root);
+    let late_root_array = test_slice::array_ref(late_root);
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
@@ -650,7 +661,7 @@ fn test_sweep_rescans_roots_added_after_atomic() {
     let work = gc_step(
         &mut gc,
         |gc| gc.mark_gray(late_root),
-        |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
+        |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
         |dead| finalized.push(dead),
     );
 
@@ -676,7 +687,7 @@ fn test_sweep_allocated_clone_scans_copied_old_child() {
     let meta = ValueMeta::new(0, ValueKind::Struct);
     let source = gc.alloc(meta, 1);
     let child = crate::objects::string::create(&mut gc, b"child");
-    let child_array = crate::objects::slice::array_ref(child);
+    let child_array = test_slice::array_ref(child);
     let cloned_root = Cell::new(core::ptr::null_mut::<Slot>());
     let mut finalized = Vec::new();
 
@@ -692,13 +703,13 @@ fn test_sweep_allocated_clone_scans_copied_old_child() {
 
     let clone = unsafe { gc.ptr_clone(source) };
     cloned_root.set(clone);
-    assert!(Gc::header(clone).is_gray());
+    assert!(test_header(clone).is_gray());
 
     let work = gc_step(
         &mut gc,
         |gc| gc.mark_gray(cloned_root.get()),
         |gc, obj| {
-            crate::gc_types::scan_object(gc, obj, &struct_metas, &empty_closure_scan_layout);
+            test_scan_object(gc, obj, &struct_metas, &empty_closure_scan_layout);
         },
         |dead| finalized.push(dead),
     );
@@ -721,7 +732,7 @@ fn test_sweep_range_barrier_rescues_copied_string_refs() {
     let elem_meta = ValueMeta::new(0, ValueKind::String);
     let arr = crate::objects::array::create(&mut gc, elem_meta, SLOT_BYTES, 1);
     let child = crate::objects::string::create(&mut gc, b"child");
-    let child_array = crate::objects::slice::array_ref(child);
+    let child_array = test_slice::array_ref(child);
     let mut finalized = Vec::new();
 
     gc.current_white ^= WHITE_BITS;
@@ -729,24 +740,24 @@ fn test_sweep_range_barrier_rescues_copied_string_refs() {
     gc.sweep_pos = 0;
     gc.sweep_write_pos = 0;
     gc.sweep_budget = usize::MAX;
-    Gc::header_mut(arr).set_black();
+    test_header_mut(arr).set_black();
 
     unsafe { crate::objects::array::set(arr, 0, child as u64, SLOT_BYTES) };
     crate::gc_types::typed_write_barrier_range_by_meta(
         &mut gc,
         arr,
-        crate::objects::array::data_ptr_bytes(arr),
+        test_array::data_ptr_bytes(arr),
         1,
         SLOT_BYTES,
         elem_meta,
         None,
     );
-    assert!(Gc::header(child).is_gray());
+    assert!(test_header(child).is_gray());
 
     let work = gc_step(
         &mut gc,
         |gc| gc.mark_gray(arr),
-        |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
+        |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
         |dead| finalized.push(dead),
     );
 
@@ -783,7 +794,7 @@ fn test_sweep_initialized_array_scans_copied_old_child() {
     let mut gc = Gc::new();
     let elem_meta = ValueMeta::new(0, ValueKind::String);
     let child = crate::objects::string::create(&mut gc, b"child");
-    let child_array = crate::objects::slice::array_ref(child);
+    let child_array = test_slice::array_ref(child);
     let new_arr_root = Cell::new(core::ptr::null_mut::<Slot>());
     let mut finalized = Vec::new();
 
@@ -797,12 +808,12 @@ fn test_sweep_initialized_array_scans_copied_old_child() {
     unsafe { crate::objects::array::set(new_arr, 0, child as u64, SLOT_BYTES) };
     gc.mark_allocated_for_scan(new_arr);
     new_arr_root.set(new_arr);
-    assert!(Gc::header(new_arr).is_gray());
+    assert!(test_header(new_arr).is_gray());
 
     let work = gc_step(
         &mut gc,
         |gc| gc.mark_gray(new_arr_root.get()),
-        |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
+        |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
         |dead| finalized.push(dead),
     );
 
@@ -820,9 +831,9 @@ fn test_sweep_initialized_map_scans_copied_old_child() {
     let mut gc = Gc::new();
     let str_meta = ValueMeta::new(0, ValueKind::String);
     let key = crate::objects::string::create(&mut gc, b"key");
-    let key_array = crate::objects::slice::array_ref(key);
+    let key_array = test_slice::array_ref(key);
     let child = crate::objects::string::create(&mut gc, b"child");
-    let child_array = crate::objects::slice::array_ref(child);
+    let child_array = test_slice::array_ref(child);
     let new_map_root = Cell::new(core::ptr::null_mut::<Slot>());
     let mut finalized = Vec::new();
 
@@ -840,12 +851,12 @@ fn test_sweep_initialized_map_scans_copied_old_child() {
     .expect("GC map root test string key must be hashable");
     gc.mark_allocated_for_scan(new_map);
     new_map_root.set(new_map);
-    assert!(Gc::header(new_map).is_gray());
+    assert!(test_header(new_map).is_gray());
 
     let work = gc_step(
         &mut gc,
         |gc| gc.mark_gray(new_map_root.get()),
-        |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
+        |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
         |dead| finalized.push(dead),
     );
 
@@ -887,7 +898,7 @@ fn test_object_allocated_after_partial_sweep_survives_as_late_root() {
     let work = gc_step(
         &mut gc,
         |gc| gc.mark_gray(late_root),
-        |gc, obj| crate::gc_types::scan_object(gc, obj, &[], &empty_closure_scan_layout),
+        |gc, obj| test_scan_object(gc, obj, &[], &empty_closure_scan_layout),
         |dead| finalized.push(dead),
     );
 

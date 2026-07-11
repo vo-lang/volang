@@ -212,6 +212,7 @@ fn test_context(
         prepare_closure_call_fn: None,
         prepare_iface_call_fn: None,
         ic_table: core::ptr::null_mut(),
+        execution_budget: vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS,
     }
 }
 
@@ -844,7 +845,8 @@ fn vm_closure_call_signature_002_jit_prepare_closure_call_rejects_closure_alloca
 
     let mut gc = Gc::new();
     let closure_ref = closure::create(&mut gc, 0, 0);
-    vo_runtime::gc::Gc::header_mut(closure_ref).slots = (closure::HEADER_SLOTS + 1) as u16;
+    unsafe { vo_runtime::gc::Gc::header_mut(closure_ref) }.slots =
+        (closure::HEADER_SLOTS + 1) as u16;
     let mut itab_cache = ItabCache::new();
     let safepoint_flag = false;
     let mut panic_flag = false;

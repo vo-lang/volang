@@ -271,11 +271,33 @@ pub fn run_with_output_interruptible_observed(
         .map_err(|e| vm_err_to_run_err(&vm, &e))?;
 
     let outcome = vm.run().map_err(|e| vm_err_to_run_err(&vm, &e))?;
-    if outcome == SchedulingOutcome::Blocked {
-        let e = vm.deadlock_err();
-        return Err(vm_err_to_run_err(&vm, &e));
-    }
+    require_terminal_outcome(&vm, outcome)?;
     Ok(run_observation(&vm))
+}
+
+fn require_terminal_outcome(vm: &Vm, outcome: SchedulingOutcome) -> Result<(), RunError> {
+    match outcome {
+        SchedulingOutcome::Completed => Ok(()),
+        SchedulingOutcome::Blocked => Err(vm_err_to_run_err(vm, &vm.deadlock_err())),
+        SchedulingOutcome::Suspended => Err(RunError::Runtime(RuntimeError {
+            message:
+                "execution suspended with pending island work; continue it through a VM session"
+                    .to_string(),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        })),
+        SchedulingOutcome::SuspendedForHostEvents => Err(RunError::Runtime(RuntimeError {
+            message: "execution suspended for host events; continue it through an async VM session"
+                .to_string(),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        })),
+        SchedulingOutcome::Panicked => Err(RunError::Runtime(RuntimeError {
+            message: "VM reported a panic outcome without a structured runtime error".to_string(),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        })),
+    }
 }
 
 #[cfg(feature = "jit")]
@@ -337,6 +359,38 @@ fn load_extensions(specs: &[NativeExtensionSpec]) -> Result<Option<ExtensionLoad
         })
     })?;
     Ok(Some(loader))
+}
+
+#[cfg(test)]
+mod terminal_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn suspended_outcomes_are_explicit_engine_errors() {
+        let vm = Vm::new();
+        for (outcome, expected) in [
+            (SchedulingOutcome::Suspended, "pending island work"),
+            (
+                SchedulingOutcome::SuspendedForHostEvents,
+                "suspended for host events",
+            ),
+            (
+                SchedulingOutcome::Panicked,
+                "without a structured runtime error",
+            ),
+        ] {
+            let error = require_terminal_outcome(&vm, outcome)
+                .expect_err("non-terminal engine outcome must be surfaced");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn completed_outcome_is_the_only_direct_success() {
+        let vm = Vm::new();
+        require_terminal_outcome(&vm, SchedulingOutcome::Completed)
+            .expect("completed execution should succeed");
+    }
 }
 
 #[cfg(all(test, feature = "jit"))]
