@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:21285292bd2cc4c0d699549e74ae141a2fb0c26f7377f6effacd26d3eeb040b1",
+    "voDevSourceDigest": "sha256:ff73f6f525d329b6aa721bf27f173ae29cbfbd464b4badb8dc3c2b4337fdd7fe",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -48,9 +48,9 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "8fc26740bf0059fcfde23b0fa89b523b0d2428ea",
+    "commit": "19961d06d27a7dde3a418b42a9a39ff4e24199af",
     "dirty": false,
-    "filesDigest": "sha256:9e337b4842f6a20dfdf2123ff7cc9332d153de8223034d1ccaca483cf7562b3c",
+    "filesDigest": "sha256:ac109fcdbfee0a0482fe81d5e4f75c7db48a109a0f5f81be224e1ce97ee40297",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
@@ -195,8 +195,8 @@
       },
       {
         "path": "render_stress.vo",
-        "digest": "sha256:4148a40a4b5d276347ca6a8e579da66c547a849787e3bb0669ee8f4552d3180c",
-        "size": 9453
+        "digest": "sha256:dc746a6b747fe2d4259498014f62e1cb9ef39084910fd8ff386be408914816f9",
+        "size": 9528
       },
       {
         "path": "runtime_owners.vo",
@@ -251,7 +251,7 @@
         "expiresAt": "2027-01-31T00:00:00.000Z"
       }
     ],
-    "sourceFilesDigest": "sha256:ff2cb88009346e7a6cb14762bf1d3dd13488d2337809416838978b93e7e89753"
+    "sourceFilesDigest": "sha256:1c0024db4aac25f84ceb06b1c909a0a18fc0c68a35ea635d14304f7d7c8e1ce3"
   },
   "producers": [
     {
@@ -2095,9 +2095,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:d7f898b3f425ccee116241f212013897a5171f4300685c631a3eac1023616214",
+      "digest": "sha256:25cd1f1512e342440a3c0801c4dca11adc376571b1f6ec4a39c43cf461a50468",
       "path": "project.json",
-      "size": 22867121
+      "size": 22867200
     },
     {
       "digest": "sha256:21d5a3522caa0e40458907e05218e75d71403b5dcb45605a8a78ed345c1692f0",
