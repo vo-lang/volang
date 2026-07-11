@@ -177,6 +177,19 @@ pub(crate) fn lint_task_file_with_options(
         validate_unique_values("task", &task.name, "output", &task.outputs)?;
         validate_unique_values("task", &task.name, "dependency", &task.needs)?;
         validate_unique_values("task", &task.name, "platform", &task.platforms)?;
+        validate_unique_values("task", &task.name, "Linux package", &task.linux_packages)?;
+        for package in &task.linux_packages {
+            if package.is_empty()
+                || !package
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+            {
+                bail!(
+                    "task {} Linux package {package:?} must be a non-empty Debian package name",
+                    task.name
+                );
+            }
+        }
         validate_unique_values("task", &task.name, "tag", &task.tags)?;
         for tag in &task.tags {
             validate_ascii_slug("task tag", tag, &['-', '_', '.'])?;

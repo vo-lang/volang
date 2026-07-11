@@ -63,6 +63,8 @@ pub(crate) struct Task {
     #[serde(default)]
     pub(crate) platforms: Vec<String>,
     #[serde(default)]
+    pub(crate) linux_packages: Vec<String>,
+    #[serde(default)]
     pub(crate) shell: bool,
 }
 

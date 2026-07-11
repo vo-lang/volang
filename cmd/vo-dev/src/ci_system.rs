@@ -146,6 +146,7 @@ struct MatrixRow {
     node_lockfiles: String,
     rust_cache_workspaces: String,
     wasm_pack_version: String,
+    linux_packages: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +164,7 @@ pub(crate) struct CiMetadata {
     node_lockfiles: String,
     rust_cache_workspaces: String,
     wasm_pack_version: String,
+    linux_packages: String,
     checkout: bool,
     checkout_repository: String,
     checkout_path: String,
@@ -205,6 +207,7 @@ impl CiMetadata {
             ("node_lockfiles", self.node_lockfiles.clone()),
             ("rust_cache_workspaces", self.rust_cache_workspaces.clone()),
             ("wasm_pack_version", self.wasm_pack_version.clone()),
+            ("linux_packages", self.linux_packages.clone()),
             ("checkout", self.checkout.to_string()),
             ("checkout_repository", self.checkout_repository.clone()),
             ("checkout_path", self.checkout_path.clone()),
@@ -362,6 +365,7 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
             } else {
                 String::new()
             },
+            linux_packages: task.linux_packages.join(" "),
             tools: tools.into_iter().collect(),
             repos: repos.into_iter().collect(),
         });
@@ -415,6 +419,14 @@ pub(crate) fn ci_metadata_for(root: &Path, task_names: &[String]) -> Result<CiMe
         } else {
             String::new()
         },
+        linux_packages: task_names
+            .iter()
+            .filter_map(|name| task_map.get(name.strip_prefix("task:").unwrap_or(name)))
+            .flat_map(|task| task.linux_packages.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" "),
         checkout: checkout.enabled,
         checkout_repository: checkout.repository,
         checkout_path: checkout.path,

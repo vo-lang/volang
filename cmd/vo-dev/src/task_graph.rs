@@ -261,6 +261,7 @@ pub(crate) fn task_to_json(task: &Task) -> serde_json::Value {
         "internal": task.internal,
         "timeout_sec": task.timeout_sec,
         "platforms": task.platforms,
+        "linux_packages": task.linux_packages,
         "shell": task.shell,
     })
 }

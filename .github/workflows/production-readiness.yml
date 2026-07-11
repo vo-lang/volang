@@ -81,6 +81,12 @@ jobs:
           path: ${{ matrix.checkout_blockkart_path }}
           ref: ${{ matrix.checkout_blockkart_expected_commit }}
 
+      - name: Install Linux task dependencies
+        if: matrix.linux_packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ${{ matrix.linux_packages }}
+
       - name: Install Rust
         if: matrix.rust
         uses: ./.github/actions/setup-rust

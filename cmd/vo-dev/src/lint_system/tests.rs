@@ -20,6 +20,7 @@ fn task(name: &str) -> Task {
         internal: false,
         timeout_sec: Some(60),
         platforms: vec![],
+        linux_packages: vec![],
         shell: false,
     }
 }

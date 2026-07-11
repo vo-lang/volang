@@ -25,7 +25,7 @@ const artifactInputs = [
 ];
 const artifactGenerator = ['vo-dev', 'task', 'run', 'task:docs-sync'];
 const artifactTaskId = 'docs-sync';
-const artifactGeneratorVersion = 3;
+const artifactGeneratorVersion = 4;
 
 function sha256Digest(bytes) {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -117,11 +117,11 @@ async function writeTree(outRoot) {
       version: artifactGeneratorVersion,
     },
     toolchain: {
-      node: process.version,
+      node: `v${process.versions.node.split('.')[0]}`,
       voDevSourceDigest: await volangGeneratorSourceDigest(),
     },
     sourceRoots: {
-      volang: root,
+      volang: '.',
     },
     inputs: artifactInputs,
     docs: [],

@@ -19,14 +19,14 @@
       "task:docs-sync"
     ],
     "script": "scripts/ci/docs_sync.mjs",
-    "version": 3
+    "version": 4
   },
   "toolchain": {
-    "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:f2e33d2632a0454fee55191d721135d5184656ac63bd0dc95c5ecc098106c2c1"
+    "node": "v24",
+    "voDevSourceDigest": "sha256:067c55785d9099efe8de216b4ba00f325e4b1c0e7a6b943ffbe7ac502257663e"
   },
   "sourceRoots": {
-    "volang": "/Users/macm1/code/github/volang"
+    "volang": "."
   },
   "inputs": [
     "scripts/ci/docs_sync.mjs",

@@ -27,6 +27,7 @@ unsafe extern "C" {
 }
 
 pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
+    ensure_volang_ci_alias(root)?;
     let config = load_tasks(root)?;
     let task_map = task_map(&config)?;
     let gate_plan_env = gate_plan_env(&config)?;
@@ -68,6 +69,56 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
         println!("ok: {name} ({elapsed:.1}s)");
     }
     Ok(())
+}
+
+fn ensure_volang_ci_alias(root: &Path) -> Result<()> {
+    let ci_modules = root.join("ci_modules");
+    let alias = ci_modules.join("volang");
+    match fs::symlink_metadata(&alias) {
+        Ok(_) => {
+            let actual = alias
+                .canonicalize()
+                .with_context(|| format!("could not resolve {}", alias.display()))?;
+            let expected = root
+                .canonicalize()
+                .with_context(|| format!("could not resolve {}", root.display()))?;
+            if actual != expected {
+                bail!(
+                    "{} must resolve to the volang root {}; found {}",
+                    alias.display(),
+                    expected.display(),
+                    actual.display()
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(&ci_modules).with_context(|| {
+                format!(
+                    "could not create CI module directory {}",
+                    ci_modules.display()
+                )
+            })?;
+            create_volang_ci_alias(&alias).with_context(|| {
+                format!(
+                    "could not create {} as an alias for the volang root",
+                    alias.display()
+                )
+            })
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("could not inspect CI module alias {}", alias.display())),
+    }
+}
+
+#[cfg(unix)]
+fn create_volang_ci_alias(alias: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink("..", alias)
+}
+
+#[cfg(windows)]
+fn create_volang_ci_alias(alias: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir("..", alias)
 }
 
 fn ci_run_id() -> Result<String> {
@@ -360,6 +411,39 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    #[test]
+    fn volang_ci_alias_is_created_and_rejects_wrong_targets() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-vo-dev-ci-alias-{stamp}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("root");
+
+        ensure_volang_ci_alias(&root).expect("create self alias");
+        assert_eq!(
+            root.join("ci_modules/volang")
+                .canonicalize()
+                .expect("alias target"),
+            root.canonicalize().expect("root target")
+        );
+
+        fs::remove_file(root.join("ci_modules/volang")).expect("remove alias");
+        fs::create_dir_all(root.join("wrong")).expect("wrong target");
+        std::os::unix::fs::symlink("../wrong", root.join("ci_modules/volang"))
+            .expect("wrong alias");
+        let error = ensure_volang_ci_alias(&root).expect_err("wrong alias must fail");
+        assert!(error
+            .to_string()
+            .contains("must resolve to the volang root"));
+
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn prepare_task_outputs_removes_only_ephemeral_target_outputs() {
