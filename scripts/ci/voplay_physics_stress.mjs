@@ -121,7 +121,7 @@ function prepareScenarioProject() {
 
 function runScenarioProgram() {
   prepareScenarioProject();
-  const command = ['./d.py', 'run', path.relative(root, projectEntry)];
+  const command = ['./d.py', 'run', path.relative(root, projectEntry), '--mode=jit', '--release'];
   const result = spawnSync(command[0], command.slice(1), {
     cwd: root,
     env: {
