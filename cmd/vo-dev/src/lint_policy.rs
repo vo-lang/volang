@@ -105,6 +105,54 @@ pub(crate) fn validate_structured_input_reference(
     Ok(())
 }
 
+pub(crate) fn contains_glob_meta(value: &str) -> bool {
+    value.contains('*') || value.contains('?') || value.contains('[') || value.contains(']')
+}
+
+pub(crate) fn artifact_path_contains(parent: &str, child: &str) -> bool {
+    child == parent || child.starts_with(&format!("{}/", parent.trim_end_matches('/')))
+}
+
+pub(crate) fn validate_ascii_slug(kind: &str, value: &str, extra: &[char]) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{kind} cannot be empty");
+    }
+    if value.trim() != value {
+        bail!("{kind} {value:?} cannot contain surrounding whitespace");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || extra.contains(&ch))
+    {
+        bail!("{kind} {value} must use lowercase ASCII letters, digits, or approved punctuation");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_unique_values(
+    owner_kind: &str,
+    owner_name: &str,
+    field: &str,
+    values: &[String],
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    for value in values {
+        if !seen.insert(value) {
+            bail!("{owner_kind} {owner_name} has duplicate {field} {value}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn declared_repo_names(project: &ProjectFile) -> HashSet<String> {
+    project
+        .first_party
+        .iter()
+        .chain(project.external_project.iter())
+        .map(|repo| repo.name.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_structured_input_reference;
@@ -173,52 +221,4 @@ mod tests {
         )
         .is_err());
     }
-}
-
-pub(crate) fn contains_glob_meta(value: &str) -> bool {
-    value.contains('*') || value.contains('?') || value.contains('[') || value.contains(']')
-}
-
-pub(crate) fn artifact_path_contains(parent: &str, child: &str) -> bool {
-    child == parent || child.starts_with(&format!("{}/", parent.trim_end_matches('/')))
-}
-
-pub(crate) fn validate_ascii_slug(kind: &str, value: &str, extra: &[char]) -> Result<()> {
-    if value.trim().is_empty() {
-        bail!("{kind} cannot be empty");
-    }
-    if value.trim() != value {
-        bail!("{kind} {value:?} cannot contain surrounding whitespace");
-    }
-    if !value
-        .chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || extra.contains(&ch))
-    {
-        bail!("{kind} {value} must use lowercase ASCII letters, digits, or approved punctuation");
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_unique_values(
-    owner_kind: &str,
-    owner_name: &str,
-    field: &str,
-    values: &[String],
-) -> Result<()> {
-    let mut seen = HashSet::new();
-    for value in values {
-        if !seen.insert(value) {
-            bail!("{owner_kind} {owner_name} has duplicate {field} {value}");
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn declared_repo_names(project: &ProjectFile) -> HashSet<String> {
-    project
-        .first_party
-        .iter()
-        .chain(project.external_project.iter())
-        .map(|repo| repo.name.clone())
-        .collect()
 }

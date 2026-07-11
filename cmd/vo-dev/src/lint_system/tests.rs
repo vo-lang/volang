@@ -2168,40 +2168,34 @@ fn voplay_gate_source_fixture() -> (String, String, String, String) {
     let architecture = VOPLAY_RENDER_ARCHITECTURE_FAILURE_CODES
         .iter()
         .copied()
-        .chain(
-            [
-                "constructsRuntimeStage(rendererAuditSource, token)",
-                "execute_render_node!",
-                "SurfaceMaterialAtTrackPosition",
-                "Body\\.SetPosition",
-                "applyPoseResetToBackend",
-                "ApplyVehicleForces",
-                "PrimitiveStats",
-                "primitive3d\\.NewBuilder",
-                "w\\.player\\.SetVelocity",
-            ]
-            .into_iter(),
-        )
+        .chain([
+            "constructsRuntimeStage(rendererAuditSource, token)",
+            "execute_render_node!",
+            "SurfaceMaterialAtTrackPosition",
+            "Body\\.SetPosition",
+            "applyPoseResetToBackend",
+            "ApplyVehicleForces",
+            "PrimitiveStats",
+            "primitive3d\\.NewBuilder",
+            "w\\.player\\.SetVelocity",
+        ])
         .collect::<Vec<_>>()
         .join("\n");
     let blockkart_boundary = VOPLAY_BLOCKKART_BOUNDARY_FAILURE_CODES
         .iter()
         .copied()
-        .chain(
-            [
-                "SurfaceMaterialAtTrackPosition",
-                "Body\\.SetPosition",
-                "applyPoseResetToBackend",
-                "ApplyVehicleForces",
-                "BackendApplyHash",
-                "PrimitiveStats",
-                "w\\.vehicle\\.SetPose",
-                "primitive3d\\.NewBuilder",
-                "w\\.player\\.SetVelocity",
-                "directEntityMutation",
-            ]
-            .into_iter(),
-        )
+        .chain([
+            "SurfaceMaterialAtTrackPosition",
+            "Body\\.SetPosition",
+            "applyPoseResetToBackend",
+            "ApplyVehicleForces",
+            "BackendApplyHash",
+            "PrimitiveStats",
+            "w\\.vehicle\\.SetPose",
+            "primitive3d\\.NewBuilder",
+            "w\\.player\\.SetVelocity",
+            "directEntityMutation",
+        ])
         .collect::<Vec<_>>()
         .join("\n");
     (readiness, render_stress, architecture, blockkart_boundary)
