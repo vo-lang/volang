@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24.16.0",
-    "voDevSourceDigest": "sha256:33691f19c1f38f6973c2940ea738d707e268ad4931c61354d3b4849caebcec4f",
+    "voDevSourceDigest": "sha256:21285292bd2cc4c0d699549e74ae141a2fb0c26f7377f6effacd26d3eeb040b1",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -48,9 +48,9 @@
     "module-cache:vogui"
   ],
   "project": {
-    "commit": "49498844a61f081ea5bf6bd6687ffb9cfd35786c",
+    "commit": "8fc26740bf0059fcfde23b0fa89b523b0d2428ea",
     "dirty": false,
-    "filesDigest": "sha256:5d9401c61527a56f276b12f5530f3712b5df61bd4ed49ca5c7a488ad2d5fa0ce",
+    "filesDigest": "sha256:9e337b4842f6a20dfdf2123ff7cc9332d153de8223034d1ccaca483cf7562b3c",
     "lockRewrite": {
       "schemaVersion": 1,
       "path": "vo.lock",
@@ -135,8 +135,8 @@
       },
       {
         "path": "hud_presenter.vo",
-        "digest": "sha256:2c43a6504ce042a79e18f7362a1aeeac227c67b46775f87d75fdf78be56e4b80",
-        "size": 17862
+        "digest": "sha256:1b81a151e22823f9836f6594c19e9d9e116ffe4c668a0c9428518bb8e2f79624",
+        "size": 17948
       },
       {
         "path": "kart_render_pose.vo",
@@ -165,8 +165,8 @@
       },
       {
         "path": "performance_budget.vo",
-        "digest": "sha256:2eef11df8fdd0cb88e85558868d3c6dd55edc9fde15f294a97ea9ac4c5b8ba76",
-        "size": 19404
+        "digest": "sha256:1badd2cb4cc79d4caa4d23b9dbefcccdac787f6fce2a33e204ff8b52b539b8e5",
+        "size": 19318
       },
       {
         "path": "play_state.vo",
@@ -195,8 +195,8 @@
       },
       {
         "path": "render_stress.vo",
-        "digest": "sha256:2639952b3cbaf05497ce1365ba4b31ad001a5f7758596ab4cfdc3e58b2e2e397",
-        "size": 9454
+        "digest": "sha256:4148a40a4b5d276347ca6a8e579da66c547a849787e3bb0669ee8f4552d3180c",
+        "size": 9453
       },
       {
         "path": "runtime_owners.vo",
@@ -251,7 +251,7 @@
         "expiresAt": "2027-01-31T00:00:00.000Z"
       }
     ],
-    "sourceFilesDigest": "sha256:27b0850782e5bc831453996c7ad9826970770d4ee47bb8c2b2bfc77630715174"
+    "sourceFilesDigest": "sha256:ff2cb88009346e7a6cb14762bf1d3dd13488d2337809416838978b93e7e89753"
   },
   "producers": [
     {
@@ -2095,9 +2095,9 @@
   ],
   "outputs": [
     {
-      "digest": "sha256:ca679c9bfa9f8a1f88fb8a83ed6c18407c8766184f5094d3799b82e09b9a23de",
+      "digest": "sha256:d7f898b3f425ccee116241f212013897a5171f4300685c631a3eac1023616214",
       "path": "project.json",
-      "size": 22867122
+      "size": 22867121
     },
     {
       "digest": "sha256:21d5a3522caa0e40458907e05218e75d71403b5dcb45605a8a78ed345c1692f0",
