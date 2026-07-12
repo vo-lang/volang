@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       node_version: ${{ steps.ci_metadata.outputs.node_version }}
+      studio_build_id: ${{ steps.studio_build_id.outputs.value }}
     steps:
       - name: Checkout volang
         uses: actions/checkout@v5
@@ -107,6 +108,10 @@ jobs:
       - name: Build Studio site
         run: cargo run -q -p vo-dev -- task run studio-browser-smoke
 
+      - name: Read Studio build ID
+        id: studio_build_id
+        run: echo "value=$(node apps/studio/scripts/studio_build_id.mjs)" >> "$GITHUB_OUTPUT"
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
@@ -137,4 +142,5 @@ jobs:
       - name: Smoke BlockKart deployment
         env:
           BLOCKKART_SMOKE_BASE_URL: ${{ steps.deployment.outputs.page_url }}
+          BLOCKKART_SMOKE_BUILD_ID: ${{ needs.build.outputs.studio_build_id }}
         run: cargo run -q -p vo-dev -- task run task:blockkart-smoke-remote

@@ -2,7 +2,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveStudioBuildId } from '../../apps/studio/scripts/studio_build_id.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -150,8 +149,7 @@ async function runHttpSmoke(baseUrl, buildId) {
 }
 
 const baseUrl = argValue('--base-url') || process.env.BLOCKKART_SMOKE_BASE_URL || '';
-const explicitBuildId = argValue('--build-id') || process.env.BLOCKKART_SMOKE_BUILD_ID || '';
-const buildId = explicitBuildId || (baseUrl ? resolveStudioBuildId(process.env) : '');
+const buildId = argValue('--build-id') || process.env.BLOCKKART_SMOKE_BUILD_ID || '';
 
 if (!baseUrl) {
   runStaticSmoke();
