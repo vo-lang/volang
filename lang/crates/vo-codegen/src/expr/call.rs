@@ -5,10 +5,10 @@ use vo_analysis::objects::{ObjKey, TypeKey};
 use vo_analysis::selection::{Selection, SelectionKind};
 use vo_common::abi::abi_lookup_name;
 use vo_common::symbol::Symbol;
+use vo_runtime::bytecode::ReturnShape;
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
-use vo_vm::bytecode::ReturnShape;
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

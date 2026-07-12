@@ -322,7 +322,7 @@ fn vm_endpoint_same_island_recv_request_blocks_before_dispatch_028() {
     vm.state
         .endpoint_registry
         .register_live(endpoint_id, endpoint);
-    vo_runtime::objects::queue::close(endpoint);
+    queue::close(endpoint);
 
     let current = vm.scheduler.spawn(Fiber::new(0));
     vm.scheduler.schedule_next().unwrap();
@@ -494,7 +494,7 @@ fn vm_arch_boundary_fact_sources_001_source_owners_are_documented_in_code() {
 
     let vm_helpers = include_str!("../../vm/helpers.rs");
     assert!(vm_helpers.contains("pub(crate) use vo_runtime::objects::closure::ClosureCallLayout;"));
-    assert!(vm_helpers.contains("pub(crate) fn closure_call_layout("));
+    assert!(vm_helpers.contains("pub(crate) unsafe fn closure_call_layout("));
     assert!(vm_helpers.contains("closure::call_layout("));
 
     let frame_call = include_str!("../../frame_call.rs");

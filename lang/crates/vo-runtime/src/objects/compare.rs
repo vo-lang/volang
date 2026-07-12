@@ -1,7 +1,11 @@
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 //! Deep comparison for interface values.
 //!
 //! Shared logic used by both VM (exec_iface_eq) and JIT (vo_iface_eq).
+//!
+//! # Safety contract
+//! Unsafe comparisons require canonical live objects matching the supplied
+//! runtime type and metadata graph for the duration of recursive traversal.
 
 use crate::gc::GcRef;
 use crate::objects::{array, string};
@@ -11,6 +15,8 @@ use vo_common_core::bytecode::Module;
 
 pub const HASH_K: u64 = 0xf1357aea2e62a9c5;
 pub const HASH_SEED: u64 = 0x517cc1b727220a95;
+pub const UNCOMPARABLE_INTERFACE_ERROR: &str =
+    "runtime error: comparing uncomparable type in interface value";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnhashableType;
@@ -128,7 +134,7 @@ pub fn iface_is_hashable(slot0: u64, module: &Module) -> bool {
 /// Deep hash of inline struct data (key slots), considering string fields by content.
 /// For map keys with struct type containing string fields.
 /// `key` is the struct field data laid out directly in the key slots.
-pub fn deep_hash_struct_inline_checked(
+pub unsafe fn deep_hash_struct_inline_checked(
     key: &[u64],
     rttid: u32,
     module: &Module,
@@ -148,11 +154,11 @@ pub fn deep_hash_struct_inline_checked(
 /// Deep hash of inline struct data (key slots), considering string fields by content.
 /// For map keys with struct type containing string fields.
 /// `key` is the struct field data laid out directly in the key slots.
-pub fn deep_hash_struct_inline(key: &[u64], rttid: u32, module: &Module) -> u64 {
+pub unsafe fn deep_hash_struct_inline(key: &[u64], rttid: u32, module: &Module) -> u64 {
     deep_hash_struct_inline_checked(key, rttid, module).unwrap_or_else(|_| shallow_hash_inline(key))
 }
 
-fn deep_hash_struct_ref_checked(
+unsafe fn deep_hash_struct_ref_checked(
     ptr: GcRef,
     rttid: u32,
     module: &Module,
@@ -174,7 +180,7 @@ fn deep_hash_struct_ref_checked(
     deep_hash_struct_slots_checked(struct_meta, slots, module)
 }
 
-fn deep_hash_struct_slots_checked(
+unsafe fn deep_hash_struct_slots_checked(
     struct_meta: &vo_common_core::bytecode::StructMeta,
     key: &[u64],
     module: &Module,
@@ -199,7 +205,7 @@ fn deep_hash_struct_slots_checked(
                     if val == 0 {
                         h = h.wrapping_add(0).wrapping_mul(HASH_K);
                     } else {
-                        let s = string::as_bytes(val as GcRef);
+                        let s = unsafe { string::bytes_unchecked(val as GcRef) };
                         for &b in s {
                             h = h.wrapping_add(b as u64).wrapping_mul(HASH_K);
                         }
@@ -246,7 +252,13 @@ fn try_shallow_eq(a: u64, b: u64) -> Option<bool> {
 
 /// Compare two interface values for equality.
 /// Returns: 0 = not equal, 1 = equal, 2 = panic (uncomparable type)
-pub fn iface_eq(b_slot0: u64, b_slot1: u64, c_slot0: u64, c_slot1: u64, module: &Module) -> u64 {
+pub unsafe fn iface_eq(
+    b_slot0: u64,
+    b_slot1: u64,
+    c_slot0: u64,
+    c_slot1: u64,
+    module: &Module,
+) -> u64 {
     // slot0 format: [itab_id:32 | rttid:24 | vk:8]
     // Compare only rttid + vk (low 32 bits), NOT itab_id
     let b_type = (b_slot0 & 0xFFFFFFFF) as u32;
@@ -265,8 +277,9 @@ pub fn iface_eq(b_slot0: u64, b_slot1: u64, c_slot0: u64, c_slot1: u64, module: 
 
     let result = match vk {
         ValueKind::String => {
-            if try_shallow_eq(b_slot1, c_slot1).unwrap_or_else(|| {
-                string::as_str(b_slot1 as GcRef) == string::as_str(c_slot1 as GcRef)
+            if try_shallow_eq(b_slot1, c_slot1).unwrap_or_else(|| unsafe {
+                string::bytes_unchecked(b_slot1 as GcRef)
+                    == string::bytes_unchecked(c_slot1 as GcRef)
             }) {
                 EqResult::Equal
             } else {
@@ -297,7 +310,7 @@ pub fn iface_eq(b_slot0: u64, b_slot1: u64, c_slot0: u64, c_slot1: u64, module: 
 
 /// Core struct comparison logic. Returns true if equal.
 /// `get_slot` returns (a_val, b_val, a_next, b_next) for the given index.
-fn deep_eq_struct_core<F>(
+unsafe fn deep_eq_struct_core<F>(
     struct_meta: &vo_common_core::bytecode::StructMeta,
     len: usize,
     module: &Module,
@@ -325,8 +338,8 @@ where
                         if a_val == 0 || b_val == 0 {
                             return EqResult::NotEqual;
                         }
-                        let a_str = string::as_str(a_val as GcRef);
-                        let b_str = string::as_str(b_val as GcRef);
+                        let a_str = unsafe { string::bytes_unchecked(a_val as GcRef) };
+                        let b_str = unsafe { string::bytes_unchecked(b_val as GcRef) };
                         if a_str != b_str {
                             return EqResult::NotEqual;
                         }
@@ -365,7 +378,7 @@ fn get_struct_meta(rttid: u32, module: &Module) -> Option<&vo_common_core::bytec
 }
 
 /// Deep comparison of two inline struct key data.
-pub fn deep_eq_struct_inline(a: &[u64], b: &[u64], rttid: u32, module: &Module) -> bool {
+pub unsafe fn deep_eq_struct_inline(a: &[u64], b: &[u64], rttid: u32, module: &Module) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -385,7 +398,7 @@ pub fn deep_eq_struct_inline(a: &[u64], b: &[u64], rttid: u32, module: &Module) 
     )
 }
 
-fn deep_eq_struct_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqResult {
+unsafe fn deep_eq_struct_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqResult {
     let struct_meta = match get_struct_meta(rttid, module) {
         Some(m) => m,
         None => {
@@ -416,14 +429,18 @@ fn deep_eq_struct_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqR
 }
 
 /// Deep comparison of two struct values on heap.
-pub fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
+pub unsafe fn deep_eq_struct(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
     matches!(deep_eq_struct_result(a, b, rttid, module), EqResult::Equal)
 }
 
 /// Deep comparison of two array values.
 /// Hash an interface value for use as map key.
 /// Uses content-based hashing for comparable types (string, struct, array, primitives).
-pub fn iface_hash_checked(slot0: u64, slot1: u64, module: &Module) -> Result<u64, UnhashableType> {
+pub unsafe fn iface_hash_checked(
+    slot0: u64,
+    slot1: u64,
+    module: &Module,
+) -> Result<u64, UnhashableType> {
     let vk = ValueKind::from_u8((slot0 & 0xFF) as u8);
     let rttid = ((slot0 >> 8) & 0xFFFFFF) as u32;
     if !value_is_comparable(rttid, vk, module) {
@@ -437,7 +454,7 @@ pub fn iface_hash_checked(slot0: u64, slot1: u64, module: &Module) -> Result<u64
     match vk {
         ValueKind::String => {
             if slot1 != 0 {
-                let s = string::as_bytes(slot1 as GcRef);
+                let s = unsafe { string::bytes_unchecked(slot1 as GcRef) };
                 for &b in s {
                     h = h.wrapping_add(b as u64).wrapping_mul(HASH_K);
                 }
@@ -464,12 +481,16 @@ pub fn iface_hash_checked(slot0: u64, slot1: u64, module: &Module) -> Result<u64
     Ok(h.rotate_left(5))
 }
 
-pub fn iface_hash(slot0: u64, slot1: u64, module: &Module) -> u64 {
+pub unsafe fn iface_hash(slot0: u64, slot1: u64, module: &Module) -> u64 {
     iface_hash_checked(slot0, slot1, module)
         .unwrap_or_else(|_| shallow_hash_inline(&[slot0, slot1]))
 }
 
-fn deep_hash_array_checked(arr: GcRef, rttid: u32, module: &Module) -> Result<u64, UnhashableType> {
+unsafe fn deep_hash_array_checked(
+    arr: GcRef,
+    rttid: u32,
+    module: &Module,
+) -> Result<u64, UnhashableType> {
     if arr.is_null() {
         return Ok(HASH_SEED.rotate_left(5));
     }
@@ -494,7 +515,7 @@ fn deep_hash_array_checked(arr: GcRef, rttid: u32, module: &Module) -> Result<u6
             for i in 0..len {
                 let val = unsafe { *data.add(i * elem_slots) };
                 if val != 0 {
-                    for &b in string::as_bytes(val as GcRef) {
+                    for &b in unsafe { string::bytes_unchecked(val as GcRef) } {
                         h = h.wrapping_add(b as u64).wrapping_mul(HASH_K);
                     }
                 }
@@ -529,7 +550,7 @@ fn deep_hash_array_checked(arr: GcRef, rttid: u32, module: &Module) -> Result<u6
     Ok(h.rotate_left(5))
 }
 
-fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqResult {
+unsafe fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqResult {
     let a_len = array::len(a);
     let b_len = array::len(b);
 
@@ -589,8 +610,9 @@ fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqRe
 
         let eq = match elem_vk {
             ValueKind::String => {
-                if try_shallow_eq(a_val, b_val).unwrap_or_else(|| {
-                    string::as_str(a_val as GcRef) == string::as_str(b_val as GcRef)
+                if try_shallow_eq(a_val, b_val).unwrap_or_else(|| unsafe {
+                    string::bytes_unchecked(a_val as GcRef)
+                        == string::bytes_unchecked(b_val as GcRef)
                 }) {
                     EqResult::Equal
                 } else {
@@ -626,7 +648,7 @@ fn deep_eq_array_result(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> EqRe
     EqResult::Equal
 }
 
-pub fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
+pub unsafe fn deep_eq_array(a: GcRef, b: GcRef, rttid: u32, module: &Module) -> bool {
     matches!(deep_eq_array_result(a, b, rttid, module), EqResult::Equal)
 }
 
@@ -694,7 +716,10 @@ mod tests {
         assert!(!value_is_comparable(array_rttid, ValueKind::Array, &module));
 
         let struct_slot0 = interface::pack_slot0(0, struct_rttid, ValueKind::Struct);
-        assert_eq!(iface_eq(struct_slot0, 0, struct_slot0, 0, &module), 2);
+        assert_eq!(
+            unsafe { iface_eq(struct_slot0, 0, struct_slot0, 0, &module) },
+            2
+        );
     }
 
     #[test]
@@ -705,8 +730,8 @@ mod tests {
         let array_slot0 = interface::pack_slot0(0, array_rttid, ValueKind::Array);
         assert!(!iface_is_hashable(struct_slot0, &module));
         assert!(!iface_is_hashable(array_slot0, &module));
-        assert!(iface_hash_checked(struct_slot0, 0, &module).is_err());
-        assert!(iface_hash_checked(array_slot0, 0, &module).is_err());
+        assert!(unsafe { iface_hash_checked(struct_slot0, 0, &module) }.is_err());
+        assert!(unsafe { iface_hash_checked(array_slot0, 0, &module) }.is_err());
     }
 
     #[test]

@@ -81,6 +81,23 @@ pub(crate) fn task_tools_recursive(root: &Path, task_name: &str) -> Result<BTree
     task_tools_recursive_from_map(&task_map, task_name)
 }
 
+pub(crate) fn task_repos_recursive_from_map(
+    task_map: &BTreeMap<String, Task>,
+    task_name: &str,
+) -> Result<BTreeSet<String>> {
+    let mut repos = BTreeSet::new();
+    let mut stack = Vec::new();
+    let mut seen = HashSet::new();
+    collect_task_repos(
+        task_name.strip_prefix("task:").unwrap_or(task_name),
+        task_map,
+        &mut repos,
+        &mut stack,
+        &mut seen,
+    )?;
+    Ok(repos)
+}
+
 pub(crate) fn selector_tools_recursive(root: &Path, selector: &str) -> Result<BTreeSet<String>> {
     let config = load_tasks(root)?;
     let task_map = task_map(&config)?;
@@ -141,6 +158,57 @@ fn collect_task_tools(
     Ok(())
 }
 
+fn collect_task_repos(
+    name: &str,
+    task_map: &BTreeMap<String, Task>,
+    repos: &mut BTreeSet<String>,
+    stack: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) -> Result<()> {
+    if seen.contains(name) {
+        return Ok(());
+    }
+    if stack.iter().any(|item| item == name) {
+        stack.push(name.to_string());
+        bail!(
+            "task dependency cycle while collecting repos: {}",
+            stack.join(" -> ")
+        );
+    }
+    stack.push(name.to_string());
+    let task = task_map
+        .get(name)
+        .ok_or_else(|| anyhow!("unknown task for repo collection: {name}"))?;
+    for dep in &task.needs {
+        collect_task_repos(dep, task_map, repos, stack, seen)?;
+    }
+    if let Some(repo) = &task.repo {
+        repos.insert(repo.clone());
+    }
+    for repo in &task.repos {
+        repos.insert(repo.clone());
+    }
+    for input in &task.inputs {
+        if let Some(repo) = input_required_repo(input) {
+            repos.insert(repo.to_string());
+        }
+    }
+    stack.pop();
+    seen.insert(name.to_string());
+    Ok(())
+}
+
+fn input_required_repo(input: &str) -> Option<&str> {
+    let reference = input
+        .strip_prefix("external:")
+        .or_else(|| input.strip_prefix("module-cache:"))
+        .or_else(|| input.strip_prefix("first-party:"))?;
+    let repo = reference
+        .split_once('/')
+        .map_or(reference, |(repo, _)| repo);
+    (!repo.trim().is_empty()).then_some(repo)
+}
+
 pub(crate) fn collect_task_node_workspaces(
     name: &str,
     task_map: &BTreeMap<String, Task>,
@@ -189,9 +257,34 @@ pub(crate) fn task_to_json(task: &Task) -> serde_json::Value {
         "env": task.env,
         "needs": task.needs,
         "repo": task.repo,
+        "repos": task.repos,
         "internal": task.internal,
         "timeout_sec": task.timeout_sec,
         "platforms": task.platforms,
+        "linux_packages": task.linux_packages,
         "shell": task.shell,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::input_required_repo;
+
+    #[test]
+    fn structured_inputs_require_the_declared_repo_only() {
+        assert_eq!(
+            input_required_repo("first-party:voplay/rust/**"),
+            Some("voplay")
+        );
+        assert_eq!(
+            input_required_repo("external:BlockKart/assets/**"),
+            Some("BlockKart")
+        );
+        assert_eq!(
+            input_required_repo("module-cache:vogui/artifact.wasm"),
+            Some("vogui")
+        );
+        assert_eq!(input_required_repo("Cargo.lock"), None);
+        assert_eq!(input_required_repo("first-party:/rust/**"), None);
+    }
 }

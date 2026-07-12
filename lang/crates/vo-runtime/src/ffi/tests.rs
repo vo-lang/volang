@@ -2127,7 +2127,7 @@ fn runtime_map_surfaces_use_checked_map_api_and_pre_set_barriers_048() {
     let ffi_source =
         vo_source_contract::production_source_without_test_modules(include_str!("mod.rs"));
     let map_set_string_key = ffi_source
-        .split("pub fn map_set_string_key(")
+        .split("pub unsafe fn map_set_string_key(")
         .nth(1)
         .and_then(|rest| rest.split("/// Find the rttid").next())
         .expect("ExternCallContext::map_set_string_key section");

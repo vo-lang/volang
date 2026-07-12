@@ -266,7 +266,8 @@ fn marshal_field_value_depth<W: FormatWriter>(
             if str_ref.is_null() {
                 writer.write_string("");
             } else {
-                writer.write_string(str_obj::as_str(str_ref));
+                // Safety: this slot is described as a live string by the runtime type.
+                writer.write_string(&unsafe { str_obj::to_rust_string(str_ref) });
             }
         }
         ValueKind::Struct => {
@@ -351,7 +352,8 @@ fn marshal_any_value_depth<W: FormatWriter>(
             if str_ref.is_null() {
                 writer.write_string("");
             } else {
-                writer.write_string(str_obj::as_str(str_ref));
+                // Safety: this slot is described as a live string by the runtime type.
+                writer.write_string(&unsafe { str_obj::to_rust_string(str_ref) });
             }
         }
         ValueKind::Struct => {
@@ -405,21 +407,17 @@ fn marshal_slice_value_depth<W: FormatWriter>(
     let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
     let elem_vk = elem_value_rttid.value_kind();
     let elem_rttid = elem_value_rttid.rttid();
-    let length = slice::len(slice_ref);
-    let elem_bytes = array::elem_bytes(slice::array_ref(slice_ref));
+    // Safety: the serializer receives a rooted slice whose runtime type was
+    // resolved from the interface metadata above.
+    let length = unsafe { slice::len(slice_ref) };
+    let elem_bytes = unsafe { array::elem_bytes(slice::array_ref(slice_ref)) };
+    let data_ptr = unsafe { slice::data_ptr(slice_ref) };
 
     writer.write_array_start();
     for i in 0..length {
         writer.write_array_elem_start(i == 0);
         marshal_elem_value_depth(
-            call,
-            slice::data_ptr(slice_ref),
-            i,
-            elem_bytes,
-            elem_vk,
-            elem_rttid,
-            writer,
-            depth,
+            call, data_ptr, i, elem_bytes, elem_vk, elem_rttid, writer, depth,
         )?;
         writer.write_array_elem_end();
     }
@@ -442,21 +440,16 @@ fn marshal_array_value_depth<W: FormatWriter>(
     let elem_value_rttid = call.get_elem_value_rttid_from_base(rttid);
     let elem_vk = elem_value_rttid.value_kind();
     let elem_rttid = elem_value_rttid.rttid();
-    let length = array::len(arr_ref);
-    let elem_bytes = array::elem_bytes(arr_ref);
+    // Safety: the serializer receives a rooted array with resolved metadata.
+    let length = unsafe { array::len(arr_ref) };
+    let elem_bytes = unsafe { array::elem_bytes(arr_ref) };
+    let data_ptr = unsafe { array::data_ptr_bytes(arr_ref) };
 
     writer.write_array_start();
     for i in 0..length {
         writer.write_array_elem_start(i == 0);
         marshal_elem_value_depth(
-            call,
-            array::data_ptr_bytes(arr_ref),
-            i,
-            elem_bytes,
-            elem_vk,
-            elem_rttid,
-            writer,
-            depth,
+            call, data_ptr, i, elem_bytes, elem_vk, elem_rttid, writer, depth,
         )?;
         writer.write_array_elem_end();
     }
@@ -517,11 +510,12 @@ fn marshal_map_value_depth<W: FormatWriter>(
         return Ok(());
     }
 
-    let key_vk = map::key_kind(map_ref);
-    let val_vk = map::val_kind(map_ref);
+    // Safety: the serializer receives a rooted map with resolved metadata.
+    let key_vk = unsafe { map::key_kind(map_ref) };
+    let val_vk = unsafe { map::val_kind(map_ref) };
     let val_rttid = get_map_key_val_rttids(call, rttid)
         .map(|(_, val)| val.rttid())
-        .unwrap_or_else(|_| map::val_meta(map_ref).meta_id());
+        .unwrap_or_else(|_| unsafe { map::val_meta(map_ref) }.meta_id());
 
     // JSON only supports string keys
     if key_vk != ValueKind::String {
@@ -529,22 +523,27 @@ fn marshal_map_value_depth<W: FormatWriter>(
     }
 
     writer.write_object_start();
-    let mut iter = map::iter_init(map_ref);
+    let mut iter = unsafe { map::iter_init(map_ref) };
+    let mut key = [0u64; 1];
+    let mut val = vec![0; unsafe { map::val_slots(map_ref) } as usize];
     let mut first = true;
-    while let Some((key, val)) = map::iter_next(&mut iter) {
+    while unsafe { map::iter_next_into(&mut iter, &mut key, &mut val) }
+        .map_err(|_| "json: map iterator layout mismatch")?
+    {
         let key_str_ref = key[0] as GcRef;
         let key_str = if key_str_ref.is_null() {
-            ""
+            String::new()
         } else {
-            str_obj::as_str(key_str_ref)
+            // Safety: JSON object keys are live VM strings.
+            unsafe { str_obj::to_rust_string(key_str_ref) }
         };
 
-        if !writer.write_field_start(key_str, first) {
+        if !writer.write_field_start(&key_str, first) {
             continue;
         }
         first = false;
 
-        marshal_map_val_depth(call, val, val_vk, val_rttid, writer, depth)?;
+        marshal_map_val_depth(call, &val, val_vk, val_rttid, writer, depth)?;
         writer.write_field_end();
     }
     writer.write_object_end();
@@ -614,7 +613,8 @@ fn marshal_elem_value_depth<W: FormatWriter>(
             if str_ref.is_null() {
                 writer.write_string("");
             } else {
-                writer.write_string(str_obj::as_str(str_ref));
+                // Safety: this slot is described as a live string by the runtime type.
+                writer.write_string(&unsafe { str_obj::to_rust_string(str_ref) });
             }
         }
         ValueKind::Struct => {
@@ -678,7 +678,8 @@ fn marshal_map_val_depth<W: FormatWriter>(
             if str_ref.is_null() {
                 writer.write_string("");
             } else {
-                writer.write_string(str_obj::as_str(str_ref));
+                // Safety: this slot is described as a live string by the runtime type.
+                writer.write_string(&unsafe { str_obj::to_rust_string(str_ref) });
             }
         }
         ValueKind::Struct => {
@@ -1100,14 +1101,16 @@ fn json_to_iface_slots<'a, R: FormatReader<'a>>(
             let m = call.alloc_map(key_meta, val_meta, 1, 2, 0);
             while let Ok(Some((k, v))) = R::next_field(&mut obj) {
                 let (s0, s1) = json_to_iface_slots::<R>(call, v);
-                call.map_set_string_key(m, &k, &[s0, s1]);
+                // Safety: `m` is the fresh map allocated immediately above.
+                unsafe { call.map_set_string_key(m, &k, &[s0, s1]) };
             }
             (ValueKind::Map as u64, m as u64)
         }
         ParsedValue::Array(elems) => {
             let elem_meta = ValueMeta::new(0, ValueKind::Interface);
             let s = call.alloc_slice(elem_meta, 2 * SLOT_BYTES, elems.len());
-            let base_ptr = slice::data_ptr(s);
+            // Safety: `s` is the fresh slice allocated immediately above.
+            let base_ptr = unsafe { slice::data_ptr(s) };
             for (i, v) in elems.into_iter().enumerate() {
                 let (s0, s1) = json_to_iface_slots::<R>(call, v);
                 unsafe {
@@ -1117,7 +1120,7 @@ fn json_to_iface_slots<'a, R: FormatReader<'a>>(
                 }
             }
             call.gc()
-                .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(s));
+                .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::array_ref(s) });
             (ValueKind::Slice as u64, s as u64)
         }
     }
@@ -1151,12 +1154,14 @@ fn unmarshal_map_value<'a, R: FormatReader<'a>>(
     while let Ok(Some((k, v))) = R::next_field(&mut obj) {
         if val_vk == ValueKind::Interface {
             let (s0, s1) = json_to_iface_slots::<R>(call, v);
-            call.map_set_string_key(m, &k, &[s0, s1]);
+            // Safety: `m` is the fresh map allocated above.
+            unsafe { call.map_set_string_key(m, &k, &[s0, s1]) };
         } else {
             let mut buf = vec![0u64; val_slots as usize];
             let ptr = buf.as_mut_ptr() as *mut u8;
             write_typed_value::<R>(call, None, ptr, val_vk, val_rttid_u32, v).ok();
-            call.map_set_string_key(m, &k, &buf);
+            // Safety: `m` is the fresh map allocated above.
+            unsafe { call.map_set_string_key(m, &k, &buf) };
         }
     }
 
@@ -1179,15 +1184,16 @@ fn unmarshal_slice_value<'a, R: FormatReader<'a>>(
         return Ok(s);
     }
 
-    let base_ptr = slice::data_ptr(s);
-    let parent = slice::array_ref(s);
+    // Safety: `s` is the fresh slice allocated above.
+    let base_ptr = unsafe { slice::data_ptr(s) };
+    let parent = unsafe { slice::array_ref(s) };
     for (i, elem_val) in elems.into_iter().enumerate() {
         let elem_ptr = unsafe { base_ptr.add(i * elem_bytes) };
         write_typed_value::<R>(call, Some(parent), elem_ptr, elem_vk, elem_rttid, elem_val)?;
     }
     if elem_meta.value_kind().may_contain_gc_refs() {
         call.gc()
-            .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(s));
+            .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::array_ref(s) });
     }
 
     Ok(s)

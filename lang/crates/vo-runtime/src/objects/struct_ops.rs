@@ -1,8 +1,12 @@
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 //! Struct operations.
 //!
 //! Struct layout on heap: [field0, field1, ...]
 //! GcHeader.meta_id contains the MetaId for type metadata lookup.
+//!
+//! # Safety contract
+//! Unsafe operations require canonical live struct allocations matching the
+//! supplied `StructMeta` slot layout.
 
 use crate::gc::{Gc, GcRef};
 use vo_common_core::types::{ValueKind, ValueMeta};
@@ -33,7 +37,7 @@ pub fn create(gc: &mut Gc, meta_id: u32, size_slots: usize) -> GcRef {
 
 /// Get field value (safe for FFI use).
 #[inline]
-pub fn get_field(obj: GcRef, idx: usize) -> u64 {
+pub unsafe fn get_field(obj: GcRef, idx: usize) -> u64 {
     unsafe { Gc::read_slot(obj, idx) }
 }
 

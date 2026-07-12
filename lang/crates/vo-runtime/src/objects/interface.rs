@@ -8,6 +8,10 @@
 
 use super::string;
 use crate::gc::GcRef;
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(feature = "std")]
+use std::string::String;
 use vo_common_core::types::ValueKind;
 
 pub const SLOT_COUNT: usize = 2;
@@ -133,10 +137,11 @@ impl InterfaceSlot {
         self.slot1 as GcRef
     }
 
-    /// Get the data as string.
+    /// Copy the data into a host-owned string.
     #[inline]
-    pub fn as_str(&self) -> &'static str {
-        string::as_str(self.slot1 as GcRef)
+    pub fn to_rust_string(&self) -> String {
+        // Safety: `self` was decoded as a live string-valued interface slot.
+        unsafe { string::to_rust_string(self.slot1 as GcRef) }
     }
 
     // ---- Type checking ----

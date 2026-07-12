@@ -179,7 +179,7 @@ impl RuntimeRollback {
     }
 
     pub(crate) fn remote_queue_proxy(vm_state: &VmState, ch: GcRef) -> Self {
-        let proxy = queue::remote_proxy(ch);
+        let proxy = unsafe { queue::remote_proxy(ch) };
         Self::RemoteQueueProxy {
             ch,
             endpoint_id: proxy.endpoint_id,
@@ -206,7 +206,7 @@ impl RuntimeRollback {
     ) -> Self {
         Self::LocalQueue {
             ch,
-            state: queue::local_state(ch).clone(),
+            state: unsafe { queue::local_state(ch) }.clone(),
             endpoint_registry: vm_state.endpoint_registry.snapshot(),
             stack_slots,
             select_state: None,
@@ -270,9 +270,12 @@ impl RuntimeRollback {
                 stack_slots,
                 select_state,
             } => {
-                queue::with_local_state(ch, |local_state| {
-                    *local_state = state;
-                });
+                // Safety: rollback retains the live queue handle captured at mutation time.
+                unsafe {
+                    queue::with_local_state(ch, |local_state| {
+                        *local_state = state;
+                    })
+                };
                 vm_state.endpoint_registry.restore(endpoint_registry);
                 if let Some(fiber) = current_fiber.and_then(|fid| scheduler.try_get_fiber_mut(fid))
                 {
@@ -293,7 +296,7 @@ impl RuntimeRollback {
                 closed,
                 endpoint_registry,
             } => {
-                let proxy = queue::remote_proxy_mut(ch);
+                let proxy = unsafe { queue::remote_proxy_mut(ch) };
                 proxy.endpoint_id = endpoint_id;
                 proxy.home_island = home_island;
                 proxy.closed = closed;
@@ -304,7 +307,7 @@ impl RuntimeRollback {
                 home_infos,
             } => {
                 for (ch, snapshot) in home_infos {
-                    queue::restore_home_info_snapshot(ch, snapshot);
+                    unsafe { queue::restore_home_info_snapshot(ch, snapshot) };
                 }
                 vm_state.endpoint_registry.restore(endpoint_registry);
             }
@@ -315,9 +318,11 @@ impl RuntimeRollback {
                 queues,
             } => {
                 for (ch, state) in queues {
-                    queue::with_local_state(ch, |local_state| {
-                        *local_state = state;
-                    });
+                    unsafe {
+                        queue::with_local_state(ch, |local_state| {
+                            *local_state = state;
+                        })
+                    };
                 }
                 let key = FiberWakeKey::from_packed(fiber_key);
                 if let Some(fiber) = scheduler.try_get_fiber_mut_by_wake_key(key) {
@@ -1761,8 +1766,8 @@ impl Vm {
                 }
                 self.apply_gc_root_effect(gc_roots, None);
                 if let Some(ch) = self.state.endpoint_registry.get_live(endpoint_id) {
-                    if queue::is_remote(ch) {
-                        queue::mark_remote_closed(ch);
+                    if unsafe { queue::is_remote(ch) } {
+                        unsafe { queue::mark_remote_closed(ch) };
                     }
                 }
                 self.apply_gc_root_effect(GcRootEffect::AllRootsDirty, None);
@@ -2338,7 +2343,7 @@ impl Vm {
         let ch =
             crate::exec::validate_queue_handle(&self.state.gc, waiter.queue_ref as GcRef, context)
                 .map_err(VmError::Jit)?;
-        if queue::is_closed(ch) {
+        if unsafe { queue::is_closed(ch) } {
             return Ok(());
         }
         Err(VmError::Jit(format!("{context} referenced open queue")))
@@ -2475,7 +2480,8 @@ impl Vm {
             .endpoint_registry
             .get_live(endpoint_id)
             .is_some_and(|ch| {
-                queue::is_remote(ch) && queue::remote_proxy(ch).home_island != from_island
+                (unsafe { queue::is_remote(ch) })
+                    && unsafe { queue::remote_proxy(ch) }.home_island != from_island
             });
         let foreign_tombstone = matches!(
             self.state
@@ -2826,9 +2832,10 @@ impl Vm {
             .iter()
             .filter(|registered| !registered.queue.is_null())
             .map(|registered| {
+                // Safety: select registration owns a rooted live local queue until cancellation.
                 (
                     registered.queue,
-                    queue::local_state(registered.queue).clone(),
+                    unsafe { queue::local_state_ref(registered.queue) }.clone(),
                 )
             })
             .collect();
@@ -2875,11 +2882,14 @@ impl Vm {
             if is_selected {
                 selected.push(registered);
             } else if !registered.queue.is_null() {
-                queue::cancel_select_waiters(
-                    registered.queue,
-                    waiter.fiber_key(),
-                    select.select_id,
-                );
+                // Safety: the select state keeps every registered queue rooted and live.
+                unsafe {
+                    queue::cancel_select_waiters(
+                        registered.queue,
+                        waiter.fiber_key(),
+                        select.select_id,
+                    );
+                }
             }
         }
         select_state.registered_queues = selected;
@@ -3039,7 +3049,8 @@ impl Vm {
                     .endpoint_registry
                     .get_live(endpoint_id)
                     .is_some_and(|ch| {
-                        queue::is_remote(ch) && queue::remote_proxy(ch).home_island != from_island
+                        (unsafe { queue::is_remote(ch) })
+                            && unsafe { queue::remote_proxy(ch) }.home_island != from_island
                     });
                 let foreign_tombstone = matches!(
                     self.state
@@ -3125,7 +3136,7 @@ impl Vm {
                     "select wake recv payload",
                 )?;
                 let expected_slot_types =
-                    crate::exec::queue::select_woken_recv_slot_types(ch, self.module.as_ref())?;
+                    crate::exec::queue::select_woken_recv_slot_types(ch, self.module.as_deref())?;
                 crate::exec::queue::validate_select_woken_recv_payload_layout(
                     data.len(),
                     slot_types,

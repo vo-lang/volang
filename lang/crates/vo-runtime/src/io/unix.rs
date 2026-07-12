@@ -104,14 +104,26 @@ impl UnixDriver {
         if let Some(state) = self.fd_states.get(&fd) {
             if is_read {
                 if let Some(existing) = state.read.as_ref() {
-                    panic!(
-                        "concurrent read on fd {}: existing token={}, new token={}",
-                        fd, existing.token, op.token
-                    );
+                    return SubmitResult::Completed(Completion {
+                        token: op.token,
+                        result: Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!(
+                                "concurrent read on fd {fd}: existing token={}, new token={}",
+                                existing.token, op.token
+                            ),
+                        )),
+                    });
                 }
             }
             if !is_read && state.write.is_some() {
-                panic!("concurrent write operation on fd {}", fd);
+                return SubmitResult::Completed(Completion {
+                    token: op.token,
+                    result: Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("concurrent write operation on fd {fd}"),
+                    )),
+                });
             }
         }
 
@@ -735,7 +747,12 @@ fn try_complete(op: &PendingOp) -> TryResult {
         }
 
         OpKind::SendTo => {
-            let addr = op.dest_addr.as_ref().expect("SendTo requires dest_addr");
+            let Some(addr) = op.dest_addr.as_ref() else {
+                return TryResult::Error(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "SendTo requires a destination address",
+                ));
+            };
             let (sockaddr, socklen) = std_to_sockaddr(addr);
             let n = unsafe {
                 libc::sendto(
@@ -759,10 +776,10 @@ fn try_complete(op: &PendingOp) -> TryResult {
                 }
             }
         }
-        OpKind::Timer => {
-            // Timer operations are handled separately via submit_timer, not through regular submit
-            unreachable!("Timer operations should not go through try_complete")
-        }
+        OpKind::Timer => TryResult::Error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "timer operation reached the regular I/O submission path",
+        )),
     }
 }
 

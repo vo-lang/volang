@@ -5,12 +5,12 @@ use crate::runtime_boundary::{
     IslandCommandEffect, PendingTransitionTerminalPolicy, ResumePolicy, RuntimeBoundary,
     RuntimeTransition,
 };
+use crate::test_support::queue;
 use crate::vm::jit::context::build_jit_context;
 use crate::vm::jit::test_support::function;
 use crate::vm::jit_mgr::JitSideExitReason;
 use crate::vm::{ExecResult, GcRootEffect, JitConfig, Vm};
 use vo_runtime::island::{EndpointRequestKind, IslandCommand};
-use vo_runtime::objects::queue;
 use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter, SelectWaitKind};
 use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 

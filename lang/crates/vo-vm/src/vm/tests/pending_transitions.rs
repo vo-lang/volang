@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(all(feature = "jit", feature = "std"))]
+use crate::test_support::queue as test_queue;
 
 #[cfg(all(feature = "jit", feature = "std"))]
 #[test]
@@ -22,7 +24,7 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
     vm.state
         .island_senders
         .insert(target_island, Arc::new(RejectingSender));
-    let ch = vo_runtime::objects::queue::create(
+    let ch = test_queue::create(
         &mut vm.state.gc,
         QueueKind::Port,
         ValueMeta::new(0, ValueKind::Int64),
@@ -30,8 +32,8 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
         1,
         0,
     );
-    vo_runtime::objects::queue::install_home_info(ch, 42, vm.state.current_island_id);
-    vo_runtime::objects::queue::register_receiver(
+    test_queue::install_home_info(ch, 42, vm.state.current_island_id);
+    test_queue::register_receiver(
         ch,
         QueueWaiter::endpoint(target_island, 0x0000_0002_0000_0003, 11),
     );
@@ -46,8 +48,8 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
 
     let mut rollback = crate::runtime_boundary::RuntimeRollback::local_queue(&vm.state, ch);
     rollback.push_stack_slot(0, vm.scheduler.get_fiber(current).stack[0]);
-    match vo_runtime::objects::queue::try_send(ch, vec![123].into_boxed_slice()) {
-        vo_runtime::objects::queue_state::SendResult::DirectSend(_) => {}
+    match test_queue::try_send(ch, vec![123].into_boxed_slice()) {
+        vo_runtime::objects::queue_state::SendResult::DirectSend { .. } => {}
         other => panic!("expected send to consume waiting endpoint receiver, got {other:?}"),
     }
     vm.scheduler.get_fiber_mut(current).stack[0] = 123;
@@ -79,9 +81,7 @@ fn vm_pending_runtime_transition_merge_preserves_rollback_058() {
         .expect_err("failed merged pending response staging must roll back local effects");
 
     assert_eq!(
-        vo_runtime::objects::queue::local_state(ch)
-            .waiting_receivers
-            .len(),
+        test_queue::local_state(ch).waiting_receivers.len(),
         1,
         "merged pending rollback must restore consumed receiver"
     );
@@ -212,94 +212,36 @@ fn vm_pending_transition_roots_002_gc_entry_rejects_unattached_pending_transitio
 
 #[cfg(feature = "jit")]
 #[test]
-fn vm_osr_panic_pending_001_osr_panic_path_propagates_attach_result() {
-    let osr_macro = source_slice_between(
-        include_str!("../mod.rs"),
-        "macro_rules! handle_loop_osr",
-        "macro_rules! handle_queue_action",
+fn vm_osr_panic_pending_001_execution_owner_reattaches_before_pending_commit() {
+    let source = compact_source_bytes(include_str!("../mod.rs"));
+    let owner = compact_region_between_compact(&source, "fnrun_fiber(", "fnrun_detached_fiber(")
+        .expect("run_fiber execution owner");
+    let execution =
+        compact_pattern_position(&owner, "execution.run()").expect("detached execution invocation");
+    let attach = compact_pattern_position(&owner, "attach_pending_runtime_transitions(result)")
+        .expect("pending transition attachment");
+    let lease = compact_region_between_compact(
+        &source,
+        "impl<'vm>DetachedFiberExecution<'vm>{",
+        "implDropforDetachedFiberExecution<'_>{",
     )
-    .expect("handle_loop_osr macro body");
+    .expect("detached execution lease implementation");
+    compact_pattern_position(&lease, "reattach_after_execution(self.fiber_id,fiber)")
+        .expect("active fiber reattachment");
     assert!(
-        osr_panic_pending_attach_result_propagates_062(osr_macro),
-        "OSR panic path must propagate non-panic attach results before unwinding"
+        compact_contains(&lease, "letmodule=vm.module.as_ref()?.clone()")
+            && !compact_contains(&lease, "vm.module.take()"),
+        "fiber execution must share the immutable module instead of detaching VM ownership"
     );
-}
-
-#[cfg(feature = "jit")]
-fn osr_panic_pending_attach_result_propagates_062(osr_macro: &str) -> bool {
-    let Some(panic_arm) = compact_region_between(
-        osr_macro,
-        "jit::OsrResult::Panic=>",
-        "jit::OsrResult::JitError",
-    ) else {
-        return false;
-    };
-    let Some(attach_pos) = compact_pattern_position(
-        &panic_arm,
-        "letresult=self.attach_pending_runtime_transitions(ExecResult::Panic);",
-    ) else {
-        return false;
-    };
-    let Some(guard_pos) = compact_pattern_position(
-        &panic_arm,
-        "if!matches!(result,ExecResult::Panic){returnresult;}",
-    ) else {
-        return false;
-    };
-    let Some(unwind_pos) = compact_pattern_position(&panic_arm, "handle_panic_result!") else {
-        return false;
-    };
-    !compact_contains(
-        &panic_arm,
-        "let_=self.attach_pending_runtime_transitions(ExecResult::Panic)",
-    ) && attach_pos < guard_pos
-        && guard_pos < unwind_pos
-}
-
-#[cfg(feature = "jit")]
-#[test]
-fn vm_osr_panic_pending_001_rejects_comment_spoofed_attach_return() {
-    let spoof = r#"
-            macro_rules! handle_loop_osr {
-                ($target_pc:expr) => {{
-                    match osr_result {
-                        jit::OsrResult::Panic => {
-                            let result =
-                                self.attach_pending_runtime_transitions(ExecResult::Panic);
-                            // if !matches!(result, ExecResult::Panic) { return result; }
-                            let _ = result;
-                            handle_panic_result!(helpers::panic_unwind());
-                        }
-                        jit::OsrResult::JitError(err) => return ExecResult::JitError(err),
-                    }
-                }}
-            }
-        "#;
-
+    let drop_impl = compact_region_between_compact(
+        &source,
+        "implDropforDetachedFiberExecution<'_>{",
+        "#[cfg(feature=\"jit\")]",
+    )
+    .expect("detached execution drop implementation");
     assert!(
-        !osr_panic_pending_attach_result_propagates_062(spoof),
-        "comment-only OSR panic return facts must not satisfy pending-transition propagation"
-    );
-
-    let late_guard = r#"
-            macro_rules! handle_loop_osr {
-                ($target_pc:expr) => {{
-                    match osr_result {
-                        jit::OsrResult::Panic => {
-                            let result =
-                                self.attach_pending_runtime_transitions(ExecResult::Panic);
-                            handle_panic_result!(helpers::panic_unwind());
-                            if !matches!(result, ExecResult::Panic) { return result; }
-                        }
-                        jit::OsrResult::JitError(err) => return ExecResult::JitError(err),
-                    }
-                }}
-            }
-        "#;
-
-    assert!(
-        !osr_panic_pending_attach_result_propagates_062(late_guard),
-        "OSR panic pending-transition guard must run before panic unwind handling"
+        execution < attach && compact_contains(&drop_impl, "self.restore()"),
+        "pending transition commit must follow execution guarded by panic-safe fiber restoration"
     );
 }
 

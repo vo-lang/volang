@@ -108,9 +108,11 @@ runs:
           printf 'components=%s\n' "$components"
           printf 'targets=%s\n' "$targets"
         } >> "$GITHUB_OUTPUT"
+    - name: Configure Rust profile
+      shell: bash
+      run: rustup set profile "${{ steps.toolchain.outputs.profile }}"
     - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
       with:
         toolchain: ${{ steps.toolchain.outputs.channel }}
-        profile: ${{ steps.toolchain.outputs.profile }}
         components: ${{ steps.toolchain.outputs.components }}
         targets: ${{ steps.toolchain.outputs.targets }}

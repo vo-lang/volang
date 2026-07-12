@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{self, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -612,7 +613,12 @@ fn stable_id(value: &str) -> String {
 fn run_plan_job(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     let job: TestJob = serde_json::from_str(&text)?;
-    run_job(&job).map_err(|err| err.into())
+    let result = run_job(&job);
+    // `main` terminates workers with `process::exit`, which skips stdio
+    // destructor flushing. Each worker is piped by the plan coordinator, so
+    // even short successful output must be flushed explicitly.
+    std::io::stdout().flush()?;
+    result.map_err(|err| err.into())
 }
 
 fn run_job(job: &TestJob) -> Result<(), String> {

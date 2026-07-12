@@ -7,9 +7,9 @@ use vo_common_core::instruction::{
     LOOP_FLAG_HAS_LABELED_BREAK, LOOP_FLAG_HAS_LABELED_CONTINUE,
 };
 use vo_common_core::{JitInstructionMetadata, TransferType};
+use vo_runtime::bytecode::FunctionDef;
+use vo_runtime::instruction::{Instruction, Opcode};
 use vo_runtime::SlotType;
-use vo_vm::bytecode::FunctionDef;
-use vo_vm::instruction::{Instruction, Opcode};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ElemLayoutSpec<'a> {
@@ -398,6 +398,12 @@ impl FuncBuilder {
                 self.param_slots as usize + slots as usize
             )
         })?;
+        let param_count = self.param_count.checked_add(1).ok_or_else(|| {
+            format!(
+                "function parameter count exceeds u16::MAX: {} parameters",
+                self.param_count as usize + 1
+            )
+        })?;
         if let Some(s) = sym {
             self.locals.insert(
                 s,
@@ -409,16 +415,23 @@ impl FuncBuilder {
         }
         self.slot_types.extend_from_slice(types);
         self.next_slot = next_slot;
-        self.param_count += 1;
+        self.param_count = param_count;
         self.param_slots = param_slots;
         Ok(slot)
     }
 
-    /// Define a parameter, panicking only for internal synthetic paths that
-    /// cannot surface `CodegenError` directly.
+    /// Define a parameter for synthetic builders and retain any layout failure
+    /// for the builder's normal `check_layout_error` handoff.
     pub fn define_param(&mut self, sym: Option<Symbol>, slots: u16, types: &[SlotType]) -> u16 {
-        self.try_define_param(sym, slots, types)
-            .unwrap_or_else(|err| panic!("{err}"))
+        match self.try_define_param(sym, slots, types) {
+            Ok(slot) => slot,
+            Err(error) => {
+                if self.layout_error.is_none() {
+                    self.layout_error = Some(error);
+                }
+                0
+            }
+        }
     }
 
     /// Box an escaped parameter: allocate heap storage and copy the stack param value into it.
@@ -440,7 +453,7 @@ impl FuncBuilder {
             _ => return,
         };
 
-        let gcref_slot = self.next_slot;
+        let gcref_slot = self.alloc_slots(&[SlotType::GcRef]);
         self.locals.insert(
             sym,
             LocalVar {
@@ -452,11 +465,8 @@ impl FuncBuilder {
                 },
             },
         );
-        self.slot_types.push(SlotType::GcRef);
-        self.next_slot += 1;
-
         // Emit PtrNew + PtrSet
-        use vo_vm::instruction::Opcode;
+        use vo_runtime::instruction::Opcode;
         let meta_reg = self.alloc_slots(&[SlotType::Value]);
         self.emit_op(Opcode::LoadConst, meta_reg, meta_idx, 0);
         assert_eq!(value_slots as usize, slot_types.len());
@@ -765,9 +775,18 @@ impl FuncBuilder {
         0
     }
 
-    fn checked_u16_count(slots: usize, context: &str) -> u16 {
-        u16::try_from(slots)
-            .unwrap_or_else(|_| panic!("{context} exceeds u16 operand width: {slots} slots"))
+    fn checked_u16_count_or_record(&mut self, slots: usize, context: &str) -> u16 {
+        match u16::try_from(slots) {
+            Ok(slots) => slots,
+            Err(_) => {
+                if self.layout_error.is_none() {
+                    self.layout_error = Some(format!(
+                        "{context} exceeds u16 operand width: {slots} slots"
+                    ));
+                }
+                0
+            }
+        }
     }
 
     fn checked_u8_slot_count_or_record(&mut self, slots: u16, context: &str) -> u8 {
@@ -943,12 +962,14 @@ impl FuncBuilder {
             ),
             "shared closure call metadata is only valid for go/defer opcodes"
         );
+        let arg_slots =
+            self.checked_u16_count_or_record(arg_layout.len(), "shared closure arg slot count");
         self.emit_with_flags_and_metadata(
             opcode,
             1,
             closure_reg,
             args_start,
-            Self::checked_u16_count(arg_layout.len(), "shared closure arg slot count"),
+            arg_slots,
             JitInstructionMetadata::CallLayout {
                 arg_layout: arg_layout.to_vec(),
                 ret_layout: Vec::new(),
@@ -1127,10 +1148,14 @@ impl FuncBuilder {
         self.emit_with_metadata(Instruction::with_flags(op, flags, a, b, c), metadata);
     }
 
-    fn elem_metadata(elem: ElemLayoutSpec<'_>) -> JitInstructionMetadata {
-        let elem_bytes =
-            u32::try_from(elem.bytes).expect("element byte width exceeds JIT metadata encoding");
-        JitInstructionMetadata::ElemLayout {
+    fn try_elem_metadata(elem: ElemLayoutSpec<'_>) -> Result<JitInstructionMetadata, String> {
+        let elem_bytes = u32::try_from(elem.bytes).map_err(|_| {
+            format!(
+                "element byte width exceeds JIT metadata encoding: {} bytes",
+                elem.bytes
+            )
+        })?;
+        Ok(JitInstructionMetadata::ElemLayout {
             elem_bytes,
             needs_sign_extend: matches!(
                 elem.value_kind,
@@ -1139,12 +1164,37 @@ impl FuncBuilder {
                     | vo_common_core::ValueKind::Int32
             ),
             slot_layout: elem.slot_types.to_vec(),
+        })
+    }
+
+    fn elem_metadata_or_record(&mut self, elem: ElemLayoutSpec<'_>) -> JitInstructionMetadata {
+        match Self::try_elem_metadata(elem) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                if self.layout_error.is_none() {
+                    self.layout_error = Some(error);
+                }
+                JitInstructionMetadata::None
+            }
         }
+    }
+
+    fn emit_with_flags_and_elem_metadata(
+        &mut self,
+        op: Opcode,
+        flags: u8,
+        a: u16,
+        b: u16,
+        c: u16,
+        elem: ElemLayoutSpec<'_>,
+    ) {
+        let metadata = self.elem_metadata_or_record(elem);
+        self.emit_with_flags_and_metadata(op, flags, a, b, c, metadata);
     }
 
     /// Emit PtrNew: a=dst, b=meta register, c=heap slot count.
     pub fn emit_ptr_new(&mut self, dst: u16, meta_reg: u16, slot_types: &[SlotType]) {
-        let slots = u16::try_from(slot_types.len()).expect("PtrNew slot layout exceeds u16::MAX");
+        let slots = self.checked_u16_count_or_record(slot_types.len(), "PtrNew heap slot layout");
         self.emit_with_metadata(
             Instruction::new(Opcode::PtrNew, dst, meta_reg, slots),
             JitInstructionMetadata::PtrLayout {
@@ -1505,13 +1555,13 @@ impl FuncBuilder {
         flags: u8,
         elem: ElemLayoutSpec<'_>,
     ) {
-        self.emit_with_flags_and_metadata(
+        self.emit_with_flags_and_elem_metadata(
             Opcode::ArrayNew,
             flags,
             dst,
             elem_meta,
             len_reg,
-            Self::elem_metadata(elem),
+            elem,
         );
     }
 
@@ -1523,13 +1573,13 @@ impl FuncBuilder {
         flags: u8,
         elem: ElemLayoutSpec<'_>,
     ) {
-        self.emit_with_flags_and_metadata(
+        self.emit_with_flags_and_elem_metadata(
             Opcode::SliceNew,
             flags,
             dst,
             elem_meta,
             len_cap_reg,
-            Self::elem_metadata(elem),
+            elem,
         );
     }
 
@@ -1549,23 +1599,16 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem.bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_metadata(
+            self.emit_with_flags_and_elem_metadata(
                 Opcode::ArrayGet,
                 flags,
                 dst,
                 arr,
                 index_and_eb,
-                Self::elem_metadata(elem),
+                elem,
             );
         } else {
-            self.emit_with_flags_and_metadata(
-                Opcode::ArrayGet,
-                flags,
-                dst,
-                arr,
-                idx,
-                Self::elem_metadata(elem),
-            );
+            self.emit_with_flags_and_elem_metadata(Opcode::ArrayGet, flags, dst, arr, idx, elem);
         }
     }
 
@@ -1584,23 +1627,16 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem.bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_metadata(
+            self.emit_with_flags_and_elem_metadata(
                 Opcode::ArraySet,
                 flags,
                 arr,
                 index_and_eb,
                 val,
-                Self::elem_metadata(elem),
+                elem,
             );
         } else {
-            self.emit_with_flags_and_metadata(
-                Opcode::ArraySet,
-                flags,
-                arr,
-                idx,
-                val,
-                Self::elem_metadata(elem),
-            );
+            self.emit_with_flags_and_elem_metadata(Opcode::ArraySet, flags, arr, idx, val, elem);
         }
     }
 
@@ -1619,23 +1655,16 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem.bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_metadata(
+            self.emit_with_flags_and_elem_metadata(
                 Opcode::SliceGet,
                 flags,
                 dst,
                 slice,
                 index_and_eb,
-                Self::elem_metadata(elem),
+                elem,
             );
         } else {
-            self.emit_with_flags_and_metadata(
-                Opcode::SliceGet,
-                flags,
-                dst,
-                slice,
-                idx,
-                Self::elem_metadata(elem),
-            );
+            self.emit_with_flags_and_elem_metadata(Opcode::SliceGet, flags, dst, slice, idx, elem);
         }
     }
 
@@ -1654,23 +1683,16 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem.bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_metadata(
+            self.emit_with_flags_and_elem_metadata(
                 Opcode::SliceSet,
                 flags,
                 slice,
                 index_and_eb,
                 val,
-                Self::elem_metadata(elem),
+                elem,
             );
         } else {
-            self.emit_with_flags_and_metadata(
-                Opcode::SliceSet,
-                flags,
-                slice,
-                idx,
-                val,
-                Self::elem_metadata(elem),
-            );
+            self.emit_with_flags_and_elem_metadata(Opcode::SliceSet, flags, slice, idx, val, elem);
         }
     }
 
@@ -1689,23 +1711,16 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem.bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_metadata(
+            self.emit_with_flags_and_elem_metadata(
                 Opcode::ArrayAddr,
                 flags,
                 dst,
                 arr,
                 index_and_eb,
-                Self::elem_metadata(elem),
+                elem,
             );
         } else {
-            self.emit_with_flags_and_metadata(
-                Opcode::ArrayAddr,
-                flags,
-                dst,
-                arr,
-                idx,
-                Self::elem_metadata(elem),
-            );
+            self.emit_with_flags_and_elem_metadata(Opcode::ArrayAddr, flags, dst, arr, idx, elem);
         }
     }
 
@@ -1724,23 +1739,16 @@ impl FuncBuilder {
             self.emit_op(Opcode::Copy, index_and_eb, idx, 0);
             let eb_idx = ctx.const_int(elem.bytes as i64);
             self.emit_op(Opcode::LoadConst, index_and_eb + 1, eb_idx, 0);
-            self.emit_with_flags_and_metadata(
+            self.emit_with_flags_and_elem_metadata(
                 Opcode::SliceAddr,
                 flags,
                 dst,
                 slice,
                 index_and_eb,
-                Self::elem_metadata(elem),
+                elem,
             );
         } else {
-            self.emit_with_flags_and_metadata(
-                Opcode::SliceAddr,
-                flags,
-                dst,
-                slice,
-                idx,
-                Self::elem_metadata(elem),
-            );
+            self.emit_with_flags_and_elem_metadata(Opcode::SliceAddr, flags, dst, slice, idx, elem);
         }
     }
 
@@ -1752,13 +1760,13 @@ impl FuncBuilder {
         flags: u8,
         elem: ElemLayoutSpec<'_>,
     ) {
-        self.emit_with_flags_and_metadata(
+        self.emit_with_flags_and_elem_metadata(
             Opcode::SliceAppend,
             flags,
             dst,
             slice,
             meta_and_elem,
-            Self::elem_metadata(elem),
+            elem,
         );
     }
 
@@ -2196,8 +2204,11 @@ impl FuncBuilder {
     }
 
     pub fn set_ret_slot_types(&mut self, slot_types: Vec<SlotType>) {
-        self.try_set_ret_slot_types(slot_types)
-            .unwrap_or_else(|err| panic!("{err}"));
+        if let Err(error) = self.try_set_ret_slot_types(slot_types) {
+            if self.layout_error.is_none() {
+                self.layout_error = Some(error);
+            }
+        }
     }
 
     /// Set param slots directly (for wrapper functions that don't use define_param)
@@ -2363,7 +2374,7 @@ impl FuncBuilder {
         self.add_param_type(meta_raw, rttid_raw, slots);
     }
 
-    pub fn add_param_transfer_types(&mut self, param_types: &[vo_vm::bytecode::TransferType]) {
+    pub fn add_param_transfer_types(&mut self, param_types: &[vo_runtime::bytecode::TransferType]) {
         for transfer_type in param_types {
             self.add_param_type(
                 transfer_type.meta_raw,
@@ -2432,11 +2443,12 @@ mod tests {
 
     #[test]
     fn zero_byte_elem_metadata_preserves_logical_slot_layout() {
-        let metadata = FuncBuilder::elem_metadata(ElemLayoutSpec::new(
+        let metadata = FuncBuilder::try_elem_metadata(ElemLayoutSpec::new(
             0,
             ValueKind::Struct,
             &[SlotType::Value],
-        ));
+        ))
+        .expect("zero-byte logical element metadata should be representable");
 
         assert!(matches!(
             metadata,
@@ -2449,13 +2461,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "element byte width exceeds JIT metadata encoding")]
-    fn elem_layout_metadata_overflow_is_not_silently_dropped() {
-        let _ = FuncBuilder::elem_metadata(ElemLayoutSpec::new(
+    #[cfg(target_pointer_width = "64")]
+    fn elem_layout_metadata_overflow_is_recorded_as_codegen_error() {
+        let mut func = FuncBuilder::new("oversized_elem_metadata");
+        let metadata = func.elem_metadata_or_record(ElemLayoutSpec::new(
             u32::MAX as usize + 1,
             ValueKind::Struct,
             &[],
         ));
+
+        assert_eq!(metadata, JitInstructionMetadata::None);
+        assert_eq!(
+            func.check_layout_error().unwrap_err(),
+            "element byte width exceeds JIT metadata encoding: 4294967296 bytes"
+        );
     }
 
     #[test]

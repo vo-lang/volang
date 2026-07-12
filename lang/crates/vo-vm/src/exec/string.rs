@@ -43,7 +43,8 @@ pub fn exec_str_new(
 pub fn exec_str_concat(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc) {
     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-    let result = string::concat(gc, a, b);
+    // Safety: bytecode verification establishes live string operands.
+    let result = unsafe { string::concat(gc, a, b) };
     stack_set(stack, bp + inst.a as usize, result as u64);
 }
 
@@ -52,7 +53,8 @@ pub fn exec_str_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut 
     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
     let lo = stack_get(stack, bp + inst.c as usize) as usize;
     let hi = stack_get(stack, bp + inst.c as usize + 1) as usize;
-    match string::slice_of(gc, s, lo, hi) {
+    // Safety: bytecode verification establishes a live string operand.
+    match unsafe { string::slice_of(gc, s, lo, hi) } {
         Some(result) => {
             stack_set(stack, bp + inst.a as usize, result as u64);
             true

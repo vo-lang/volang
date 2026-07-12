@@ -1,13 +1,13 @@
 //! Island thread execution - runs a VM instance for an island.
 
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, mpsc::Sender, Arc};
 
 use vo_runtime::ext_loader::{ExtensionLoader, NativeExtensionSpec};
 use vo_runtime::island::IslandCommand;
 use vo_runtime::island_transport::IslandTransport;
 
 pub use super::types::IslandRegistry;
-use super::{island_shared, Vm};
+use super::{island_shared, types::IslandThreadEvent, Vm};
 use crate::bytecode::Module;
 
 #[cfg(feature = "jit")]
@@ -40,9 +40,11 @@ pub fn run_island_thread(
     island_registry: IslandRegistry,
     extension_specs: Vec<NativeExtensionSpec>,
     jit_config: Option<super::JitConfig>,
-) {
+    interrupt_flag: Arc<AtomicBool>,
+    events: &Sender<IslandThreadEvent>,
+) -> Result<(), String> {
     let mut vm = create_island_vm(jit_config)
-        .unwrap_or_else(|err| panic!("island {island_id}: JIT initialization failed: {err}"));
+        .map_err(|err| format!("island {island_id}: JIT initialization failed: {err}"))?;
     run_island_vm(
         island_id,
         module,
@@ -50,7 +52,9 @@ pub fn run_island_thread(
         island_registry,
         extension_specs,
         &mut vm,
-    );
+        interrupt_flag,
+        events,
+    )
 }
 
 #[cfg(not(feature = "jit"))]
@@ -60,7 +64,9 @@ pub fn run_island_thread(
     transport: impl IslandTransport,
     island_registry: IslandRegistry,
     extension_specs: Vec<NativeExtensionSpec>,
-) {
+    interrupt_flag: Arc<AtomicBool>,
+    events: &Sender<IslandThreadEvent>,
+) -> Result<(), String> {
     let mut vm = Vm::new();
     run_island_vm(
         island_id,
@@ -69,7 +75,9 @@ pub fn run_island_thread(
         island_registry,
         extension_specs,
         &mut vm,
-    );
+        interrupt_flag,
+        events,
+    )
 }
 
 fn run_island_vm(
@@ -79,51 +87,64 @@ fn run_island_vm(
     island_registry: IslandRegistry,
     extension_specs: Vec<NativeExtensionSpec>,
     vm: &mut Vm,
-) {
+    interrupt_flag: Arc<AtomicBool>,
+    events: &Sender<IslandThreadEvent>,
+) -> Result<(), String> {
+    vm.set_interrupt_flag(interrupt_flag);
     let ext_loader = if extension_specs.is_empty() {
         None
     } else {
         Some(
             ExtensionLoader::from_specs(&extension_specs)
-                .unwrap_or_else(|e| panic!("failed to load island extensions: {}", e)),
+                .map_err(|error| format!("island {island_id}: extension load failed: {error}"))?,
         )
     };
-    if let Err(e) = vm.load_with_extensions((*module).clone(), ext_loader) {
-        eprintln!("island {}: load failed: {:?}", island_id, e);
-        return;
-    }
+    vm.load_shared_with_extensions(module, ext_loader)
+        .map_err(|error| format!("island {island_id}: module load failed: {error:?}"))?;
     vm.state.island_registry = Some(island_registry);
     vm.state.current_island_id = island_id;
     // Initialize global variables (including interface values) before processing commands.
-    if let Err(e) = vm.run_init() {
-        eprintln!("island {}: run_init failed: {:?}", island_id, e);
-        return;
+    let init_outcome = vm
+        .run_init()
+        .map_err(|error| format!("island {island_id}: run_init failed: {error:?}"))?;
+    if init_outcome != super::SchedulingOutcome::Completed {
+        return Err(format!(
+            "island {island_id}: initialization ended with {init_outcome:?}"
+        ));
     }
-    run_island_loop(vm, &transport);
+    events
+        .send(IslandThreadEvent::Ready)
+        .map_err(|_| format!("island {island_id}: parent dropped startup channel"))?;
+    run_island_loop(vm, &transport)
 }
 
-fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
+fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) -> Result<(), String> {
+    const ACTIVE_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+    const IDLE_INTERRUPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
     loop {
+        if vm.interrupt_requested() {
+            return Ok(());
+        }
+
         // 1. Process all pending commands first
         loop {
             match transport.try_recv() {
                 Ok(Some(envelope)) => {
-                    if handle_command(vm, envelope.source_island_id, envelope.command) {
-                        return;
+                    if handle_command(vm, envelope.source_island_id, envelope.command)? {
+                        return Ok(());
                     }
                 }
                 Ok(None) => break,
-                Err(_) => return,
+                Err(error) => return Err(format!("island transport receive failed: {error:?}")),
             }
         }
         vm.state.clear_endpoint_tombstones_if_quiescent();
 
         // 2. Run scheduler if there's work
         if vm.scheduler.has_work() {
-            if let Err(err) = vm.run_scheduled() {
-                eprintln!("island scheduler failed: {err:?}");
-                return;
-            }
+            vm.run_scheduled()
+                .map_err(|error| format!("island scheduler failed: {error:?}"))?;
             vm.state.clear_endpoint_tombstones_if_quiescent();
             continue; // Check for new commands after running
         }
@@ -131,33 +152,47 @@ fn run_island_loop(vm: &mut Vm, transport: &dyn IslandTransport) {
         // 3. No runnable fibers - decide how to wait for next event
         let has_waiters = vm.scheduler.has_io_waiters() || vm.scheduler.has_blocked();
 
-        if has_waiters {
-            // Has pending I/O or blocked fibers - use timeout to allow periodic polling
-            match transport.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(envelope) => {
-                    if handle_command(vm, envelope.source_island_id, envelope.command) {
-                        return;
-                    }
-                    vm.state.clear_endpoint_tombstones_if_quiescent();
+        let wait_interval = if has_waiters {
+            ACTIVE_WAIT_POLL_INTERVAL
+        } else {
+            IDLE_INTERRUPT_POLL_INTERVAL
+        };
+        match transport.recv_timeout(wait_interval) {
+            Ok(envelope) => {
+                if handle_command(vm, envelope.source_island_id, envelope.command)? {
+                    return Ok(());
                 }
-                Err(vo_runtime::island_transport::TransportError::Timeout) => {
-                    // Poll I/O to check for completions
+                vm.state.clear_endpoint_tombstones_if_quiescent();
+            }
+            Err(vo_runtime::island_transport::TransportError::Timeout) => {
+                if has_waiters {
                     vm.poll_io_ready_commands();
                 }
-                Err(_) => return,
             }
-        } else {
-            // Completely idle - block until command arrives
-            match transport.recv() {
-                Ok(envelope) => {
-                    if handle_command(vm, envelope.source_island_id, envelope.command) {
-                        return;
-                    }
-                    vm.state.clear_endpoint_tombstones_if_quiescent();
-                }
-                Err(_) => return,
-            }
+            Err(error) => return Err(format!("island transport wait failed: {error:?}")),
         }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod loop_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn idle_island_observes_interrupt_without_shutdown_command() {
+        let mut vm = Vm::new();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        vm.set_interrupt_flag(interrupt.clone());
+        let (_sender, transport) = vo_runtime::island_transport::InThreadTransport::new();
+        let interrupter = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            interrupt.store(true, Ordering::SeqCst);
+        });
+
+        run_island_loop(&mut vm, &transport).expect("interrupt is a clean island shutdown");
+        interrupter.join().expect("interrupter exits cleanly");
     }
 }
 
@@ -195,28 +230,43 @@ mod source_contract_tests {
             "island threads must not silently discard scheduler execution errors"
         );
         assert!(
-            source.contains("if let Err(err) = vm.run_scheduled()")
-                || source.contains("match vm.run_scheduled()"),
-            "island threads must exit through an explicit run_scheduled error path"
+            source.contains("vm.run_scheduled()")
+                && source.contains(".map_err(|error|")
+                && source.contains("island scheduler failed"),
+            "island threads must propagate run_scheduled errors through their terminal event"
+        );
+    }
+
+    #[test]
+    fn island_thread_reports_ready_only_after_completed_init_051() {
+        let source = crate::source_contract::production_source_without_test_modules(include_str!(
+            "island_thread.rs"
+        ));
+        let completed = source
+            .find("init_outcome != super::SchedulingOutcome::Completed")
+            .expect("island initialization must require a completed scheduler outcome");
+        let ready = source
+            .find(".send(IslandThreadEvent::Ready)")
+            .expect("island thread must report readiness");
+        assert!(
+            completed < ready,
+            "readiness must follow completed island initialization"
         );
     }
 }
 
-/// Returns true if should exit loop.
-fn handle_command(vm: &mut Vm, source_island_id: u32, cmd: IslandCommand) -> bool {
+/// Returns true when a clean shutdown command should exit the loop.
+fn handle_command(vm: &mut Vm, source_island_id: u32, cmd: IslandCommand) -> Result<bool, String> {
     match cmd {
-        IslandCommand::Shutdown => true,
+        IslandCommand::Shutdown => Ok(true),
         IslandCommand::SpawnFiber { closure_data } => {
-            if let Err(err) = island_shared::handle_spawn_fiber(vm, closure_data.data()) {
-                eprintln!("island spawn failed: {err}");
-                return true;
-            }
-            false
+            island_shared::handle_spawn_fiber(vm, closure_data.data())
+                .map_err(|error| format!("island spawn failed: {error}"))?;
+            Ok(false)
         }
         IslandCommand::WakeFiber { waiter } => {
             let _ = (source_island_id, waiter);
-            eprintln!("island wake failed: WakeFiber transport ingress was rejected");
-            true
+            Err("island wake failed: WakeFiber transport ingress was rejected".to_string())
         }
         IslandCommand::EndpointRequest {
             endpoint_id,
@@ -226,21 +276,20 @@ fn handle_command(vm: &mut Vm, source_island_id: u32, cmd: IslandCommand) -> boo
             wait_id,
         } => {
             if source_island_id != from_island {
-                eprintln!("island endpoint request failed: transport source was rejected");
-                return true;
+                return Err(
+                    "island endpoint request failed: transport source was rejected".to_string(),
+                );
             }
-            if let Err(err) = island_shared::handle_endpoint_request_command(
+            island_shared::handle_endpoint_request_command(
                 vm,
                 endpoint_id,
                 kind,
                 from_island,
                 fiber_key,
                 wait_id,
-            ) {
-                eprintln!("island endpoint request failed: {err:?}");
-                return true;
-            }
-            false
+            )
+            .map_err(|error| format!("island endpoint request failed: {error:?}"))?;
+            Ok(false)
         }
         IslandCommand::EndpointResponse {
             endpoint_id,
@@ -250,21 +299,20 @@ fn handle_command(vm: &mut Vm, source_island_id: u32, cmd: IslandCommand) -> boo
             wait_id,
         } => {
             if source_island_id != from_island {
-                eprintln!("island endpoint response failed: transport source was rejected");
-                return true;
+                return Err(
+                    "island endpoint response failed: transport source was rejected".to_string(),
+                );
             }
-            if let Err(err) = island_shared::handle_endpoint_response_command(
+            island_shared::handle_endpoint_response_command(
                 vm,
                 endpoint_id,
                 kind,
                 from_island,
                 fiber_key,
                 wait_id,
-            ) {
-                eprintln!("island endpoint response failed: {err:?}");
-                return true;
-            }
-            false
+            )
+            .map_err(|error| format!("island endpoint response failed: {error:?}"))?;
+            Ok(false)
         }
     }
 }
@@ -282,15 +330,16 @@ mod command_tests {
         vm.scheduler.schedule_next().unwrap();
         vm.scheduler.block_for_queue();
 
-        let should_exit = handle_command(
+        let error = handle_command(
             &mut vm,
             1,
             IslandCommand::WakeFiber {
                 waiter: vo_runtime::objects::queue_state::QueueWaiter::simple(1, key),
             },
-        );
+        )
+        .expect_err("raw WakeFiber ingress must fail explicitly");
 
-        assert!(should_exit);
+        assert!(error.contains("WakeFiber transport ingress"));
         assert_eq!(
             vm.scheduler.get_fiber(fid).state,
             FiberState::Blocked(BlockReason::Queue)

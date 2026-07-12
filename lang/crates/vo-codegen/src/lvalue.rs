@@ -7,9 +7,9 @@
 //! - Container indexing (arr[i], slice[i], map[k])
 //! - Pointer dereference (*p)
 
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

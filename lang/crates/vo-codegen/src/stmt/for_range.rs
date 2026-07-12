@@ -6,9 +6,9 @@
 use vo_analysis::objects::TypeKey;
 use vo_common_core::bytecode::MAP_ITER_SLOT_TYPES;
 use vo_common_core::instruction::{pack_map_iter_next_flags, pack_queue_recv_flags};
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

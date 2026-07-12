@@ -24,9 +24,40 @@ const artifactInputs = [
   'lang/docs/vo-for-gophers.md',
 ];
 const artifactGenerator = ['vo-dev', 'task', 'run', 'task:docs-sync'];
+const artifactTaskId = 'docs-sync';
+const artifactGeneratorVersion = 4;
+
+function sha256Digest(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
 
 function digest(text) {
-  return `sha256:${createHash('sha256').update(text).digest('hex')}`;
+  return sha256Digest(Buffer.from(text, 'utf8'));
+}
+
+function sourceSetDigest(entries) {
+  return sha256Digest(Buffer.from(JSON.stringify(entries), 'utf8'));
+}
+
+async function volangGeneratorSourceDigest() {
+  const inputs = [
+    'scripts/ci/docs_sync.mjs',
+    'scripts/ci/docs_lint.mjs',
+    'scripts/ci/active_plan_snapshot.mjs',
+    'eng/project.toml',
+    'eng/tasks.toml',
+    'eng/ci.toml',
+  ];
+  const entries = [];
+  for (const relative of inputs) {
+    const bytes = await fs.readFile(path.join(root, relative));
+    entries.push({
+      digest: sha256Digest(bytes),
+      path: relative,
+      size: bytes.byteLength,
+    });
+  }
+  return sourceSetDigest(entries.sort((a, b) => a.path.localeCompare(b.path)));
 }
 
 async function sourceTimestamp(file) {
@@ -73,14 +104,28 @@ async function renderGeneratedDoc(entry) {
 
 async function writeTree(outRoot) {
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     artifact: 'playground.generated-docs',
     path: artifactPath,
+    task: {
+      id: artifactTaskId,
+      command: artifactGenerator,
+    },
     generator: {
       command: artifactGenerator,
+      script: 'scripts/ci/docs_sync.mjs',
+      version: artifactGeneratorVersion,
+    },
+    toolchain: {
+      node: `v${process.versions.node.split('.')[0]}`,
+      voDevSourceDigest: await volangGeneratorSourceDigest(),
+    },
+    sourceRoots: {
+      volang: '.',
     },
     inputs: artifactInputs,
     docs: [],
+    outputs: [],
   };
   await fs.rm(outRoot, { recursive: true, force: true });
   await fs.mkdir(outRoot, { recursive: true });
@@ -90,6 +135,11 @@ async function writeTree(outRoot) {
     await fs.mkdir(path.dirname(outPath), { recursive: true });
     await fs.writeFile(outPath, generated.text, 'utf8');
     manifest.docs.push(generated.manifest);
+    manifest.outputs.push({
+      digest: digest(generated.text),
+      path: entry.output,
+      size: Buffer.byteLength(generated.text),
+    });
   }
   await fs.writeFile(path.join(outRoot, '_manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 }

@@ -4,7 +4,9 @@ use super::*;
 fn vm_endpoint_request_route_preflight_058_close_missing_peer_route_preserves_queue() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
-    vm.module = Some(Module::new("endpoint-request-route-close".to_string()));
+    vm.module = Some(std::sync::Arc::new(Module::new(
+        "endpoint-request-route-close".to_string(),
+    )));
     let endpoint_id = 160;
     let ch = queue::create(
         &mut vm.state.gc,
@@ -68,7 +70,9 @@ fn vm_endpoint_request_owner_019_rejects_unknown_peer_recv() {
     let mut vm = Vm::new();
     vm.state.current_island_id = 3;
     vm.state.external_island_transport = true;
-    vm.module = Some(Module::new("endpoint-request-owner-recv".to_string()));
+    vm.module = Some(std::sync::Arc::new(Module::new(
+        "endpoint-request-owner-recv".to_string(),
+    )));
     let endpoint_id = 58;
     let fiber_key = 0x0000_0001_0000_0062;
     let wait_id = 14;
@@ -130,9 +134,9 @@ fn vm_endpoint_request_owner_019_unauthorized_send_closes_source_pending_wait() 
     let mut home = Vm::new();
     home.state.current_island_id = 3;
     home.state.external_island_transport = true;
-    home.module = Some(Module::new(
+    home.module = Some(std::sync::Arc::new(Module::new(
         "endpoint-request-owner-send-source".to_string(),
-    ));
+    )));
     let endpoint_id = 59;
     let home_ch = queue::create(
         &mut home.state.gc,
@@ -230,9 +234,9 @@ fn vm_endpoint_request_owner_019_unauthorized_recv_rejects_source_pending_wait()
     let mut home = Vm::new();
     home.state.current_island_id = 3;
     home.state.external_island_transport = true;
-    home.module = Some(Module::new(
+    home.module = Some(std::sync::Arc::new(Module::new(
         "endpoint-request-owner-recv-source".to_string(),
-    ));
+    )));
     let endpoint_id = 60;
     let home_ch = queue::create(
         &mut home.state.gc,
@@ -390,7 +394,7 @@ fn vm_endpoint_recv_remote_direct_txn_004_preflight_preserves_buffer_on_transfer
     let mut transfer_commit = crate::exec::QueueTransferCommit::default();
     let ctx = EndpointRequestCtx {
         ch,
-        cap: vo_runtime::objects::queue_state::capacity(ch),
+        cap: test_queue_state::capacity(ch),
         home_island: vm_state.current_island_id,
         elem_meta: ValueMeta::new(0, ValueKind::Struct),
         elem_rttid: ValueRttid::new(0, ValueKind::Struct),
@@ -412,12 +416,12 @@ fn vm_endpoint_recv_remote_direct_txn_004_preflight_preserves_buffer_on_transfer
                 &mut local_wakes,
                 &mut transfer_commit,
                 &mut island_effects,
-            );
-        });
+            )
+        })
     }));
 
     assert!(
-        result.is_ok(),
+        matches!(result, Ok(Ok(()))),
         "endpoint recv remote-direct preflight failure must not panic"
     );
     assert_eq!(
@@ -495,7 +499,7 @@ fn vm_endpoint_recv_remote_direct_txn_004_preflight_preserves_waiting_sender_on_
     let mut transfer_commit = crate::exec::QueueTransferCommit::default();
     let ctx = EndpointRequestCtx {
         ch,
-        cap: vo_runtime::objects::queue_state::capacity(ch),
+        cap: test_queue_state::capacity(ch),
         home_island: vm_state.current_island_id,
         elem_meta: ValueMeta::new(0, ValueKind::Struct),
         elem_rttid: ValueRttid::new(0, ValueKind::Struct),
@@ -517,12 +521,12 @@ fn vm_endpoint_recv_remote_direct_txn_004_preflight_preserves_waiting_sender_on_
                 &mut local_wakes,
                 &mut transfer_commit,
                 &mut island_effects,
-            );
-        });
+            )
+        })
     }));
 
     assert!(
-        result.is_ok(),
+        matches!(result, Ok(Ok(()))),
         "endpoint recv waiting-sender preflight failure must not panic"
     );
     assert_eq!(
@@ -571,7 +575,7 @@ fn vm_endpoint_recv_pack_preflight_012_same_island_buffered_port_prepares_before
     let mut transfer_commit = crate::exec::QueueTransferCommit::default();
     let ctx = EndpointRequestCtx {
         ch,
-        cap: vo_runtime::objects::queue_state::capacity(ch),
+        cap: test_queue_state::capacity(ch),
         home_island: vm_state.current_island_id,
         elem_meta: ValueMeta::new(0, ValueKind::Port),
         elem_rttid: ValueRttid::new(0, ValueKind::Port),
@@ -593,12 +597,12 @@ fn vm_endpoint_recv_pack_preflight_012_same_island_buffered_port_prepares_before
                 &mut local_wakes,
                 &mut transfer_commit,
                 &mut island_effects,
-            );
-        });
+            )
+        })
     }));
 
     assert!(
-        result.is_ok(),
+        matches!(result, Ok(Ok(()))),
         "same-island endpoint recv must prepare queued ports before packing the response"
     );
     assert!(
@@ -652,7 +656,7 @@ fn vm_endpoint_recv_pack_preflight_012_same_island_waiting_sender_error_preserve
     let mut transfer_commit = crate::exec::QueueTransferCommit::default();
     let ctx = EndpointRequestCtx {
         ch,
-        cap: vo_runtime::objects::queue_state::capacity(ch),
+        cap: test_queue_state::capacity(ch),
         home_island: vm_state.current_island_id,
         elem_meta: ValueMeta::new(0, ValueKind::Struct),
         elem_rttid: ValueRttid::new(0, ValueKind::Struct),
@@ -674,12 +678,12 @@ fn vm_endpoint_recv_pack_preflight_012_same_island_waiting_sender_error_preserve
                 &mut local_wakes,
                 &mut transfer_commit,
                 &mut island_effects,
-            );
-        });
+            )
+        })
     }));
 
     assert!(
-        result.is_ok(),
+        matches!(result, Ok(Ok(()))),
         "same-island endpoint recv preflight failure must not panic"
     );
     assert_eq!(

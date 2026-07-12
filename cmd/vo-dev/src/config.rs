@@ -56,10 +56,14 @@ pub(crate) struct Task {
     pub(crate) needs: Vec<String>,
     pub(crate) repo: Option<String>,
     #[serde(default)]
+    pub(crate) repos: Vec<String>,
+    #[serde(default)]
     pub(crate) internal: bool,
     pub(crate) timeout_sec: Option<u64>,
     #[serde(default)]
     pub(crate) platforms: Vec<String>,
+    #[serde(default)]
+    pub(crate) linux_packages: Vec<String>,
     #[serde(default)]
     pub(crate) shell: bool,
 }
@@ -77,6 +81,7 @@ pub(crate) struct ToolchainFile {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RustCacheWorkspace {
+    pub(crate) repo: Option<String>,
     pub(crate) path: String,
     pub(crate) target: String,
 }
@@ -126,6 +131,7 @@ pub(crate) struct ProjectRepo {
     pub(crate) name: String,
     pub(crate) repository: Option<String>,
     pub(crate) local_hint: Option<String>,
+    pub(crate) expected_commit: Option<String>,
     pub(crate) ci_checkout: Option<bool>,
     #[serde(default)]
     pub(crate) workspace: Vec<ProjectWorkspace>,
@@ -144,6 +150,22 @@ pub(crate) struct CiFile {
     pub(crate) changed_files: ChangedFiles,
     #[serde(default)]
     pub(crate) known_prefix: Vec<KnownPrefix>,
+    #[serde(default, rename = "matrix")]
+    pub(crate) matrices: Vec<CiMatrix>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CiMatrix {
+    pub(crate) name: String,
+    #[serde(default, rename = "unit")]
+    pub(crate) units: Vec<CiMatrixUnit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CiMatrixUnit {
+    pub(crate) selector: String,
+    pub(crate) title: String,
+    pub(crate) tier: String,
 }
 
 #[derive(Debug, Deserialize)]

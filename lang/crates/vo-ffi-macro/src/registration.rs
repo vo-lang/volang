@@ -127,8 +127,7 @@ pub fn emit_fn_registration(
 ///
 /// `const_name` is the Rust symbol name for the generated constant:
 /// - **Internal/Stdlib**: caller passes `format_ident!("__STDLIB_{}", lookup_name)`.
-/// - **Extension** (native): `const_name` is unused (linkme handles registration).
-/// - **Extension** (wasm): caller passes `make_ext_const_name(raw_pkg, func_name)`.
+/// - **Extension**: caller passes `make_ext_const_name(raw_pkg, func_name)`.
 pub fn emit_registration(
     flavor: &RegistrationFlavor,
     lookup_name: &str,
@@ -180,6 +179,17 @@ pub fn emit_registration_with_effects(
                 #[vo_runtime::distributed_slice(vo_runtime::EXTERN_TABLE)]
                 #[doc(hidden)]
                 static #entry_name: vo_runtime::ffi::ExternEntry = vo_runtime::ffi::ExternEntry {
+                    name_ptr: #lookup_name.as_ptr(),
+                    name_len: #lookup_name.len() as u32,
+                    func: #trampoline_name,
+                    effects_bits: (#effects).bits(),
+                };
+
+                #[cfg(not(target_arch = "wasm32"))]
+                #[doc(hidden)]
+                #[allow(non_upper_case_globals)]
+                pub const #const_name: vo_runtime::ffi::ExternEntry =
+                    vo_runtime::ffi::ExternEntry {
                     name_ptr: #lookup_name.as_ptr(),
                     name_len: #lookup_name.len() as u32,
                     func: #trampoline_name,

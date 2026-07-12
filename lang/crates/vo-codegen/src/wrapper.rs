@@ -7,9 +7,9 @@
 //! - `$promoted` wrappers: For promoted methods through embedding (navigate path, call original)
 
 use vo_analysis::objects::TypeKey;
+use vo_runtime::bytecode::ReturnShape;
+use vo_runtime::instruction::Opcode;
 use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueRttid};
-use vo_vm::bytecode::ReturnShape;
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
@@ -44,7 +44,7 @@ fn define_forwarded_params(
 }
 
 fn split_param_layouts(
-    param_types: &[vo_vm::bytecode::TransferType],
+    param_types: &[vo_runtime::bytecode::TransferType],
     flat_slot_types: &[SlotType],
 ) -> Vec<Vec<SlotType>> {
     let mut layouts = Vec::with_capacity(param_types.len());
@@ -959,7 +959,7 @@ pub fn generate_defer_iface_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vo_vm::bytecode::{ExtSlotKind, ParamShape};
+    use vo_runtime::bytecode::{ExtSlotKind, ParamShape};
 
     fn return_shape(slot_types: Vec<SlotType>) -> ReturnShape {
         ReturnShape::try_with_slot_types(slot_types).expect("test return shape should be valid")
@@ -1126,7 +1126,7 @@ mod tests {
             .expect("defer wrapper should register extern");
         assert_eq!(
             extern_def.allowed_effects,
-            vo_vm::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
+            vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
         );
     }
 
@@ -1149,7 +1149,7 @@ mod tests {
             .expect("defer wrapper should register extern");
         assert_eq!(
             extern_def.params,
-            vo_vm::bytecode::ParamShape::Exact { slots: 1 }
+            vo_runtime::bytecode::ParamShape::Exact { slots: 1 }
         );
         assert_eq!(extern_def.param_kinds, vec![ExtSlotKind::Bytes]);
 
@@ -1167,9 +1167,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "extern 'pkg_F' registered with incompatible return interface metadata"
-    )]
     fn defer_extern_wrapper_cache_key_does_not_bypass_return_interface_metadata_060() {
         let mut ctx = CodegenContext::new("defer-extern-interface-return-shape");
 
@@ -1177,5 +1174,9 @@ mod tests {
             generate_defer_extern_wrapper(&mut ctx, "pkg_F", Vec::new(), interface_return_shape(1));
         let _ =
             generate_defer_extern_wrapper(&mut ctx, "pkg_F", Vec::new(), interface_return_shape(2));
+        assert_eq!(
+            ctx.check_layout_errors().unwrap_err(),
+            "extern 'pkg_F' registered with incompatible return interface metadata"
+        );
     }
 }

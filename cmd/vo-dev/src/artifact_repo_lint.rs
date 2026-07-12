@@ -157,7 +157,8 @@ fn lint_generated_directories_inner(
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
         let rel = match path.strip_prefix(root) {
@@ -288,6 +289,36 @@ ci_checkout = true
 
         lint_tracked_artifacts(&root, &artifacts)
             .expect("declared CI checkout generated dirs should be external to root policy");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_lint_ignores_symlinked_ci_self_checkout_062() {
+        let root = temp_root("ci-self-checkout-symlink");
+        fs::create_dir_all(&root).expect("root dir");
+        init_project(
+            &root,
+            r#"version = 1
+
+[repo]
+name = "volang"
+module = "github.com/vo-lang/volang"
+"#,
+        );
+        fs::create_dir_all(root.join("target")).expect("target dir");
+        fs::create_dir_all(root.join("ci_modules")).expect("ci modules dir");
+        std::os::unix::fs::symlink("..", root.join("ci_modules/volang"))
+            .expect("self-checkout symlink");
+
+        let artifacts = ArtifactFile {
+            version: 1,
+            artifacts: Vec::new(),
+        };
+
+        let err = lint_tracked_artifacts(&root, &artifacts).unwrap_err();
+        assert!(format!("{err:#}").contains("target looks generated"));
+        assert!(!format!("{err:#}").contains("ci_modules/volang/target"));
         fs::remove_dir_all(root).ok();
     }
 

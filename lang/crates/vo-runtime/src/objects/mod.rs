@@ -9,12 +9,16 @@ pub mod alloc_error {
     pub const OVERFLOW: i32 = 4;
 }
 
-/// Macro to implement as_ref/as_mut for GC object header types.
+/// Macro to implement raw as_ref/as_mut access for GC object header types.
 macro_rules! impl_gc_object {
     ($name:ident) => {
         impl $name {
             #[inline]
-            pub fn as_ref(p: GcRef) -> &'static Self {
+            /// # Safety
+            /// `p` must point to a live object of this exact header type for the
+            /// returned borrow. The object must not be finalized or mutably
+            /// aliased while the borrow is used.
+            pub unsafe fn as_ref<'a>(p: GcRef) -> &'a Self {
                 unsafe { &*(p as *const Self) }
             }
             #[inline]
@@ -23,7 +27,7 @@ macro_rules! impl_gc_object {
             /// mutation publishes GC-visible references, the caller must apply the
             /// required write barrier first or be initializing a freshly allocated
             /// object that will be marked for scanning before collection.
-            pub unsafe fn as_mut(p: GcRef) -> &'static mut Self {
+            pub unsafe fn as_mut<'a>(p: GcRef) -> &'a mut Self {
                 unsafe { &mut *(p as *mut Self) }
             }
         }
@@ -33,10 +37,14 @@ macro_rules! impl_gc_object {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn raw_object_headers_as_mut_are_unsafe_public_primitives_058() {
+    fn raw_object_headers_are_unsafe_public_primitives_058() {
         let source = include_str!("mod.rs");
         assert!(
-            source.matches("pub unsafe fn as_mut(").count() >= 2,
+            source.matches("pub unsafe fn as_ref").count() >= 2,
+            "raw object header reads must stay behind an unsafe contract"
+        );
+        assert!(
+            source.matches("pub unsafe fn as_mut").count() >= 2,
             "raw object header mutation must stay behind an unsafe contract"
         );
         assert!(

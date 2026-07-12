@@ -65,12 +65,13 @@ fn format_args_slice_with_ctx(slice_ref: GcRef, call: Option<&ExternCallContext>
         return String::new();
     }
 
-    let len = slice::len(slice_ref);
+    // Safety: callers pass a rooted []any argument from the extern ABI.
+    let len = unsafe { slice::len(slice_ref) };
     if len == 0 {
         return String::new();
     }
 
-    let data_ptr = slice::data_ptr(slice_ref) as *const u64;
+    let data_ptr = unsafe { slice::data_ptr(slice_ref) } as *const u64;
     let mut result = String::new();
 
     for i in 0..len {
@@ -91,11 +92,12 @@ fn sprint_format_args(slice_ref: GcRef, call: Option<&ExternCallContext>) -> Str
     if slice_ref.is_null() {
         return String::new();
     }
-    let len = slice::len(slice_ref);
+    // Safety: callers pass a rooted []any argument from the extern ABI.
+    let len = unsafe { slice::len(slice_ref) };
     if len == 0 {
         return String::new();
     }
-    let data_ptr = slice::data_ptr(slice_ref) as *const u64;
+    let data_ptr = unsafe { slice::data_ptr(slice_ref) } as *const u64;
     let mut result = String::new();
     for i in 0..len {
         let slot0 = unsafe { *data_ptr.add(i * 2) };
@@ -277,12 +279,13 @@ fn sprintf_impl(format_str: &str, args_ref: GcRef, call: Option<&ExternCallConte
     let args_len = if args_ref.is_null() {
         0
     } else {
-        slice::len(args_ref)
+        // Safety: `args_ref` is the rooted []any argument for this format call.
+        unsafe { slice::len(args_ref) }
     };
     let data_ptr = if args_ref.is_null() {
         core::ptr::null()
     } else {
-        slice::data_ptr(args_ref) as *const u64
+        (unsafe { slice::data_ptr(args_ref) }) as *const u64
     };
 
     let mut result = String::new();
@@ -415,7 +418,8 @@ fn format_with_spec(
         }
         's' => {
             let mut s = match vk {
-                ValueKind::String => str_obj::as_str(slot1 as GcRef).to_string(),
+                // Safety: the interface metadata identifies `slot1` as a live string.
+                ValueKind::String => unsafe { str_obj::to_rust_string(slot1 as GcRef) },
                 _ => format_interface_with_ctx(slot0, slot1, call),
             };
             if let Some(prec) = spec.precision {
@@ -570,8 +574,9 @@ fn format_with_spec(
         }
         'x' => match vk {
             ValueKind::String => {
-                let s = str_obj::as_str(slot1 as GcRef);
-                let hex: String = s.bytes().map(|b| format!("{:02x}", b)).collect();
+                // Safety: the interface metadata identifies `slot1` as a live string.
+                let bytes = unsafe { str_obj::to_bytes(slot1 as GcRef) };
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                 pad_width(hex, spec, ' ')
             }
             _ if vk.is_integer() => {
@@ -589,8 +594,9 @@ fn format_with_spec(
         },
         'X' => match vk {
             ValueKind::String => {
-                let s = str_obj::as_str(slot1 as GcRef);
-                let hex: String = s.bytes().map(|b| format!("{:02X}", b)).collect();
+                // Safety: the interface metadata identifies `slot1` as a live string.
+                let bytes = unsafe { str_obj::to_bytes(slot1 as GcRef) };
+                let hex: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
                 pad_width(hex, spec, ' ')
             }
             _ if vk.is_integer() => {
@@ -617,7 +623,8 @@ fn format_with_spec(
         'p' => pad_width(format!("0x{:x}", slot1), spec, ' '),
         'q' => match vk {
             ValueKind::String => {
-                let s = str_obj::as_str(slot1 as GcRef);
+                // Safety: the interface metadata identifies `slot1` as a live string.
+                let s = unsafe { str_obj::to_rust_string(slot1 as GcRef) };
                 pad_width(format!("{:?}", s), spec, ' ')
             }
             _ if vk.is_integer() => {
@@ -644,7 +651,8 @@ fn create_any_slice(gc: &mut vo_runtime::gc::Gc, items: &[interface::InterfaceSl
     let elem_meta = ValueMeta::new(0, ValueKind::Interface);
     let new_slice = slice::create(gc, elem_meta, 16, len, len);
     if len > 0 {
-        let dst_ptr = slice::data_ptr(new_slice) as *mut u64;
+        // Safety: `new_slice` is freshly allocated above.
+        let dst_ptr = unsafe { slice::data_ptr(new_slice) } as *mut u64;
         for (i, item) in items.iter().enumerate() {
             unsafe {
                 *dst_ptr.add(i * 2) = item.slot0;
@@ -652,7 +660,7 @@ fn create_any_slice(gc: &mut vo_runtime::gc::Gc, items: &[interface::InterfaceSl
             }
         }
     }
-    gc.mark_allocated_for_scan(slice::array_ref(new_slice));
+    gc.mark_allocated_for_scan(unsafe { slice::array_ref(new_slice) });
     new_slice
 }
 

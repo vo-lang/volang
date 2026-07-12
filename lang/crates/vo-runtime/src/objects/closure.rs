@@ -1,8 +1,13 @@
+#![allow(clippy::missing_safety_doc)]
 //! Closure object operations.
 //!
 //! Layout: GcHeader + ClosureHeader + [captures...]
 //! - ClosureHeader: func_id, capture_count (1 slot)
 //! - Captures: capture_count slots (GcRef to escaped variables, stored directly)
+//!
+//! # Safety contract
+//! Unsafe accessors require a canonical live closure allocation whose capture
+//! count fits its allocation and whose captures remain rooted during access.
 
 use crate::gc::{Gc, GcRef};
 use crate::slot::{Slot, SLOT_BYTES};
@@ -30,12 +35,12 @@ pub fn create(gc: &mut Gc, func_id: u32, capture_count: usize) -> GcRef {
 }
 
 #[inline]
-pub fn func_id(c: GcRef) -> u32 {
-    ClosureHeader::as_ref(c).func_id
+pub unsafe fn func_id(c: GcRef) -> u32 {
+    unsafe { ClosureHeader::as_ref(c) }.func_id
 }
 #[inline]
-pub fn capture_count(c: GcRef) -> usize {
-    ClosureHeader::as_ref(c).capture_count as usize
+pub unsafe fn capture_count(c: GcRef) -> usize {
+    unsafe { ClosureHeader::as_ref(c) }.capture_count as usize
 }
 
 #[inline]
@@ -45,7 +50,7 @@ fn captures_ptr(c: GcRef) -> *mut Slot {
 
 /// Get captured variable (GcRef to escaped variable on heap)
 #[inline]
-pub fn get_capture(c: GcRef, idx: usize) -> Slot {
+pub unsafe fn get_capture(c: GcRef, idx: usize) -> Slot {
     unsafe { *captures_ptr(c).add(idx) }
 }
 
@@ -114,13 +119,14 @@ impl ClosureCallLayoutError {
 /// Determine closure call layout based on function metadata and closure state.
 /// This is the single source of truth for closure argument placement.
 #[inline]
-pub fn call_layout(
+pub unsafe fn call_layout(
     closure_ref: u64,
     closure_gcref: GcRef,
     recv_slots: usize,
     is_closure: bool,
 ) -> Result<ClosureCallLayout, ClosureCallLayoutError> {
-    let cap_count = capture_count(closure_gcref);
+    // Safety: VM call dispatch only supplies a rooted closure object here.
+    let cap_count = unsafe { capture_count(closure_gcref) };
 
     if recv_slots > 0 && cap_count > 0 {
         if cap_count != recv_slots {

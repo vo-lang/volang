@@ -19,10 +19,11 @@ pub(crate) fn cmd_dpy(root: &Path, mut args: Vec<String>) -> Result<()> {
     match args.remove(0).as_str() {
         "test" => run_test_compat(root, args),
         "run" => {
+            let (args, release) = extract_release_flag(args);
             let jit_mode = vo_run_uses_jit(&args);
-            run_vo_cli(root, prepend("run", args), jit_mode)
+            run_vo_cli(root, prepend("run", args), jit_mode, release)
         }
-        "vo" => run_vo_cli(root, args, false),
+        "vo" => run_vo_cli(root, args, false, false),
         "gc-perf" => dev_gc_perf::cmd_gc_perf(root, args),
         "ci" => run_ci_compat(root, args),
         "bench" => dev_bench::cmd_bench(root, args),
@@ -35,7 +36,7 @@ pub(crate) fn cmd_dpy(root: &Path, mut args: Vec<String>) -> Result<()> {
             print_dpy_usage();
             Ok(())
         }
-        other => run_vo_cli(root, prepend(other, args), false),
+        other => run_vo_cli(root, prepend(other, args), false, false),
     }
 }
 
@@ -96,9 +97,9 @@ fn run_ci_compat(root: &Path, args: Vec<String>) -> Result<()> {
     task_system::cmd_task(root, task_args)
 }
 
-fn run_vo_cli(root: &Path, args: Vec<String>, jit_mode: bool) -> Result<()> {
-    ensure_vo_cli_built(root)?;
-    let mut command = Command::new(vo_bin(root));
+fn run_vo_cli(root: &Path, args: Vec<String>, jit_mode: bool, release: bool) -> Result<()> {
+    ensure_vo_cli_built(root, release)?;
+    let mut command = Command::new(vo_bin(root, release));
     command.args(args).current_dir(root);
     if jit_mode {
         command.env("VO_JIT_CALL_THRESHOLD", "1");
@@ -110,20 +111,29 @@ fn run_vo_cli(root: &Path, args: Vec<String>, jit_mode: bool) -> Result<()> {
     Ok(())
 }
 
-fn ensure_vo_cli_built(root: &Path) -> Result<()> {
-    let status = Command::new("cargo")
-        .args(["build", "-p", "vo"])
+fn ensure_vo_cli_built(root: &Path, release: bool) -> Result<()> {
+    let mut command = Command::new("cargo");
+    command.args(["build", "-p", "vo"]);
+    if release {
+        command.arg("--release");
+    }
+    let status = command
         .current_dir(root)
         .status()
         .context("could not build vo CLI")?;
     if !status.success() {
-        bail!("cargo build -p vo failed with status {status}");
+        let profile = if release { "release" } else { "debug" };
+        bail!("cargo build -p vo ({profile}) failed with status {status}");
     }
     Ok(())
 }
 
-fn vo_bin(root: &Path) -> PathBuf {
-    root.join("target/debug/vo")
+fn vo_bin(root: &Path, release: bool) -> PathBuf {
+    root.join(if release {
+        "target/release/vo"
+    } else {
+        "target/debug/vo"
+    })
 }
 
 fn test_selectors(root: &Path) -> Result<Vec<String>> {
@@ -230,6 +240,6 @@ fn prepend(first: &str, args: Vec<String>) -> Vec<String> {
 
 fn print_dpy_usage() {
     println!(
-        "usage:\n  ./d.py test [target|alias] [--release] [-v] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]\n  ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]\n  ./d.py bench [all|vo|<name>|score] [--all-langs] [--runs N] [--warmup N]\n  ./d.py loc [--with-tests]\n  ./d.py clean [all|vo|rust|bench|junk]\n  ./d.py studio [--build-wasm] [--build-only] [--runner] [project]\n  ./d.py studio-native [--build-wasm] [--runner] [project]\n  ./d.py studio-stop\n  ./d.py ci [smart|quality|test|site|pr|full|release-verify|task <task-name>|task:<task-name>]\n  ./d.py run <file.vo> [--mode=vm|jit] [--codegen]\n  ./d.py vo <args...>"
+        "usage:\n  ./d.py test [target|alias] [--release] [-v] [-j N|--jobs N] [--repeat N|-n N] [file-or-dir]\n  ./d.py gc-perf [--release] [--json] [--objects=N|--small|--large] [dead-sweep|live-chain|root-table|sparse-root-table|interior-root-table]\n  ./d.py bench [all|vo|<name>|score] [--all-langs] [--runs N] [--warmup N]\n  ./d.py loc [--with-tests]\n  ./d.py clean [all|vo|rust|bench|junk]\n  ./d.py studio [--build-wasm] [--build-only] [--runner] [project]\n  ./d.py studio-native [--build-wasm] [--runner] [project]\n  ./d.py studio-stop\n  ./d.py ci [smart|quality|test|site|pr|full|release-verify|task <task-name>|task:<task-name>]\n  ./d.py run <file.vo> [--mode=vm|jit] [--release] [--codegen]\n  ./d.py vo <args...>"
     );
 }

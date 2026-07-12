@@ -1,10 +1,10 @@
 #![allow(clippy::too_many_arguments)]
 //! Dynamic access expression compilation (a~>field, a~>[key], a~>(args), a~>method(args))
 
+use vo_runtime::bytecode::ReturnShape;
+use vo_runtime::instruction::Opcode;
 use vo_runtime::{SlotType, ValueKind};
 use vo_syntax::ast::{DynAccessOp, Expr};
-use vo_vm::bytecode::ReturnShape;
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
@@ -153,7 +153,7 @@ fn compile_dyn_call_unified(
     let pack_extern = ctx.get_or_register_extern_with_return_shape_and_effects(
         "dyn_pack_any_slice",
         pack_returns,
-        vo_vm::bytecode::ExternEffects::NONE,
+        vo_runtime::bytecode::ExternEffects::NONE,
     );
     let pack_result = func.alloc_slots(&pack_result_types);
     let pack_arg_count = dyn_call_arg_slot_count(2, arg_count, ctx);
@@ -211,7 +211,7 @@ fn compile_dyn_call_unified(
             "dyn_call",
             call_returns,
             crate::context::ext_slot_kinds_for_slot_types(&call_arg_types),
-            vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+            vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
         );
     let call_args = func.alloc_slots(&call_arg_types);
 
@@ -626,7 +626,7 @@ fn compile_dyn_op(
                     "dyn_field",
                     result_returns,
                     Vec::new(),
-                    vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+                    vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
                 );
             func.emit_call_extern(result, extern_id, args, 5, &result_slot_types);
 
@@ -703,7 +703,7 @@ fn compile_dyn_op(
                     "dyn_index",
                     result_returns,
                     Vec::new(),
-                    vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+                    vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
                 );
             func.emit_call_extern(result, extern_id, args, 6, &result_slot_types);
 
@@ -813,7 +813,7 @@ fn compile_dyn_method_unified(
     let pack_extern = ctx.get_or_register_extern_with_return_shape_and_effects(
         "dyn_pack_any_slice",
         pack_returns,
-        vo_vm::bytecode::ExternEffects::NONE,
+        vo_runtime::bytecode::ExternEffects::NONE,
     );
     let pack_result = func.alloc_slots(&pack_result_types);
     let pack_arg_count = dyn_call_arg_slot_count(2, arg_count, ctx);
@@ -872,7 +872,7 @@ fn compile_dyn_method_unified(
             "dyn_method",
             call_returns,
             crate::context::ext_slot_kinds_for_slot_types(&call_arg_types),
-            vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+            vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
         );
     let call_args = func.alloc_slots(&call_arg_types);
 

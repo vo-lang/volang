@@ -45,6 +45,11 @@ target = "target"
 path = "apps/studio/wasm"
 target = "target"
 
+[[rust_cache_workspace]]
+repo = "voplay"
+path = "rust"
+target = "target"
+
 [[node_workspace]]
 name = "studio"
 path = "apps/studio"
@@ -72,5 +77,5 @@ name = "vogui-js"
 repo = "vogui"
 path = "js"
 lockfile = "js/package-lock.json"
-audit = "first-party-release"
-audit_reason = "First-party dependency hygiene is owned by the vogui release verification path."
+audit = "current"
+audit_level = "high"

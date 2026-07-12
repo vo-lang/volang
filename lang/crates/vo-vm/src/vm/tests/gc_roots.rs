@@ -331,6 +331,46 @@ fn gc_root_full_vm_scan_is_budgeted() {
 }
 
 #[test]
+fn gc_root_defer_payload_scan_is_budgeted() {
+    const ROOTS: u16 = 2048;
+    let mut vm = Vm::new();
+    vm.finish_load(gc_test_module_with_root_slots(1));
+    let fid = vm.scheduler.spawn(Fiber::new(0));
+    let args = vm.state.gc.alloc(ValueMeta::new(0, ValueKind::Void), ROOTS);
+    let mut roots = Vec::with_capacity(ROOTS as usize);
+    for slot in 0..ROOTS as usize {
+        let root = alloc_gc_test_object(&mut vm);
+        roots.push(root);
+        unsafe { vo_runtime::gc::Gc::write_slot(args, slot, root as u64) };
+    }
+    {
+        let fiber = vm.scheduler.get_fiber_mut(fid);
+        fiber.push_frame(0, 1, 1, 0, 0);
+        fiber.defer_stack.push(DeferEntry {
+            frame_depth: 1,
+            func_id: 0,
+            closure: core::ptr::null_mut(),
+            args,
+            arg_layout: DeferArgLayout {
+                slot_types: vec![SlotType::GcRef; ROOTS as usize],
+            },
+            is_closure: false,
+            is_errdefer: false,
+            registered_at_generation: 0,
+        });
+    }
+
+    vm.gc_step_after_fiber(None);
+    assert_eq!(vm.last_gc_step_stats().gc.root_scan_work_bytes, 8192);
+    assert!(vm.state.gc_root_scan.is_some());
+
+    run_gc_until_pause(&mut vm);
+    for root in roots {
+        assert_eq!(vm.state.gc.canonicalize_ref(root), Some(root));
+    }
+}
+
+#[test]
 fn gc_root_pending_start_cycle_scan_restarts_when_roots_mutate() {
     const ROOTS: u16 = 2048;
     let mut vm = Vm::new();
@@ -491,6 +531,18 @@ fn gc_root_duplicate_dirty_fiber_mark_does_not_advance_epoch_without_active_scan
         dirty_fibers: vec![fid.to_raw()],
         roots: Vec::new(),
         cursor: 0,
+        stage: VmRootScanStage::Fibers,
+        global_def_cursor: 0,
+        global_base_cursor: 0,
+        global_slot_cursor: 0,
+        fiber_source_cursor: 0,
+        fiber_frame_cursor: 0,
+        fiber_slot_cursor: 0,
+        fiber_aux_stage: VmFiberRootScanStage::Defers,
+        fiber_aux_outer_cursor: 0,
+        fiber_aux_slot_cursor: 0,
+        sentinel_cursor: 0,
+        endpoint_cursor: 0,
     });
     vm.mark_gc_fiber_roots_dirty(fid);
     assert_eq!(vm.state.gc_dirty_epoch, 9);

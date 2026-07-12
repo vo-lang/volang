@@ -185,8 +185,9 @@ mod read_impl {
     #[vostd_fn("math/rand", "Read", std)]
     pub fn read(call: &mut ExternCallContext) -> ExternResult {
         let buf_ref = call.arg_ref(slots::ARG_P);
-        let len = slice::len(buf_ref);
-        let buf_ptr = slice::data_ptr(buf_ref);
+        // Safety: `buf_ref` is the rooted []byte argument for this extern call.
+        let len = unsafe { slice::len(buf_ref) };
+        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
         if buf_ptr.is_null() && len > 0 {
             call.ret_i64(slots::RET_0, 0);
             write_nil_error(call, slots::RET_1);

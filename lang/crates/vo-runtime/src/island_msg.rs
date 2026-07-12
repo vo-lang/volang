@@ -242,14 +242,17 @@ pub fn encode_spawn_payload_from_capture_values(
             continue;
         };
         let value_meta = ValueMeta::from_raw(transfer_type.meta_raw);
-        let packed = pack_slots_with_named_type_metas(
-            gc,
-            value_slots,
-            value_meta,
-            struct_metas,
-            named_type_metas,
-            runtime_types,
-        );
+        // Safety: capture slots and metadata are produced by verified bytecode.
+        let packed = unsafe {
+            pack_slots_with_named_type_metas(
+                gc,
+                value_slots,
+                value_meta,
+                struct_metas,
+                named_type_metas,
+                runtime_types,
+            )
+        };
         let packed_data = packed.data();
         buf.extend_from_slice(&(packed_data.len() as u32).to_le_bytes());
         buf.extend_from_slice(packed_data);
@@ -261,14 +264,17 @@ pub fn encode_spawn_payload_from_capture_values(
         if arg_offset + slots_usize <= args.len() {
             let value_meta = ValueMeta::from_raw(transfer_type.meta_raw);
             let value_slots = &args[arg_offset..arg_offset + slots_usize];
-            let packed = pack_slots_with_named_type_metas(
-                gc,
-                value_slots,
-                value_meta,
-                struct_metas,
-                named_type_metas,
-                runtime_types,
-            );
+            // Safety: parameter slots and metadata come from the verified call layout.
+            let packed = unsafe {
+                pack_slots_with_named_type_metas(
+                    gc,
+                    value_slots,
+                    value_meta,
+                    struct_metas,
+                    named_type_metas,
+                    runtime_types,
+                )
+            };
             let packed_data = packed.data();
             buf.extend_from_slice(&(packed_data.len() as u32).to_le_bytes());
             buf.extend_from_slice(packed_data);
@@ -305,14 +311,17 @@ pub fn encode_spawn_payload_from_raw_capture_slots(
     buf.extend_from_slice(&(raw_capture_slots.len() as u16).to_le_bytes());
 
     let value_meta = ValueMeta::from_raw(capture_type.meta_raw);
-    let packed = pack_slots_with_named_type_metas(
-        gc,
-        raw_capture_slots,
-        value_meta,
-        struct_metas,
-        named_type_metas,
-        runtime_types,
-    );
+    // Safety: direct receiver captures are checked against `capture_type` above.
+    let packed = unsafe {
+        pack_slots_with_named_type_metas(
+            gc,
+            raw_capture_slots,
+            value_meta,
+            struct_metas,
+            named_type_metas,
+            runtime_types,
+        )
+    };
     let packed_data = packed.data();
     buf.extend_from_slice(&(packed_data.len() as u32).to_le_bytes());
     buf.extend_from_slice(packed_data);
@@ -323,14 +332,17 @@ pub fn encode_spawn_payload_from_raw_capture_slots(
         if arg_offset + slots_usize <= args.len() {
             let value_meta = ValueMeta::from_raw(transfer_type.meta_raw);
             let value_slots = &args[arg_offset..arg_offset + slots_usize];
-            let packed = pack_slots_with_named_type_metas(
-                gc,
-                value_slots,
-                value_meta,
-                struct_metas,
-                named_type_metas,
-                runtime_types,
-            );
+            // Safety: parameter slots and metadata come from the verified call layout.
+            let packed = unsafe {
+                pack_slots_with_named_type_metas(
+                    gc,
+                    value_slots,
+                    value_meta,
+                    struct_metas,
+                    named_type_metas,
+                    runtime_types,
+                )
+            };
             let packed_data = packed.data();
             buf.extend_from_slice(&(packed_data.len() as u32).to_le_bytes());
             buf.extend_from_slice(packed_data);
@@ -448,16 +460,20 @@ where
         let packed = PackedValue::from_data(packed_data.to_vec());
         let mut value_slots = vec![0u64; transfer_type.slots as usize];
         let mut cursor = 0;
-        unpack_slots_expected_with_queue_handle_resolver_and_cache(
-            gc,
-            packed.data(),
-            &mut cursor,
-            &mut value_slots,
-            value_meta,
-            PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types),
-            &mut queue_handle_cache,
-            &mut resolve_queue_handle,
-        );
+        // Safety: the packed chunk was validated immediately above and the
+        // destination width matches the declared transfer layout.
+        unsafe {
+            unpack_slots_expected_with_queue_handle_resolver_and_cache(
+                gc,
+                packed.data(),
+                &mut cursor,
+                &mut value_slots,
+                value_meta,
+                PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types),
+                &mut queue_handle_cache,
+                &mut resolve_queue_handle,
+            )
+        };
         captures.extend_from_slice(&value_slots);
     } else {
         for &transfer_type in capture_types.iter().take(payload.num_captures as usize) {
@@ -480,16 +496,23 @@ where
             let packed = PackedValue::from_data(packed_data.to_vec());
             let mut value_slots = vec![0u64; transfer_type.slots as usize];
             let mut cursor = 0;
-            unpack_slots_expected_with_queue_handle_resolver_and_cache(
-                gc,
-                packed.data(),
-                &mut cursor,
-                &mut value_slots,
-                value_meta,
-                PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types),
-                &mut queue_handle_cache,
-                &mut resolve_queue_handle,
-            );
+            // Safety: the packed chunk and destination layout were validated above.
+            unsafe {
+                unpack_slots_expected_with_queue_handle_resolver_and_cache(
+                    gc,
+                    packed.data(),
+                    &mut cursor,
+                    &mut value_slots,
+                    value_meta,
+                    PackTypeContext::with_named_types(
+                        struct_metas,
+                        named_type_metas,
+                        runtime_types,
+                    ),
+                    &mut queue_handle_cache,
+                    &mut resolve_queue_handle,
+                )
+            };
 
             let box_ref = alloc_capture_box(gc, value_meta, transfer_type.slots);
             for (j, &slot) in value_slots.iter().enumerate() {
@@ -522,16 +545,19 @@ where
         let packed = PackedValue::from_data(packed_data.to_vec());
         let mut value_slots = vec![0u64; transfer_type.slots as usize];
         let mut cursor = 0;
-        unpack_slots_expected_with_queue_handle_resolver_and_cache(
-            gc,
-            packed.data(),
-            &mut cursor,
-            &mut value_slots,
-            value_meta,
-            PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types),
-            &mut queue_handle_cache,
-            &mut resolve_queue_handle,
-        );
+        // Safety: the packed chunk and destination layout were validated above.
+        unsafe {
+            unpack_slots_expected_with_queue_handle_resolver_and_cache(
+                gc,
+                packed.data(),
+                &mut cursor,
+                &mut value_slots,
+                value_meta,
+                PackTypeContext::with_named_types(struct_metas, named_type_metas, runtime_types),
+                &mut queue_handle_cache,
+                &mut resolve_queue_handle,
+            )
+        };
 
         args.extend_from_slice(&value_slots);
     }
@@ -743,8 +769,9 @@ fn decode_endpoint_response_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gc_types::{trace_object_children_with_context, ClosureScanLayout, GcScanContext};
+    use crate::gc_types::{ClosureScanLayout, GcScanContext};
     use crate::objects::string;
+    use crate::test_support::trace_object_children_with_context;
 
     fn roundtrip(cmd: IslandCommand) {
         let encoded = encode_island_command(&cmd);
@@ -850,7 +877,7 @@ mod tests {
 
         assert!(args.is_empty());
         let capture_box = captures[0] as GcRef;
-        let header = Gc::header(capture_box);
+        let header = unsafe { Gc::header(capture_box) };
         assert!(header.is_value_slots_object());
         assert_eq!(header.value_meta(), ValueMeta::new(1, ValueKind::Array));
         assert_eq!(header.slots, 2);
@@ -868,7 +895,7 @@ mod tests {
             "spawn unpack capture box must scan every array element root"
         );
         assert!(visited.iter().all(|&child| {
-            Gc::header(child).value_meta() == ValueMeta::new(0, ValueKind::String)
+            unsafe { Gc::header(child) }.value_meta() == ValueMeta::new(0, ValueKind::String)
         }));
     }
 
@@ -919,10 +946,17 @@ mod tests {
 
         assert!(args.is_empty());
         assert_eq!(captures.len(), 2);
-        assert_eq!(Gc::header(captures[0] as GcRef).kind(), ValueKind::String);
-        assert_eq!(Gc::header(captures[1] as GcRef).kind(), ValueKind::String);
-        assert_eq!(string::as_bytes(captures[0] as GcRef), b"left");
-        assert_eq!(string::as_bytes(captures[1] as GcRef), b"right");
+        assert_eq!(
+            unsafe { Gc::header(captures[0] as GcRef) }.kind(),
+            ValueKind::String
+        );
+        assert_eq!(
+            unsafe { Gc::header(captures[1] as GcRef) }.kind(),
+            ValueKind::String
+        );
+        // Safety: unpacking produced live string captures in `gc`.
+        assert_eq!(unsafe { string::to_bytes(captures[0] as GcRef) }, b"left");
+        assert_eq!(unsafe { string::to_bytes(captures[1] as GcRef) }, b"right");
     }
 
     fn roundtrip_frame(target_island_id: u32, cmd: IslandCommand) {

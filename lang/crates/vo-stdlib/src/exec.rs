@@ -195,13 +195,15 @@ fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
     if slice_ref.is_null() {
         return Vec::new();
     }
-    let len = slice::len(slice_ref);
+    // Safety: this helper only receives a rooted []string extern argument.
+    let len = unsafe { slice::len(slice_ref) };
     let mut result = Vec::with_capacity(len);
     for i in 0..len {
         let str_ref_raw = unsafe { slice::get(slice_ref, i, std::mem::size_of::<GcRef>()) };
         let str_ref: GcRef = slot_to_ptr(str_ref_raw);
         if !str_ref.is_null() {
-            let s = vo_runtime::objects::string::as_str(str_ref).to_string();
+            // Safety: the typed slice supplies live string elements.
+            let s = unsafe { vo_runtime::objects::string::to_rust_string(str_ref) };
             result.push(s);
         } else {
             result.push(String::new());

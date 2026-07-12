@@ -318,7 +318,7 @@ pub(super) fn save_compile_cache(
 }
 
 fn save_extensions(path: &Path, extensions: &[NativeExtensionSpec]) -> bool {
-    let cached = extensions
+    let cached = dedupe_extension_specs(extensions.to_vec())
         .iter()
         .map(CachedNativeExtensionSpec::from)
         .collect::<Vec<_>>();
@@ -333,14 +333,32 @@ fn load_extensions(path: &Path) -> Option<Vec<NativeExtensionSpec>> {
         Ok(bytes) => serde_json::from_slice::<Vec<CachedNativeExtensionSpec>>(&bytes)
             .ok()
             .map(|extensions| {
-                extensions
-                    .into_iter()
-                    .map(NativeExtensionSpec::from)
-                    .collect()
+                dedupe_extension_specs(
+                    extensions
+                        .into_iter()
+                        .map(NativeExtensionSpec::from)
+                        .collect(),
+                )
             }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
         Err(_) => None,
     }
+}
+
+fn dedupe_extension_specs(extensions: Vec<NativeExtensionSpec>) -> Vec<NativeExtensionSpec> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::with_capacity(extensions.len());
+    for spec in extensions {
+        let key = (
+            spec.name.clone(),
+            spec.native_path.clone(),
+            spec.manifest_path.clone(),
+        );
+        if seen.insert(key) {
+            deduped.push(spec);
+        }
+    }
+    deduped
 }
 
 fn save_locked_modules(path: &Path, locked_modules: &[LockedModule]) -> bool {
@@ -396,6 +414,32 @@ mod tests {
         ));
 
         assert!(!cached_extensions_have_usable_host_artifacts(&[spec]));
+    }
+
+    #[test]
+    fn cached_extensions_dedupe_duplicate_specs_on_load() {
+        let slot = temp_cache_slot("dedupe-extensions");
+        fs::create_dir_all(&slot.dir).expect("create cache dir");
+        let cached = vec![
+            CachedNativeExtensionSpec {
+                name: "demo".to_string(),
+                native_path: PathBuf::from("rust/target/debug/libdemo.dylib"),
+                manifest_path: PathBuf::from("vo.mod"),
+            },
+            CachedNativeExtensionSpec {
+                name: "demo".to_string(),
+                native_path: PathBuf::from("rust/target/debug/libdemo.dylib"),
+                manifest_path: PathBuf::from("vo.mod"),
+            },
+        ];
+        fs::write(&slot.extensions_file, serde_json::to_vec(&cached).unwrap())
+            .expect("write extensions cache");
+
+        let loaded = load_extensions(&slot.extensions_file).expect("load extensions cache");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "demo");
+
+        let _ = fs::remove_dir_all(&slot.dir);
     }
 
     #[test]

@@ -119,6 +119,9 @@ function localProjectSnapshot() {
     configureServer(server: ProxyServer) {
       installLocalProjectSnapshot(server.middlewares);
     },
+    configurePreviewServer(server: ProxyServer) {
+      installLocalProjectSnapshot(server.middlewares);
+    },
   };
 }
 
@@ -126,6 +129,10 @@ function voplayPerfReportEndpoint() {
   return {
     name: 'studio-voplay-perf-report-endpoint',
     configureServer(server: ProxyServer) {
+      installVoplayPerfReportEndpoint(server.middlewares);
+      installVoplayPerfReloadEndpoint(server);
+    },
+    configurePreviewServer(server: ProxyServer) {
       installVoplayPerfReportEndpoint(server.middlewares);
       installVoplayPerfReloadEndpoint(server);
     },

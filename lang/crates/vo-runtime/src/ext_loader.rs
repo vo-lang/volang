@@ -178,13 +178,13 @@ fn extern_entry_name<'a>(
     })
 }
 
-fn validate_extension_entries(
+fn validate_extension_entries<'a>(
     extension: &str,
-    entries: &[ExternEntry],
+    entries: impl IntoIterator<Item = (usize, &'a ExternEntry)>,
     mut is_already_registered: impl FnMut(&str) -> bool,
 ) -> Result<(), ExtError> {
-    let mut seen = HashSet::with_capacity(entries.len());
-    for (index, entry) in entries.iter().enumerate() {
+    let mut seen = HashSet::new();
+    for (index, entry) in entries {
         let extern_name = extern_entry_name(extension, index, entry)?;
         if !seen.insert(extern_name) {
             return Err(invalid_entry_table(
@@ -209,6 +209,23 @@ fn validate_extension_entries(
         }
     }
     Ok(())
+}
+
+fn extension_extern_prefix(extension: &str) -> String {
+    let mut prefix = String::with_capacity(extension.len() + 1);
+    for ch in extension.chars() {
+        if ch.is_ascii_alphanumeric() {
+            prefix.push(ch.to_ascii_lowercase());
+        } else {
+            prefix.push('_');
+        }
+    }
+    prefix.push('_');
+    prefix
+}
+
+fn extension_exports_entry(extension: &str, extern_name: &str) -> bool {
+    extern_name.starts_with(&extension_extern_prefix(extension))
 }
 
 /// A loaded extension entry.
@@ -274,6 +291,9 @@ impl ExtensionLoader {
         let canonical_path = path
             .canonicalize()
             .map_err(|e| ExtError::LoadFailed(format!("{}: {}", path.display(), e)))?;
+        if self.has_loaded_spec(name, &canonical_path) {
+            return Ok(());
+        }
 
         // Use RTLD_LOCAL to keep dylib symbols private and avoid linkme EXTERN_TABLE conflicts
         // with the host binary. Extensions are standalone and do not share symbols.
@@ -308,16 +328,24 @@ impl ExtensionLoader {
         } else {
             unsafe { std::slice::from_raw_parts(table.entries, table.entry_count as usize) }
         };
-        validate_extension_entries(name, c_entries, |extern_name| {
+        let mut owned_entries = Vec::new();
+        for (index, entry) in c_entries.iter().enumerate() {
+            let extern_name = extern_entry_name(name, index, entry)?;
+            if extension_exports_entry(name, extern_name) {
+                owned_entries.push((index, entry));
+            }
+        }
+        validate_extension_entries(name, owned_entries.iter().copied(), |extern_name| {
             self.cache.contains_key(extern_name)
         })?;
 
         let ext_idx = self.loaded.len();
-        let mut entries = Vec::with_capacity(c_entries.len());
+        let mut entries = Vec::with_capacity(owned_entries.len());
 
-        for (i, c_entry) in c_entries.iter().enumerate() {
-            let extern_name = extern_entry_name(name, i, c_entry)?;
-            self.cache.insert(extern_name.to_string(), (ext_idx, i));
+        for (entry_idx, (table_idx, c_entry)) in owned_entries.iter().enumerate() {
+            let extern_name = extern_entry_name(name, *table_idx, c_entry)?;
+            self.cache
+                .insert(extern_name.to_string(), (ext_idx, entry_idx));
             entries.push(LoadedEntry {
                 func: c_entry.func,
                 effects: c_entry.effects().unwrap_or(ExternEffects::UNKNOWN_CONTROL),
@@ -351,6 +379,12 @@ impl ExtensionLoader {
 
     pub fn specs(&self) -> &[NativeExtensionSpec] {
         &self.specs
+    }
+
+    fn has_loaded_spec(&self, name: &str, native_path: &Path) -> bool {
+        self.specs
+            .iter()
+            .any(|loaded| loaded.name == name && loaded.native_path == native_path)
     }
 
     /// Get a loaded extension library by manifest name.
@@ -468,8 +502,8 @@ mod tests {
     fn extension_table_rejects_invalid_effect_bits() {
         let mut entries = [entry(b"pkg_bad_effects")];
         entries[0].effects_bits = ExternEffects::ALLOWED_BITS << 1;
-        let err =
-            validate_extension_entries("bad", &entries, |_| false).expect_err("invalid effects");
+        let err = validate_extension_entries("bad", entries.iter().enumerate(), |_| false)
+            .expect_err("invalid effects");
         assert!(err.to_string().contains("invalid effects bits"));
     }
 
@@ -509,8 +543,8 @@ mod tests {
     fn extension_entries_reject_duplicate_extern_names() {
         let entries = [entry(b"dup"), entry(b"dup")];
 
-        let err =
-            validate_extension_entries("dups", &entries, |_| false).expect_err("duplicate name");
+        let err = validate_extension_entries("dups", entries.iter().enumerate(), |_| false)
+            .expect_err("duplicate name");
         assert!(err.to_string().contains("duplicate extern name 'dup'"));
     }
 
@@ -518,8 +552,10 @@ mod tests {
     fn extension_entries_reject_already_registered_extern_names() {
         let entries = [entry(b"existing")];
 
-        let err = validate_extension_entries("dups", &entries, |name| name == "existing")
-            .expect_err("already registered name");
+        let err = validate_extension_entries("dups", entries.iter().enumerate(), |name| {
+            name == "existing"
+        })
+        .expect_err("already registered name");
         assert!(err.to_string().contains("already registered"));
     }
 
@@ -527,6 +563,30 @@ mod tests {
     fn extension_entries_accept_unique_extern_names() {
         let entries = [entry(b"one"), entry(b"two")];
 
-        validate_extension_entries("ok", &entries, |_| false).expect("unique names");
+        validate_extension_entries("ok", entries.iter().enumerate(), |_| false)
+            .expect("unique names");
+    }
+
+    #[test]
+    fn extension_entry_ownership_uses_manifest_prefix() {
+        assert!(extension_exports_entry("voplay", "voplay_renderInit"));
+        assert!(extension_exports_entry("vo-play", "vo_play_renderInit"));
+        assert!(extension_exports_entry("vogui", "vogui_navigate"));
+        assert!(!extension_exports_entry("voplay", "vogui_navigate"));
+    }
+
+    #[test]
+    fn load_impl_skips_exact_duplicate_specs() {
+        let mut loader = ExtensionLoader::new();
+        let native_path = PathBuf::from("/tmp/libsame.so");
+        loader.specs.push(NativeExtensionSpec::new(
+            "same",
+            native_path.clone(),
+            PathBuf::from("/tmp/same/vo.mod"),
+        ));
+
+        assert!(loader.has_loaded_spec("same", &native_path));
+        assert!(!loader.has_loaded_spec("same", Path::new("/tmp/other.so")));
+        assert!(!loader.has_loaded_spec("other", &native_path));
     }
 }

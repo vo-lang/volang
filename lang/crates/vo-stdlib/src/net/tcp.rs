@@ -132,8 +132,9 @@ pub fn net_tcp_conn_read(call: &mut ExternCallContext) -> ExternResult {
         let resume_token = call.take_resume_io_token();
         let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
         let buf_ref = call.arg_ref(slots::ARG_B);
-        let buf_len = slice::len(buf_ref);
-        let buf_ptr = slice::data_ptr(buf_ref);
+        // Safety: `buf_ref` is a rooted []byte extern argument.
+        let buf_len = unsafe { slice::len(buf_ref) };
+        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
 
         let fd = {
             let handles = TCP_CONN_HANDLES.lock().unwrap();
@@ -168,8 +169,9 @@ pub fn net_tcp_conn_read(call: &mut ExternCallContext) -> ExternResult {
     {
         let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
         let buf_ref = call.arg_ref(slots::ARG_B);
-        let buf_len = slice::len(buf_ref);
-        let buf_ptr = slice::data_ptr(buf_ref);
+        // Safety: `buf_ref` is a rooted []byte extern argument.
+        let buf_len = unsafe { slice::len(buf_ref) };
+        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
         let buf = if buf_len == 0 {
             &mut [] as &mut [u8]
         } else {
@@ -208,8 +210,9 @@ pub fn net_tcp_conn_write(call: &mut ExternCallContext) -> ExternResult {
         let resume_token = call.take_resume_io_token();
         let handle = call.arg_i64(slots::ARG_HANDLE) as i32;
         let buf_ref = call.arg_ref(slots::ARG_B);
-        let buf_len = slice::len(buf_ref);
-        let buf_ptr = slice::data_ptr(buf_ref);
+        // Safety: `buf_ref` is a rooted []byte extern argument.
+        let buf_len = unsafe { slice::len(buf_ref) };
+        let buf_ptr = unsafe { slice::data_ptr(buf_ref) };
 
         let fd = {
             let handles = TCP_CONN_HANDLES.lock().unwrap();

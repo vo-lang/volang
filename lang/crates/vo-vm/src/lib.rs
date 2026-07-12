@@ -32,6 +32,8 @@ pub mod runtime_boundary;
 pub mod scheduler;
 #[cfg(test)]
 pub(crate) mod source_contract;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod vm;
 
 // Re-export runtime bytecode modules
@@ -42,6 +44,8 @@ pub use vo_runtime::serialize;
 // Re-export semantic JIT surface types for external use.
 #[cfg(feature = "jit")]
 pub use vm::{JitConfig, JitExecutionStats, JitSideExitReason, JitSideExitReasonStats};
+#[cfg(feature = "jit")]
+pub use vo_jit::JitCodeMemoryStats;
 
 #[cfg(test)]
 mod tests {

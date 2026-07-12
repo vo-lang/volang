@@ -5,6 +5,12 @@ extern crate alloc;
 
 extern crate self as vo_runtime;
 
+/// Cooperative instruction budget shared by interpreter and native tiers.
+///
+/// The value keeps native and browser-hosted interpreter work preemptible while
+/// avoiding repeated host scheduling for ordinary frame-sized workloads.
+pub const EXECUTION_TIMESLICE_INSTRUCTIONS: u32 = 16_384;
+
 pub mod output;
 pub mod slot;
 
@@ -17,6 +23,8 @@ pub mod island_transport;
 pub mod itab;
 pub mod objects;
 pub mod pack;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 // FFI core types (no_std compatible), registration requires std
 pub mod ffi;

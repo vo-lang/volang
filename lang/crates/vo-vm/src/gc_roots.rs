@@ -12,7 +12,10 @@ use vo_runtime::slot::SLOT_BYTES;
 use crate::bytecode::{FunctionDef, GlobalDef, Module};
 use crate::fiber::{DeferEntry, Fiber, PanicState};
 use crate::scheduler::FiberId;
-use crate::vm::{EndpointRegistry, Vm, VmGcStepStats, VmRootScanMode, VmRootScanSnapshot};
+use crate::vm::{
+    EndpointRegistry, Vm, VmFiberRootScanStage, VmGcStepStats, VmRootScanMode, VmRootScanSnapshot,
+    VmRootScanStage,
+};
 
 #[inline]
 fn collect_gcref(roots: &mut Vec<GcRef>, gcref: GcRef) {
@@ -256,6 +259,376 @@ fn build_vm_root_scan_snapshot(
         },
         roots,
         cursor: 0,
+        stage: VmRootScanStage::Done,
+        global_def_cursor: global_defs.len(),
+        global_base_cursor: globals.len(),
+        global_slot_cursor: 0,
+        fiber_source_cursor: fibers.len(),
+        fiber_frame_cursor: 0,
+        fiber_slot_cursor: 0,
+        fiber_aux_stage: VmFiberRootScanStage::Done,
+        fiber_aux_outer_cursor: 0,
+        fiber_aux_slot_cursor: 0,
+        sentinel_cursor: 0,
+        endpoint_cursor: 0,
+    }
+}
+
+fn new_vm_root_scan_snapshot(
+    kind: GcRootScanKind,
+    dirty_epoch: u64,
+    dirty_all: bool,
+    dirty_fibers: &[u32],
+) -> VmRootScanSnapshot {
+    let mode = if kind == GcRootScanKind::Sweep && !dirty_all {
+        VmRootScanMode::DirtyFibers
+    } else {
+        VmRootScanMode::Full
+    };
+    VmRootScanSnapshot {
+        kind,
+        mode,
+        dirty_epoch,
+        dirty_fibers: if mode == VmRootScanMode::DirtyFibers {
+            dirty_fibers.to_vec()
+        } else {
+            Vec::new()
+        },
+        roots: Vec::new(),
+        cursor: 0,
+        stage: VmRootScanStage::Globals,
+        global_def_cursor: 0,
+        global_base_cursor: 0,
+        global_slot_cursor: 0,
+        fiber_source_cursor: 0,
+        fiber_frame_cursor: 0,
+        fiber_slot_cursor: 0,
+        fiber_aux_stage: VmFiberRootScanStage::Defers,
+        fiber_aux_outer_cursor: 0,
+        fiber_aux_slot_cursor: 0,
+        sentinel_cursor: 0,
+        endpoint_cursor: 0,
+    }
+}
+
+#[inline]
+fn typed_slot_root(
+    slots: &[u64],
+    slot_types: &[vo_runtime::SlotType],
+    idx: usize,
+) -> Option<GcRef> {
+    let raw = *slots.get(idx)?;
+    match slot_types.get(idx).copied()? {
+        vo_runtime::SlotType::GcRef if raw != 0 => Some(raw as GcRef),
+        vo_runtime::SlotType::Interface1
+            if raw != 0
+                && idx > 0
+                && vo_runtime::objects::interface::data_is_gc_ref(slots[idx - 1]) =>
+        {
+            Some(raw as GcRef)
+        }
+        _ => None,
+    }
+}
+
+fn selected_fiber_index(snapshot: &VmRootScanSnapshot, fibers_len: usize) -> Option<usize> {
+    match snapshot.mode {
+        VmRootScanMode::Full => {
+            (snapshot.fiber_source_cursor < fibers_len).then_some(snapshot.fiber_source_cursor)
+        }
+        VmRootScanMode::DirtyFibers => snapshot
+            .dirty_fibers
+            .get(snapshot.fiber_source_cursor)
+            .copied()
+            .map(|raw| raw as usize),
+    }
+}
+
+enum AuxRootScanStep {
+    Consumed(Option<GcRef>),
+    BudgetExhausted,
+    Done,
+}
+
+fn interface_value_root(value: vo_runtime::InterfaceSlot) -> Option<GcRef> {
+    (value.is_ref_type() && value.slot1 != 0).then_some(value.as_ref())
+}
+
+fn defer_entry_root_at(entry: &DeferEntry, cursor: usize) -> Option<Option<GcRef>> {
+    match cursor {
+        0 => Some((!entry.closure.is_null()).then_some(entry.closure)),
+        1 => Some((!entry.args.is_null()).then_some(entry.args)),
+        _ if entry.args.is_null() => None,
+        _ => {
+            let slot = cursor - 2;
+            let arg_slots = entry.arg_layout.slot_types.len();
+            if slot == 0 {
+                assert!(
+                    arg_slots <= unsafe { vo_runtime::gc::Gc::header(entry.args) }.slots as usize,
+                    "defer root layout exceeds argument object: layout_slots={} object_slots={}",
+                    arg_slots,
+                    unsafe { vo_runtime::gc::Gc::header(entry.args) }.slots
+                );
+            }
+            if slot >= arg_slots {
+                return None;
+            }
+            let args = unsafe { core::slice::from_raw_parts(entry.args as *const u64, arg_slots) };
+            Some(typed_slot_root(args, &entry.arg_layout.slot_types, slot))
+        }
+    }
+}
+
+fn reset_fiber_aux_stage(snapshot: &mut VmRootScanSnapshot, stage: VmFiberRootScanStage) {
+    snapshot.fiber_aux_stage = stage;
+    snapshot.fiber_aux_outer_cursor = 0;
+    snapshot.fiber_aux_slot_cursor = 0;
+}
+
+fn scan_fiber_aux_root(
+    snapshot: &mut VmRootScanSnapshot,
+    fiber: &Fiber,
+    budget_available: bool,
+) -> AuxRootScanStep {
+    loop {
+        match snapshot.fiber_aux_stage {
+            VmFiberRootScanStage::Defers => {
+                let Some(entry) = fiber.defer_stack.get(snapshot.fiber_aux_outer_cursor) else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::UnwindDefers);
+                    continue;
+                };
+                if let Some(root) = defer_entry_root_at(entry, snapshot.fiber_aux_slot_cursor) {
+                    if !budget_available {
+                        return AuxRootScanStep::BudgetExhausted;
+                    }
+                    snapshot.fiber_aux_slot_cursor += 1;
+                    return AuxRootScanStep::Consumed(root);
+                }
+                snapshot.fiber_aux_outer_cursor += 1;
+                snapshot.fiber_aux_slot_cursor = 0;
+            }
+            VmFiberRootScanStage::UnwindDefers => {
+                let Some(pending) = fiber
+                    .unwinding
+                    .as_ref()
+                    .map(|state| state.pending.as_slice())
+                else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::ReturnValues);
+                    continue;
+                };
+                let Some(entry) = pending.get(snapshot.fiber_aux_outer_cursor) else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::ReturnValues);
+                    continue;
+                };
+                if let Some(root) = defer_entry_root_at(entry, snapshot.fiber_aux_slot_cursor) {
+                    if !budget_available {
+                        return AuxRootScanStep::BudgetExhausted;
+                    }
+                    snapshot.fiber_aux_slot_cursor += 1;
+                    return AuxRootScanStep::Consumed(root);
+                }
+                snapshot.fiber_aux_outer_cursor += 1;
+                snapshot.fiber_aux_slot_cursor = 0;
+            }
+            VmFiberRootScanStage::ReturnValues => {
+                let Some(values) = fiber
+                    .unwinding
+                    .as_ref()
+                    .and_then(|state| state.return_values.as_ref())
+                else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Panic);
+                    continue;
+                };
+                let root = match values {
+                    crate::fiber::ReturnValues::Stack { vals, slot_types } => {
+                        if snapshot.fiber_aux_slot_cursor == 0 {
+                            assert_eq!(
+                                vals.len(),
+                                slot_types.len(),
+                                "unwinding return root layout mismatch: fiber={} values={} slot_types={}",
+                                fiber.id,
+                                vals.len(),
+                                slot_types.len()
+                            );
+                        }
+                        if snapshot.fiber_aux_slot_cursor >= vals.len() {
+                            reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Panic);
+                            continue;
+                        }
+                        typed_slot_root(vals, slot_types, snapshot.fiber_aux_slot_cursor)
+                    }
+                    crate::fiber::ReturnValues::Heap { gcrefs, .. } => {
+                        let Some(&raw) = gcrefs.get(snapshot.fiber_aux_slot_cursor) else {
+                            reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Panic);
+                            continue;
+                        };
+                        (raw != 0).then_some(raw as GcRef)
+                    }
+                };
+                if !budget_available {
+                    return AuxRootScanStep::BudgetExhausted;
+                }
+                snapshot.fiber_aux_slot_cursor += 1;
+                return AuxRootScanStep::Consumed(root);
+            }
+            VmFiberRootScanStage::Panic => {
+                let Some(PanicState::Recoverable(value)) = fiber.panic_state else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::ClosureReplay);
+                    continue;
+                };
+                if snapshot.fiber_aux_slot_cursor > 0 {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::ClosureReplay);
+                    continue;
+                }
+                if !budget_available {
+                    return AuxRootScanStep::BudgetExhausted;
+                }
+                snapshot.fiber_aux_slot_cursor = 1;
+                return AuxRootScanStep::Consumed(interface_value_root(value));
+            }
+            VmFiberRootScanStage::ClosureReplay => {
+                let Some((values, slot_types)) = fiber
+                    .closure_replay
+                    .results
+                    .get(snapshot.fiber_aux_outer_cursor)
+                else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::JitSuspend);
+                    continue;
+                };
+                if snapshot.fiber_aux_slot_cursor == 0 {
+                    assert_eq!(
+                        values.len(),
+                        slot_types.len(),
+                        "closure replay root layout mismatch: fiber={} result={} values={} slot_types={}",
+                        fiber.id,
+                        snapshot.fiber_aux_outer_cursor,
+                        values.len(),
+                        slot_types.len()
+                    );
+                }
+                if snapshot.fiber_aux_slot_cursor >= values.len() {
+                    snapshot.fiber_aux_outer_cursor += 1;
+                    snapshot.fiber_aux_slot_cursor = 0;
+                    continue;
+                }
+                if !budget_available {
+                    return AuxRootScanStep::BudgetExhausted;
+                }
+                let root = typed_slot_root(values, slot_types, snapshot.fiber_aux_slot_cursor);
+                snapshot.fiber_aux_slot_cursor += 1;
+                return AuxRootScanStep::Consumed(root);
+            }
+            VmFiberRootScanStage::JitSuspend => {
+                #[cfg(feature = "jit")]
+                if let Some(crate::fiber::JitExternSuspend::CallClosure {
+                    closure_ref, args, ..
+                }) = &fiber.jit_extern_suspend
+                {
+                    if snapshot.fiber_aux_slot_cursor == 0 {
+                        assert_eq!(
+                            args.values.len(),
+                            args.slot_types.len(),
+                            "JIT suspend root layout mismatch: fiber={} values={} slot_types={}",
+                            fiber.id,
+                            args.values.len(),
+                            args.slot_types.len()
+                        );
+                    }
+                    let root = match snapshot.fiber_aux_slot_cursor {
+                        0 => Some((!closure_ref.is_null()).then_some(*closure_ref)),
+                        cursor => {
+                            let slot = cursor - 1;
+                            (slot < args.values.len())
+                                .then(|| typed_slot_root(&args.values, &args.slot_types, slot))
+                        }
+                    };
+                    if let Some(root) = root {
+                        if !budget_available {
+                            return AuxRootScanStep::BudgetExhausted;
+                        }
+                        snapshot.fiber_aux_slot_cursor += 1;
+                        return AuxRootScanStep::Consumed(root);
+                    }
+                }
+                reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::SelectQueues);
+            }
+            VmFiberRootScanStage::SelectQueues => {
+                let Some(queue) = fiber
+                    .select_state
+                    .as_ref()
+                    .and_then(|state| state.registered_queues.get(snapshot.fiber_aux_outer_cursor))
+                else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::SelectResult);
+                    continue;
+                };
+                if !budget_available {
+                    return AuxRootScanStep::BudgetExhausted;
+                }
+                snapshot.fiber_aux_outer_cursor += 1;
+                return AuxRootScanStep::Consumed((!queue.queue.is_null()).then_some(queue.queue));
+            }
+            VmFiberRootScanStage::SelectResult => {
+                let Some(crate::fiber::SelectWokenResult::Recv {
+                    data, slot_types, ..
+                }) = fiber
+                    .select_state
+                    .as_ref()
+                    .and_then(|state| state.woken_result.as_ref())
+                else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::QueueWait);
+                    continue;
+                };
+                if snapshot.fiber_aux_slot_cursor == 0 {
+                    assert_eq!(
+                        data.len(),
+                        slot_types.len(),
+                        "select result root layout mismatch: fiber={} values={} slot_types={}",
+                        fiber.id,
+                        data.len(),
+                        slot_types.len()
+                    );
+                }
+                if snapshot.fiber_aux_slot_cursor >= data.len() {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::QueueWait);
+                    continue;
+                }
+                if !budget_available {
+                    return AuxRootScanStep::BudgetExhausted;
+                }
+                let root = typed_slot_root(data, slot_types, snapshot.fiber_aux_slot_cursor);
+                snapshot.fiber_aux_slot_cursor += 1;
+                return AuxRootScanStep::Consumed(root);
+            }
+            VmFiberRootScanStage::QueueWait => {
+                let Some(state) = fiber.queue_wait_state else {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::JitPanic);
+                    continue;
+                };
+                if snapshot.fiber_aux_slot_cursor > 0 {
+                    reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::JitPanic);
+                    continue;
+                }
+                if !budget_available {
+                    return AuxRootScanStep::BudgetExhausted;
+                }
+                snapshot.fiber_aux_slot_cursor = 1;
+                return AuxRootScanStep::Consumed(
+                    (!state.queue_ref.is_null()).then_some(state.queue_ref),
+                );
+            }
+            VmFiberRootScanStage::JitPanic => {
+                #[cfg(feature = "jit")]
+                if fiber.jit_panic_flag && snapshot.fiber_aux_slot_cursor == 0 {
+                    if !budget_available {
+                        return AuxRootScanStep::BudgetExhausted;
+                    }
+                    snapshot.fiber_aux_slot_cursor = 1;
+                    return AuxRootScanStep::Consumed(interface_value_root(fiber.jit_panic_msg));
+                }
+                reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Done);
+            }
+            VmFiberRootScanStage::Done => return AuxRootScanStep::Done,
+        }
     }
 }
 
@@ -304,18 +677,11 @@ fn scan_vm_root_snapshot_chunk(
             .map(|snapshot| snapshot.kind != kind)
             .unwrap_or(true);
         if needs_new_snapshot {
-            *root_scan = Some(build_vm_root_scan_snapshot(
-                gc,
+            *root_scan = Some(new_vm_root_scan_snapshot(
                 kind,
                 dirty_epoch,
                 dirty_all,
                 dirty_fibers,
-                globals,
-                global_defs,
-                fibers,
-                functions,
-                sentinel_errors,
-                endpoint_registry,
             ));
         }
 
@@ -328,22 +694,185 @@ fn scan_vm_root_snapshot_chunk(
             continue;
         }
 
-        let slots_budget = ((limit_bytes - work) / SLOT_BYTES).max(1);
-        let start = snapshot.cursor;
-        let end = start.saturating_add(slots_budget).min(snapshot.roots.len());
-        for &root in &snapshot.roots[start..end] {
-            gc.mark_gray(root);
-        }
-        snapshot.cursor = end;
-        work += (end - start) * SLOT_BYTES;
+        loop {
+            if let Some(&root) = snapshot.roots.get(snapshot.cursor) {
+                if work >= limit_bytes {
+                    return GcRootScanChunk::pending(work);
+                }
+                gc.mark_gray(root);
+                snapshot.cursor += 1;
+                work += SLOT_BYTES;
+                continue;
+            }
+            snapshot.roots.clear();
+            snapshot.cursor = 0;
 
-        if snapshot.cursor < snapshot.roots.len() {
-            return GcRootScanChunk::pending(work);
-        }
+            match snapshot.stage {
+                VmRootScanStage::Globals => {
+                    let Some(def) = global_defs.get(snapshot.global_def_cursor) else {
+                        snapshot.stage = VmRootScanStage::Fibers;
+                        continue;
+                    };
+                    let slots = def.slots as usize;
+                    if snapshot.global_slot_cursor == 0 {
+                        assert_eq!(
+                            def.slot_types.len(),
+                            slots,
+                            "global root layout mismatch at definition {}: declared_slots={} slot_types={}",
+                            snapshot.global_def_cursor,
+                            slots,
+                            def.slot_types.len()
+                        );
+                        assert!(
+                            snapshot.global_base_cursor.saturating_add(slots) <= globals.len(),
+                            "global root storage mismatch at definition {}: range={}..{} globals={}",
+                            snapshot.global_def_cursor,
+                            snapshot.global_base_cursor,
+                            snapshot.global_base_cursor.saturating_add(slots),
+                            globals.len()
+                        );
+                    }
+                    if snapshot.global_slot_cursor >= slots {
+                        snapshot.global_base_cursor =
+                            snapshot.global_base_cursor.saturating_add(slots);
+                        snapshot.global_def_cursor += 1;
+                        snapshot.global_slot_cursor = 0;
+                        continue;
+                    }
+                    let start = snapshot.global_base_cursor;
+                    let end = start + slots;
+                    let global_slots = &globals[start..end];
+                    let idx = snapshot.global_slot_cursor;
+                    if work >= limit_bytes {
+                        return GcRootScanChunk::pending(work);
+                    }
+                    if let Some(root) = typed_slot_root(global_slots, &def.slot_types, idx) {
+                        gc.mark_gray(root);
+                    }
+                    snapshot.global_slot_cursor += 1;
+                    work += SLOT_BYTES;
+                }
+                VmRootScanStage::Fibers => {
+                    let Some(fiber_idx) = selected_fiber_index(snapshot, fibers.len()) else {
+                        snapshot.stage = VmRootScanStage::SentinelErrors;
+                        continue;
+                    };
+                    if fiber_idx >= fibers.len() {
+                        snapshot.fiber_source_cursor += 1;
+                        snapshot.fiber_frame_cursor = 0;
+                        snapshot.fiber_slot_cursor = 0;
+                        reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Defers);
+                        continue;
+                    }
+                    let fiber = &fibers[fiber_idx];
+                    if fiber.state.is_dead() {
+                        snapshot.fiber_source_cursor += 1;
+                        snapshot.fiber_frame_cursor = 0;
+                        snapshot.fiber_slot_cursor = 0;
+                        reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Defers);
+                        continue;
+                    }
+                    if let Some(frame) = fiber.frames.get(snapshot.fiber_frame_cursor) {
+                        let func = functions.get(frame.func_id as usize).unwrap_or_else(|| {
+                            panic!(
+                                "fiber root frame references missing function: fiber={} frame={} func_id={} functions={}",
+                                fiber.id,
+                                snapshot.fiber_frame_cursor,
+                                frame.func_id,
+                                functions.len()
+                            )
+                        });
+                        let scan_slots = usize::from(frame.scan_slots);
+                        if snapshot.fiber_slot_cursor == 0 {
+                            assert!(
+                                scan_slots <= func.slot_types.len(),
+                                "fiber root layout mismatch: fiber={} func_id={} scan_slots={} slot_types={}",
+                                fiber.id,
+                                frame.func_id,
+                                scan_slots,
+                                func.slot_types.len()
+                            );
+                            assert!(
+                                frame.bp.saturating_add(scan_slots) <= fiber.stack.len(),
+                                "fiber root stack range mismatch: fiber={} func_id={} range={}..{} stack={}",
+                                fiber.id,
+                                frame.func_id,
+                                frame.bp,
+                                frame.bp.saturating_add(scan_slots),
+                                fiber.stack.len()
+                            );
+                        }
+                        if snapshot.fiber_slot_cursor < scan_slots {
+                            if work >= limit_bytes {
+                                return GcRootScanChunk::pending(work);
+                            }
+                            let idx = snapshot.fiber_slot_cursor;
+                            let stack_slots = &fiber.stack[frame.bp..frame.bp + scan_slots];
+                            if let Some(root) = typed_slot_root(stack_slots, &func.slot_types, idx)
+                            {
+                                gc.mark_gray(root);
+                            }
+                            snapshot.fiber_slot_cursor += 1;
+                            work += SLOT_BYTES;
+                            continue;
+                        }
+                        snapshot.fiber_frame_cursor += 1;
+                        snapshot.fiber_slot_cursor = 0;
+                        continue;
+                    }
 
-        *completion = Some(VmRootScanCompletion::from(&*snapshot));
-        *root_scan = None;
-        return GcRootScanChunk::complete(work);
+                    match scan_fiber_aux_root(snapshot, fiber, work < limit_bytes) {
+                        AuxRootScanStep::Consumed(root) => {
+                            if let Some(root) = root {
+                                gc.mark_gray(root);
+                            }
+                            work += SLOT_BYTES;
+                        }
+                        AuxRootScanStep::BudgetExhausted => {
+                            return GcRootScanChunk::pending(work);
+                        }
+                        AuxRootScanStep::Done => {
+                            snapshot.fiber_source_cursor += 1;
+                            snapshot.fiber_frame_cursor = 0;
+                            snapshot.fiber_slot_cursor = 0;
+                            reset_fiber_aux_stage(snapshot, VmFiberRootScanStage::Defers);
+                        }
+                    }
+                }
+                VmRootScanStage::SentinelErrors => {
+                    let Some(root) = sentinel_errors.gc_root_at(snapshot.sentinel_cursor) else {
+                        snapshot.stage = VmRootScanStage::Endpoints;
+                        continue;
+                    };
+                    if work >= limit_bytes {
+                        return GcRootScanChunk::pending(work);
+                    }
+                    gc.mark_gray(root);
+                    snapshot.sentinel_cursor += 1;
+                    work += SLOT_BYTES;
+                }
+                VmRootScanStage::Endpoints => {
+                    let Some(root) = endpoint_registry.live_handle_at(snapshot.endpoint_cursor)
+                    else {
+                        snapshot.stage = VmRootScanStage::Done;
+                        continue;
+                    };
+                    if work >= limit_bytes {
+                        return GcRootScanChunk::pending(work);
+                    }
+                    if !root.is_null() {
+                        gc.mark_gray(root);
+                    }
+                    snapshot.endpoint_cursor += 1;
+                    work += SLOT_BYTES;
+                }
+                VmRootScanStage::Done => {
+                    *completion = Some(VmRootScanCompletion::from(&*snapshot));
+                    *root_scan = None;
+                    return GcRootScanChunk::complete(work);
+                }
+            }
+        }
     }
 }
 
@@ -455,7 +984,7 @@ impl Vm {
             self.mark_gc_fiber_roots_dirty(fiber_id);
         }
         let module = match &self.module {
-            Some(m) => m as *const crate::bytecode::Module,
+            Some(module) => module.as_ref() as *const crate::bytecode::Module,
             None => return,
         };
         // SAFETY: Split borrow via raw pointer. gc is exclusively accessed by step(),
@@ -679,40 +1208,43 @@ impl Vm {
             }
 
             let mut violation: Option<String> = None;
-            vo_runtime::gc_types::trace_object_children_with_context(
-                parent,
-                vo_runtime::gc_types::GcScanContext::from_module_parts(
-                    &module.struct_metas,
-                    &module.named_type_metas,
-                    &module.runtime_types,
-                ),
-                &func_closure_scan_layout,
-                |child| {
-                    if violation.is_some() || child.is_null() {
-                        return;
-                    }
-                    let Some(child) = self.state.gc.canonicalize_ref(child) else {
-                        violation = Some(format!(
-                            "black object {:?} references non-live child {:?}",
-                            parent, child
-                        ));
-                        return;
-                    };
-                    let dangling_white = if self.state.gc.state() == GcState::Sweep {
-                        self.state.gc.is_dead_white(child)
-                    } else {
-                        self.state.gc.is_white(child)
-                    };
-                    if dangling_white {
-                        violation = Some(format!(
+            // Safety: `parent` comes from the collector's live object table.
+            unsafe {
+                vo_runtime::gc_types::trace_object_children_with_context(
+                    parent,
+                    vo_runtime::gc_types::GcScanContext::from_module_parts(
+                        &module.struct_metas,
+                        &module.named_type_metas,
+                        &module.runtime_types,
+                    ),
+                    &func_closure_scan_layout,
+                    |child| {
+                        if violation.is_some() || child.is_null() {
+                            return;
+                        }
+                        let Some(child) = self.state.gc.canonicalize_ref(child) else {
+                            violation = Some(format!(
+                                "black object {:?} references non-live child {:?}",
+                                parent, child
+                            ));
+                            return;
+                        };
+                        let dangling_white = if self.state.gc.state() == GcState::Sweep {
+                            self.state.gc.is_dead_white(child)
+                        } else {
+                            self.state.gc.is_white(child)
+                        };
+                        if dangling_white {
+                            violation = Some(format!(
                             "black object {:?} references unreachable white child {:?} during {:?}",
                             parent,
                             child,
                             self.state.gc.state()
                         ));
-                    }
-                },
-            );
+                        }
+                    },
+                )
+            };
             if let Some(err) = violation {
                 return Err(err);
             }

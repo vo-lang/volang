@@ -37,6 +37,7 @@ pub use verifier::{
 };
 
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
 
 use cranelift_codegen::ir::{types, AbiParam, FuncRef, Signature};
 use cranelift_codegen::settings::{self, Configurable};
@@ -140,10 +141,24 @@ impl From<loop_analysis::LoopAnalysisError> for JitError {
 // =============================================================================
 
 pub struct CompiledFunction {
-    pub code_ptr: *const u8,
-    pub code_size: usize,
-    pub param_slots: u16,
-    pub ret_slots: u16,
+    code_ptr: *const u8,
+    code_size: usize,
+    param_slots: u16,
+    ret_slots: u16,
+}
+
+impl CompiledFunction {
+    pub fn code_size(&self) -> usize {
+        self.code_size
+    }
+
+    pub fn param_slots(&self) -> u16 {
+        self.param_slots
+    }
+
+    pub fn ret_slots(&self) -> u16 {
+        self.ret_slots
+    }
 }
 
 unsafe impl Send for CompiledFunction {}
@@ -172,16 +187,25 @@ pub struct JitCompileEnv<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct JitCompileEnvScope {
+    extern_entries_identity: (*const ResolvedExtern, usize),
     externs: Vec<ResolvedExtern>,
     backend_caps: JitBackendCaps,
 }
 
 impl JitCompileEnvScope {
     fn from_env(env: JitCompileEnv<'_>) -> Self {
+        let entries = env.externs.entries();
         Self {
-            externs: env.externs.entries().to_vec(),
+            extern_entries_identity: (entries.as_ptr(), entries.len()),
+            externs: entries.to_vec(),
             backend_caps: env.backend_caps,
         }
+    }
+
+    fn is_same_immutable_table(&self, env: JitCompileEnv<'_>) -> bool {
+        let entries = env.externs.entries();
+        self.extern_entries_identity == (entries.as_ptr(), entries.len())
+            && self.backend_caps == env.backend_caps
     }
 }
 
@@ -189,49 +213,72 @@ impl JitCompileEnvScope {
 // JitCache
 // =============================================================================
 
-pub struct JitCache {
+struct JitCache {
     functions: HashMap<u32, CompiledFunction>,
     loops: HashMap<(u32, usize), CompiledLoop>,
 }
 
 impl JitCache {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             functions: HashMap::new(),
             loops: HashMap::new(),
         }
     }
-    pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
+    fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
         self.functions.get(&func_id)
     }
-    pub fn insert(&mut self, func_id: u32, func: CompiledFunction) {
+    fn insert(&mut self, func_id: u32, func: CompiledFunction) {
         self.functions.insert(func_id, func);
     }
-    pub fn contains(&self, func_id: u32) -> bool {
+    fn contains(&self, func_id: u32) -> bool {
         self.functions.contains_key(&func_id)
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
-    pub unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
+    /// `self` must remain alive, unmoved through destruction, and not be dropped
+    /// until every invocation has returned and every copy of the pointer has
+    /// been permanently retired.
+    unsafe fn get_func_ptr(&self, func_id: u32) -> Option<JitFunc> {
         self.functions
             .get(&func_id)
             .map(|f| std::mem::transmute(f.code_ptr))
     }
-    pub fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
+    fn get_loop(&self, func_id: u32, begin_pc: usize) -> Option<&CompiledLoop> {
         self.loops.get(&(func_id, begin_pc))
     }
-    pub fn insert_loop(&mut self, func_id: u32, begin_pc: usize, compiled: CompiledLoop) {
+    fn insert_loop(&mut self, func_id: u32, begin_pc: usize, compiled: CompiledLoop) {
         self.loops.insert((func_id, begin_pc), compiled);
     }
-    pub fn contains_loop(&self, func_id: u32, begin_pc: usize) -> bool {
-        self.loops.contains_key(&(func_id, begin_pc))
+    fn code_memory_stats(&self) -> JitCodeMemoryStats {
+        JitCodeMemoryStats {
+            function_count: self.functions.len(),
+            loop_count: self.loops.len(),
+            function_bytes: self.functions.values().map(|func| func.code_size).sum(),
+            loop_bytes: self.loops.values().map(|loop_| loop_.code_size).sum(),
+        }
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
-    pub unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
+    /// `self` must outlive every use and every copy of the returned pointer.
+    unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
         self.loops
             .get(&(func_id, begin_pc))
             .map(|l| std::mem::transmute(l.code_ptr))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JitCodeMemoryStats {
+    pub function_count: usize,
+    pub loop_count: usize,
+    pub function_bytes: usize,
+    pub loop_bytes: usize,
+}
+
+impl JitCodeMemoryStats {
+    pub fn total_bytes(self) -> usize {
+        self.function_bytes.saturating_add(self.loop_bytes)
     }
 }
 
@@ -246,13 +293,14 @@ impl Default for JitCache {
 // =============================================================================
 
 pub struct JitCompiler {
-    module: JITModule,
+    module: ManuallyDrop<JITModule>,
     ctx: cranelift_codegen::Context,
     cache: JitCache,
     func_decl_ids: HashMap<u32, FuncId>,
     callee_func_refs_buf: Vec<Option<FuncRef>>,
     helper_funcs: HelperFuncIds,
     verified_module: Option<VerifiedModule>,
+    immutable_module_identity: Option<(*const FunctionDef, usize)>,
     verified_env: Option<JitCompileEnvScope>,
     debug_ir: bool,
 }
@@ -285,13 +333,14 @@ impl JitCompiler {
         let helper_funcs = helpers::declare_helpers(&mut module, ptr_type)?;
 
         Ok(Self {
-            module,
+            module: ManuallyDrop::new(module),
             ctx,
             cache: JitCache::new(),
             func_decl_ids: HashMap::new(),
             callee_func_refs_buf: Vec::new(),
             helper_funcs,
             verified_module: None,
+            immutable_module_identity: None,
             verified_env: None,
             debug_ir,
         })
@@ -303,6 +352,11 @@ impl JitCompiler {
 
     fn verify_module_once(&mut self, vo_module: &VoModule) -> Result<(), JitError> {
         if let Some(verified) = self.verified_module {
+            if self.immutable_module_identity
+                == Some((vo_module.functions.as_ptr(), vo_module.functions.len()))
+            {
+                return Ok(());
+            }
             if verified.matches(vo_module) {
                 return Ok(());
             }
@@ -312,15 +366,36 @@ impl JitCompiler {
         Ok(())
     }
 
+    /// Bind the compiler to a VM-owned module that cannot mutate for the
+    /// compiler's remaining lifetime.
+    ///
+    /// # Safety
+    ///
+    /// The module's functions and all module-level facts consumed by codegen
+    /// must remain immutable. This permits subsequent compiles to use stable
+    /// function-buffer identity instead of serializing and hashing the module.
+    pub unsafe fn bind_immutable_module_scope(
+        &mut self,
+        vo_module: &VoModule,
+    ) -> Result<(), JitError> {
+        self.verify_module_once(vo_module)?;
+        self.immutable_module_identity =
+            Some((vo_module.functions.as_ptr(), vo_module.functions.len()));
+        Ok(())
+    }
+
     fn verify_env_once(&mut self, env: JitCompileEnv<'_>) -> Result<(), JitError> {
-        let scope = JitCompileEnvScope::from_env(env);
         if let Some(verified) = &self.verified_env {
-            if verified == &scope {
+            if verified.is_same_immutable_table(env) {
+                return Ok(());
+            }
+            let scope = JitCompileEnvScope::from_env(env);
+            if verified.externs == scope.externs && verified.backend_caps == scope.backend_caps {
                 return Ok(());
             }
             return Err(JitError::CompileEnvScopeChanged);
         }
-        self.verified_env = Some(scope);
+        self.verified_env = Some(JitCompileEnvScope::from_env(env));
         Ok(())
     }
 
@@ -333,7 +408,7 @@ impl JitCompiler {
         let Some(module_func) = vo_module.functions.get(func_id as usize) else {
             return Err(JitError::FunctionNotFound(func_id));
         };
-        if module_func != func {
+        if !std::ptr::eq(module_func, func) && module_func != func {
             return Err(JitError::FunctionScopeChanged);
         }
         Ok(())
@@ -375,7 +450,7 @@ impl JitCompiler {
         &mut self,
         func_id_cl: cranelift_module::FuncId,
         name: &str,
-    ) -> Result<*const u8, JitError> {
+    ) -> Result<(*const u8, usize), JitError> {
         let flags = settings::Flags::new(settings::builder());
         cranelift_codegen::verifier::verify_function(&self.ctx.func, &flags).map_err(|errors| {
             JitError::Internal(format!(
@@ -386,11 +461,17 @@ impl JitCompiler {
             eprintln!("[JIT VERIFY OK] {}", name);
         }
 
-        self.module.define_function(func_id_cl, &mut self.ctx)?;
-        self.module.clear_context(&mut self.ctx);
-        self.module.finalize_definitions()?;
+        let module = &mut self.module;
+        module.define_function(func_id_cl, &mut self.ctx)?;
+        let code_size = self
+            .ctx
+            .compiled_code()
+            .map(|code| code.code_info().total_size as usize)
+            .ok_or_else(|| JitError::Internal(format!("missing compiled code for {name}")))?;
+        module.clear_context(&mut self.ctx);
+        module.finalize_definitions()?;
 
-        Ok(self.module.get_finalized_function(func_id_cl))
+        Ok((module.get_finalized_function(func_id_cl), code_size))
     }
 
     pub fn compile(
@@ -412,8 +493,9 @@ impl JitCompiler {
         // Clear any residual state from previous compilation
         self.ctx.clear();
 
-        let ptr_type = self.module.target_config().pointer_type();
-        let mut sig = Signature::new(self.module.target_config().default_call_conv);
+        let module = &self.module;
+        let ptr_type = module.target_config().pointer_type();
+        let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr_type)); // ctx
         sig.params.push(AbiParam::new(ptr_type)); // args
         sig.params.push(AbiParam::new(ptr_type)); // ret
@@ -451,7 +533,7 @@ impl JitCompiler {
                 env,
                 helpers,
                 &callee_func_refs,
-            );
+            )?;
             compiler.compile()
         };
         self.callee_func_refs_buf = callee_func_refs;
@@ -462,11 +544,11 @@ impl JitCompiler {
             eprintln!("{}", self.ctx.func.display());
         }
 
-        let code_ptr =
+        let (code_ptr, code_size) =
             self.finalize_function(func_id_cl, &format!("func_{} {}", func_id, func.name))?;
         let compiled = CompiledFunction {
             code_ptr,
-            code_size: 0,
+            code_size,
             param_slots: func.param_slots,
             ret_slots: func.ret_slots,
         };
@@ -499,8 +581,9 @@ impl JitCompiler {
         // Clear any residual state from previous compilation
         self.ctx.clear();
 
-        let ptr_type = self.module.target_config().pointer_type();
-        let mut sig = Signature::new(self.module.target_config().default_call_conv);
+        let module = &self.module;
+        let ptr_type = module.target_config().pointer_type();
+        let mut sig = Signature::new(module.target_config().default_call_conv);
         sig.params.push(AbiParam::new(ptr_type)); // ctx
         sig.params.push(AbiParam::new(ptr_type)); // locals_ptr
         sig.returns.push(AbiParam::new(types::I32));
@@ -540,10 +623,11 @@ impl JitCompiler {
         self.callee_func_refs_buf = callee_func_refs;
         compile_result?;
 
-        let code_ptr =
+        let (code_ptr, code_size) =
             self.finalize_function(func_id_cl, &format!("loop_{}_{}", func_id, begin_pc))?;
         let compiled = CompiledLoop {
             code_ptr,
+            code_size,
             loop_info: loop_info.clone(),
         };
         self.cache.insert_loop(func_id, begin_pc, compiled);
@@ -552,6 +636,10 @@ impl JitCompiler {
 
     pub fn get(&self, func_id: u32) -> Option<&CompiledFunction> {
         self.cache.get(func_id)
+    }
+
+    pub fn code_memory_stats(&self) -> JitCodeMemoryStats {
+        self.cache.code_memory_stats()
     }
     /// # Safety
     /// The returned function pointer must only be called with the correct ABI.
@@ -566,8 +654,16 @@ impl JitCompiler {
     pub unsafe fn get_loop_func_ptr(&self, func_id: u32, begin_pc: usize) -> Option<LoopFunc> {
         self.cache.get_loop_func_ptr(func_id, begin_pc)
     }
-    pub fn cache(&self) -> &JitCache {
-        &self.cache
+}
+
+impl Drop for JitCompiler {
+    fn drop(&mut self) {
+        // SAFETY: Drop runs exactly once and `module` is never taken elsewhere.
+        let module = unsafe { ManuallyDrop::take(&mut self.module) };
+        // SAFETY: JitCompiler owns every published code pointer. Safe VM owners
+        // drop the compiler only after native execution has returned. Raw
+        // getters carry an explicit unsafe lifetime obligation for other users.
+        unsafe { module.free_memory() };
     }
 }
 

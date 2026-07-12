@@ -1,14 +1,20 @@
-name: Production Readiness
+name: Scheduled / Release Qualification
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "37 3 * * 6"
 
 permissions:
   contents: read
 
+concurrency:
+  group: qualification-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   plan:
-    name: Plan production gates
+    name: Plan qualification
     runs-on: ubuntu-latest
     outputs:
       has_tasks: ${{ steps.plan.outputs.has_tasks }}
@@ -23,9 +29,9 @@ jobs:
       - name: Install Rust
         uses: ./.github/actions/setup-rust
 
-      - name: Plan final gate tasks
+      - name: Plan qualification units
         id: plan
-        run: cargo run -q -p vo-dev -- ci final-matrix --github-output
+        run: cargo run -q -p vo-dev -- ci full-matrix qualification --github-output
 
   readiness-gate:
     name: ${{ matrix.title }}
@@ -41,12 +47,56 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout first-party module
-        if: matrix.checkout
+      - name: Checkout vogui
+        if: matrix.checkout_vogui
         uses: actions/checkout@v5
         with:
-          repository: ${{ matrix.checkout_repository }}
-          path: ${{ matrix.checkout_path }}
+          repository: ${{ matrix.checkout_vogui_repository }}
+          path: ${{ matrix.checkout_vogui_path }}
+          ref: ${{ matrix.checkout_vogui_expected_commit }}
+          fetch-depth: 0
+
+      - name: Checkout voplay
+        if: matrix.checkout_voplay
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.checkout_voplay_repository }}
+          path: ${{ matrix.checkout_voplay_path }}
+          ref: ${{ matrix.checkout_voplay_expected_commit }}
+          fetch-depth: 0
+
+      - name: Checkout vopack
+        if: matrix.checkout_vopack
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.checkout_vopack_repository }}
+          path: ${{ matrix.checkout_vopack_path }}
+          ref: ${{ matrix.checkout_vopack_expected_commit }}
+          fetch-depth: 0
+
+      - name: Checkout vostore
+        if: matrix.checkout_vostore
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.checkout_vostore_repository }}
+          path: ${{ matrix.checkout_vostore_path }}
+          ref: ${{ matrix.checkout_vostore_expected_commit }}
+          fetch-depth: 0
+
+      - name: Checkout BlockKart
+        if: matrix.checkout_blockkart
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ matrix.checkout_blockkart_repository }}
+          path: ${{ matrix.checkout_blockkart_path }}
+          ref: ${{ matrix.checkout_blockkart_expected_commit }}
+          fetch-depth: 0
+
+      - name: Install Linux task dependencies
+        if: matrix.linux_packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ${{ matrix.linux_packages }}
 
       - name: Install Rust
         if: matrix.rust
@@ -60,7 +110,7 @@ jobs:
 
       - name: Setup Python
         if: matrix.python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python_version }}
 
@@ -78,5 +128,5 @@ jobs:
       - name: Check task tools
         run: cargo run -q -p vo-dev -- tool check --task "${{ matrix.task }}"
 
-      - name: Run gate task
-        run: cargo run -q -p vo-dev -- task run "task:${{ matrix.task }}"
+      - name: Run gate execution unit
+        run: cargo run -q -p vo-dev -- task run "${{ matrix.task }}"

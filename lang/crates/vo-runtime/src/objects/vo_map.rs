@@ -8,6 +8,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 
+use core::borrow::Borrow;
 use core::hash::Hash;
 use core::mem;
 
@@ -143,15 +144,13 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
                     key: k, hash: h, ..
                 } => {
                     if *h == hash && *k == key {
-                        // Replace existing
-                        let old = mem::replace(
-                            &mut self.buckets[idx],
-                            Bucket::Occupied { key, value, hash },
-                        );
-                        if let Bucket::Occupied { value: old_val, .. } = old {
-                            return Some(old_val);
-                        }
-                        unreachable!();
+                        let Bucket::Occupied {
+                            value: old_value, ..
+                        } = &mut self.buckets[idx]
+                        else {
+                            return None;
+                        };
+                        return Some(mem::replace(old_value, value));
                     }
                 }
             }
@@ -162,6 +161,36 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
     /// Get value by key
     pub fn get(&self, key: &K) -> Option<&V> {
         self.get_with_hash(key, hash_one(key))
+    }
+
+    /// Look up a key through a borrowed representation without allocating an
+    /// owned `K`. This keeps slice/string map probes allocation-free.
+    pub fn get_borrowed<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        let hash = hash_one(key);
+        if self.buckets.is_empty() {
+            return None;
+        }
+        let mut idx = self.bucket_index(hash);
+        loop {
+            match &self.buckets[idx] {
+                Bucket::Empty => return None,
+                Bucket::Tombstone => {}
+                Bucket::Occupied {
+                    key: stored,
+                    value,
+                    hash: stored_hash,
+                } => {
+                    if *stored_hash == hash && stored.borrow() == key {
+                        return Some(value);
+                    }
+                }
+            }
+            idx = (idx + 1) & (self.buckets.len() - 1);
+        }
     }
 
     /// Get value by key with precomputed hash
@@ -233,6 +262,35 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
         self.remove_with_hash(key, hash_one(key))
     }
 
+    /// Remove a key through a borrowed representation without allocating an
+    /// owned `K` for the probe.
+    pub fn remove_borrowed<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        let hash = hash_one(key);
+        if self.buckets.is_empty() {
+            return None;
+        }
+        let mut idx = self.bucket_index(hash);
+        loop {
+            match &self.buckets[idx] {
+                Bucket::Empty => return None,
+                Bucket::Tombstone => {}
+                Bucket::Occupied {
+                    key: stored,
+                    hash: stored_hash,
+                    ..
+                } if *stored_hash == hash && stored.borrow() == key => {
+                    return self.remove_bucket_at(idx);
+                }
+                Bucket::Occupied { .. } => {}
+            }
+            idx = (idx + 1) & (self.buckets.len() - 1);
+        }
+    }
+
     /// Remove key with precomputed hash
     pub fn remove_with_hash(&mut self, key: &K, hash: u64) -> Option<V> {
         if self.buckets.is_empty() {
@@ -248,13 +306,7 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
                     key: k, hash: h, ..
                 } => {
                     if *h == hash && k == key {
-                        let old = core::mem::replace(&mut self.buckets[idx], Bucket::Tombstone);
-                        self.len -= 1;
-                        // Note: used count stays same (tombstone still occupies slot)
-                        if let Bucket::Occupied { value, .. } = old {
-                            return Some(value);
-                        }
-                        unreachable!();
+                        return self.remove_bucket_at(idx);
                     }
                 }
             }
@@ -347,16 +399,27 @@ impl<K: Eq + Hash, V> VoMap<K, V> {
                 Bucket::Tombstone => {}
                 Bucket::Occupied { key, value, .. } => {
                     if predicate(key, value) {
-                        let old = core::mem::replace(&mut self.buckets[idx], Bucket::Tombstone);
-                        self.len -= 1;
-                        if let Bucket::Occupied { value, .. } = old {
-                            return Some(value);
-                        }
-                        unreachable!();
+                        return self.remove_bucket_at(idx);
                     }
                 }
             }
             idx = (idx + 1) & (self.buckets.len() - 1);
+        }
+    }
+
+    fn remove_bucket_at(&mut self, idx: usize) -> Option<V> {
+        let old = core::mem::replace(&mut self.buckets[idx], Bucket::Tombstone);
+        match old {
+            Bucket::Occupied { value, .. } => {
+                self.len -= 1;
+                // `used` stays unchanged because the tombstone still occupies the probe slot.
+                Some(value)
+            }
+            Bucket::Empty => {
+                self.buckets[idx] = Bucket::Empty;
+                None
+            }
+            Bucket::Tombstone => None,
         }
     }
 
@@ -482,7 +545,7 @@ impl<'a, K, V> Iterator for VoMapIterMut<'a, K, V> {
 
 /// FNV-1a hash with fixed seed for consistent hashing
 #[inline]
-fn hash_one<K: Hash>(key: &K) -> u64 {
+fn hash_one<K: Hash + ?Sized>(key: &K) -> u64 {
     use core::hash::Hasher;
     let mut hasher = FnvHasher::new();
     key.hash(&mut hasher);

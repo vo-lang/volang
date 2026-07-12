@@ -11,9 +11,43 @@ fn endpoint_request_backing_invariant_is_not_debug_only() {
         "EndpointRequest backing invariants must be enforced in release builds"
     );
     assert!(
-        source.contains("EndpointRequest arrived at non-LOCAL channel"),
+        source.contains("resolved to a non-local queue"),
         "the endpoint backing invariant should stay explicit"
     );
+}
+
+#[test]
+fn endpoint_request_rejects_remote_proxy_before_home_info_read() {
+    let mut vm = Vm::new();
+    vm.state.current_island_id = 3;
+    let endpoint_id = 0x7001;
+    let remote = queue::create_remote_proxy(
+        &mut vm.state.gc,
+        endpoint_id,
+        9,
+        0,
+        ValueMeta::new(0, ValueKind::Int64),
+        ValueRttid::new(0, ValueKind::Int64),
+        1,
+    );
+    vm.state
+        .endpoint_registry
+        .register_live(endpoint_id, remote);
+
+    let error = handle_endpoint_request_command(
+        &mut vm,
+        endpoint_id,
+        EndpointRequestKind::Transfer { new_peer: 5 },
+        9,
+        0,
+        0,
+    )
+    .expect_err("remote proxies cannot own incoming endpoint requests");
+
+    match error {
+        VmError::Jit(message) => assert!(message.contains("non-local queue"), "{message}"),
+        other => panic!("backing drift should be a VM error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -155,7 +189,7 @@ fn vm_direct_method_capture_protocol_006_spawn_allocates_multi_slot_receiver_cap
         &module.named_type_metas,
         &module.runtime_types,
     );
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let before_fibers = vm.scheduler.fibers.len();
 
     handle_spawn_fiber(&mut vm, &payload).expect("raw receiver payload should spawn");
@@ -168,8 +202,8 @@ fn vm_direct_method_capture_protocol_006_spawn_allocates_multi_slot_receiver_cap
         let copied_right = *stack.add(1) as GcRef;
         assert_ne!(copied_left, left, "cross-island strings are deep-copied");
         assert_ne!(copied_right, right, "cross-island strings are deep-copied");
-        assert_eq!(string::as_bytes(copied_left), b"left");
-        assert_eq!(string::as_bytes(copied_right), b"right");
+        assert_eq!(string::to_bytes(copied_left), b"left");
+        assert_eq!(string::to_bytes(copied_right), b"right");
     }
 }
 
@@ -206,7 +240,7 @@ fn vm_island_spawn_unpack_txn_004_rejects_capture_count_drift_before_closure_cre
     let mut vm = Vm::new();
     let mut module = Module::new("spawn-count-drift".to_string());
     module.functions.push(empty_spawn_func());
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let before_fibers = vm.scheduler.fibers.len();
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());
@@ -251,7 +285,7 @@ fn vm_island_spawn_unpack_txn_004_rejects_arg_rttid_drift_before_closure_create(
         RuntimeType::Slice(ValueRttid::new(0, ValueKind::String)),
     ];
     module.functions.push(func);
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let before_fibers = vm.scheduler.fibers.len();
     let mut packed_arg = vec![ValueKind::Slice as u8, 1];
     packed_arg.extend_from_slice(&0u64.to_le_bytes());
@@ -299,7 +333,7 @@ fn vm_island_spawn_unpack_txn_004_rejects_zero_length_arg_chunk_before_closure_c
     let mut module = Module::new("spawn-zero-length-arg".to_string());
     module.runtime_types = vec![RuntimeType::Basic(ValueKind::Int64)];
     module.functions.push(func);
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let before_fibers = vm.scheduler.fibers.len();
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());
@@ -355,16 +389,8 @@ fn vm_island_spawn_unpack_txn_061_build_failure_restores_endpoint_registry() {
     ];
     module.functions.push(func);
     let mut source_gc = vo_runtime::gc::Gc::new();
-    let remote_port = queue::create_remote_proxy(
-        &mut source_gc,
-        QueueKind::Port,
-        endpoint_id,
-        9,
-        1,
-        elem_meta,
-        elem_rttid,
-        1,
-    );
+    let remote_port =
+        queue::create_remote_proxy(&mut source_gc, endpoint_id, 9, 1, elem_meta, elem_rttid, 1);
     let payload = vo_runtime::island_msg::encode_spawn_payload_from_capture_values(
         &source_gc,
         0,
@@ -376,7 +402,7 @@ fn vm_island_spawn_unpack_txn_061_build_failure_restores_endpoint_registry() {
         &module.named_type_metas,
         &module.runtime_types,
     );
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let before_fibers = vm.scheduler.fibers.len();
 
     let err = handle_spawn_fiber(&mut vm, &payload)
@@ -407,7 +433,7 @@ fn vm_island_spawn_unpack_txn_061_rejects_missing_method_receiver_before_enqueue
     module
         .functions
         .push(direct_method_spawn_func(vec![SlotType::GcRef]));
-    vm.module = Some(module);
+    vm.module = Some(std::sync::Arc::new(module));
     let before_fibers = vm.scheduler.fibers.len();
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());

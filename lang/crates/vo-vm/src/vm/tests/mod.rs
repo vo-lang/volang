@@ -3,6 +3,7 @@ use crate::fiber::{
     DeferArgLayout, DeferEntry, Fiber, PanicState, QueueWaitState, ReturnValues, SelectState,
     UnwindingMode, UnwindingState,
 };
+use crate::test_support::queue as test_queue;
 #[cfg(feature = "std")]
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "std")]
@@ -511,7 +512,7 @@ fn queue_action_macro_source_062() -> &'static str {
     source_slice_between(
         include_str!("../mod.rs"),
         "macro_rules! handle_queue_action",
-        "for _ in 0..TIME_SLICE",
+        "while fiber.execution_budget > 0",
     )
     .expect("handle_queue_action macro body")
 }

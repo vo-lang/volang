@@ -26,7 +26,9 @@ use hashbrown::HashMap as HbHashMap;
 #[cfg(feature = "std")]
 use std::collections::{HashMap as StdHashMap, VecDeque};
 #[cfg(feature = "std")]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "std")]
+use std::sync::mpsc::Receiver;
 #[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "std")]
@@ -94,14 +96,18 @@ pub enum EndpointEntry {
 /// Used on both home islands (LOCAL channels) and remote islands (REMOTE proxies)
 /// to route incoming ChanRequest/ChanResponse commands.
 pub struct EndpointRegistry {
-    pub entries: HbHashMap<u64, EndpointEntry>,
+    entries: HbHashMap<u64, EndpointEntry>,
     tombstone_count: usize,
+    live_roots: Vec<(u64, GcRef)>,
+    live_root_indices: HbHashMap<u64, usize>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct EndpointRegistrySnapshot {
     entries: HbHashMap<u64, EndpointEntry>,
     tombstone_count: usize,
+    live_roots: Vec<(u64, GcRef)>,
+    live_root_indices: HbHashMap<u64, usize>,
 }
 
 impl Default for EndpointRegistry {
@@ -115,6 +121,8 @@ impl EndpointRegistry {
         Self {
             entries: HbHashMap::new(),
             tombstone_count: 0,
+            live_roots: Vec::new(),
+            live_root_indices: HbHashMap::new(),
         }
     }
 
@@ -122,29 +130,54 @@ impl EndpointRegistry {
         EndpointRegistrySnapshot {
             entries: self.entries.clone(),
             tombstone_count: self.tombstone_count,
+            live_roots: self.live_roots.clone(),
+            live_root_indices: self.live_root_indices.clone(),
         }
     }
 
     pub(crate) fn restore(&mut self, snapshot: EndpointRegistrySnapshot) {
         self.entries = snapshot.entries;
         self.tombstone_count = snapshot.tombstone_count;
+        self.live_roots = snapshot.live_roots;
+        self.live_root_indices = snapshot.live_root_indices;
+    }
+
+    fn upsert_live_root(&mut self, endpoint_id: u64, ch: GcRef) {
+        if let Some(&index) = self.live_root_indices.get(&endpoint_id) {
+            self.live_roots[index].1 = ch;
+            return;
+        }
+        let index = self.live_roots.len();
+        self.live_roots.push((endpoint_id, ch));
+        self.live_root_indices.insert(endpoint_id, index);
+    }
+
+    fn remove_live_root(&mut self, endpoint_id: u64) {
+        let Some(index) = self.live_root_indices.remove(&endpoint_id) else {
+            return;
+        };
+        self.live_roots.swap_remove(index);
+        if let Some((moved_endpoint, _)) = self.live_roots.get(index).copied() {
+            self.live_root_indices.insert(moved_endpoint, index);
+        }
     }
 
     /// Register or update a live channel for an endpoint.
     pub fn register_live(&mut self, endpoint_id: u64, ch: GcRef) {
-        if matches!(
-            self.entries.insert(endpoint_id, EndpointEntry::Live(ch)),
-            Some(EndpointEntry::Tombstone { .. })
-        ) {
+        let old = self.entries.insert(endpoint_id, EndpointEntry::Live(ch));
+        if matches!(old, Some(EndpointEntry::Tombstone { .. })) {
             self.tombstone_count -= 1;
         }
+        self.upsert_live_root(endpoint_id, ch);
     }
 
     /// Ensure endpoint is registered as live (idempotent).
     pub fn ensure_live(&mut self, endpoint_id: u64, ch: GcRef) {
-        self.entries
-            .entry(endpoint_id)
-            .or_insert(EndpointEntry::Live(ch));
+        if self.entries.contains_key(&endpoint_id) {
+            return;
+        }
+        self.entries.insert(endpoint_id, EndpointEntry::Live(ch));
+        self.upsert_live_root(endpoint_id, ch);
     }
 
     /// Get a live channel by endpoint ID. Returns None for tombstones and missing.
@@ -153,6 +186,10 @@ impl EndpointRegistry {
             Some(EndpointEntry::Live(ch)) => Some(*ch),
             _ => None,
         }
+    }
+
+    pub(crate) fn entry(&self, endpoint_id: u64) -> Option<EndpointEntry> {
+        self.entries.get(&endpoint_id).copied()
     }
 
     /// Mark an endpoint as tombstoned (channel closed or collected).
@@ -177,6 +214,9 @@ impl EndpointRegistry {
         );
         if !matches!(old, Some(EndpointEntry::Tombstone { .. })) {
             self.tombstone_count += 1;
+        }
+        if matches!(old, Some(EndpointEntry::Live(_))) {
+            self.remove_live_root(endpoint_id);
         }
     }
 
@@ -217,16 +257,17 @@ impl EndpointRegistry {
 
     /// Iterate all live GcRefs for GC root scanning.
     pub fn live_handles(&self) -> impl Iterator<Item = GcRef> + '_ {
-        self.entries.values().filter_map(|e| match e {
-            EndpointEntry::Live(ch) => Some(*ch),
-            EndpointEntry::Tombstone { .. } => None,
-        })
+        self.live_roots.iter().map(|(_, ch)| *ch)
+    }
+
+    pub(crate) fn live_handle_at(&self, index: usize) -> Option<GcRef> {
+        self.live_roots.get(index).map(|(_, ch)| *ch)
     }
 }
 
 /// Time slice: number of instructions before forced yield check.
 /// VM executes at most TIME_SLICE instructions per fiber before yielding to scheduler.
-pub const TIME_SLICE: u32 = 1000;
+pub const TIME_SLICE: u32 = vo_runtime::EXECUTION_TIMESLICE_INSTRUCTIONS;
 
 /// VM execution result - drives scheduler state transitions.
 ///
@@ -333,11 +374,22 @@ pub enum VmError {
     Jit(String),
 }
 
+/// Lifecycle events emitted by an island worker thread.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IslandThreadEvent {
+    Ready,
+    Failed(String),
+    Exited,
+}
+
 /// Active island thread info.
 #[cfg(feature = "std")]
 pub struct IslandThread {
     pub island_id: u32,
     pub join_handle: Option<JoinHandle<()>>,
+    pub events: Receiver<IslandThreadEvent>,
+    pub interrupt_flag: Arc<AtomicBool>,
 }
 
 /// VM mutable state that can be borrowed independently from scheduler.
@@ -412,14 +464,52 @@ pub enum VmRootScanMode {
     DirtyFibers,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmRootScanStage {
+    Globals,
+    Fibers,
+    SentinelErrors,
+    Endpoints,
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmFiberRootScanStage {
+    Defers,
+    UnwindDefers,
+    ReturnValues,
+    Panic,
+    ClosureReplay,
+    JitSuspend,
+    SelectQueues,
+    SelectResult,
+    QueueWait,
+    JitPanic,
+    Done,
+}
+
 #[derive(Debug)]
 pub struct VmRootScanSnapshot {
     pub kind: GcRootScanKind,
     pub mode: VmRootScanMode,
     pub dirty_epoch: u64,
     pub dirty_fibers: Vec<u32>,
+    /// Small pending-root buffer for non-stack fiber state and VM-owned caches.
+    /// Global and frame slots are enumerated directly through the cursors below.
     pub roots: Vec<GcRef>,
     pub cursor: usize,
+    pub stage: VmRootScanStage,
+    pub global_def_cursor: usize,
+    pub global_base_cursor: usize,
+    pub global_slot_cursor: usize,
+    pub fiber_source_cursor: usize,
+    pub fiber_frame_cursor: usize,
+    pub fiber_slot_cursor: usize,
+    pub fiber_aux_stage: VmFiberRootScanStage,
+    pub fiber_aux_outer_cursor: usize,
+    pub fiber_aux_slot_cursor: usize,
+    pub sentinel_cursor: usize,
+    pub endpoint_cursor: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -651,6 +741,9 @@ impl Default for VmState {
 #[cfg(feature = "std")]
 impl Drop for VmState {
     fn drop(&mut self) {
+        for island in &self.island_threads {
+            island.interrupt_flag.store(true, Ordering::SeqCst);
+        }
         for island in &self.island_threads {
             let _ = self.try_send_to_island(island.island_id, IslandCommand::Shutdown);
         }

@@ -15,6 +15,33 @@ use vo_runtime::{SlotType, ValueKind, ValueMeta};
 use crate::instruction::Instruction;
 use crate::vm::helpers::{stack_get, stack_set};
 
+/// Reusable interpreter storage for map operands and results.
+///
+/// Map bytecode permits destination slots to overlap key/value inputs, so the
+/// interpreter must snapshot operands before calling the runtime. Keeping that
+/// storage on the fiber removes an allocation from every steady-state map
+/// operation while preserving the bytecode aliasing contract.
+#[derive(Debug, Default)]
+pub struct MapScratch {
+    slots: Vec<u64>,
+}
+
+impl MapScratch {
+    #[inline]
+    fn key_value(&mut self, key_slots: usize, val_slots: usize) -> (&mut [u64], &mut [u64]) {
+        let total = key_slots + val_slots;
+        self.slots.resize(total, 0);
+        self.slots[..total].fill(0);
+        self.slots[..total].split_at_mut(key_slots)
+    }
+
+    #[inline]
+    fn key(&mut self, key_slots: usize) -> &mut [u64] {
+        self.slots.resize(key_slots, 0);
+        &mut self.slots[..key_slots]
+    }
+}
+
 pub fn validate_map_handle(gc: &Gc, m: GcRef, context: &str) -> Result<GcRef, String> {
     let Some(base) = gc.canonicalize_ref(m) else {
         return Err(format!("{context}: invalid map handle"));
@@ -22,7 +49,7 @@ pub fn validate_map_handle(gc: &Gc, m: GcRef, context: &str) -> Result<GcRef, St
     if base != m {
         return Err(format!("{context}: map handle must be an object base"));
     }
-    let kind = Gc::header(base).kind();
+    let kind = unsafe { Gc::header(base) }.kind();
     if kind != ValueKind::Map {
         return Err(format!("{context}: expected map handle, got {:?}", kind));
     }
@@ -44,7 +71,8 @@ pub fn exec_map_new(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mut Gc
 
 #[inline]
 fn validate_map_key_slots(m: GcRef, key_slots: usize, access: &str) -> Result<(), String> {
-    let expected = map::key_slots(m) as usize;
+    // Safety: callers canonicalize and verify `m` before layout validation.
+    let expected = unsafe { map::key_slots(m) } as usize;
     if key_slots != expected {
         return Err(format!(
             "{access} key slots {key_slots} do not match map key slots {expected}"
@@ -61,7 +89,7 @@ fn validate_map_key_value_slots(
     access: &str,
 ) -> Result<(), String> {
     validate_map_key_slots(m, key_slots, access)?;
-    let expected = map::val_slots(m) as usize;
+    let expected = unsafe { map::val_slots(m) } as usize;
     if val_slots != expected {
         return Err(format!(
             "{access} value slots {val_slots} do not match map value slots {expected}"
@@ -140,10 +168,19 @@ fn validate_map_key_value_layout(
     module: Option<&Module>,
     access: &str,
 ) -> Result<(), String> {
-    let expected_key =
-        value_meta_layout(map::key_meta(m), map::key_slots(m) as usize, module, access)?;
-    let expected_val =
-        value_meta_layout(map::val_meta(m), map::val_slots(m) as usize, module, access)?;
+    // Safety: callers canonicalize and verify `m` before layout validation.
+    let expected_key = value_meta_layout(
+        unsafe { map::key_meta(m) },
+        unsafe { map::key_slots(m) } as usize,
+        module,
+        access,
+    )?;
+    let expected_val = value_meta_layout(
+        unsafe { map::val_meta(m) },
+        unsafe { map::val_slots(m) } as usize,
+        module,
+        access,
+    )?;
     if key_layout != expected_key.as_slice() {
         return Err(format!(
             "{access} key layout {key_layout:?} does not match map key layout {expected_key:?}"
@@ -177,6 +214,29 @@ pub fn exec_map_get_with_layout(
     module: Option<&Module>,
     expected_layout: Option<(&[SlotType], &[SlotType])>,
 ) -> Result<bool, String> {
+    let mut scratch = MapScratch::default();
+    exec_map_get_with_layout_using_scratch(
+        stack,
+        bp,
+        inst,
+        gc,
+        module,
+        expected_layout,
+        &mut scratch,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn exec_map_get_with_layout_using_scratch(
+    stack: *mut Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &Gc,
+    module: Option<&Module>,
+    expected_layout: Option<(&[SlotType], &[SlotType])>,
+    scratch: &mut MapScratch,
+) -> Result<bool, String> {
     let mut m = stack_get(stack, bp + inst.b as usize) as GcRef;
     let meta = stack_get(stack, bp + inst.c as usize);
     let key_slots = ((meta >> 16) & 0xFFFF) as usize;
@@ -203,25 +263,23 @@ pub fn exec_map_get_with_layout(
     }
 
     let key_start = bp + inst.c as usize + 1;
-    let key: Vec<u64> = (0..key_slots)
-        .map(|i| stack_get(stack, key_start + i))
-        .collect();
+    let (key, val) = scratch.key_value(key_slots, val_slots);
+    for (i, slot) in key.iter_mut().enumerate() {
+        *slot = stack_get(stack, key_start + i);
+    }
 
-    let (val_opt, ok) = match map::get_with_ok_checked(m, &key, module) {
+    let ok = match unsafe { map::get_checked_into(m, key, module, val) } {
         Ok(result) => result,
         Err(map::MapKeyError::UnhashableInterfaceKey) => return Ok(false),
         Err(map::MapKeyError::SlotCountMismatch) => {
             return Err("MapGet key slot count does not match map layout".to_string())
         }
+        Err(map::MapKeyError::MissingModule) => {
+            return Err("MapGet requires loaded module metadata for this key type".to_string())
+        }
     };
-    if let Some(val) = val_opt {
-        for (i, &v) in val.iter().enumerate().take(val_slots) {
-            stack_set(stack, dst_start + i, v);
-        }
-    } else {
-        for i in 0..val_slots {
-            stack_set(stack, dst_start + i, 0);
-        }
+    for (i, &value) in val.iter().enumerate() {
+        stack_set(stack, dst_start + i, value);
     }
     if has_ok {
         stack_set(stack, dst_start + val_slots, ok as u64);
@@ -252,6 +310,29 @@ pub fn exec_map_set_with_layout(
     module: Option<&Module>,
     expected_layout: Option<(&[SlotType], &[SlotType])>,
 ) -> Result<bool, String> {
+    let mut scratch = MapScratch::default();
+    exec_map_set_with_layout_using_scratch(
+        stack,
+        bp,
+        inst,
+        gc,
+        module,
+        expected_layout,
+        &mut scratch,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn exec_map_set_with_layout_using_scratch(
+    stack: *const Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &mut Gc,
+    module: Option<&Module>,
+    expected_layout: Option<(&[SlotType], &[SlotType])>,
+    scratch: &mut MapScratch,
+) -> Result<bool, String> {
     let mut m = stack_get(stack, bp + inst.a as usize) as GcRef;
     let meta = stack_get(stack, bp + inst.b as usize);
     let key_slots = ((meta >> 8) & 0xFF) as usize;
@@ -268,34 +349,38 @@ pub fn exec_map_set_with_layout(
         }
     }
 
-    let key: Vec<u64> = (0..key_slots)
-        .map(|i| stack_get(stack, key_start + i))
-        .collect();
-    let val: Vec<u64> = (0..val_slots)
-        .map(|i| stack_get(stack, val_start + i))
-        .collect();
+    let (key, val) = scratch.key_value(key_slots, val_slots);
+    for (i, slot) in key.iter_mut().enumerate() {
+        *slot = stack_get(stack, key_start + i);
+    }
+    for (i, slot) in val.iter_mut().enumerate() {
+        *slot = stack_get(stack, val_start + i);
+    }
 
     if !m.is_null() {
-        let key_meta = map::key_meta(m);
-        let val_meta = map::val_meta(m);
+        let key_meta = unsafe { map::key_meta(m) };
+        let val_meta = unsafe { map::val_meta(m) };
         if key_meta.value_kind().may_contain_gc_refs() {
-            vo_runtime::gc_types::try_typed_write_barrier_by_meta(gc, m, &key, key_meta, module)
+            vo_runtime::gc_types::try_typed_write_barrier_by_meta(gc, m, key, key_meta, module)
                 .map_err(|err| err.to_string())?;
         }
         if val_meta.value_kind().may_contain_gc_refs() {
-            vo_runtime::gc_types::try_typed_write_barrier_by_meta(gc, m, &val, val_meta, module)
+            vo_runtime::gc_types::try_typed_write_barrier_by_meta(gc, m, val, val_meta, module)
                 .map_err(|err| err.to_string())?;
         }
     }
     let set_result = unsafe {
         // SAFETY: VM MapSet validated the map handle and applied precise key/value barriers above.
-        map::set_checked(m, &key, &val, module)
+        map::set_checked(m, key, val, module)
     };
     match set_result {
         Ok(()) => {}
         Err(map::MapKeyError::UnhashableInterfaceKey) => return Ok(false),
         Err(map::MapKeyError::SlotCountMismatch) => {
             return Err("MapSet key/value slot count does not match map layout".to_string())
+        }
+        Err(map::MapKeyError::MissingModule) => {
+            return Err("MapSet requires loaded module metadata for this key type".to_string())
         }
     }
     Ok(true)
@@ -321,6 +406,29 @@ pub fn exec_map_delete_with_layout(
     module: Option<&Module>,
     expected_key_layout: Option<&[SlotType]>,
 ) -> Result<bool, String> {
+    let mut scratch = MapScratch::default();
+    exec_map_delete_with_layout_using_scratch(
+        stack,
+        bp,
+        inst,
+        gc,
+        module,
+        expected_key_layout,
+        &mut scratch,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn exec_map_delete_with_layout_using_scratch(
+    stack: *const Slot,
+    bp: usize,
+    inst: &Instruction,
+    gc: &Gc,
+    module: Option<&Module>,
+    expected_key_layout: Option<&[SlotType]>,
+    scratch: &mut MapScratch,
+) -> Result<bool, String> {
     let mut m = stack_get(stack, bp + inst.a as usize) as GcRef;
     let meta = stack_get(stack, bp + inst.b as usize);
     let key_slots = meta as usize;
@@ -332,8 +440,8 @@ pub fn exec_map_delete_with_layout(
         validate_map_key_slots(m, key_slots, "MapDelete")?;
         if let Some(key_layout) = expected_key_layout {
             let expected_key = value_meta_layout(
-                map::key_meta(m),
-                map::key_slots(m) as usize,
+                unsafe { map::key_meta(m) },
+                unsafe { map::key_slots(m) } as usize,
                 module,
                 "MapDelete",
             )?;
@@ -345,15 +453,25 @@ pub fn exec_map_delete_with_layout(
         }
     }
 
-    let key: Vec<u64> = (0..key_slots)
-        .map(|i| stack_get(stack, key_start + i))
-        .collect();
+    // Deleting from a nil map is a no-op under Go semantics. It must not reach
+    // the raw MapData accessor, which requires a live object.
+    if m.is_null() {
+        return Ok(true);
+    }
 
-    match map::delete_checked(m, &key, module) {
+    let key = scratch.key(key_slots);
+    for (i, slot) in key.iter_mut().enumerate() {
+        *slot = stack_get(stack, key_start + i);
+    }
+
+    match unsafe { map::delete_checked(m, key, module) } {
         Ok(()) => Ok(true),
         Err(map::MapKeyError::UnhashableInterfaceKey) => Ok(false),
         Err(map::MapKeyError::SlotCountMismatch) => {
             Err("MapDelete key slot count does not match map layout".to_string())
+        }
+        Err(map::MapKeyError::MissingModule) => {
+            Err("MapDelete requires loaded module metadata for this key type".to_string())
         }
     }
 }
@@ -369,7 +487,12 @@ pub fn exec_map_len(
     if !m.is_null() {
         m = validate_map_handle(gc, m, "MapLen")?;
     }
-    let len = if m.is_null() { 0 } else { map::len(m) };
+    let len = if m.is_null() {
+        0
+    } else {
+        // Safety: `validate_map_handle` established a live map object.
+        unsafe { map::len(m) }
+    };
     stack_set(stack, bp + inst.a as usize, len as u64);
     Ok(())
 }
@@ -387,7 +510,8 @@ pub fn exec_map_iter_init(
     if !m.is_null() {
         m = validate_map_handle(gc, m, "MapIterInit")?;
     }
-    let iter = map::iter_init(m);
+    // Safety: null creates an exhausted iterator; non-null was validated above.
+    let iter = unsafe { map::iter_init(m) };
 
     let iter_slot = bp + inst.a as usize;
     const SLOTS: usize = map::MAP_ITER_SLOTS;
@@ -437,30 +561,32 @@ pub fn exec_map_iter_next_with_layout(
         }
     }
 
-    match map::iter_next(iter) {
-        Some((key, val)) => {
-            for (i, &k) in key.iter().enumerate().take(key_slots) {
-                stack_set(stack, key_dst + i, k);
-            }
-            for i in key.len().min(key_slots)..key_slots {
-                stack_set(stack, key_dst + i, 0);
-            }
-            for (i, &v) in val.iter().enumerate().take(val_slots) {
-                stack_set(stack, val_dst + i, v);
-            }
-            for i in val.len().min(val_slots)..val_slots {
-                stack_set(stack, val_dst + i, 0);
-            }
+    let key_out = if key_slots == 0 {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(stack.add(key_dst), key_slots) }
+    };
+    let val_out = if val_slots == 0 {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(stack.add(val_dst), val_slots) }
+    };
+    // Safety: the iterator map handle and output layouts were validated above.
+    match unsafe { map::iter_next_into(iter, key_out, val_out) } {
+        Ok(true) => {
             stack_set(stack, ok_slot, 1);
         }
-        None => {
-            for i in 0..key_slots {
-                stack_set(stack, key_dst + i, 0);
-            }
-            for i in 0..val_slots {
-                stack_set(stack, val_dst + i, 0);
-            }
+        Ok(false) => {
             stack_set(stack, ok_slot, 0);
+        }
+        Err(map::MapKeyError::SlotCountMismatch) => {
+            return Err("MapIterNext output slots do not match map layout".to_string())
+        }
+        Err(map::MapKeyError::UnhashableInterfaceKey) => {
+            return Err("MapIterNext encountered invalid interface-key state".to_string())
+        }
+        Err(map::MapKeyError::MissingModule) => {
+            return Err("MapIterNext requires loaded module metadata".to_string())
         }
     }
     Ok(())
@@ -492,6 +618,49 @@ fn map_iter_next_slot_widths(
 mod tests {
     use super::*;
     use vo_runtime::ValueKind;
+
+    #[test]
+    fn map_get_reuses_fiber_scratch_and_preserves_input_output_aliasing() {
+        let mut gc = Gc::new();
+        let int_meta = ValueMeta::new(0, ValueKind::Int64);
+        let m = map::create(&mut gc, int_meta, int_meta, 1, 1, 0);
+        unsafe { map::set_checked(m, &[7], &[42], None) }.expect("seed map");
+        let meta = (1 << 16) | (1 << 1);
+        let mut stack = vec![m as u64, meta, 7];
+        let inst = Instruction::new(crate::instruction::Opcode::MapGet, 2, 0, 1);
+        let mut scratch = MapScratch::default();
+
+        assert!(exec_map_get_with_layout_using_scratch(
+            stack.as_mut_ptr(),
+            0,
+            &inst,
+            &gc,
+            None,
+            None,
+            &mut scratch,
+        )
+        .expect("first map read"));
+        assert_eq!(stack[2], 42, "destination may alias the key input");
+        let scratch_ptr = scratch.slots.as_ptr();
+
+        stack[2] = 7;
+        assert!(exec_map_get_with_layout_using_scratch(
+            stack.as_mut_ptr(),
+            0,
+            &inst,
+            &gc,
+            None,
+            None,
+            &mut scratch,
+        )
+        .expect("second map read"));
+        assert_eq!(stack[2], 42);
+        assert_eq!(
+            scratch.slots.as_ptr(),
+            scratch_ptr,
+            "steady-state map reads must retain the scratch allocation"
+        );
+    }
 
     #[test]
     fn exec_map_get_rejects_runtime_value_width_drift_before_stack_write_035() {
@@ -529,7 +698,7 @@ mod tests {
 
         assert!(err.contains("MapSet value slots 1"), "{err}");
         assert!(err.contains("map value slots 2"), "{err}");
-        let (value, ok) = map::get_with_ok_checked(m, &[7], None).expect("map read");
+        let (value, ok) = unsafe { map::get_with_ok_checked(m, &[7], None) }.expect("map read");
         assert!(!ok);
         assert!(value.is_none());
     }
@@ -603,7 +772,7 @@ mod tests {
 
         assert!(err.contains("MapSet value layout [Value]"), "{err}");
         assert!(err.contains("map value layout [GcRef]"), "{err}");
-        let (value, ok) = map::get_with_ok_checked(m, &[7], None).expect("map read");
+        let (value, ok) = unsafe { map::get_with_ok_checked(m, &[7], None) }.expect("map read");
         assert!(!ok);
         assert!(value.is_none());
     }
@@ -692,7 +861,7 @@ mod tests {
 
     #[test]
     fn exec_map_iter_next_nil_rejects_value_width_drift_before_stack_write_061() {
-        let iter = map::iter_init(core::ptr::null_mut());
+        let iter = unsafe { map::iter_init(core::ptr::null_mut()) };
         let mut stack = vec![99; map::MAP_ITER_SLOTS + 4];
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -768,8 +937,8 @@ mod tests {
             .expect("exec_map_delete source");
         let body = &source[start..end];
 
-        assert!(body.contains("let key_meta = map::key_meta(m);"), "{body}");
-        assert!(body.contains("let val_meta = map::val_meta(m);"), "{body}");
+        assert!(body.contains("map::key_meta(m)"), "{body}");
+        assert!(body.contains("map::val_meta(m)"), "{body}");
         assert!(
             !body.contains("inst.flags & 0b01") && !body.contains("inst.flags & 0b10"),
             "{body}"

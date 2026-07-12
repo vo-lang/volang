@@ -30,12 +30,50 @@ jobs:
         id: ci_metadata
         run: cargo run -q -p vo-dev -- ci metadata site --github-output
 
-      - name: Checkout first-party module
-        if: steps.ci_metadata.outputs.checkout == 'true'
+      - name: Checkout vogui
+        if: steps.ci_metadata.outputs.checkout_vogui == 'true'
         uses: actions/checkout@v5
         with:
-          repository: ${{ steps.ci_metadata.outputs.checkout_repository }}
-          path: ${{ steps.ci_metadata.outputs.checkout_path }}
+          repository: ${{ steps.ci_metadata.outputs.checkout_vogui_repository }}
+          path: ${{ steps.ci_metadata.outputs.checkout_vogui_path }}
+          ref: ${{ steps.ci_metadata.outputs.checkout_vogui_expected_commit }}
+          fetch-depth: 0
+
+      - name: Checkout voplay
+        if: steps.ci_metadata.outputs.checkout_voplay == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.ci_metadata.outputs.checkout_voplay_repository }}
+          path: ${{ steps.ci_metadata.outputs.checkout_voplay_path }}
+          ref: ${{ steps.ci_metadata.outputs.checkout_voplay_expected_commit }}
+          fetch-depth: 0
+
+      - name: Checkout vopack
+        if: steps.ci_metadata.outputs.checkout_vopack == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.ci_metadata.outputs.checkout_vopack_repository }}
+          path: ${{ steps.ci_metadata.outputs.checkout_vopack_path }}
+          ref: ${{ steps.ci_metadata.outputs.checkout_vopack_expected_commit }}
+          fetch-depth: 0
+
+      - name: Checkout vostore
+        if: steps.ci_metadata.outputs.checkout_vostore == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.ci_metadata.outputs.checkout_vostore_repository }}
+          path: ${{ steps.ci_metadata.outputs.checkout_vostore_path }}
+          ref: ${{ steps.ci_metadata.outputs.checkout_vostore_expected_commit }}
+          fetch-depth: 0
+
+      - name: Checkout BlockKart
+        if: steps.ci_metadata.outputs.checkout_blockkart == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.ci_metadata.outputs.checkout_blockkart_repository }}
+          path: ${{ steps.ci_metadata.outputs.checkout_blockkart_path }}
+          ref: ${{ steps.ci_metadata.outputs.checkout_blockkart_expected_commit }}
+          fetch-depth: 0
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -53,6 +91,12 @@ jobs:
           node-version: ${{ steps.ci_metadata.outputs.node_version }}
           cache: "npm"
           cache-dependency-path: ${{ steps.ci_metadata.outputs.node_lockfiles }}
+
+      - name: Bootstrap site tools
+        run: cargo run -q -p vo-dev -- tool bootstrap --task site --apply
+
+      - name: Check site tools
+        run: cargo run -q -p vo-dev -- tool check --task site
 
       - name: Build Studio site
         run: cargo run -q -p vo-dev -- task run site

@@ -1,6 +1,8 @@
-use crate::config::{load_tasks, load_toolchains, Task};
-use crate::first_party::ci_checkout_untracked_prefixes;
-use crate::task_graph::{resolve_selector, task_map, task_tools_recursive};
+use crate::config::{load_project, load_tasks, load_toolchains, Task};
+use crate::first_party::{ci_checkout_untracked_prefixes, project_repo_path};
+use crate::task_graph::{
+    resolve_selector, task_map, task_repos_recursive_from_map, task_tools_recursive,
+};
 use crate::tool_lint::lint_toolchain_file;
 use crate::tool_system::check_tools;
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,9 +13,9 @@ use std::fs;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
@@ -25,14 +27,17 @@ unsafe extern "C" {
 }
 
 pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
+    ensure_volang_ci_alias(root)?;
     let config = load_tasks(root)?;
     let task_map = task_map(&config)?;
     let gate_plan_env = gate_plan_env(&config)?;
+    let ci_run_id = ci_run_id()?;
     for name in task_names {
         let task = task_map
             .get(name)
             .ok_or_else(|| anyhow!("unknown task: {name}"))?;
         ensure_task_tools(root, name)?;
+        prepare_task_outputs(root, task)?;
         let cwd = root.join(task.cwd.as_deref().unwrap_or("."));
         println!("\n==> {}", task.title);
         println!(
@@ -49,6 +54,10 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
         for (key, value) in &gate_plan_env {
             command.env(key, value);
         }
+        command.env("VO_DEV_CI_RUN_ID", &ci_run_id);
+        for (key, value) in task_root_env(root, &task_map, name)? {
+            command.env(key, value);
+        }
         let status = run_command_with_optional_timeout(&mut command, task.timeout_sec)
             .with_context(|| format!("could not run task {name}"))?;
         let elapsed = start.elapsed().as_secs_f32();
@@ -60,6 +69,162 @@ pub(crate) fn run_tasks(root: &Path, task_names: &[String]) -> Result<()> {
         println!("ok: {name} ({elapsed:.1}s)");
     }
     Ok(())
+}
+
+fn ensure_volang_ci_alias(root: &Path) -> Result<()> {
+    let ci_modules = root.join("ci_modules");
+    let alias = ci_modules.join("volang");
+    match fs::symlink_metadata(&alias) {
+        Ok(_) => {
+            let actual = alias
+                .canonicalize()
+                .with_context(|| format!("could not resolve {}", alias.display()))?;
+            let expected = root
+                .canonicalize()
+                .with_context(|| format!("could not resolve {}", root.display()))?;
+            if actual != expected {
+                bail!(
+                    "{} must resolve to the volang root {}; found {}",
+                    alias.display(),
+                    expected.display(),
+                    actual.display()
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(&ci_modules).with_context(|| {
+                format!(
+                    "could not create CI module directory {}",
+                    ci_modules.display()
+                )
+            })?;
+            create_volang_ci_alias(&alias).with_context(|| {
+                format!(
+                    "could not create {} as an alias for the volang root",
+                    alias.display()
+                )
+            })
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("could not inspect CI module alias {}", alias.display())),
+    }
+}
+
+#[cfg(unix)]
+fn create_volang_ci_alias(alias: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink("..", alias)
+}
+
+#[cfg(windows)]
+fn create_volang_ci_alias(alias: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir("..", alias)
+}
+
+fn ci_run_id() -> Result<String> {
+    if let Ok(existing) = std::env::var("VO_DEV_CI_RUN_ID") {
+        if !existing.trim().is_empty() && existing.trim() == existing {
+            return Ok(existing);
+        }
+        bail!("VO_DEV_CI_RUN_ID must be non-empty and cannot contain surrounding whitespace");
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX epoch")?
+        .as_nanos();
+    Ok(format!("vo-dev-{nanos}-{}", std::process::id()))
+}
+
+fn prepare_task_outputs(root: &Path, task: &Task) -> Result<()> {
+    for output in &task.outputs {
+        if output != "target" && !output.starts_with("target/") {
+            continue;
+        }
+        let path = root.join(output);
+        if path.is_dir() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("could not clear stale task output {output}"))?;
+        } else if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("could not clear stale task output {output}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn task_root_env(
+    root: &Path,
+    task_map: &std::collections::BTreeMap<String, Task>,
+    task_name: &str,
+) -> Result<Vec<(String, String)>> {
+    let required_repos = task_repos_recursive_from_map(task_map, task_name)?;
+    let project = load_project(root)?;
+    let mut env = vec![(
+        "VOLANG_ROOT".to_string(),
+        absolute_path(root)?.display().to_string(),
+    )];
+    for repo in project
+        .first_party
+        .iter()
+        .chain(project.external_project.iter())
+    {
+        let env_name = repo_root_env_name(&repo.name);
+        let path = match project_repo_path(root, &repo.name) {
+            Ok(path) => path,
+            Err(error) if required_repos.contains(&repo.name) => {
+                bail!(
+                    "task {task_name} requires project repo {}; provision a CI checkout or local_hint before running it: {error:#}",
+                    repo.name
+                );
+            }
+            Err(_) => fallback_repo_path(root, &repo.name, repo.local_hint.as_deref()),
+        };
+        env.push((env_name, path.display().to_string()));
+        if let Some(expected_commit) = &repo.expected_commit {
+            env.push((
+                repo_expected_commit_env_name(&repo.name),
+                expected_commit.clone(),
+            ));
+        }
+    }
+    Ok(env)
+}
+
+fn repo_root_env_name(repo: &str) -> String {
+    let mut out = String::new();
+    for ch in repo.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out.push_str("_ROOT");
+    out
+}
+
+fn repo_expected_commit_env_name(repo: &str) -> String {
+    let mut out = String::new();
+    for ch in repo.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out.push_str("_EXPECTED_COMMIT");
+    out
+}
+
+fn fallback_repo_path(root: &Path, repo: &str, local_hint: Option<&str>) -> PathBuf {
+    local_hint
+        .map(|hint| root.join(hint))
+        .unwrap_or_else(|| root.join("ci_modules").join(repo))
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    path.canonicalize()
+        .with_context(|| format!("could not canonicalize {}", path.display()))
 }
 
 fn gate_plan_env(config: &crate::config::TaskFile) -> Result<Vec<(String, String)>> {
@@ -246,6 +411,71 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    #[test]
+    fn volang_ci_alias_is_created_and_rejects_wrong_targets() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-vo-dev-ci-alias-{stamp}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("root");
+
+        ensure_volang_ci_alias(&root).expect("create self alias");
+        assert_eq!(
+            root.join("ci_modules/volang")
+                .canonicalize()
+                .expect("alias target"),
+            root.canonicalize().expect("root target")
+        );
+
+        fs::remove_file(root.join("ci_modules/volang")).expect("remove alias");
+        fs::create_dir_all(root.join("wrong")).expect("wrong target");
+        std::os::unix::fs::symlink("../wrong", root.join("ci_modules/volang"))
+            .expect("wrong alias");
+        let error = ensure_volang_ci_alias(&root).expect_err("wrong alias must fail");
+        assert!(error
+            .to_string()
+            .contains("must resolve to the volang root"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn prepare_task_outputs_removes_only_ephemeral_target_outputs() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "volang-vo-dev-stale-output-{stamp}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("target/report")).expect("target report dir");
+        fs::create_dir_all(root.join("checked-in/artifact")).expect("checked-in artifact dir");
+        fs::write(root.join("target/report/report.json"), "stale").expect("stale report");
+        fs::write(root.join("checked-in/artifact/data.json"), "source").expect("source artifact");
+        let task: crate::config::Task = toml::from_str(
+            r#"
+name = "evidence"
+title = "Evidence"
+command = ["true"]
+outputs = ["target/report", "checked-in/artifact"]
+tier = "contract"
+"#,
+        )
+        .expect("task");
+
+        prepare_task_outputs(&root, &task).expect("prepare outputs");
+
+        assert!(!root.join("target/report").exists());
+        assert!(root.join("checked-in/artifact/data.json").exists());
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn gate_plan_env_includes_resolved_task_dependencies_035() {

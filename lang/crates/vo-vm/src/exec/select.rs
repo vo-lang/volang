@@ -361,8 +361,8 @@ fn find_ready_case(stack: *const Slot, bp: usize, gc: &Gc, state: &SelectState) 
             Ok(ch) => ch,
             Err(msg) => return ReadyCase::Malformed(msg),
         };
-        if queue::is_remote(ch) {
-            match queue_state::kind(ch) {
+        if unsafe { queue::is_remote(ch) } {
+            match unsafe { queue_state::kind(ch) } {
                 QueueKind::Port => return ReadyCase::UnsupportedRemotePort,
                 QueueKind::Chan => {
                     return ReadyCase::Malformed(
@@ -373,8 +373,8 @@ fn find_ready_case(stack: *const Slot, bp: usize, gc: &Gc, state: &SelectState) 
         }
 
         let is_ready = match case.kind {
-            SelectCaseKind::Send => queue::send_ready(ch),
-            SelectCaseKind::Recv => queue::recv_ready(ch),
+            SelectCaseKind::Send => unsafe { queue::send_ready(ch) },
+            SelectCaseKind::Recv => unsafe { queue::recv_ready(ch) },
         };
 
         if is_ready {
@@ -421,7 +421,8 @@ fn barrier_select_send_value(
     value: &[u64],
     module: Option<&Module>,
 ) -> Result<(), String> {
-    let elem_meta = queue_state::elem_meta(ch);
+    // Safety: select execution validates the queue handle before this helper.
+    let elem_meta = unsafe { queue_state::elem_meta(ch) };
     if elem_meta.value_kind().may_contain_gc_refs() {
         vo_runtime::gc_types::try_typed_write_barrier_by_meta(
             &mut vm_state.gc,
@@ -602,7 +603,7 @@ fn complete_woken_case(
                     "SelectExec woken send received non-send wake result".to_string(),
                 );
             }
-            None if !ch.is_null() && queue::is_closed(ch) => {
+            None if !ch.is_null() && unsafe { queue::is_closed(ch) } => {
                 if let Some(state) = select_state.as_mut() {
                     cancel_select_waiters(state, fiber_key);
                 }
@@ -651,16 +652,12 @@ fn execute_send_case(
     let value: QueueMessage = (0..elem_slots)
         .map(|i| stack_get(stack, val_start + i))
         .collect();
-    if let Err(msg) = barrier_select_send_value(vm_state, ch, value.as_ref(), module) {
-        *select_state = None;
-        return SelectResult::Malformed(msg);
-    }
-
     let struct_metas = module.map(|m| m.struct_metas.as_slice()).unwrap_or(&[]);
     let runtime_types = module.map(|m| m.runtime_types.as_slice()).unwrap_or(&[]);
-    let action = super::queue_send_core(
+    let action = super::queue_send_owned_core_with_layout(
         ch,
-        value.as_ref(),
+        value,
+        elem_layout,
         island_id,
         fiber_key,
         vm_state,
@@ -826,25 +823,25 @@ fn recv_case_wake(
     let _ = island_id;
     super::preflight_queue_recv_routes(vm_state, ch)?;
     let dst_start = bp + val_reg as usize;
-    let remote_sender_rollback =
-        if !ch.is_null() && !queue::is_remote(ch) && queue::next_recv_endpoint_sender(ch).is_some()
-        {
-            Some(
-                crate::runtime_boundary::RuntimeRollback::local_queue_with_stack_slots(
-                    vm_state,
-                    ch,
-                    super::stack_slot_snapshot(stack, dst_start, elem_slots + usize::from(has_ok)),
-                ),
-            )
-        } else {
-            None
-        };
-    let (result, value) = queue::try_recv(ch);
-    match result {
-        RecvResult::Success(sender) => {
-            let Some(value) = value else {
-                return Err("select recv success returned without payload".to_string());
-            };
+    let remote_sender_rollback = if !ch.is_null()
+        && !unsafe { queue::is_remote(ch) }
+        && unsafe { queue::next_recv_endpoint_sender(ch) }.is_some()
+    {
+        Some(
+            crate::runtime_boundary::RuntimeRollback::local_queue_with_stack_slots(
+                vm_state,
+                ch,
+                super::stack_slot_snapshot(stack, dst_start, elem_slots + usize::from(has_ok)),
+            ),
+        )
+    } else {
+        None
+    };
+    match unsafe { queue::try_recv(ch) } {
+        RecvResult::Success {
+            woke_sender: sender,
+            payload: value,
+        } => {
             super::write_recv_result(Some(value.as_ref()), elem_slots, has_ok, |i, written| {
                 stack_set(stack, dst_start + i, written);
             });
@@ -860,7 +857,7 @@ fn recv_case_wake(
             });
             Ok(super::QueueAction::Continue)
         }
-        RecvResult::WouldBlock | RecvResult::Blocked => Err(blocked_message.to_string()),
+        RecvResult::WouldBlock => Err(blocked_message.to_string()),
     }
 }
 
@@ -892,7 +889,7 @@ fn register_select_waiters(
                 return Err(msg);
             }
         };
-        if queue::is_remote(ch) {
+        if unsafe { queue::is_remote(ch) } {
             cancel_select_waiters(state, fiber_key);
             return Err("remote channel reached select waiter registration".to_string());
         }
@@ -917,18 +914,20 @@ fn register_select_waiters(
                     cancel_select_waiters(state, fiber_key);
                     return Err(msg);
                 }
-                queue::register_sender(
-                    ch,
-                    QueueWaiter::selecting(
-                        island_id,
-                        fiber_key,
-                        idx as u16,
-                        select_id,
-                        ch as u64,
-                        case.kind.wait_kind(),
-                    ),
-                    value,
-                );
+                unsafe {
+                    queue::register_sender(
+                        ch,
+                        QueueWaiter::selecting(
+                            island_id,
+                            fiber_key,
+                            idx as u16,
+                            select_id,
+                            ch as u64,
+                            case.kind.wait_kind(),
+                        ),
+                        value,
+                    )
+                };
             }
             SelectCaseKind::Recv => {
                 let layout_result = if let Some(elem_layout) = case.elem_layout.as_deref() {
@@ -940,17 +939,19 @@ fn register_select_waiters(
                     cancel_select_waiters(state, fiber_key);
                     return Err(msg);
                 }
-                queue::register_receiver(
-                    ch,
-                    QueueWaiter::selecting(
-                        island_id,
-                        fiber_key,
-                        idx as u16,
-                        select_id,
-                        ch as u64,
-                        case.kind.wait_kind(),
-                    ),
-                );
+                unsafe {
+                    queue::register_receiver(
+                        ch,
+                        QueueWaiter::selecting(
+                            island_id,
+                            fiber_key,
+                            idx as u16,
+                            select_id,
+                            ch as u64,
+                            case.kind.wait_kind(),
+                        ),
+                    )
+                };
             }
         }
 
@@ -969,7 +970,8 @@ pub(crate) fn cancel_select_waiters(state: &mut SelectState, fiber_key: u64) {
     for registered in &state.registered_queues {
         let ch = registered.queue;
         if !ch.is_null() {
-            queue::cancel_select_waiters(ch, fiber_key, select_id);
+            // Safety: registered queues were validated when the waiter was installed.
+            unsafe { queue::cancel_select_waiters(ch, fiber_key, select_id) };
         }
     }
     state.registered_queues.clear();

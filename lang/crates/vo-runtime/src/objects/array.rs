@@ -1,9 +1,14 @@
+#![allow(clippy::missing_safety_doc)]
 //! Array object operations.
 //!
 //! Layout: GcHeader + ArrayHeader + [elements...]
 //! - GcHeader: kind=Array, meta_id=0 (Array doesn't need its own meta_id)
 //! - ArrayHeader: len (Slot), elem_meta (ValueMeta), elem_bytes (u32) - 2 slots
 //! - Elements: packed by elem_bytes (1/2/4/8+ bytes per element)
+//!
+//! # Safety contract
+//! Unsafe accessors require a canonical live array allocation and in-bounds
+//! indices or byte ranges matching its recorded element layout.
 
 use crate::gc::{Gc, GcRef};
 use crate::slot::{byte_offset_for_slots, slot_to_usize, slots_for_bytes, Slot, SLOT_BYTES};
@@ -53,23 +58,23 @@ pub fn is_nil(arr: GcRef) -> bool {
 }
 
 #[inline]
-pub fn len(arr: GcRef) -> usize {
+pub unsafe fn len(arr: GcRef) -> usize {
     if arr.is_null() {
         return 0;
     }
-    slot_to_usize(ArrayHeader::as_ref(arr).len)
+    slot_to_usize(unsafe { ArrayHeader::as_ref(arr) }.len)
 }
 
 #[inline]
-pub fn elem_meta(arr: GcRef) -> ValueMeta {
+pub unsafe fn elem_meta(arr: GcRef) -> ValueMeta {
     if arr.is_null() {
         return ValueMeta::new(0, ValueKind::Void);
     }
-    ArrayHeader::as_ref(arr).elem_meta
+    unsafe { ArrayHeader::as_ref(arr) }.elem_meta
 }
 
 #[inline]
-pub fn elem_kind(arr: GcRef) -> ValueKind {
+pub unsafe fn elem_kind(arr: GcRef) -> ValueKind {
     if arr.is_null() {
         return ValueKind::Void;
     }
@@ -77,7 +82,7 @@ pub fn elem_kind(arr: GcRef) -> ValueKind {
 }
 
 #[inline]
-pub fn elem_meta_id(arr: GcRef) -> u32 {
+pub unsafe fn elem_meta_id(arr: GcRef) -> u32 {
     if arr.is_null() {
         return 0;
     }
@@ -85,17 +90,17 @@ pub fn elem_meta_id(arr: GcRef) -> u32 {
 }
 
 #[inline]
-pub fn elem_bytes(arr: GcRef) -> usize {
+pub unsafe fn elem_bytes(arr: GcRef) -> usize {
     if arr.is_null() {
         return 0;
     }
-    ArrayHeader::as_ref(arr).elem_bytes as usize
+    unsafe { ArrayHeader::as_ref(arr) }.elem_bytes as usize
 }
 
 /// Total slots including header (for large array clone)
 #[inline]
-pub fn total_slots(arr: GcRef) -> usize {
-    let header = ArrayHeader::as_ref(arr);
+pub unsafe fn total_slots(arr: GcRef) -> usize {
+    let header = unsafe { ArrayHeader::as_ref(arr) };
     let data_bytes = slot_to_usize(header.len) * header.elem_bytes as usize;
     let data_slots = slots_for_bytes(data_bytes);
     HEADER_SLOTS + data_slots
@@ -104,7 +109,7 @@ pub fn total_slots(arr: GcRef) -> usize {
 /// Return byte pointer to data area (after ArrayHeader)
 /// Note: GcRef points to data after GcHeader, so we only skip ArrayHeader here.
 #[inline(always)]
-pub fn data_ptr_bytes(arr: GcRef) -> *mut u8 {
+pub unsafe fn data_ptr_bytes(arr: GcRef) -> *mut u8 {
     unsafe { (arr as *mut u8).add(byte_offset_for_slots(HEADER_SLOTS)) }
 }
 

@@ -2,9 +2,9 @@
 //!
 //! Handles address-of (&x), dereference (*x), and getting pointers to expressions.
 
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::{Expr, ExprKind};
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;

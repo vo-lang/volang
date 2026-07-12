@@ -1,7 +1,12 @@
+#![allow(clippy::missing_safety_doc)]
 //! FFI (Foreign Function Interface) for Vo native extensions.
 //!
 //! This module provides the interface for implementing Vo functions in Rust.
 //! Both VM interpreter and JIT compiler use these types.
+//!
+//! # Safety contract
+//! Unsafe FFI accessors require VM-owned call contexts and ABI buffers that
+//! stay live and layout-compatible for the complete native call.
 //!
 //! # Architecture
 //!
@@ -81,6 +86,7 @@ pub struct SentinelErrorCache {
     inner: HashMap<&'static str, Vec<(u64, u64)>>,
     #[cfg(not(feature = "std"))]
     inner: BTreeMap<&'static str, Vec<(u64, u64)>>,
+    gc_roots: Vec<GcRef>,
 }
 
 impl SentinelErrorCache {
@@ -104,12 +110,25 @@ impl SentinelErrorCache {
 
     pub fn insert(&mut self, pkg: &'static str, errors: Vec<(u64, u64)>) {
         self.inner.insert(pkg, errors);
+        self.gc_roots.clear();
+        for values in self.inner.values() {
+            for &(slot0, slot1) in values {
+                if crate::objects::interface::data_is_gc_ref(slot0) && slot1 != 0 {
+                    self.gc_roots.push(slot1 as GcRef);
+                }
+            }
+        }
     }
 
     /// Iterate all cached error values (for GC root scanning).
     /// Each entry is a slice of (slot0, slot1) interface pairs.
     pub fn iter_values(&self) -> impl Iterator<Item = &[(u64, u64)]> {
         self.inner.values().map(|v| v.as_slice())
+    }
+
+    /// Random access for budgeted VM root scanning.
+    pub fn gc_root_at(&self, index: usize) -> Option<GcRef> {
+        self.gc_roots.get(index).copied()
     }
 }
 
@@ -437,14 +456,15 @@ pub struct ExternEntry {
 
 #[cfg(feature = "std")]
 impl ExternEntry {
-    /// Get function name as a string slice.
-    pub fn name(&self) -> &str {
-        unsafe {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                self.name_ptr,
-                self.name_len as usize,
-            ))
-        }
+    /// Borrow the function name carried by the extension ABI entry.
+    ///
+    /// # Safety
+    /// `name_ptr..name_len` must remain readable and contain UTF-8 for the
+    /// returned lifetime. Dynamic extension tables must pass loader validation
+    /// before calling this method.
+    pub unsafe fn name_unchecked(&self) -> &str {
+        let bytes = core::slice::from_raw_parts(self.name_ptr, self.name_len as usize);
+        core::str::from_utf8(bytes).expect("validated extension name must remain UTF-8")
     }
 
     pub fn effects(&self) -> Option<ExternEffects> {
@@ -520,7 +540,9 @@ pub static EXTERN_TABLE: [ExternEntry] = [..];
 /// Lookup an extension function by name.
 #[cfg(feature = "std")]
 pub fn lookup_extern_entry(name: &str) -> Option<&'static ExternEntry> {
-    EXTERN_TABLE.iter().find(|entry| entry.name() == name)
+    EXTERN_TABLE
+        .iter()
+        .find(|entry| unsafe { entry.name_unchecked() == name })
 }
 
 /// Lookup an extension function by name.
@@ -1053,11 +1075,18 @@ impl<'a> ExternCallContext<'a> {
     /// Read argument as string (zero-copy borrow).
     #[inline]
     pub fn arg_str(&self, n: u16) -> &str {
+        self.try_arg_str(n)
+            .expect("Vo string argument contains invalid UTF-8")
+    }
+
+    /// Read an argument as UTF-8 without assuming every Vo string is valid text.
+    #[inline]
+    pub fn try_arg_str(&self, n: u16) -> Result<&str, core::str::Utf8Error> {
         let ptr = self.arg_ref(n);
         if ptr.is_null() {
-            ""
+            Ok("")
         } else {
-            string::as_str(ptr)
+            core::str::from_utf8(unsafe { string::bytes_unchecked(ptr) })
         }
     }
 
@@ -1068,8 +1097,10 @@ impl<'a> ExternCallContext<'a> {
         if ptr.is_null() {
             &[]
         } else {
-            let data_ptr = slice::data_ptr(ptr);
-            let len = slice::len(ptr);
+            // Safety: `arg_ref` reads a verified byte-slice argument rooted by
+            // this extern call context.
+            let data_ptr = unsafe { slice::data_ptr(ptr) };
+            let len = unsafe { slice::len(ptr) };
             unsafe { core::slice::from_raw_parts(data_ptr, len) }
         }
     }
@@ -1684,7 +1715,8 @@ impl<'a> ExternCallContext<'a> {
         let len = data.len();
         let elem_meta = ValueMeta::new(0, ValueKind::Uint8);
         let s = slice::create(self.gc, elem_meta, 1, len, len);
-        let dst = slice::data_ptr(s);
+        // Safety: `s` is the fresh byte slice allocated immediately above.
+        let dst = unsafe { slice::data_ptr(s) };
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), dst, len) };
         s
     }
@@ -1725,7 +1757,7 @@ impl<'a> ExternCallContext<'a> {
     /// `val` must be a slice of exactly `val_slots` u64 words.
     #[inline]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn map_set_string_key(&mut self, m: GcRef, key: &str, val: &[u64]) {
+    pub unsafe fn map_set_string_key(&mut self, m: GcRef, key: &str, val: &[u64]) {
         assert_eq!(
             crate::objects::map::key_kind(m),
             ValueKind::String,
@@ -1790,7 +1822,9 @@ impl<'a> ExternCallContext<'a> {
             // String is a GcRef (8 bytes), store as u64
             unsafe { slice::set(s, i, str_ref as u64, 8) };
         }
-        self.gc.mark_allocated_for_scan(slice::array_ref(s));
+        // Safety: `s` is the fresh string slice allocated above.
+        self.gc
+            .mark_allocated_for_scan(unsafe { slice::array_ref(s) });
         s
     }
 
@@ -2197,7 +2231,7 @@ impl<'a> ExternCallContext<'a> {
             )));
         };
         self.write_return_slot(slot_idx + 1, canonical as u64)?;
-        let header = Gc::header(canonical);
+        let header = unsafe { Gc::header(canonical) };
         match value_rttid.value_kind() {
             ValueKind::Struct | ValueKind::Pointer => {
                 self.verify_return_interface_data_kind(
@@ -2363,9 +2397,11 @@ impl<'a> ExternCallContext<'a> {
                 )));
             }
         }
-        let actual_len = array::len(array_ref);
-        let actual_elem_meta = array::elem_meta(array_ref);
-        let actual_elem_bytes = array::elem_bytes(array_ref);
+        // Safety: the return verifier canonicalized the object and established
+        // the array header kind above.
+        let actual_len = unsafe { array::len(array_ref) };
+        let actual_elem_meta = unsafe { array::elem_meta(array_ref) };
+        let actual_elem_bytes = unsafe { array::elem_bytes(array_ref) };
         if actual_len != expected_len
             || actual_elem_meta != expected_elem_meta
             || actual_elem_bytes != expected_elem_bytes

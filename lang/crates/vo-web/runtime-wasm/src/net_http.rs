@@ -190,14 +190,17 @@ fn read_string_slice(slice_ref: GcRef) -> Vec<String> {
     if slice_ref.is_null() {
         return Vec::new();
     }
-    let len = slice::len(slice_ref);
+    // Safety: the resolved extern ABI verifies this argument as a rooted
+    // []string value before the host provider is invoked.
+    let len = unsafe { slice::len(slice_ref) };
     let elem_bytes = core::mem::size_of::<GcRef>();
     let mut result = Vec::with_capacity(len);
     for i in 0..len {
         let raw = unsafe { slice::get(slice_ref, i, elem_bytes) };
         let str_ref: GcRef = slot_to_ptr(raw);
         if !str_ref.is_null() {
-            result.push(vo_runtime::objects::string::as_str(str_ref).to_string());
+            // Safety: the typed slice supplies live string elements.
+            result.push(unsafe { vo_runtime::objects::string::to_rust_string(str_ref) });
         } else {
             result.push(String::new());
         }

@@ -101,7 +101,7 @@ impl GcModel {
                         gc.mark_gray(root);
                     }
                 },
-                |gc, obj| scan_object(gc, obj, struct_metas, &empty_closure_layout),
+                |gc, obj| unsafe { scan_object(gc, obj, struct_metas, &empty_closure_layout) },
                 |_| {},
             );
             if self.gc.last_step_stats().cycle_finished {
@@ -346,7 +346,7 @@ fn gc_model_array_ref_elements_survive_from_root() {
         gc_step(
             &mut gc,
             |gc| gc.mark_gray(arr),
-            |gc, obj| scan_object(gc, obj, &struct_metas, &empty_closure_layout),
+            |gc, obj| unsafe { scan_object(gc, obj, &struct_metas, &empty_closure_layout) },
             |_| {},
         );
         if gc.last_step_stats().cycle_finished {
@@ -379,7 +379,7 @@ fn gc_model_black_parent_write_barrier_rescues_white_child() {
                     gc.mark_gray(root);
                 }
             },
-            |gc, obj| scan_object(gc, obj, struct_metas, &empty_closure_layout),
+            |gc, obj| unsafe { scan_object(gc, obj, struct_metas, &empty_closure_layout) },
             |_| {},
         );
         if model.gc.is_black(parent) && model.gc.state() == GcState::Propagate {

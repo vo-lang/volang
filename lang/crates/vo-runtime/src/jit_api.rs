@@ -1,9 +1,13 @@
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 //! JIT runtime API.
 //!
 //! This module defines the C ABI interface between JIT-compiled code and the
 //! Vo runtime. All functions here are `extern "C"` and can be called from
 //! JIT-generated native code.
+//!
+//! # Safety contract
+//! Unsafe helpers require a live VM-owned `JitContext` and ABI buffers whose
+//! lengths and layouts were validated by generated code or the VM bridge.
 //!
 //! # Architecture
 //!
@@ -24,7 +28,9 @@ use std::ffi::c_void;
 use crate::gc::{Gc, GcRef};
 use crate::itab::ItabCache;
 use crate::objects::interface::InterfaceSlot;
+
 use crate::slot::slots_for_bytes;
+pub use crate::EXECUTION_TIMESLICE_INSTRUCTIONS;
 use crate::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 use vo_common_core::bytecode::{JitInstructionMetadata, Module};
 use vo_common_core::instruction::iface_assert_result_slots_from_flags;
@@ -316,8 +322,8 @@ pub struct JitContext {
     /// Pointer to the global variables array.
     pub globals: *mut u64,
 
-    /// Pointer to safepoint flag (read by JIT to check if GC wants to run).
-    /// When this is true, JIT should call vo_gc_safepoint().
+    /// Legacy ABI slot retained for extension compatibility.
+    /// Native scheduling uses `execution_budget` below.
     pub safepoint_flag: *const bool,
 
     /// Pointer to panic flag (set by JIT when panic occurs).
@@ -651,6 +657,14 @@ pub struct JitContext {
     /// Pointer to DynCallIC table (DynCallIC::TABLE_SIZE entries).
     /// JIT callsites hash into this table for fast-path dispatch.
     pub ic_table: *mut DynCallIC,
+
+    /// Scheduler-turn instruction budget shared by every nested native call.
+    ///
+    /// Generated code charges bounded bytecode regions before entering them.
+    /// The VM copies this value to and from the active fiber at each JIT bridge,
+    /// so interpreter work, loop OSR, and full-function JIT execution consume a
+    /// single cooperative scheduling budget.
+    pub execution_budget: u32,
 }
 
 /// JitContext field offsets for JIT compiler.
@@ -762,6 +776,10 @@ impl JitContext {
 
     // Inline Cache
     pub const OFFSET_IC_TABLE: i32 = std::mem::offset_of!(JitContext, ic_table) as i32;
+
+    // Cooperative scheduler budget
+    pub const OFFSET_EXECUTION_BUDGET: i32 =
+        std::mem::offset_of!(JitContext, execution_budget) as i32;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -980,6 +998,10 @@ pub fn jit_context_abi_fields() -> &'static [JitContextAbiField] {
         JitContextAbiField {
             name: "ic_table",
             offset: JitContext::OFFSET_IC_TABLE,
+        },
+        JitContextAbiField {
+            name: "execution_budget",
+            offset: JitContext::OFFSET_EXECUTION_BUDGET,
         },
     ]
 }
@@ -1627,27 +1649,15 @@ pub extern "C" fn vo_gc_typed_write_barrier_by_meta(
     }
 }
 
-/// GC safepoint - intentionally a no-op.
+/// Legacy safepoint compatibility symbol.
 ///
-/// The synchronous JIT design with non-moving GC means stack maps are NOT needed:
-///
-/// 1. **Non-moving GC**: GcRef pointers never change, so JIT's SSA variables
-///    holding GcRefs remain valid even after GC runs.
-///
-/// 2. **Reachability**: All GcRefs in JIT code originate from `fiber.stack`
-///    (already tracked by GC) or from helper return values (already rooted).
-///
-/// 3. **GC triggers only at call boundaries**:
-///    - `vo_gc_alloc` - checks debt and may trigger collection
-///    - `vo_call_vm` - enters VM context where GC can run
-///    - Other extern calls
-///
-/// This design eliminates the need for expensive stack maps while maintaining
-/// GC correctness. The trade-off is that long JIT loops without allocations
-/// will delay GC, but this only affects latency, not correctness.
+/// Generated native code charges bounded control-flow regions against the
+/// scheduler-turn budget in `JitContext` and returns `CALL_KIND_YIELD` when the
+/// next region cannot fit. The VM then owns interrupt polling, root
+/// materialization, and incremental GC work at the scheduling boundary.
 #[no_mangle]
 pub extern "C" fn vo_gc_safepoint(_ctx: *mut JitContext) {
-    // Intentionally no-op. See doc comment for design rationale.
+    // Kept as an ABI symbol for already-built extensions.
 }
 
 /// Set Call request state in JitContext.
@@ -1942,6 +1952,17 @@ fn validate_jit_raw_inout_buffer(
     validate_jit_raw_out_buffer(ctx, ptr, slots, detail)
 }
 
+/// Build an output slice after `validate_jit_raw_out_buffer` succeeds.
+/// Zero-width VM values permit a null ABI pointer, so they use Rust's empty
+/// slice representation without touching the pointer.
+unsafe fn jit_raw_out_slice<'a>(ptr: *mut u64, slots: usize) -> &'a mut [u64] {
+    if slots == 0 {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(ptr, slots) }
+    }
+}
+
 fn validate_map_handle(
     ctx: *mut JitContext,
     m: crate::gc::GcRef,
@@ -1959,7 +1980,7 @@ fn validate_map_handle(
     if base != m {
         return Err(set_invalid_map_metadata(ctx, detail));
     }
-    if Gc::header(base).kind() != ValueKind::Map {
+    if unsafe { Gc::header(base) }.kind() != ValueKind::Map {
         return Err(set_invalid_map_metadata(ctx, detail));
     }
     Ok(base)
@@ -2231,18 +2252,20 @@ fn validate_map_key_value_layout(
     } else {
         unsafe { (*ctx).module.as_ref() }
     };
+    // Safety: callers canonicalize `m` and verify the map header before this
+    // layout comparison.
     let expected_key = jit_value_meta_layout(
         ctx,
         module,
-        crate::objects::map::key_meta(m),
-        crate::objects::map::key_slots(m) as usize,
+        unsafe { crate::objects::map::key_meta(m) },
+        unsafe { crate::objects::map::key_slots(m) } as usize,
         detail,
     )?;
     let expected_val = jit_value_meta_layout(
         ctx,
         module,
-        crate::objects::map::val_meta(m),
-        crate::objects::map::val_slots(m) as usize,
+        unsafe { crate::objects::map::val_meta(m) },
+        unsafe { crate::objects::map::val_slots(m) } as usize,
         detail,
     )?;
     if key_layout != expected_key.as_slice() || val_layout != expected_val.as_slice() {
@@ -2262,11 +2285,13 @@ fn validate_map_key_layout(
     } else {
         unsafe { (*ctx).module.as_ref() }
     };
+    // Safety: callers canonicalize `m` and verify the map header before this
+    // layout comparison.
     let expected_key = jit_value_meta_layout(
         ctx,
         module,
-        crate::objects::map::key_meta(m),
-        crate::objects::map::key_slots(m) as usize,
+        unsafe { crate::objects::map::key_meta(m) },
+        unsafe { crate::objects::map::key_slots(m) } as usize,
         detail,
     )?;
     if key_layout != expected_key.as_slice() {
@@ -2286,7 +2311,8 @@ pub extern "C" fn vo_map_len(ctx: *mut JitContext, m: u64) -> u64 {
         Ok(m_ref) => m_ref,
         Err(result) => return result,
     };
-    map::len(m_ref) as u64
+    // Safety: `validate_map_handle` established a live map object.
+    unsafe { map::len(m_ref) as u64 }
 }
 
 /// Get value from map. Returns pointer to value slots, or null if not found.
@@ -2333,7 +2359,10 @@ pub extern "C" fn vo_map_get(
         Ok(m_ref) => m_ref,
         Err(result) => return result,
     };
-    if map::key_slots(m_ref) as u32 != key_slots || map::val_slots(m_ref) as u32 != val_slots {
+    // Safety: `validate_map_handle` established a live map object.
+    if unsafe { map::key_slots(m_ref) } as u32 != key_slots
+        || unsafe { map::val_slots(m_ref) } as u32 != val_slots
+    {
         return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
     }
     let ctx_ref = unsafe { &*ctx };
@@ -2355,27 +2384,17 @@ pub extern "C" fn vo_map_get(
 
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    let (val_opt, ok) = match map::get_with_ok_checked(m_ref, key, module) {
+    let val_out = unsafe { jit_raw_out_slice(val_ptr, val_slots as usize) };
+    let ok = match unsafe { map::get_checked_into(m_ref, key, module, val_out) } {
         Ok(result) => result,
         Err(map::MapKeyError::UnhashableInterfaceKey) => return 2,
         Err(map::MapKeyError::SlotCountMismatch) => {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
         }
-    };
-
-    if let Some(val) = val_opt {
-        if val.len() != val_slots as usize {
+        Err(map::MapKeyError::MissingModule) => {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_GET_LAYOUT);
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val_slots as usize);
-        }
-    } else {
-        // Zero out val_ptr buffer for non-existent keys
-        unsafe {
-            core::ptr::write_bytes(val_ptr, 0, val_slots as usize);
-        }
-    }
+    };
     ok as u64
 }
 
@@ -2409,7 +2428,10 @@ pub extern "C" fn vo_map_set(
         Ok(m_ref) => m_ref,
         Err(result) => return result,
     };
-    if map::key_slots(m_ref) as u32 != key_slots || map::val_slots(m_ref) as u32 != val_slots {
+    // Safety: `validate_map_handle` established a live map object.
+    if unsafe { map::key_slots(m_ref) } as u32 != key_slots
+        || unsafe { map::val_slots(m_ref) } as u32 != val_slots
+    {
         return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
     }
     let ctx_ref = unsafe { &*ctx };
@@ -2435,8 +2457,8 @@ pub extern "C" fn vo_map_set(
 
     // Write barrier: use map's stored metadata to barrier only actual GcRef slots.
     let gc = unsafe { &mut *(*ctx).gc };
-    let km = map::key_meta(m_ref);
-    let vm = map::val_meta(m_ref);
+    let km = unsafe { map::key_meta(m_ref) };
+    let vm = unsafe { map::val_meta(m_ref) };
     if km.value_kind().may_contain_gc_refs()
         && crate::gc_types::try_typed_write_barrier_by_meta(gc, m_ref, key, km, module).is_err()
     {
@@ -2455,6 +2477,9 @@ pub extern "C" fn vo_map_set(
         Ok(()) => {}
         Err(map::MapKeyError::UnhashableInterfaceKey) => return 1,
         Err(map::MapKeyError::SlotCountMismatch) => {
+            return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
+        }
+        Err(map::MapKeyError::MissingModule) => {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_SET_LAYOUT);
         }
     }
@@ -2487,7 +2512,8 @@ pub extern "C" fn vo_map_delete(
         Ok(m_ref) => m_ref,
         Err(result) => return result,
     };
-    if map::key_slots(m_ref) as u32 != key_slots {
+    // Safety: `validate_map_handle` established a live map object.
+    if unsafe { map::key_slots(m_ref) } as u32 != key_slots {
         return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT);
     }
     let ctx_ref = unsafe { &*ctx };
@@ -2505,10 +2531,13 @@ pub extern "C" fn vo_map_delete(
 
     let module = unsafe { (*ctx).module.as_ref() };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_slots as usize) };
-    match map::delete_checked(m_ref, key, module) {
+    match unsafe { map::delete_checked(m_ref, key, module) } {
         Ok(()) => 0,
         Err(map::MapKeyError::UnhashableInterfaceKey) => 1,
         Err(map::MapKeyError::SlotCountMismatch) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
+        }
+        Err(map::MapKeyError::MissingModule) => {
             set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_DELETE_LAYOUT)
         }
     }
@@ -2532,7 +2561,8 @@ pub extern "C" fn vo_map_iter_init(ctx: *mut JitContext, m: u64, iter_ptr: *mut 
             Err(result) => return result,
         }
     };
-    let iter = map::iter_init(m_ref);
+    // Safety: null produces an exhausted iterator; non-null was validated as a map.
+    let iter = unsafe { map::iter_init(m_ref) };
     unsafe {
         core::ptr::copy_nonoverlapping(
             &iter as *const map::MapIterator as *const u64,
@@ -2591,8 +2621,8 @@ pub extern "C" fn vo_map_iter_next(
             Ok(validated) => map_ref = validated,
             Err(result) => return result,
         }
-        if map::key_slots(map_ref) as usize != key_slots
-            || map::val_slots(map_ref) as usize != val_slots
+        if unsafe { map::key_slots(map_ref) } as usize != key_slots
+            || unsafe { map::val_slots(map_ref) } as usize != val_slots
         {
             return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT);
         }
@@ -2615,27 +2645,20 @@ pub extern "C" fn vo_map_iter_next(
         }
     }
 
-    unsafe {
-        if key_slots > 0 {
-            core::ptr::write_bytes(key_ptr, 0, key_slots);
+    let key_out = unsafe { jit_raw_out_slice(key_ptr, key_slots) };
+    let val_out = unsafe { jit_raw_out_slice(val_ptr, val_slots) };
+    // Safety: iterator and output layouts were validated above.
+    match unsafe { map::iter_next_into(iter, key_out, val_out) } {
+        Ok(found) => u64::from(found),
+        Err(map::MapKeyError::SlotCountMismatch) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
         }
-        if val_slots > 0 {
-            core::ptr::write_bytes(val_ptr, 0, val_slots);
+        Err(map::MapKeyError::UnhashableInterfaceKey) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
         }
-    }
-
-    match map::iter_next(iter) {
-        Some((key, val)) => {
-            if key.len() != key_slots || val.len() != val_slots {
-                return set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT);
-            }
-            unsafe {
-                core::ptr::copy_nonoverlapping(key.as_ptr(), key_ptr, key_slots);
-                core::ptr::copy_nonoverlapping(val.as_ptr(), val_ptr, val_slots);
-            }
-            1
+        Err(map::MapKeyError::MissingModule) => {
+            set_invalid_metadata_u64(ctx, JIT_HELPER_MAP_ITER_NEXT_LAYOUT)
         }
-        None => 0,
     }
 }
 
@@ -2654,7 +2677,8 @@ pub extern "C" fn vo_map_iter_next(
 #[no_mangle]
 pub extern "C" fn vo_str_decode_rune(s: u64, pos: u64) -> u64 {
     use crate::objects::string;
-    let (rune, width) = string::decode_rune_at(s as crate::gc::GcRef, pos as usize);
+    // Safety: generated code passes a live string reference.
+    let (rune, width) = unsafe { string::decode_rune_at(s as crate::gc::GcRef, pos as usize) };
     ((rune as u64) << 32) | (width as u64)
 }
 
@@ -2662,14 +2686,16 @@ pub extern "C" fn vo_str_decode_rune(s: u64, pos: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn vo_str_len(s: u64) -> u64 {
     use crate::objects::string;
-    string::len(s as crate::gc::GcRef) as u64
+    // Safety: generated code passes a live string reference.
+    unsafe { string::len(s as crate::gc::GcRef) as u64 }
 }
 
 /// Get byte at index.
 #[no_mangle]
 pub extern "C" fn vo_str_index(s: u64, idx: u64) -> u64 {
     use crate::objects::string;
-    string::index(s as crate::gc::GcRef, idx as usize) as u64
+    // Safety: generated code performs the bounds check before this helper.
+    unsafe { string::index(s as crate::gc::GcRef, idx as usize) as u64 }
 }
 
 /// Concatenate two strings.
@@ -2699,14 +2725,16 @@ pub extern "C" fn vo_str_slice(gc: *mut Gc, s: u64, lo: u64, hi: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn vo_str_eq(a: u64, b: u64) -> u64 {
     use crate::objects::string;
-    string::eq(a as crate::gc::GcRef, b as crate::gc::GcRef) as u64
+    // Safety: generated code passes live string references.
+    unsafe { string::eq(a as crate::gc::GcRef, b as crate::gc::GcRef) as u64 }
 }
 
 /// Compare strings.
 #[no_mangle]
 pub extern "C" fn vo_str_cmp(a: u64, b: u64) -> i32 {
     use crate::objects::string;
-    string::cmp(a as crate::gc::GcRef, b as crate::gc::GcRef)
+    // Safety: generated code passes live string references.
+    unsafe { string::cmp(a as crate::gc::GcRef, b as crate::gc::GcRef) }
 }
 
 /// Create string from constant index.
@@ -2844,7 +2872,7 @@ pub extern "C" fn vo_array_new(gc: *mut Gc, elem_meta: u32, elem_bytes: u32, len
 
 /// Get array length.
 #[no_mangle]
-pub extern "C" fn vo_array_len(arr: u64) -> u64 {
+pub unsafe extern "C" fn vo_array_len(arr: u64) -> u64 {
     use crate::objects::array;
     if arr == 0 {
         return 0;
@@ -2885,7 +2913,7 @@ pub extern "C" fn vo_slice_new_checked(
 
 /// Get slice length.
 #[no_mangle]
-pub extern "C" fn vo_slice_len(s: u64) -> u64 {
+pub unsafe extern "C" fn vo_slice_len(s: u64) -> u64 {
     if s == 0 {
         return 0;
     }
@@ -2895,7 +2923,7 @@ pub extern "C" fn vo_slice_len(s: u64) -> u64 {
 
 /// Get slice capacity.
 #[no_mangle]
-pub extern "C" fn vo_slice_cap(s: u64) -> u64 {
+pub unsafe extern "C" fn vo_slice_cap(s: u64) -> u64 {
     if s == 0 {
         return 0;
     }
@@ -3110,7 +3138,7 @@ pub extern "C" fn vo_iface_to_iface(
 /// Interface equality comparison.
 /// Returns: 0 = not equal, 1 = equal, 2 = panic (uncomparable type)
 #[no_mangle]
-pub extern "C" fn vo_iface_eq(
+pub unsafe extern "C" fn vo_iface_eq(
     ctx: *mut JitContext,
     b_slot0: u64,
     b_slot1: u64,

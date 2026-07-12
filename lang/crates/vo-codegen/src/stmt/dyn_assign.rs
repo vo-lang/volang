@@ -3,10 +3,10 @@
 //! This module handles dynamic field and index assignment using protocol-first
 //! dispatch with extern fallback.
 
+use vo_runtime::bytecode::ReturnShape;
+use vo_runtime::instruction::Opcode;
 use vo_runtime::SlotType;
 use vo_syntax::ast::Expr;
-use vo_vm::bytecode::ReturnShape;
-use vo_vm::instruction::Opcode;
 
 use crate::context::CodegenContext;
 use crate::error::CodegenError;
@@ -134,7 +134,7 @@ pub(crate) fn compile_dyn_field_assign(
     let extern_id = ctx.get_or_register_extern_with_return_shape_and_effects(
         "dyn_set_field",
         returns,
-        vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+        vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
     );
     let err_reg = func.alloc_slots(&ret_slot_types);
     func.emit_call_extern(err_reg, extern_id, args, 5, &ret_slot_types);
@@ -195,7 +195,7 @@ pub(crate) fn compile_dyn_index_assign(
     let extern_id = ctx.get_or_register_extern_with_return_shape_and_effects(
         "dyn_set_index_unified",
         returns,
-        vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
+        vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY,
     );
     let err_reg = func.alloc_slots(&ret_slot_types);
     func.emit_call_extern(err_reg, extern_id, args, 6, &ret_slot_types);

@@ -1,5 +1,9 @@
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 //! GC object scanning by type.
+//!
+//! # Safety contract
+//! Unsafe scanners require canonical live GC objects whose allocation layout
+//! matches the supplied runtime metadata for the complete call.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec;
@@ -345,7 +349,7 @@ pub fn typed_write_barrier_range_by_meta(
 ///
 /// `func_closure_scan_layout`: returns closure capture GC metadata for a function id.
 /// Used to scan closure captures with correct types (Interface0/Interface1 vs GcRef).
-pub fn scan_object<'a, F>(
+pub unsafe fn scan_object<'a, F>(
     gc: &mut Gc,
     obj: GcRef,
     struct_metas: &[StructMeta],
@@ -361,7 +365,7 @@ pub fn scan_object<'a, F>(
     );
 }
 
-pub fn scan_object_with_context<'a, F>(
+pub unsafe fn scan_object_with_context<'a, F>(
     gc: &mut Gc,
     obj: GcRef,
     context: GcScanContext<'_>,
@@ -375,7 +379,7 @@ pub fn scan_object_with_context<'a, F>(
 }
 
 /// Visit a GC object's children through the same precise metadata rules used by collection.
-pub fn trace_object_children<'a, F, V>(
+pub unsafe fn trace_object_children<'a, F, V>(
     obj: GcRef,
     struct_metas: &[StructMeta],
     func_closure_scan_layout: &F,
@@ -392,7 +396,7 @@ pub fn trace_object_children<'a, F, V>(
     );
 }
 
-pub fn trace_object_children_with_context<'a, F, V>(
+pub unsafe fn trace_object_children_with_context<'a, F, V>(
     obj: GcRef,
     context: GcScanContext<'_>,
     func_closure_scan_layout: &F,
@@ -401,7 +405,7 @@ pub fn trace_object_children_with_context<'a, F, V>(
     F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
     V: FnMut(GcRef),
 {
-    let gc_header = Gc::header(obj);
+    let gc_header = unsafe { Gc::header(obj) };
 
     if gc_header.is_value_slots_object() {
         let slots =
@@ -489,7 +493,7 @@ pub fn trace_object_children_with_context<'a, F, V>(
 /// For regular closures, all captures are GcRef (pointers to heap-boxed escaped vars).
 /// For method value closures, captures may include interface data (itab + data).
 /// Runtime-created direct method closures capture receiver slot1 for a method function.
-fn trace_closure_children<'a, F, V>(obj: GcRef, func_capture_slot_types: &F, visit: &mut V)
+unsafe fn trace_closure_children<'a, F, V>(obj: GcRef, func_capture_slot_types: &F, visit: &mut V)
 where
     F: Fn(u32) -> ClosureScanLayout<'a> + ?Sized,
     V: FnMut(GcRef),
@@ -531,7 +535,7 @@ where
     );
 }
 
-fn trace_array_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
+unsafe fn trace_array_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
 where
     V: FnMut(GcRef),
 {
@@ -578,7 +582,7 @@ where
     }
 }
 
-fn trace_queue_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
+unsafe fn trace_queue_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
 where
     V: FnMut(GcRef),
 {
@@ -593,7 +597,7 @@ where
         return;
     }
 
-    let state = queue::local_state(obj);
+    let state = unsafe { queue::local_state(obj) };
     for elem in state.iter_buffer() {
         trace_queue_elem(
             elem,
@@ -885,7 +889,7 @@ fn runtime_type_kind(runtime_type: &RuntimeType, context: GcScanContext<'_>) -> 
     }
 }
 
-fn trace_map_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
+unsafe fn trace_map_children<V>(obj: GcRef, context: GcScanContext<'_>, visit: &mut V)
 where
     V: FnMut(GcRef),
 {
@@ -899,20 +903,28 @@ where
     }
 
     let mut iter = map::iter_init(obj);
-    while let Some((k, v)) = map::iter_next(&mut iter) {
+    while map::with_next(&mut iter, |entry| {
+        let Some((key, val)) = entry else {
+            return false;
+        };
         if key_kind.may_contain_gc_refs() {
-            trace_value_slots_by_meta(k, key_meta, context, visit)
+            trace_value_slots_by_meta(key, key_meta, context, visit)
                 .unwrap_or_else(|err| panic!("scan_map key: {err}"));
         }
         if val_kind.may_contain_gc_refs() {
-            trace_value_slots_by_meta(v, val_meta, context, visit)
+            trace_value_slots_by_meta(val, val_meta, context, visit)
                 .unwrap_or_else(|err| panic!("scan_map value: {err}"));
         }
-    }
+        true
+    }) {}
 }
 
-fn trace_struct_children<V>(obj: GcRef, meta_id: usize, struct_metas: &[StructMeta], visit: &mut V)
-where
+unsafe fn trace_struct_children<V>(
+    obj: GcRef,
+    meta_id: usize,
+    struct_metas: &[StructMeta],
+    visit: &mut V,
+) where
     V: FnMut(GcRef),
 {
     let meta = struct_metas
@@ -942,8 +954,8 @@ where
 
 /// Finalize a GC object before deallocation.
 /// Releases native resources (Box, etc.) not managed by GC.
-pub fn finalize_object(obj: GcRef) {
-    let header = Gc::header(obj);
+pub unsafe fn finalize_object(obj: GcRef) {
+    let header = unsafe { Gc::header(obj) };
     if header.is_value_slots_object() {
         return;
     }
@@ -972,6 +984,7 @@ pub fn finalize_object(obj: GcRef) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{queue, scan_object, trace_object_children_with_context};
 
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
         let start = src.find(start).expect("section start");
@@ -1136,7 +1149,7 @@ mod tests {
             vec![left as u64, right as u64].into_boxed_slice(),
             waiter,
         ) {
-            queue::SendResult::Blocked => {}
+            queue::BlockingSendResult::Blocked => {}
             other => panic!("expected waiting sender array value, got {other:?}"),
         }
 

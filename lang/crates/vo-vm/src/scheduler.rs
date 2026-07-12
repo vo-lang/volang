@@ -19,6 +19,8 @@ use vo_runtime::ffi::HostEventReplaySource;
 use vo_runtime::io::{IoRuntime, IoToken};
 use vo_runtime::objects::queue_state::QueueWaiter;
 
+const DETACHED_FIBER_SENTINEL: u32 = u32::MAX;
+
 /// Type-safe fiber ID (newtype over u32 index into scheduler.fibers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FiberId(u32);
@@ -209,25 +211,6 @@ pub struct WaitRegistration {
     pub registration_key: WaitRegistrationKey,
 }
 
-pub(crate) struct FiberLease<'a> {
-    #[allow(dead_code)]
-    pub(crate) key: FiberWakeKey,
-    fiber: &'a mut Fiber,
-}
-
-impl<'a> FiberLease<'a> {
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn fiber(&self) -> &Fiber {
-        self.fiber
-    }
-
-    #[inline]
-    pub(crate) fn fiber_mut(&mut self) -> &mut Fiber {
-        self.fiber
-    }
-}
-
 /// Internal state for a fiber waiting on a host-side event.
 #[derive(Debug)]
 struct HostEventWaiter {
@@ -264,10 +247,20 @@ pub(crate) struct Scheduler {
     /// Fibers waiting for host-side events (timers, fetch Promises).
     host_event_waiters: Vec<HostEventWaiter>,
     next_wait_registration_token: u64,
+    /// Reusable dead slot swapped into `fibers[current]` while that fiber is
+    /// executing. The active fiber is then owned outside Scheduler, so runtime
+    /// callbacks can borrow VM services without aliasing scheduler storage.
+    execution_placeholder: Option<Box<Fiber>>,
 }
 
 impl Scheduler {
     pub(crate) fn new() -> Self {
+        let mut execution_placeholder = Fiber::new(DETACHED_FIBER_SENTINEL);
+        // The placeholder never executes; release Fiber's normal 8K-slot
+        // startup reservation so every VM does not retain an idle 64 KiB stack.
+        execution_placeholder.stack = Vec::new();
+        execution_placeholder.generation = u32::MAX;
+        execution_placeholder.state = FiberState::Dead;
         Scheduler {
             fibers: Vec::new(),
             free_slots: Vec::new(),
@@ -278,6 +271,7 @@ impl Scheduler {
             io_waiters: HashMap::new(),
             host_event_waiters: Vec::new(),
             next_wait_registration_token: 1,
+            execution_placeholder: Some(Box::new(execution_placeholder)),
         }
     }
 
@@ -340,33 +334,61 @@ impl Scheduler {
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn get_fiber(&self, id: FiberId) -> &Fiber {
-        &self.fibers[id.0 as usize]
+        let fiber = &self.fibers[id.0 as usize];
+        assert_ne!(
+            fiber.id, DETACHED_FIBER_SENTINEL,
+            "active fiber must be accessed through its detached execution owner"
+        );
+        fiber
     }
 
     /// Try to get fiber by FiberId. Use at host/island command boundaries
     /// where a raw id may be stale or malformed.
     #[inline]
     pub(crate) fn try_get_fiber(&self, id: FiberId) -> Option<&Fiber> {
-        self.fibers.get(id.0 as usize).map(|fiber| &**fiber)
+        self.fibers
+            .get(id.0 as usize)
+            .filter(|fiber| fiber.id != DETACHED_FIBER_SENTINEL)
+            .map(|fiber| &**fiber)
     }
 
     /// Get mutable fiber by FiberId (O(1) index access).
     #[inline]
     pub(crate) fn get_fiber_mut(&mut self, id: FiberId) -> &mut Fiber {
-        &mut self.fibers[id.0 as usize]
+        let fiber = &mut self.fibers[id.0 as usize];
+        assert_ne!(
+            fiber.id, DETACHED_FIBER_SENTINEL,
+            "active fiber must be accessed through its detached execution owner"
+        );
+        fiber
     }
 
     /// Try to get mutable fiber by FiberId. Use at host/island command
     /// boundaries where a raw id may be stale or malformed.
     #[inline]
     pub(crate) fn try_get_fiber_mut(&mut self, id: FiberId) -> Option<&mut Fiber> {
-        self.fibers.get_mut(id.0 as usize).map(Box::as_mut)
+        self.fibers
+            .get_mut(id.0 as usize)
+            .filter(|fiber| fiber.id != DETACHED_FIBER_SENTINEL)
+            .map(Box::as_mut)
     }
 
-    pub(crate) fn lease_fiber(&mut self, id: FiberId) -> Option<FiberLease<'_>> {
-        let fiber = self.fibers.get_mut(id.0 as usize)?;
-        let key = FiberWakeKey::new(id.to_raw(), fiber.generation);
-        Some(FiberLease { key, fiber })
+    pub(crate) fn detach_for_execution(&mut self, id: FiberId) -> Option<Box<Fiber>> {
+        let slot = self.fibers.get_mut(id.0 as usize)?;
+        let placeholder = self.execution_placeholder.take()?;
+        Some(core::mem::replace(slot, placeholder))
+    }
+
+    pub(crate) fn reattach_after_execution(&mut self, id: FiberId, fiber: Box<Fiber>) {
+        let slot = self
+            .fibers
+            .get_mut(id.0 as usize)
+            .expect("executing fiber slot must remain allocated");
+        let placeholder = core::mem::replace(slot, fiber);
+        debug_assert_eq!(placeholder.id, DETACHED_FIBER_SENTINEL);
+        debug_assert_eq!(placeholder.state, FiberState::Dead);
+        let previous_placeholder = self.execution_placeholder.replace(placeholder);
+        debug_assert!(previous_placeholder.is_none());
     }
 
     /// Try to get a fiber by an opaque endpoint-response key.
@@ -390,7 +412,7 @@ impl Scheduler {
     #[inline]
     pub(crate) fn try_get_fiber_by_wake_key(&self, key: FiberWakeKey) -> Option<&Fiber> {
         let fiber = self.fibers.get(key.slot as usize)?;
-        if fiber.generation == key.generation {
+        if fiber.id != DETACHED_FIBER_SENTINEL && fiber.generation == key.generation {
             Some(&**fiber)
         } else {
             None
@@ -403,7 +425,7 @@ impl Scheduler {
         key: FiberWakeKey,
     ) -> Option<&mut Fiber> {
         let fiber = self.fibers.get_mut(key.slot as usize)?;
-        if fiber.generation == key.generation {
+        if fiber.id != DETACHED_FIBER_SENTINEL && fiber.generation == key.generation {
             Some(&mut **fiber)
         } else {
             None
@@ -416,6 +438,9 @@ impl Scheduler {
         let Some(fiber) = self.fibers.get_mut(id.0 as usize) else {
             return false;
         };
+        if fiber.id == DETACHED_FIBER_SENTINEL {
+            return false;
+        }
         if fiber.state.is_blocked() {
             fiber.state = FiberState::Runnable;
             self.blocked_count -= 1;
@@ -429,7 +454,8 @@ impl Scheduler {
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn current_fiber_mut(&mut self) -> Option<&mut Fiber> {
-        self.current.map(|id| &mut *self.fibers[id.0 as usize])
+        let id = self.current?;
+        self.try_get_fiber_mut(id)
     }
 
     /// Current fiber yields CPU, remains runnable.
@@ -437,6 +463,7 @@ impl Scheduler {
     pub(crate) fn yield_current(&mut self) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
+            assert_ne!(fiber.id, DETACHED_FIBER_SENTINEL);
             fiber.state = FiberState::Runnable;
             self.ready_queue.push_back(id);
         }
@@ -447,6 +474,7 @@ impl Scheduler {
     pub(crate) fn block_for_queue(&mut self) {
         if let Some(id) = self.current.take() {
             let fiber = &mut self.fibers[id.0 as usize];
+            assert_ne!(fiber.id, DETACHED_FIBER_SENTINEL);
             fiber.state = FiberState::Blocked(BlockReason::Queue);
             self.blocked_count += 1;
         }

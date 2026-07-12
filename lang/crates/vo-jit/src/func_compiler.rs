@@ -1,7 +1,7 @@
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
 //! Function compiler: bytecode -> Cranelift IR.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFlags, Value};
@@ -25,6 +25,7 @@ pub struct FunctionCompiler<'a> {
     entry_block: Block,
     current_pc: usize,
     helpers: HelperFuncs,
+    copy_frame_slots: FuncRef,
     reg_consts: HashMap<u16, i64>,
     reg_const_facts: Vec<HashMap<u16, i64>>,
     /// FuncRef table for other already-compiled callees.
@@ -38,6 +39,7 @@ pub struct FunctionCompiler<'a> {
     /// have triggered fiber.stack reallocation via jit_push_frame.
     args_ptr_var: Variable,
     args_ptr_is_stack_var: Variable,
+    execution_budget_regions: BTreeMap<usize, u32>,
     /// Slots that have been verified non-nil in the current basic block.
     /// Cleared on block transitions (jump targets).
     checked_non_nil: HashSet<u16>,
@@ -61,14 +63,18 @@ impl<'a> FunctionCompiler<'a> {
         env: JitCompileEnv<'a>,
         helpers: HelperFuncs,
         callee_func_refs: &'a [Option<FuncRef>],
-    ) -> Self {
+    ) -> Result<Self, JitError> {
         let mut builder = FunctionBuilder::new(func, func_ctx);
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
 
         let local_slots = func_def.local_slots as u32;
 
-        Self {
+        let copy_frame_slots = helpers.copy_frame_slots.ok_or_else(|| {
+            JitError::Internal("vo_jit_copy_frame_slots helper was not declared".to_string())
+        })?;
+
+        Ok(Self {
             builder,
             func_id,
             func_def,
@@ -79,18 +85,20 @@ impl<'a> FunctionCompiler<'a> {
             entry_block,
             current_pc: 0,
             helpers,
+            copy_frame_slots,
             reg_consts: HashMap::new(),
             reg_const_facts: Vec::new(),
             callee_func_refs,
             saved_jit_bp: Variable::from_u32(local_slots + 1000),
             args_ptr_var: Variable::from_u32(local_slots + 1001),
             args_ptr_is_stack_var: Variable::from_u32(local_slots + 1002),
+            execution_budget_regions: BTreeMap::new(),
             checked_non_nil: HashSet::new(),
             memory_only_start: u16::MAX,
             saved_caller_bp: Value::from_u32(0),
             saved_fiber_sp: Value::from_u32(0),
             pending_select_cases: Vec::new(),
-        }
+        })
     }
 
     pub fn compile(mut self) -> Result<(), JitError> {
@@ -122,9 +130,11 @@ impl<'a> FunctionCompiler<'a> {
 
     fn scan_jump_targets(&mut self) -> Result<(), JitError> {
         let policy = crate::compile_common::ControlPolicy::full_function(self.func_def.code.len());
-        for target in crate::compile_common::jump_targets_for_policy(&self.func_def.code, policy)? {
-            self.ensure_block(target);
+        let regions = crate::compile_common::execution_budget_regions(&self.func_def.code, policy)?;
+        for start in regions.keys().copied() {
+            self.ensure_block(start);
         }
+        self.execution_budget_regions = regions;
         Ok(())
     }
 
@@ -175,10 +185,6 @@ impl<'a> FunctionCompiler<'a> {
     fn emit_variable_spill(&mut self) {
         let dst_ptr = self.fiber_stack_args_ptr();
         let args_ptr = self.current_memory_base_ptr();
-        let copy_frame_slots = self
-            .helpers
-            .copy_frame_slots
-            .expect("vo_jit_copy_frame_slots helper must be declared");
         crate::compile_common::CompilerStorage::for_function(
             self.func_def,
             &self.vars,
@@ -188,8 +194,25 @@ impl<'a> FunctionCompiler<'a> {
             &mut self.builder,
             args_ptr,
             dst_ptr,
-            copy_frame_slots,
+            self.copy_frame_slots,
         );
+    }
+
+    fn emit_cooperative_yield(&mut self, resume_pc: usize) {
+        self.emit_variable_spill();
+        let ctx = self.builder.block_params(self.entry_block)[0];
+        crate::compile_common::emit_cooperative_yield_return(&mut self.builder, ctx, resume_pc);
+    }
+
+    fn emit_execution_budget_checkpoint(&mut self, resume_pc: usize, cost: u32) {
+        let ctx = self.builder.block_params(self.entry_block)[0];
+        let poll = crate::compile_common::branch_on_execution_budget(&mut self.builder, ctx, cost);
+
+        self.builder.switch_to_block(poll.exhausted);
+        self.builder.seal_block(poll.exhausted);
+        self.emit_cooperative_yield(resume_pc);
+
+        crate::compile_common::continue_after_execution_budget_poll(&mut self.builder, ctx, &poll);
     }
 
     fn current_memory_base_ptr(&mut self) -> Value {
@@ -782,6 +805,9 @@ impl<'a> crate::compile_common::CompileDriver for FunctionCompiler<'a> {
             block_terminated,
         ) {
             self.clear_flow_facts();
+            if let Some(cost) = self.execution_budget_regions.get(&pc).copied() {
+                self.emit_execution_budget_checkpoint(pc, cost);
+            }
         }
         Ok(())
     }

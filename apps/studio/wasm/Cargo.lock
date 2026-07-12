@@ -1190,7 +1190,6 @@ dependencies = [
  "vo-runtime",
  "vo-stdlib",
  "vo-syntax",
- "vo-vm",
 ]
 
 [[package]]

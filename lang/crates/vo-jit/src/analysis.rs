@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use vo_runtime::bytecode::{FunctionDef, Module as VoModule};
 
-use crate::effects::{self, EffectFacts, InstructionEffects, MemorySyncEffect};
+use crate::effects::{self, EffectFacts, MemorySyncEffect};
 use crate::verifier::JitMetadataError;
 
 pub struct FunctionAnalysis {
@@ -39,45 +39,36 @@ impl FunctionAnalysis {
             end_pc_exclusive,
         );
 
-        let effects = func_def
-            .code
-            .iter()
-            .enumerate()
-            .map(|(pc, inst)| {
-                let facts = EffectFacts::from_instruction(func_def.jit_metadata.get(pc));
-                effects::try_instruction_effects_with_module_context(
-                    inst,
-                    facts,
-                    &vo_module.externs,
-                    &vo_module.functions,
-                )
-                .map_err(|err| JitMetadataError::effect(func_def, pc, err))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let begin = begin_pc.min(effects.len());
-        let end = end_pc_exclusive.min(effects.len()).max(begin);
-        let memory_only_start = compute_memory_only_start_from_effects(&effects[begin..end]);
+        let begin = begin_pc.min(func_def.code.len());
+        let end = end_pc_exclusive.min(func_def.code.len()).max(begin);
+        let mut memory_only_start = u16::MAX;
+        for pc in begin..end {
+            let inst = &func_def.code[pc];
+            let facts = EffectFacts::from_instruction(func_def.jit_metadata.get(pc));
+            let effect = effects::try_instruction_effects_with_module_context(
+                inst,
+                facts,
+                &vo_module.externs,
+                &vo_module.functions,
+            )
+            .map_err(|err| JitMetadataError::effect(func_def, pc, err))?;
+            match effect.memory_sync {
+                MemorySyncEffect::None => {}
+                MemorySyncEffect::From(base) => {
+                    memory_only_start = memory_only_start.min(base);
+                }
+                MemorySyncEffect::All => {
+                    memory_only_start = 0;
+                    break;
+                }
+            }
+        }
 
         Ok(Self {
             memory_only_start,
             reg_const_facts,
         })
     }
-}
-
-pub fn compute_memory_only_start_from_effects(effects: &[InstructionEffects]) -> u16 {
-    let mut min_base = u16::MAX;
-    for effect in effects {
-        match effect.memory_sync {
-            MemorySyncEffect::None => {}
-            MemorySyncEffect::From(base) => {
-                min_base = min_base.min(base);
-            }
-            MemorySyncEffect::All => return 0,
-        }
-    }
-    min_base
 }
 
 #[cfg(test)]

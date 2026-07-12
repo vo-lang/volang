@@ -19,11 +19,58 @@ pub enum RunMode {
     Jit,
 }
 
+#[cfg(feature = "jit")]
+fn jit_config_error(message: String) -> RunError {
+    RunError::Runtime(RuntimeError {
+        message,
+        location: None,
+        kind: RuntimeErrorKind::Other,
+    })
+}
+
+#[cfg(feature = "jit")]
+fn jit_env_u32(name: &str, default: u32) -> Result<u32, RunError> {
+    match std::env::var(name) {
+        Ok(value) => value.parse::<u32>().map_err(|_| {
+            jit_config_error(format!(
+                "invalid {name} value {value:?}: expected an unsigned 32-bit integer"
+            ))
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(jit_config_error(format!(
+            "invalid {name}: value is not valid Unicode"
+        ))),
+    }
+}
+
+#[cfg(feature = "jit")]
+fn jit_env_bool(name: &str, default: bool) -> Result<bool, RunError> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let normalized = value.to_ascii_lowercase();
+            match normalized.as_str() {
+                "1" | "true" | "yes" => Ok(true),
+                "0" | "false" | "no" => Ok(false),
+                _ => Err(jit_config_error(format!(
+                    "invalid {name} value {value:?}: expected true/false, yes/no, or 1/0"
+                ))),
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(jit_config_error(format!(
+            "invalid {name}: value is not valid Unicode"
+        ))),
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RunObservation {
     pub jit_function_entries: u64,
     pub jit_loop_entries: u64,
     pub jit_regular_call_side_exits: u64,
+    pub jit_function_code_bytes: usize,
+    pub jit_loop_code_bytes: usize,
+    pub jit_unsupported_functions: usize,
 }
 
 impl RunObservation {
@@ -183,15 +230,9 @@ pub fn run_with_output_interruptible_observed(
         RunMode::Jit => {
             use vo_vm::JitConfig;
 
-            let call_threshold = std::env::var("VO_JIT_CALL_THRESHOLD")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(100);
-            let loop_threshold = std::env::var("VO_JIT_LOOP_THRESHOLD")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(50);
-            let debug_ir = std::env::var("VO_JIT_DEBUG").is_ok();
+            let call_threshold = jit_env_u32("VO_JIT_CALL_THRESHOLD", 100)?;
+            let loop_threshold = jit_env_u32("VO_JIT_LOOP_THRESHOLD", 50)?;
+            let debug_ir = jit_env_bool("VO_JIT_DEBUG", false)?;
 
             let config = JitConfig {
                 call_threshold,
@@ -230,20 +271,46 @@ pub fn run_with_output_interruptible_observed(
         .map_err(|e| vm_err_to_run_err(&vm, &e))?;
 
     let outcome = vm.run().map_err(|e| vm_err_to_run_err(&vm, &e))?;
-    if outcome == SchedulingOutcome::Blocked {
-        let e = vm.deadlock_err();
-        return Err(vm_err_to_run_err(&vm, &e));
-    }
+    require_terminal_outcome(&vm, outcome)?;
     Ok(run_observation(&vm))
+}
+
+fn require_terminal_outcome(vm: &Vm, outcome: SchedulingOutcome) -> Result<(), RunError> {
+    match outcome {
+        SchedulingOutcome::Completed => Ok(()),
+        SchedulingOutcome::Blocked => Err(vm_err_to_run_err(vm, &vm.deadlock_err())),
+        SchedulingOutcome::Suspended => Err(RunError::Runtime(RuntimeError {
+            message:
+                "execution suspended with pending island work; continue it through a VM session"
+                    .to_string(),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        })),
+        SchedulingOutcome::SuspendedForHostEvents => Err(RunError::Runtime(RuntimeError {
+            message: "execution suspended for host events; continue it through an async VM session"
+                .to_string(),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        })),
+        SchedulingOutcome::Panicked => Err(RunError::Runtime(RuntimeError {
+            message: "VM reported a panic outcome without a structured runtime error".to_string(),
+            location: None,
+            kind: RuntimeErrorKind::Other,
+        })),
+    }
 }
 
 #[cfg(feature = "jit")]
 fn run_observation(vm: &Vm) -> RunObservation {
     let stats = vm.jit_execution_stats();
+    let code = vm.jit_code_memory_stats();
     RunObservation {
         jit_function_entries: stats.function_entries,
         jit_loop_entries: stats.loop_entries,
         jit_regular_call_side_exits: stats.side_exit_count(vo_vm::JitSideExitReason::RegularCall),
+        jit_function_code_bytes: code.function_bytes,
+        jit_loop_code_bytes: code.loop_bytes,
+        jit_unsupported_functions: vm.jit_unsupported_function_count(),
     }
 }
 
@@ -292,6 +359,38 @@ fn load_extensions(specs: &[NativeExtensionSpec]) -> Result<Option<ExtensionLoad
         })
     })?;
     Ok(Some(loader))
+}
+
+#[cfg(test)]
+mod terminal_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn suspended_outcomes_are_explicit_engine_errors() {
+        let vm = Vm::new();
+        for (outcome, expected) in [
+            (SchedulingOutcome::Suspended, "pending island work"),
+            (
+                SchedulingOutcome::SuspendedForHostEvents,
+                "suspended for host events",
+            ),
+            (
+                SchedulingOutcome::Panicked,
+                "without a structured runtime error",
+            ),
+        ] {
+            let error = require_terminal_outcome(&vm, outcome)
+                .expect_err("non-terminal engine outcome must be surfaced");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn completed_outcome_is_the_only_direct_success() {
+        let vm = Vm::new();
+        require_terminal_outcome(&vm, SchedulingOutcome::Completed)
+            .expect("completed execution should succeed");
+    }
 }
 
 #[cfg(all(test, feature = "jit"))]

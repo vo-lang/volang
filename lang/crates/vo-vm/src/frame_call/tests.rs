@@ -544,7 +544,7 @@ fn vm_closure_call_signature_002_extern_replay_rejects_closure_allocation_drift_
     fiber.push_frame(0, 2, 0, 0, 0);
     let module = module_with_callee(test_function(1, 2, true));
     let closure_ref = closure::create(&mut gc, 0, 0);
-    Gc::header_mut(closure_ref).slots = (closure::HEADER_SLOTS + 1) as u16;
+    unsafe { Gc::header_mut(closure_ref) }.slots = (closure::HEADER_SLOTS + 1) as u16;
 
     let result = FrameCallBuilder::new(&mut gc, &mut fiber, &module)
         .call_extern_replay_closure(closure_ref, empty_payload());

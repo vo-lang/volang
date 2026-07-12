@@ -286,7 +286,7 @@ fn vm_jit_queue_recv_remote_ack_rollback_058_source_attaches_local_queue_rollbac
         .expect("jit_queue_recv should exist");
     let before_ack_arm = compact_region_between_compact(
         &recv_body,
-        "letremote_sender_rollback=if",
+        "lethas_local_endpoint_sender=",
         "matchcomplete_queue_recv(",
     )
     .expect("jit_queue_recv should build rollback before mutating recv");
@@ -945,11 +945,11 @@ fn vm_jit_queue_close_osr_001_source_uses_pending_transition_for_endpoint_close(
 fn vm_jit_queue_close_osr_001_local_endpoint_close_publishes_pending_transition_under_lease() {
     use super::*;
     use crate::fiber::Fiber;
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_runtime::bytecode::Module;
     use vo_runtime::island::{EndpointResponseKind, IslandCommand};
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1006,10 +1006,10 @@ fn vm_jit_queue_close_osr_001_local_endpoint_close_publishes_pending_transition_
 fn vm_jit_queue_close_route_preflight_057_missing_peer_route_preserves_open_queue() {
     use super::*;
     use crate::fiber::Fiber;
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1283,10 +1283,10 @@ fn vm_jit_queue_send_remote_replay_003_rejects_invalid_callback_before_remote_se
 fn vm_jit_queue_send_callback_layout_003_rejects_elem_slot_drift_before_enqueue() {
     use super::*;
     use crate::fiber::Fiber;
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1314,10 +1314,10 @@ fn vm_jit_queue_send_callback_layout_003_rejects_elem_slot_drift_before_enqueue(
 fn vm_endpoint_direct_preflight_012_jit_same_island_missing_home_info_preserves_waiter() {
     use super::*;
     use crate::fiber::Fiber;
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1361,10 +1361,10 @@ fn vm_endpoint_direct_preflight_012_jit_same_island_missing_home_info_preserves_
 fn vm_jit_queue_recv_remote_replay_003_rejects_elem_slot_drift_before_replay_consumption() {
     use super::*;
     use crate::fiber::{Fiber, RemoteRecvResponse};
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1401,10 +1401,10 @@ fn vm_jit_queue_recv_remote_replay_003_rejects_elem_slot_drift_before_replay_con
 fn vm_jit_queue_recv_remote_replay_058_rejects_bad_payload_without_consuming_response() {
     use super::*;
     use crate::fiber::{Fiber, RemoteRecvResponse};
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1443,10 +1443,10 @@ fn vm_jit_queue_recv_remote_replay_058_rejects_bad_payload_without_consuming_res
 fn vm_endpoint_sender_preflight_012_jit_same_island_recv_missing_home_info_preserves_sender() {
     use super::*;
     use crate::fiber::Fiber;
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1497,10 +1497,10 @@ fn vm_endpoint_sender_preflight_012_jit_same_island_recv_missing_home_info_prese
 fn vm_rt_001_queue_send_commits_wake_before_terminal_jit_error_discard() {
     use super::*;
     use crate::fiber::{Fiber, FiberState};
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{ExecResult, JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1625,11 +1625,11 @@ fn vm_pending_queue_endpoint_request_003_jit_error_discards_uncommitted_endpoint
 fn vm_jit_remote_send_transfer_txn_006_jit_error_commits_after_local_endpoint_prepare() {
     use super::*;
     use crate::fiber::Fiber;
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{ExecResult, JitConfig, Vm};
     use vo_common_core::{ChanDir, RuntimeType};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1646,7 +1646,6 @@ fn vm_jit_remote_send_transfer_txn_006_jit_error_commits_after_local_endpoint_pr
     ];
     let remote = queue::create_remote_proxy(
         &mut vm.state.gc,
-        QueueKind::Port,
         42,
         9,
         1,
@@ -1708,11 +1707,11 @@ fn vm_jit_remote_send_transfer_txn_006_jit_error_commits_after_local_endpoint_pr
 fn vm_jit_remote_send_route_preflight_057_missing_home_route_preserves_payload_endpoint_state() {
     use super::*;
     use crate::fiber::Fiber;
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{JitConfig, Vm};
     use vo_common_core::{ChanDir, RuntimeType};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::QueueKind;
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
@@ -1728,7 +1727,6 @@ fn vm_jit_remote_send_route_preflight_057_missing_home_route_preserves_payload_e
     ];
     let remote = queue::create_remote_proxy(
         &mut vm.state.gc,
-        QueueKind::Port,
         42,
         9,
         1,
@@ -1770,10 +1768,10 @@ fn vm_jit_remote_send_route_preflight_057_missing_home_route_preserves_payload_e
 fn vm_rt_001_queue_close_commits_receiver_wake_before_terminal_jit_error_discard() {
     use super::*;
     use crate::fiber::{Fiber, FiberState};
+    use crate::test_support::queue;
     use crate::vm::jit::build_jit_context;
     use crate::vm::{ExecResult, JitConfig, Vm};
     use vo_runtime::bytecode::Module;
-    use vo_runtime::objects::queue;
     use vo_runtime::objects::queue_state::{QueueKind, QueueWaiter};
     use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 

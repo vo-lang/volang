@@ -3,7 +3,6 @@ use vo_runtime::jit_api::JitResult;
 
 use crate::fiber::Fiber;
 use crate::runtime_boundary::RuntimeTransition;
-use crate::scheduler::FiberId;
 use crate::vm::jit_mgr::JitSideExitReason;
 use crate::vm::Vm;
 
@@ -11,25 +10,20 @@ use super::bridge_result::{osr_result_from_bridge_transition, JitBridgeMode};
 use super::context::build_jit_context;
 use super::transition::handle_jit_non_ok_transition;
 
-struct OsrRawBorrow {
-    module: *const Module,
-    fiber: *mut Fiber,
-}
-
 struct OsrBorrowBoundaryGuard {
     depth: *mut u32,
 }
 
 impl OsrBorrowBoundaryGuard {
-    fn enter(vm: &mut Vm) -> Self {
+    fn try_enter(vm: &mut Vm) -> Result<Self, String> {
         vm.state.jit_osr_borrow_lease_depth = vm
             .state
             .jit_osr_borrow_lease_depth
             .checked_add(1)
-            .expect("OSR borrow lease depth overflow");
-        Self {
+            .ok_or_else(|| "OSR borrow lease depth overflow".to_string())?;
+        Ok(Self {
             depth: &mut vm.state.jit_osr_borrow_lease_depth,
-        }
+        })
     }
 }
 
@@ -39,38 +33,6 @@ impl Drop for OsrBorrowBoundaryGuard {
             debug_assert!(*self.depth > 0);
             *self.depth = self.depth.read().saturating_sub(1);
         }
-    }
-}
-
-impl OsrRawBorrow {
-    fn capture(vm: &mut Vm, fiber_id: FiberId) -> Result<Self, OsrResult> {
-        let Some(module) = vm.module.as_ref() else {
-            return Err(OsrResult::JitError(
-                "Loop OSR requested without a loaded module".into(),
-            ));
-        };
-        Ok(Self {
-            module: module as *const Module,
-            fiber: vm.scheduler.get_fiber_mut(fiber_id) as *mut Fiber,
-        })
-    }
-
-    /// # Safety
-    ///
-    /// The captured module pointer must come from `vm.module` and remain loaded
-    /// for the whole OSR dispatch. The VM must not replace or drop the module
-    /// while the compiled loop is running.
-    unsafe fn module<'a>(&self) -> &'a Module {
-        &*self.module
-    }
-
-    /// # Safety
-    ///
-    /// The captured fiber pointer must come from `vm.scheduler` for the active
-    /// `fiber_id`. OSR dispatch must not move or alias that fiber while this
-    /// mutable borrow is in use.
-    unsafe fn fiber_mut<'a>(&self) -> &'a mut Fiber {
-        &mut *self.fiber
     }
 }
 
@@ -91,21 +53,17 @@ pub enum OsrResult {
 /// Execute a compiled loop via OSR.
 pub fn dispatch_loop_osr(
     vm: &mut Vm,
-    fiber_id: FiberId,
+    fiber: &mut Fiber,
+    module: &Module,
     loop_func: vo_jit::LoopFunc,
     bp: usize,
     local_slots: usize,
 ) -> OsrResult {
-    let raw = match OsrRawBorrow::capture(vm, fiber_id) {
-        Ok(raw) => raw,
-        Err(result) => return result,
+    let lease_guard = match OsrBorrowBoundaryGuard::try_enter(vm) {
+        Ok(guard) => guard,
+        Err(error) => return OsrResult::JitError(error),
     };
-
-    let lease_guard = OsrBorrowBoundaryGuard::enter(vm);
-    let (result, ctx) = unsafe {
-        let module = raw.module();
-        let fiber = raw.fiber_mut();
-
+    let (result, ctx) = {
         if let Some(jit_mgr) = vm.jit.manager_mut() {
             jit_mgr.record_loop_entry();
         }
@@ -129,16 +87,14 @@ pub fn dispatch_loop_osr(
             .unwrap_or(u32::MAX);
 
         // locals_ptr points to fiber.stack[bp..]
-        let locals_ptr = fiber.stack_ptr().add(bp);
+        let locals_ptr = unsafe { fiber.stack_ptr().add(bp) };
 
         // Call loop function
         let result = loop_func(ctx.as_ptr(), locals_ptr);
+        fiber.execution_budget = ctx.ctx.execution_budget;
         (result, ctx)
     };
     drop(lease_guard);
-
-    let fiber = unsafe { raw.fiber_mut() };
-    let module = unsafe { raw.module() };
 
     match result {
         JitResult::Ok => {
@@ -164,19 +120,19 @@ pub fn dispatch_loop_osr(
 /// Try loop OSR at backedge. Returns None if loop not compiled/not hot.
 pub(crate) fn try_loop_osr(
     vm: &mut Vm,
-    fiber_id: FiberId,
+    fiber: &mut Fiber,
+    module: &Module,
     func_id: u32,
     loop_pc: usize,
     bp: usize,
 ) -> Option<OsrResult> {
-    let loop_func = match get_or_compile_loop(vm, func_id, loop_pc) {
+    let loop_func = match get_or_compile_loop(vm, module, func_id, loop_pc) {
         Ok(Some(loop_func)) => loop_func,
         Ok(None) => return None,
         Err(err) => {
-            let func_name = vm
-                .module
-                .as_ref()
-                .and_then(|module| module.functions.get(func_id as usize))
+            let func_name = module
+                .functions
+                .get(func_id as usize)
                 .map(|func| func.name.as_str())
                 .unwrap_or("<unknown>");
             return Some(OsrResult::JitError(format!(
@@ -184,31 +140,30 @@ pub(crate) fn try_loop_osr(
             )));
         }
     };
-    let Some(module) = vm.module.as_ref() else {
-        return Some(OsrResult::JitError(
-            "Loop OSR requested without a loaded module".into(),
-        ));
-    };
     let Some(func) = module.functions.get(func_id as usize) else {
         return Some(OsrResult::JitError(format!(
             "Loop OSR requested missing function id {func_id}"
         )));
     };
     let local_slots = func.local_slots as usize;
-    Some(dispatch_loop_osr(vm, fiber_id, loop_func, bp, local_slots))
+    Some(dispatch_loop_osr(
+        vm,
+        fiber,
+        module,
+        loop_func,
+        bp,
+        local_slots,
+    ))
 }
 
 /// Get compiled loop or compile if hot. Returns None if not ready.
 #[allow(clippy::result_large_err)]
 fn get_or_compile_loop(
     vm: &mut Vm,
+    module: &Module,
     func_id: u32,
     loop_pc: usize,
 ) -> Result<Option<vo_jit::LoopFunc>, vo_jit::JitError> {
-    let module = vm
-        .module
-        .as_ref()
-        .ok_or_else(|| vo_jit::JitError::Internal("OSR requested without loaded module".into()))?;
     let func_def = module
         .functions
         .get(func_id as usize)
@@ -224,9 +179,7 @@ fn get_or_compile_loop(
 
     // Already failed?
     if jit_mgr.is_loop_failed(func_id, loop_pc)? {
-        return Err(vo_jit::JitError::Internal(format!(
-            "loop at pc {loop_pc} previously failed JIT compilation"
-        )));
+        return Ok(None);
     }
 
     // Not hot yet?
@@ -240,37 +193,14 @@ fn get_or_compile_loop(
         Ok(Some(info)) => info,
         Ok(None) => {
             jit_mgr.mark_loop_failed(func_id, loop_pc)?;
-            return Err(vo_jit::JitError::Internal(format!(
-                "hot back-edge at pc {loop_pc} has no LoopInfo"
-            )));
+            jit_mgr.record_side_exit(JitSideExitReason::LoopMetadataUnavailable);
+            return Ok(None);
         }
         Err(err) => {
             jit_mgr.mark_loop_failed(func_id, loop_pc)?;
             return Err(err);
         }
     };
-
-    // Pre-compile Call targets so JIT-to-JIT calls can succeed
-    let loop_end = loop_info.end_pc + 1;
-    for pc in loop_info.begin_pc..loop_end {
-        let inst = func_def
-            .code
-            .get(pc)
-            .ok_or(vo_jit::JitError::InvalidOsrTarget(pc))?;
-        if let Some(target_func_id) = vo_jit::static_call_target_from_semantics(inst) {
-            if !jit_mgr.is_compiled(target_func_id)? && !jit_mgr.is_unsupported(target_func_id)? {
-                let target_func = module
-                    .functions
-                    .get(target_func_id as usize)
-                    .ok_or(vo_jit::JitError::FunctionNotFound(target_func_id))?;
-                let env = vo_jit::JitCompileEnv {
-                    externs: &vm.state.resolved_externs,
-                    backend_caps: Default::default(),
-                };
-                jit_mgr.resolve_call(target_func_id, target_func, module, env)?;
-            }
-        }
-    }
 
     let env = vo_jit::JitCompileEnv {
         externs: &vm.state.resolved_externs,
@@ -288,7 +218,12 @@ fn get_or_compile_loop(
         }
         Err(err) => {
             jit_mgr.mark_loop_failed(func_id, loop_pc)?;
-            Err(err)
+            if matches!(&err, vo_jit::JitError::UnsupportedOpcode(_)) {
+                jit_mgr.record_side_exit(JitSideExitReason::InterpretedUnsupported);
+                Ok(None)
+            } else {
+                Err(err)
+            }
         }
     }
 }
@@ -297,6 +232,7 @@ fn get_or_compile_loop(
 mod tests {
     use super::super::test_support::function;
     use super::*;
+    use crate::scheduler::FiberId;
     use crate::vm::JitConfig;
     use vo_runtime::jit_api::{JitContext, JitRuntimeTrapKind};
     use vo_runtime::InterfaceSlot;
@@ -353,11 +289,22 @@ mod tests {
         (vm, fid)
     }
 
+    fn dispatch_test_loop(vm: &mut Vm, fid: FiberId, loop_func: vo_jit::LoopFunc) -> OsrResult {
+        let module = vm.module.as_ref().cloned().expect("loaded module");
+        let mut fiber = vm
+            .scheduler
+            .detach_for_execution(fid)
+            .expect("active fiber");
+        let result = dispatch_loop_osr(vm, &mut fiber, &module, loop_func, 0, 1);
+        vm.scheduler.reattach_after_execution(fid, fiber);
+        result
+    }
+
     #[test]
     fn vm_osr_user_panic_without_user_panic_pc_is_jit_error() {
         let (mut vm, fid) = vm_with_jit_frame();
 
-        match dispatch_loop_osr(&mut vm, fid, user_panic_without_location, 0, 1) {
+        match dispatch_test_loop(&mut vm, fid, user_panic_without_location) {
             OsrResult::JitError(msg) => assert!(msg.contains("user_panic_pc")),
             _ => panic!("missing user_panic_pc must be a JitError"),
         }
@@ -367,7 +314,7 @@ mod tests {
     fn vm_osr_runtime_trap_without_runtime_trap_pc_is_jit_error() {
         let (mut vm, fid) = vm_with_jit_frame();
 
-        match dispatch_loop_osr(&mut vm, fid, runtime_trap_without_location, 0, 1) {
+        match dispatch_test_loop(&mut vm, fid, runtime_trap_without_location) {
             OsrResult::JitError(msg) => assert!(msg.contains("runtime_trap_pc")),
             _ => panic!("missing runtime_trap_pc must be a JitError"),
         }
@@ -393,7 +340,7 @@ mod tests {
     fn vm_osr_borrow_boundary_001_lease_rejects_direct_transition_during_osr() {
         let (mut vm, fid) = vm_with_jit_frame();
 
-        match dispatch_loop_osr(&mut vm, fid, direct_transition_rejected_during_osr, 0, 1) {
+        match dispatch_test_loop(&mut vm, fid, direct_transition_rejected_during_osr) {
             OsrResult::ExitPc(77) => {}
             _ => panic!("OSR lease must reject direct runtime transition during loop callback"),
         }

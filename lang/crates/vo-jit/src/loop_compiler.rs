@@ -1,7 +1,7 @@
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
 //! Loop compiler for OSR (On-Stack Replacement).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block, FuncRef, Function, InstBuilder, MemFlags, Value};
@@ -20,8 +20,19 @@ use vo_runtime::jit_api::{JitContext, JitResult};
 pub type LoopFunc = extern "C" fn(*mut JitContext, *mut u64) -> JitResult;
 
 pub struct CompiledLoop {
-    pub code_ptr: *const u8,
-    pub loop_info: LoopInfo,
+    pub(crate) code_ptr: *const u8,
+    pub(crate) code_size: usize,
+    pub(crate) loop_info: LoopInfo,
+}
+
+impl CompiledLoop {
+    pub fn code_size(&self) -> usize {
+        self.code_size
+    }
+
+    pub fn loop_info(&self) -> &LoopInfo {
+        &self.loop_info
+    }
 }
 
 unsafe impl Send for CompiledLoop {}
@@ -40,6 +51,7 @@ pub struct LoopCompiler<'a> {
     exit_block: Block,
     current_pc: usize,
     locals_ptr_var: Variable,
+    execution_budget_regions: BTreeMap<usize, u32>,
     ctx_ptr: Value,
     helpers: HelperFuncs,
     reg_consts: HashMap<u16, i64>,
@@ -83,6 +95,7 @@ impl<'a> LoopCompiler<'a> {
             exit_block,
             current_pc: 0,
             locals_ptr_var: Variable::from_u32(local_slots + 1000),
+            execution_budget_regions: BTreeMap::new(),
             ctx_ptr: Value::from_u32(0),
             helpers,
             reg_consts: HashMap::new(),
@@ -127,9 +140,11 @@ impl<'a> LoopCompiler<'a> {
             self.loop_info.exit_pc,
             self.func_def.code.len(),
         );
-        for target in crate::compile_common::jump_targets_for_policy(&self.func_def.code, policy)? {
-            self.ensure_block(target);
+        let regions = crate::compile_common::execution_budget_regions(&self.func_def.code, policy)?;
+        for start in regions.keys().copied() {
+            self.ensure_block(start);
         }
+        self.execution_budget_regions = regions;
         Ok(())
     }
 
@@ -215,6 +230,33 @@ impl<'a> LoopCompiler<'a> {
             self.memory_only_start,
         )
         .spill_ssa_prefix_to_memory(&mut self.builder, locals_ptr);
+    }
+
+    fn emit_cooperative_yield(&mut self, resume_pc: usize) {
+        self.store_vars_to_memory();
+        crate::compile_common::emit_cooperative_yield_return(
+            &mut self.builder,
+            self.ctx_ptr,
+            resume_pc,
+        );
+    }
+
+    fn emit_execution_budget_checkpoint(&mut self, resume_pc: usize, cost: u32) {
+        let poll = crate::compile_common::branch_on_execution_budget(
+            &mut self.builder,
+            self.ctx_ptr,
+            cost,
+        );
+
+        self.builder.switch_to_block(poll.exhausted);
+        self.builder.seal_block(poll.exhausted);
+        self.emit_cooperative_yield(resume_pc);
+
+        crate::compile_common::continue_after_execution_budget_poll(
+            &mut self.builder,
+            self.ctx_ptr,
+            &poll,
+        );
     }
 
     fn translate_instruction(&mut self, inst: &Instruction) -> Result<bool, JitError> {
@@ -470,6 +512,9 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
             block_terminated,
         ) {
             self.clear_flow_facts();
+            if let Some(cost) = self.execution_budget_regions.get(&pc).copied() {
+                self.emit_execution_budget_checkpoint(pc, cost);
+            }
         }
         Ok(())
     }
@@ -503,7 +548,9 @@ impl<'a> crate::compile_common::CompileDriver for LoopCompiler<'a> {
         self.store_vars_to_memory();
         let crate::compile_common::ControlPolicy::LoopOsr { exit_pc, .. } = self.control_policy()
         else {
-            unreachable!("LoopCompiler must use LoopOsr control policy");
+            return Err(JitError::Internal(
+                "LoopCompiler received a non-OSR control policy".to_string(),
+            ));
         };
         self.emit_loop_exit(exit_pc as u32);
         Ok(())

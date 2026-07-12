@@ -3,10 +3,8 @@ use crate::fiber::{
     Fiber, FiberState, SelectCase, SelectCaseKind, SelectRegisteredQueue, SelectState,
     SelectWokenResult,
 };
-use vo_runtime::objects::{
-    queue,
-    queue_state::{QueueKind, SelectWaitKind},
-};
+use crate::test_support::queue;
+use vo_runtime::objects::queue_state::{QueueKind, SelectWaitKind};
 use vo_runtime::{ValueKind, ValueMeta, ValueRttid};
 
 #[cfg(feature = "std")]
@@ -179,7 +177,9 @@ fn select_send_state_for_queue_061(ch: GcRef) -> SelectState {
 fn live_same_island_endpoint_061(name: &str) -> (Vm, GcRef, u64) {
     let mut vm = Vm::new();
     vm.state.external_island_transport = true;
-    vm.module = Some(vo_common_core::bytecode::Module::new(name.to_string()));
+    vm.module = Some(std::sync::Arc::new(vo_common_core::bytecode::Module::new(
+        name.to_string(),
+    )));
     let endpoint_id = 0x0610_0000_0000_0600;
     let ch = queue::create(
         &mut vm.state.gc,

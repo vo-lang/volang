@@ -407,7 +407,10 @@ impl Gc {
     /// Check if object is dead-white for the current cycle.
     #[inline]
     pub fn is_dead_white(&self, obj: GcRef) -> bool {
-        let header = Self::header(obj);
+        let Some(obj) = self.canonicalize_ref(obj) else {
+            return false;
+        };
+        let header = unsafe { Self::header(obj) };
         (header.marked & WHITE_BITS) == self.other_white()
     }
 
@@ -423,7 +426,7 @@ impl Gc {
     pub fn alloc_value_slots(&mut self, value_meta: ValueMeta, slots: u16) -> GcRef {
         let obj = self.alloc(value_meta, slots);
         if !obj.is_null() {
-            Self::header_mut(obj).set_value_slots_object();
+            unsafe { Self::header_mut(obj) }.set_value_slots_object();
         }
         obj
     }
@@ -498,7 +501,7 @@ impl Gc {
         self.total_bytes += total_size;
         self.debt += total_size as i64;
         if matches!(self.state, GcState::Propagate | GcState::Atomic) {
-            Self::header_mut(data_ptr).set_gray();
+            unsafe { Self::header_mut(data_ptr) }.set_gray();
             self.gray.push(data_ptr);
         }
 
@@ -525,14 +528,23 @@ impl Gc {
     }
 
     /// Get the header of a GC object.
+    ///
+    /// # Safety
+    /// `obj` must be the base address of a live allocation owned by a `Gc`.
+    /// The allocation must outlive the returned borrow.
     #[inline]
-    pub fn header(obj: GcRef) -> &'static GcHeader {
+    pub unsafe fn header<'a>(obj: GcRef) -> &'a GcHeader {
         unsafe { &*((obj as *const u8).sub(GcHeader::SIZE) as *const GcHeader) }
     }
 
     /// Get mutable header of a GC object.
+    ///
+    /// # Safety
+    /// `obj` must be the base address of a live allocation owned by a `Gc`, and
+    /// the caller must hold exclusive access to its header for the returned
+    /// borrow.
     #[inline]
-    pub fn header_mut(obj: GcRef) -> &'static mut GcHeader {
+    pub unsafe fn header_mut<'a>(obj: GcRef) -> &'a mut GcHeader {
         unsafe { &mut *((obj as *mut u8).sub(GcHeader::SIZE) as *mut GcHeader) }
     }
 
@@ -541,11 +553,13 @@ impl Gc {
     #[inline]
     fn object_size_bytes(obj: GcRef) -> usize {
         use crate::objects::array;
-        let header = Self::header(obj);
+        let header = unsafe { Self::header(obj) };
         let slots = if header.is_value_slots_object() {
             header.slots as usize
         } else if header.slots == 0 && header.kind() == ValueKind::Array {
-            array::total_slots(obj)
+            // Safety: `obj` was allocated by this collector and its header
+            // identifies the array layout used below.
+            unsafe { array::total_slots(obj) }
         } else {
             header.slots as usize
         };
@@ -929,7 +943,7 @@ impl Gc {
             self.mark_dead_white_gray(obj);
             return;
         }
-        let header = Self::header_mut(obj);
+        let header = unsafe { Self::header_mut(obj) };
         if header.is_white() {
             header.set_gray();
             self.gray.push(obj);
@@ -939,7 +953,7 @@ impl Gc {
     #[inline]
     fn mark_dead_white_gray(&mut self, obj: GcRef) {
         let dead_white = self.other_white();
-        let header = Self::header_mut(obj);
+        let header = unsafe { Self::header_mut(obj) };
         if header.marked & WHITE_BITS == dead_white {
             header.set_gray();
             self.gray.push(obj);
@@ -961,7 +975,7 @@ impl Gc {
         let Some(obj) = self.canonicalize_ref(obj) else {
             self.mark_gray_fail(obj);
         };
-        let header = Self::header_mut(obj);
+        let header = unsafe { Self::header_mut(obj) };
         if header.marked & WHITE_BITS == self.current_white {
             header.set_gray();
             self.gray.push(obj);
@@ -1003,8 +1017,8 @@ impl Gc {
         };
         match self.state {
             GcState::Propagate => {
-                let p_header = Self::header(parent);
-                let c_header = Self::header(child);
+                let p_header = unsafe { Self::header(parent) };
+                let c_header = unsafe { Self::header(child) };
                 // Backward barrier: black parent writes white child -> parent becomes gray.
                 if p_header.is_black() && c_header.is_white() {
                     self.barrier_back(parent);
@@ -1046,7 +1060,7 @@ impl Gc {
             return false;
         }
         self.canonicalize_ref(obj)
-            .map(|base| !base.is_null() && Self::header(base).is_black())
+            .map(|base| !base.is_null() && unsafe { Self::header(base) }.is_black())
             .unwrap_or(false)
     }
 
@@ -1057,13 +1071,13 @@ impl Gc {
             return false;
         }
         self.canonicalize_ref(obj)
-            .map(|base| !base.is_null() && Self::header(base).is_white())
+            .map(|base| !base.is_null() && unsafe { Self::header(base) }.is_white())
             .unwrap_or(false)
     }
 
     /// Backward barrier: turn black object back to gray for re-scan.
     fn barrier_back(&mut self, obj: GcRef) {
-        let header = Self::header_mut(obj);
+        let header = unsafe { Self::header_mut(obj) };
         header.set_white(self.current_white);
         self.grayagain.push(obj);
     }
@@ -1380,7 +1394,7 @@ impl Gc {
                 "propagate_step: invalid GcRef {:p} in gray queue",
                 obj
             );
-            let header = Self::header_mut(obj);
+            let header = unsafe { Self::header_mut(obj) };
             if !header.is_black() {
                 header.set_black();
                 scan_object(self, obj);
@@ -1399,7 +1413,7 @@ impl Gc {
     fn atomic_phase<S: FnMut(&mut Gc, GcRef)>(&mut self, scan_object: &mut S) {
         // Process grayagain (objects modified during propagate)
         while let Some(obj) = self.grayagain.pop() {
-            let header = Self::header_mut(obj);
+            let header = unsafe { Self::header_mut(obj) };
             if !header.is_black() {
                 header.set_black();
                 scan_object(self, obj);
@@ -1408,7 +1422,7 @@ impl Gc {
 
         // Process any new gray objects added during grayagain processing
         while let Some(obj) = self.gray.pop() {
-            let header = Self::header_mut(obj);
+            let header = unsafe { Self::header_mut(obj) };
             if !header.is_black() {
                 header.set_black();
                 scan_object(self, obj);
@@ -1435,7 +1449,7 @@ impl Gc {
 
         while self.sweep_pos < self.all_objects.len() && work < limit {
             let obj = self.all_objects[self.sweep_pos];
-            let header = Self::header(obj);
+            let header = unsafe { Self::header(obj) };
             let obj_white = header.marked & WHITE_BITS;
             let data_size = self.all_object_data_sizes[self.sweep_pos];
 
@@ -1452,7 +1466,7 @@ impl Gc {
 
             if header.is_black() || obj_white == self.current_white {
                 // Alive: reset to current white
-                Self::header_mut(obj).set_white(self.current_white);
+                unsafe { Self::header_mut(obj) }.set_white(self.current_white);
                 self.all_objects[self.sweep_write_pos] = obj;
                 self.all_object_data_sizes[self.sweep_write_pos] = data_size;
                 self.sweep_write_pos += 1;
@@ -1544,7 +1558,7 @@ impl Gc {
         if src.is_null() {
             return src;
         }
-        let header = Self::header(src);
+        let header = unsafe { Self::header(src) };
         let value_meta = header.value_meta;
 
         // For large arrays, slots == 0, read actual size from ArrayHeader.
@@ -1562,7 +1576,7 @@ impl Gc {
 
         let dst = self.alloc_inner(value_meta, header.slots, actual_slots);
         if header.is_value_slots_object() && !dst.is_null() {
-            Self::header_mut(dst).set_value_slots_object();
+            unsafe { Self::header_mut(dst) }.set_value_slots_object();
         }
 
         for i in 0..actual_slots {

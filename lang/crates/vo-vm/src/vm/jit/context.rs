@@ -15,6 +15,8 @@ use crate::vm::Vm;
 use super::callbacks;
 use super::frame::{jit_pop_frame, jit_push_frame, jit_push_resume_point};
 
+static LEGACY_SAFEPOINT_FLAG: bool = false;
+
 /// JIT context wrapper.
 ///
 /// Panic state (panic_flag, is_user_panic, panic_msg) lives on Fiber directly,
@@ -68,8 +70,8 @@ pub fn build_jit_context(
     module: &Module,
 ) -> Result<JitContextWrapper, String> {
     // Extract jit_mgr values first to avoid borrow conflicts
-    let (jit_func_table, jit_func_count, direct_call_table, direct_call_count) = {
-        let jit_mgr = vm.jit.manager().ok_or_else(|| {
+    let (jit_func_table, jit_func_count, direct_call_table, direct_call_count, ic_table) = {
+        let jit_mgr = vm.jit.manager_mut().ok_or_else(|| {
             "JIT context requested without an initialized JIT manager".to_string()
         })?;
         (
@@ -77,11 +79,9 @@ pub fn build_jit_context(
             jit_mgr.func_table_len() as u32,
             jit_mgr.direct_call_table_ptr(),
             jit_mgr.direct_call_table_len() as u32,
+            jit_mgr.ensure_dynamic_call_ic(),
         )
     };
-
-    // IC table is per-fiber to avoid data races between goroutines
-    let ic_table = fiber.ensure_ic_table();
 
     // Reset panic state on Fiber (no heap allocation needed)
     fiber.jit_panic_flag = false;
@@ -92,7 +92,7 @@ pub fn build_jit_context(
     let ctx = JitContext {
         gc: &mut vm.state.gc as *mut _,
         globals: vm.state.globals.as_mut_ptr(),
-        safepoint_flag: &fiber.jit_safepoint_flag as *const bool,
+        safepoint_flag: &LEGACY_SAFEPOINT_FLAG,
         panic_flag: &mut fiber.jit_panic_flag as *mut bool,
         is_user_panic: &mut fiber.jit_is_user_panic as *mut bool,
         panic_msg: &mut fiber.jit_panic_msg as *mut InterfaceSlot,
@@ -165,6 +165,7 @@ pub fn build_jit_context(
         prepare_closure_call_fn: Some(callbacks::jit_prepare_closure_call),
         prepare_iface_call_fn: Some(callbacks::jit_prepare_iface_call),
         ic_table,
+        execution_budget: fiber.execution_budget,
     };
 
     ctx.validate_required_callbacks().map_err(|field| {
@@ -195,5 +196,20 @@ mod tests {
             err.contains("initialized JIT manager"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn jit_context_inherits_active_fiber_scheduler_budget() {
+        let mut vm = Vm::try_with_jit_config(crate::vm::JitConfig::default()).expect("JIT VM");
+        let mut module = Module::new("jit-context-budget-test".to_string());
+        module.functions.push(function(1, 0));
+        vm.load(module).expect("load module");
+        let module = vm.module.as_ref().expect("loaded module").clone();
+        let mut fiber = Fiber::new(7);
+        fiber.execution_budget = 17;
+
+        let ctx = build_jit_context(&mut vm, &mut fiber, &module).expect("JIT context");
+
+        assert_eq!(ctx.ctx.execution_budget, 17);
     }
 }

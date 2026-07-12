@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::queue;
 use vo_common_core::bytecode::{FieldMeta, StructMeta};
 use vo_common_core::RuntimeType;
 use vo_runtime::objects::queue_state::QueueData;
@@ -50,7 +51,7 @@ fn select_state_with_case(kind: SelectCaseKind) -> Option<SelectState> {
 fn remote_chan_in_select_is_malformed_instead_of_unreachable_panic() {
     let mut vm_state = crate::vm::VmState::new();
     let (meta, rttid) = int_meta();
-    let ch = queue::create_remote_proxy(&mut vm_state.gc, QueueKind::Port, 9, 7, 1, meta, rttid, 1);
+    let ch = queue::create_remote_proxy(&mut vm_state.gc, 9, 7, 1, meta, rttid, 1);
     // Safety: this test intentionally mutates a freshly allocated proxy
     // header into a malformed channel shape.
     unsafe { QueueData::as_mut(ch) }.kind = QueueKind::Chan as u16;

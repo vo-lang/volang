@@ -224,7 +224,14 @@ fn cleanup_unmaterialized_wait_queue_state(vm: &mut Vm, fiber: &mut Fiber) {
     let fiber_key = fiber.wake_key_packed();
     if let Some(wait) = fiber.queue_wait_state.take() {
         if !wait.queue_ref.is_null() {
-            vo_runtime::objects::queue::cancel_simple_waiter(wait.queue_ref, fiber_key, wait.kind);
+            // Safety: queue wait state keeps the registered queue rooted until cleanup.
+            unsafe {
+                vo_runtime::objects::queue::cancel_simple_waiter(
+                    wait.queue_ref,
+                    fiber_key,
+                    wait.kind,
+                );
+            }
         }
     }
     if let Some(select_state) = fiber.select_state.as_mut() {

@@ -559,7 +559,6 @@ fn vm_same_island_closed_endpoint_wake_source_061_rejects_foreign_live_remote_be
     let home_island = vm.state.current_island_id + 9;
     let remote_proxy = queue::create_remote_proxy(
         &mut vm.state.gc,
-        QueueKind::Port,
         endpoint_id,
         home_island,
         1,

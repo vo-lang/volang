@@ -94,6 +94,7 @@ export interface RendererModule {
   init(host: RendererHost): Promise<void>;
   render(container: HTMLElement, bytes: Uint8Array): void;
   stop(): void;
+  quiesceForCapture?(): ({ stopped?: number } & Record<string, unknown>) | void;
   registerWidget?(name: string, factory: WidgetFactory): void;
   destroyWidgets?(): void;
 }
@@ -116,6 +117,8 @@ type ActiveRendererBridge = {
 type StudioBrowserSmokeRendererDebugHook = {
   moduleBytesLength(): number;
   dumpModuleBytes(): Promise<string>;
+  quiesceRenderLoop(): { renderers: unknown[]; stopped: number; sessionId: number | null };
+  rendererState(): { active: boolean; renderers: unknown[]; sessionId: number | null };
 };
 
 export type VfsFile = { path: string; bytes: Uint8Array };
@@ -164,6 +167,8 @@ function exposeStudioBrowserSmokeRendererDebug(moduleBytes: Uint8Array): void {
       const wasm = await loadStudioWasm();
       return wasm.dumpBytecode(bytes);
     },
+    quiesceRenderLoop: () => quiesceRendererBridgeForSmoke(),
+    rendererState: () => rendererBridgeSmokeState(),
   };
 }
 
@@ -577,6 +582,7 @@ async function loadRendererModule(
       init: requireFunction<RendererModule['init']>(mod.init, `${rendererPath}.default.init`),
       render: requireFunction<RendererModule['render']>(mod.render, `${rendererPath}.default.render`),
       stop: requireFunction<RendererModule['stop']>(mod.stop, `${rendererPath}.default.stop`),
+      quiesceForCapture: optionalFunction<NonNullable<RendererModule['quiesceForCapture']>>(mod.quiesceForCapture, `${rendererPath}.default.quiesceForCapture`),
       registerWidget: optionalFunction<NonNullable<RendererModule['registerWidget']>>(mod.registerWidget, `${rendererPath}.default.registerWidget`),
       destroyWidgets: optionalFunction<NonNullable<RendererModule['destroyWidgets']>>(mod.destroyWidgets, `${rendererPath}.default.destroyWidgets`),
     };
@@ -762,6 +768,42 @@ export function stopRendererBridge(sessionId?: number | null): boolean {
     revokeBlobUrls(active.blobUrls);
   }
   return true;
+}
+
+export function rendererBridgeSmokeState(): { active: boolean; renderers: unknown[]; sessionId: number | null } {
+  const active = activeRendererBridge;
+  if (!active) {
+    return { active: false, renderers: [], sessionId: null };
+  }
+  return {
+    active: true,
+    renderers: active.renderers.map((renderer) => ({
+      destroyWidgets: typeof renderer.destroyWidgets === 'function',
+      quiesceForCapture: typeof renderer.quiesceForCapture === 'function',
+      registerWidget: typeof renderer.registerWidget === 'function',
+      stop: typeof renderer.stop === 'function',
+    })),
+    sessionId: active.sessionId,
+  };
+}
+
+export function quiesceRendererBridgeForSmoke(): { renderers: unknown[]; stopped: number; sessionId: number | null } {
+  const active = activeRendererBridge;
+  if (!active) {
+    return { renderers: [], stopped: 0, sessionId: null };
+  }
+  let stopped = 0;
+  const renderers: unknown[] = [];
+  for (const renderer of active.renderers) {
+    if (typeof renderer.quiesceForCapture === 'function') {
+      const result = renderer.quiesceForCapture();
+      stopped += Math.max(1, Number(result?.stopped ?? 1));
+      renderers.push({ quiesceForCapture: true, result: result ?? null });
+    } else {
+      renderers.push({ quiesceForCapture: false, stopped: false });
+    }
+  }
+  return { renderers, stopped, sessionId: active.sessionId };
 }
 
 // Deliver render bytes to the active renderer

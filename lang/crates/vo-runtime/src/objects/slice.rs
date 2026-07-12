@@ -1,8 +1,12 @@
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 //! Slice object operations.
 //!
 //! Layout: GcHeader + SliceData
 //! Slice references an underlying array with start offset.
+//!
+//! # Safety contract
+//! Unsafe accessors require canonical live slice and backing-array allocations
+//! whose recorded range and element layout remain valid during access.
 
 use crate::gc::{Gc, GcRef};
 use crate::objects::alloc_error;
@@ -42,7 +46,9 @@ pub fn create(
     capacity: usize,
 ) -> GcRef {
     let arr = array::create(gc, elem_meta, elem_bytes, capacity);
-    from_array_range(gc, arr, 0, length)
+    // Safety: `arr` is freshly allocated above and `length <= capacity` is
+    // enforced by the checked caller or the VM allocation contract.
+    unsafe { from_array_range(gc, arr, 0, length) }
 }
 
 /// Create a new slice with validation (unified logic for VM and JIT).
@@ -95,14 +101,14 @@ pub fn create_checked(
     Ok(result)
 }
 
-pub fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize) -> GcRef {
+pub unsafe fn from_array_range(gc: &mut Gc, arr: GcRef, start_off: usize, length: usize) -> GcRef {
     let arr_len = array::len(arr);
     assert!(start_off <= arr_len, "slice start offset out of bounds");
     let cap = arr_len - start_off;
     from_array_range_with_cap(gc, arr, start_off, length, cap)
 }
 
-pub fn from_array_range_with_cap(
+pub unsafe fn from_array_range_with_cap(
     gc: &mut Gc,
     arr: GcRef,
     start_off: usize,
@@ -131,7 +137,7 @@ pub fn from_array_range_with_cap(
 
 /// Two-index array slice: arr[lo:hi].
 /// Returns None on bounds error (lo > hi or hi > arr_len).
-pub fn array_slice(gc: &mut Gc, arr: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
+pub unsafe fn array_slice(gc: &mut Gc, arr: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
     let arr_len = array::len(arr);
     if lo > hi || hi > arr_len {
         return None;
@@ -141,7 +147,7 @@ pub fn array_slice(gc: &mut Gc, arr: GcRef, lo: usize, hi: usize) -> Option<GcRe
 
 /// Three-index array slice: arr[lo:hi:max].
 /// Returns None on bounds error (lo > hi or hi > max or max > arr_len).
-pub fn array_slice_with_cap(
+pub unsafe fn array_slice_with_cap(
     gc: &mut Gc,
     arr: GcRef,
     lo: usize,
@@ -155,7 +161,7 @@ pub fn array_slice_with_cap(
     Some(from_array_range_with_cap(gc, arr, lo, hi - lo, max - lo))
 }
 
-pub fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef {
+pub unsafe fn from_array(gc: &mut Gc, arr: GcRef) -> GcRef {
     let length = array::len(arr);
     from_array_range(gc, arr, 0, length)
 }
@@ -166,43 +172,43 @@ pub fn is_nil(s: GcRef) -> bool {
 }
 
 #[inline]
-pub fn array_ref(s: GcRef) -> GcRef {
+pub unsafe fn array_ref(s: GcRef) -> GcRef {
     if s.is_null() {
         return core::ptr::null_mut();
     }
-    slot_to_ptr(SliceData::as_ref(s).array)
+    slot_to_ptr(unsafe { SliceData::as_ref(s) }.array)
 }
 #[inline]
-pub fn data_ptr(s: GcRef) -> *mut u8 {
+pub unsafe fn data_ptr(s: GcRef) -> *mut u8 {
     if s.is_null() {
         return core::ptr::null_mut();
     }
-    slot_to_ptr(SliceData::as_ref(s).data_ptr)
+    slot_to_ptr(unsafe { SliceData::as_ref(s) }.data_ptr)
 }
 #[inline]
-pub fn len(s: GcRef) -> usize {
+pub unsafe fn len(s: GcRef) -> usize {
     if s.is_null() {
         return 0;
     }
-    slot_to_usize(SliceData::as_ref(s).len)
+    slot_to_usize(unsafe { SliceData::as_ref(s) }.len)
 }
 #[inline]
-pub fn cap(s: GcRef) -> usize {
+pub unsafe fn cap(s: GcRef) -> usize {
     if s.is_null() {
         return 0;
     }
-    slot_to_usize(SliceData::as_ref(s).cap)
+    slot_to_usize(unsafe { SliceData::as_ref(s) }.cap)
 }
 #[inline]
-pub fn elem_kind(s: GcRef) -> ValueKind {
+pub unsafe fn elem_kind(s: GcRef) -> ValueKind {
     array::elem_kind(array_ref(s))
 }
 #[inline]
-pub fn elem_meta_id(s: GcRef) -> u32 {
+pub unsafe fn elem_meta_id(s: GcRef) -> u32 {
     array::elem_meta_id(array_ref(s))
 }
 #[inline]
-pub fn elem_meta(s: GcRef) -> ValueMeta {
+pub unsafe fn elem_meta(s: GcRef) -> ValueMeta {
     array::elem_meta(array_ref(s))
 }
 
@@ -350,8 +356,8 @@ mod public_api_contract_tests {
 
 /// Two-index slice: s[lo:hi] - capacity extends to original cap.
 /// Returns None on bounds error (lo > hi or hi > cap).
-pub fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
-    let data = SliceData::as_ref(s);
+pub unsafe fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
+    let data = unsafe { SliceData::as_ref(s) };
     let cap = slot_to_usize(data.cap);
     if lo > hi || hi > cap {
         return None;
@@ -371,8 +377,14 @@ pub fn slice_of(gc: &mut Gc, s: GcRef, lo: usize, hi: usize) -> Option<GcRef> {
 
 /// Three-index slice: s[lo:hi:max] - capacity = max - lo.
 /// Returns None on bounds error (lo > hi or hi > max or max > cap).
-pub fn slice_of_with_cap(gc: &mut Gc, s: GcRef, lo: usize, hi: usize, max: usize) -> Option<GcRef> {
-    let data = SliceData::as_ref(s);
+pub unsafe fn slice_of_with_cap(
+    gc: &mut Gc,
+    s: GcRef,
+    lo: usize,
+    hi: usize,
+    max: usize,
+) -> Option<GcRef> {
+    let data = unsafe { SliceData::as_ref(s) };
     let cap = slot_to_usize(data.cap);
     if lo > hi || hi > max || max > cap {
         return None;
@@ -392,8 +404,8 @@ pub fn slice_of_with_cap(gc: &mut Gc, s: GcRef, lo: usize, hi: usize, max: usize
 
 /// Create new slice header with updated length (same backing array, same start).
 /// Used by append when capacity is sufficient.
-pub fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
-    let data = SliceData::as_ref(s);
+pub unsafe fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
+    let data = unsafe { SliceData::as_ref(s) };
     assert!(
         new_len <= slot_to_usize(data.cap),
         "slice length exceeds capacity"
@@ -411,7 +423,7 @@ pub fn with_new_len(gc: &mut Gc, s: GcRef, new_len: usize) -> GcRef {
 
 /// Append single element to slice.
 /// elem_bytes: actual byte size per element
-pub fn append(
+pub unsafe fn append(
     gc: &mut Gc,
     em: ValueMeta,
     elem_bytes: usize,
@@ -422,7 +434,7 @@ pub fn append(
     try_append(gc, em, elem_bytes, s, val, module).unwrap_or_else(|err| panic!("{err}"))
 }
 
-pub fn try_append(
+pub unsafe fn try_append(
     gc: &mut Gc,
     em: ValueMeta,
     elem_bytes: usize,
@@ -444,7 +456,7 @@ pub fn try_append(
         }
         return Ok(from_array_range(gc, new_arr, 0, 1));
     }
-    let data = SliceData::as_ref(s);
+    let data = unsafe { SliceData::as_ref(s) };
     let cur_len = slot_to_usize(data.len);
     let cur_cap = slot_to_usize(data.cap);
     let actual_em = elem_meta(s);
@@ -510,7 +522,10 @@ pub fn try_append(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::objects::array;
+    use crate::test_support::{
+        array,
+        slice::{from_array_range, from_array_range_with_cap, try_append, with_new_len},
+    };
     use vo_common_core::bytecode::{Module, StructMeta};
     use vo_common_core::types::SlotType;
 
@@ -519,7 +534,7 @@ mod tests {
         let mut gc = Gc::new();
         let em = ValueMeta::new(0, ValueKind::Struct);
         let arr = array::create(&mut gc, em, 8, 2);
-        unsafe { array::set_n(arr, 1, &[42], 8) };
+        array::set_n(arr, 1, &[42], 8);
         let s = from_array_range(&mut gc, arr, 0, 1);
         let module = Module::new("test".to_string());
 
@@ -530,7 +545,7 @@ mod tests {
             err,
             crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
         );
-        assert_eq!(unsafe { array::get(arr, 1, 8) }, 42);
+        assert_eq!(array::get(arr, 1, 8), 42);
     }
 
     #[test]
@@ -550,7 +565,7 @@ mod tests {
             .expect("struct metadata should allow append");
 
         assert!(!result.is_null());
-        assert_eq!(unsafe { array::get(arr, 1, 8) }, 0);
+        assert_eq!(array::get(arr, 1, 8), 0);
     }
 
     #[test]
@@ -559,7 +574,7 @@ mod tests {
         let actual_em = ValueMeta::new(0, ValueKind::Struct);
         let caller_em = ValueMeta::new(0, ValueKind::Int64);
         let arr = array::create(&mut gc, actual_em, 8, 2);
-        unsafe { array::set_n(arr, 1, &[42], 8) };
+        array::set_n(arr, 1, &[42], 8);
         let s = from_array_range(&mut gc, arr, 0, 1);
         let module = Module::new("test".to_string());
 
@@ -570,7 +585,7 @@ mod tests {
             err,
             crate::gc_types::TypedWriteBarrierByMetaError::MissingStructMeta { meta_id: 0 }
         );
-        assert_eq!(unsafe { array::get(arr, 1, 8) }, 42);
+        assert_eq!(array::get(arr, 1, 8), 42);
     }
 
     #[test]

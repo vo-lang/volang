@@ -1,6 +1,8 @@
 //! Virtual machine main structure.
 
 #[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::format;
@@ -47,7 +49,8 @@ pub(crate) use types::EndpointRegistrySnapshot;
 pub use types::IslandThread;
 pub use types::{
     ErrorLocation, ExecResult, GcRootEffect, RuntimeTrapKind, SchedulingOutcome, VmError,
-    VmGcStepStats, VmRootScanMode, VmRootScanSnapshot, VmState, TIME_SLICE,
+    VmFiberRootScanStage, VmGcStepStats, VmRootScanMode, VmRootScanSnapshot, VmRootScanStage,
+    VmState, TIME_SLICE,
 };
 
 use extern_call::{apply_extern_replay_scope_effect, extern_result_to_transition, ExternBoundary};
@@ -249,20 +252,64 @@ impl VmJitState {
 }
 
 pub struct Vm {
-    /// JIT state (only available with "jit" feature).
-    ///
-    /// Strict JIT entry points validate all function metadata before a module is accepted.
-    /// IMPORTANT: Must be first field so it's dropped LAST (Rust drops in reverse order).
-    /// JIT code memory must remain valid while scheduler/fibers are being dropped.
-    #[cfg(feature = "jit")]
-    jit: VmJitState,
     #[cfg(feature = "std")]
     extension_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     #[cfg(feature = "std")]
     extension_specs: Option<Vec<vo_runtime::ext_loader::NativeExtensionSpec>>,
-    pub(crate) module: Option<Module>,
+    pub(crate) module: Option<Arc<Module>>,
     pub(crate) scheduler: Scheduler,
     pub(crate) state: VmState,
+    /// JIT state is declared last so Rust's declaration-order field drop keeps
+    /// executable memory alive until module, scheduler, and VM state are gone.
+    /// Strict JIT entry points validate all function metadata before admission.
+    #[cfg(feature = "jit")]
+    jit: VmJitState,
+}
+
+/// Owns the active module and fiber outside `Vm` for one execution slice.
+/// Drop restores both owners during normal return and panic unwinding.
+struct DetachedFiberExecution<'vm> {
+    vm: &'vm mut Vm,
+    fiber_id: crate::scheduler::FiberId,
+    module: Arc<Module>,
+    fiber: Option<Box<Fiber>>,
+}
+
+impl<'vm> DetachedFiberExecution<'vm> {
+    fn try_new(vm: &'vm mut Vm, fiber_id: crate::scheduler::FiberId) -> Option<Self> {
+        let module = vm.module.as_ref()?.clone();
+        let fiber = vm.scheduler.detach_for_execution(fiber_id)?;
+        Some(Self {
+            vm,
+            fiber_id,
+            module,
+            fiber: Some(fiber),
+        })
+    }
+
+    fn run(&mut self) -> ExecResult {
+        let module = self.module.as_ref();
+        let Some(fiber) = self.fiber.as_mut() else {
+            return ExecResult::JitError(
+                "detached fiber execution attempted after ownership was restored".to_string(),
+            );
+        };
+        self.vm.run_detached_fiber(self.fiber_id, fiber, module)
+    }
+
+    fn restore(&mut self) {
+        if let Some(fiber) = self.fiber.take() {
+            self.vm
+                .scheduler
+                .reattach_after_execution(self.fiber_id, fiber);
+        }
+    }
+}
+
+impl Drop for DetachedFiberExecution<'_> {
+    fn drop(&mut self) {
+        self.restore();
+    }
 }
 
 #[cfg(feature = "jit")]
@@ -650,6 +697,29 @@ impl Vm {
             .unwrap_or_default()
     }
 
+    #[cfg(feature = "jit")]
+    pub fn jit_code_memory_stats(&self) -> vo_jit::JitCodeMemoryStats {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.code_memory_stats())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_unsupported_function_count(&self) -> usize {
+        self.jit
+            .manager()
+            .map(|mgr| mgr.unsupported_function_count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_function_compile_error(&self, func_id: u32) -> Option<&str> {
+        self.jit
+            .manager()
+            .and_then(|mgr| mgr.function_compile_error(func_id))
+    }
+
     #[cfg(not(feature = "jit"))]
     pub fn has_jit(&self) -> bool {
         false
@@ -690,7 +760,7 @@ impl Vm {
     }
 
     pub fn module(&self) -> Option<&Module> {
-        self.module.as_ref()
+        self.module.as_deref()
     }
 
     pub fn extern_registry_mut(&mut self) -> &mut vo_runtime::ExternRegistry {
@@ -743,6 +813,17 @@ impl Vm {
         module: Module,
         ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
     ) -> Result<(), VmError> {
+        self.load_shared_with_extensions(Arc::new(module), ext_loader)
+    }
+
+    /// Load an immutable module already owned by a VM family. Island VMs use
+    /// this path so bytecode and metadata are shared instead of deep-cloned.
+    #[cfg(feature = "std")]
+    pub(crate) fn load_shared_with_extensions(
+        &mut self,
+        module: Arc<Module>,
+        ext_loader: Option<vo_runtime::ext_loader::ExtensionLoader>,
+    ) -> Result<(), VmError> {
         self.ensure_can_load_module()?;
         {
             let verified = validate_vm_module(&module)?;
@@ -784,7 +865,7 @@ impl Vm {
         self.extension_specs = ext_loader.as_ref().map(|loader| loader.specs().to_vec());
         self.extension_loader = ext_loader;
 
-        self.finish_load(module);
+        self.finish_load_shared(module);
         Ok(())
     }
 
@@ -813,7 +894,12 @@ impl Vm {
     }
 
     /// Finish loading a module (shared by load and load_with_extensions).
+    #[cfg(any(test, not(feature = "std")))]
     fn finish_load(&mut self, module: Module) {
+        self.finish_load_shared(Arc::new(module));
+    }
+
+    fn finish_load_shared(&mut self, module: Arc<Module>) {
         let total_global_slots: usize = module.globals.iter().map(|g| g.slots as usize).sum();
         self.state.globals = vec![0u64; total_global_slots];
         self.state.mark_gc_all_roots_dirty();
@@ -837,6 +923,35 @@ impl Vm {
     /// Returns the island handle (GcRef).
     #[cfg(feature = "std")]
     pub fn create_island(&mut self) -> Result<GcRef, VmError> {
+        let module = if self.state.external_island_transport {
+            None
+        } else {
+            Some(
+                self.module
+                    .as_ref()
+                    .ok_or_else(|| {
+                        VmError::Jit("create_island requires loaded module".to_string())
+                    })?
+                    .clone(),
+            )
+        };
+        self.create_island_with_shared_module(module)
+    }
+
+    /// Create an island while an execution lease owns the active module.
+    #[cfg(feature = "std")]
+    pub(crate) fn create_island_for_execution(
+        &mut self,
+        _module: &Module,
+    ) -> Result<GcRef, VmError> {
+        self.create_island()
+    }
+
+    #[cfg(feature = "std")]
+    fn create_island_with_shared_module(
+        &mut self,
+        module: Option<Arc<Module>>,
+    ) -> Result<GcRef, VmError> {
         let next_id = self.state.next_island_id;
         if self.state.external_island_transport {
             self.state.next_island_id += 1;
@@ -845,9 +960,7 @@ impl Vm {
 
         use vo_runtime::island_transport::{InThreadTransport, IslandSender};
 
-        let module = self
-            .module
-            .as_ref()
+        let module = module
             .ok_or_else(|| VmError::Jit("create_island requires loaded module".to_string()))?;
         self.state.next_island_id += 1;
 
@@ -887,35 +1000,83 @@ impl Vm {
             .insert(next_id, island_sender.clone());
 
         // Spawn island thread with JIT config from main VM
-        let module_arc = std::sync::Arc::new(module.clone());
         let registry_clone = registry.clone();
         let extension_specs = self.extension_specs.clone().unwrap_or_default();
         #[cfg(feature = "jit")]
         let jit_config = self.jit.manager().map(|mgr| mgr.config().clone());
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let startup_interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_interrupt = startup_interrupt.clone();
         let join_handle = std::thread::spawn(move || {
             #[cfg(feature = "jit")]
-            island_thread::run_island_thread(
+            let result = island_thread::run_island_thread(
                 next_id,
-                module_arc,
+                module,
                 island_transport,
                 registry_clone,
                 extension_specs,
                 jit_config,
+                child_interrupt,
+                &event_tx,
             );
             #[cfg(not(feature = "jit"))]
-            island_thread::run_island_thread(
+            let result = island_thread::run_island_thread(
                 next_id,
-                module_arc,
+                module,
                 island_transport,
                 registry_clone,
                 extension_specs,
+                child_interrupt,
+                &event_tx,
             );
+            let terminal = match result {
+                Ok(()) => types::IslandThreadEvent::Exited,
+                Err(error) => types::IslandThreadEvent::Failed(error),
+            };
+            let _ = event_tx.send(terminal);
         });
+
+        const ISLAND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        let startup = event_rx.recv_timeout(ISLAND_STARTUP_TIMEOUT);
+        if !matches!(startup, Ok(types::IslandThreadEvent::Ready)) {
+            startup_interrupt.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = island_sender.send_command(
+                self.state.current_island_id,
+                vo_runtime::island::IslandCommand::Shutdown,
+            );
+            if let Ok(mut guard) = registry.lock() {
+                guard.remove(&next_id);
+            }
+            self.state.island_senders.remove(&next_id);
+            let timed_out = matches!(startup, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+            if !timed_out {
+                let _ = join_handle.join();
+            }
+            let message = match startup {
+                Ok(types::IslandThreadEvent::Failed(error)) => error,
+                Ok(types::IslandThreadEvent::Exited) => {
+                    format!("island {next_id} exited during startup")
+                }
+                Ok(types::IslandThreadEvent::Ready) => {
+                    format!("island {next_id} reported an inconsistent startup state")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => format!(
+                    "island {next_id} startup timed out after {} seconds",
+                    ISLAND_STARTUP_TIMEOUT.as_secs()
+                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    format!("island {next_id} terminated before reporting startup status")
+                }
+            };
+            return Err(VmError::Jit(message));
+        }
 
         // Save thread handle
         self.state.island_threads.push(IslandThread {
             island_id: next_id,
             join_handle: Some(join_handle),
+            events: event_rx,
+            interrupt_flag: startup_interrupt,
         });
 
         Ok(handle)
@@ -1163,6 +1324,8 @@ impl Vm {
     /// Process commands from other island threads (non-blocking).
     #[inline]
     fn process_island_commands(&mut self) -> Result<(), VmError> {
+        #[cfg(feature = "std")]
+        self.poll_island_thread_events()?;
         let mut cmds = Vec::new();
         #[cfg(feature = "std")]
         if let Some(ref transport) = self.state.main_transport {
@@ -1180,6 +1343,40 @@ impl Vm {
             self.dispatch_queued_island_command_from(envelope.source_island_id, envelope.command)?;
         }
         self.state.clear_endpoint_tombstones_if_quiescent();
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    fn poll_island_thread_events(&mut self) -> Result<(), VmError> {
+        for island in &mut self.state.island_threads {
+            match island.events.try_recv() {
+                Ok(types::IslandThreadEvent::Ready) => {
+                    return Err(VmError::Jit(format!(
+                        "island {} reported duplicate startup readiness",
+                        island.island_id
+                    )));
+                }
+                Ok(types::IslandThreadEvent::Failed(error)) => {
+                    return Err(VmError::Jit(format!(
+                        "island {} failed: {error}",
+                        island.island_id
+                    )));
+                }
+                Ok(types::IslandThreadEvent::Exited) => {
+                    return Err(VmError::Jit(format!(
+                        "island {} exited while the parent VM was active",
+                        island.island_id
+                    )));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(VmError::Jit(format!(
+                        "island {} disconnected without a terminal event",
+                        island.island_id
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1609,25 +1806,30 @@ impl Vm {
     /// Run a fiber for up to TIME_SLICE instructions.
     /// Uses FiberId for type-safe fiber access.
     fn run_fiber(&mut self, fiber_id: crate::scheduler::FiberId) -> ExecResult {
-        let module_ptr = match &self.module {
-            Some(m) => m as *const Module,
-            None => return ExecResult::Done,
-        };
-        // SAFETY: module_ptr is valid for the duration of run_fiber.
-        let module = unsafe { &*module_ptr };
-
-        // Cache fiber pointer outside the loop through a generation-bearing lease.
-        // SAFETY: Box<Fiber> ensures stable addresses - fiber_ptr remains valid across Vec operations.
-        // The lease is released before runtime transitions or wake commands are applied.
-        let fiber_ptr = {
-            let mut lease = match self.scheduler.lease_fiber(fiber_id) {
-                Some(lease) => lease,
-                None => return ExecResult::Done,
+        let result = {
+            let Some(mut execution) = DetachedFiberExecution::try_new(self, fiber_id) else {
+                return ExecResult::Done;
             };
-            lease.fiber_mut() as *mut Fiber
+            execution.run()
         };
-        let fiber = unsafe { &mut *fiber_ptr };
 
+        #[cfg(feature = "jit")]
+        let result = self.attach_pending_runtime_transitions(result);
+        result
+    }
+
+    /// Execute with the active module and fiber owned outside `Vm`.
+    ///
+    /// This makes the JIT/FFI callback contract structurally disjoint: callbacks
+    /// may borrow VM services while the active fiber and immutable module remain
+    /// independent values, with runtime transitions committed after reattachment.
+    fn run_detached_fiber(
+        &mut self,
+        fiber_id: crate::scheduler::FiberId,
+        fiber: &mut Fiber,
+        module: &Module,
+    ) -> ExecResult {
+        fiber.execution_budget = TIME_SLICE;
         // SAFETY: We manually manage borrows via raw pointers to avoid borrow checker conflicts.
         // Get raw pointer to stack for fast access - fiber.ensure_capacity may invalidate this
         let mut stack = fiber.stack_ptr();
@@ -1685,6 +1887,10 @@ impl Vm {
             ($result:expr) => {{
                 let r = $result;
                 if matches!(r, ExecResult::FrameChanged) {
+                    #[cfg(feature = "jit")]
+                    if !self.state.pending_runtime_transitions.is_empty() {
+                        return ExecResult::FrameChanged;
+                    }
                     stack = fiber.stack_ptr();
                     refetch_after_frame_change!();
                     continue;
@@ -1698,49 +1904,36 @@ impl Vm {
         #[cfg(feature = "jit")]
         macro_rules! handle_loop_osr {
             ($target_pc:expr) => {{
-                if let Some(osr_result) = jit::try_loop_osr(self, fiber_id, func_id, $target_pc, bp)
+                if let Some(osr_result) =
+                    jit::try_loop_osr(self, fiber, module, func_id, $target_pc, bp)
                 {
                     match osr_result {
                         jit::OsrResult::FrameChanged => {
-                            let result =
-                                self.attach_pending_runtime_transitions(ExecResult::FrameChanged);
-                            if !matches!(result, ExecResult::FrameChanged) {
-                                return result;
+                            if !self.state.pending_runtime_transitions.is_empty() {
+                                return ExecResult::FrameChanged;
                             }
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
                             refetch_after_frame_change!();
                             continue;
                         }
                         jit::OsrResult::Transition(transition) => {
-                            return self.attach_pending_runtime_transitions(
-                                ExecResult::Transition(transition),
-                            );
+                            return ExecResult::Transition(transition);
                         }
                         jit::OsrResult::ExitPc(exit_pc) => {
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             let Some(frame) = fiber.current_frame_mut() else {
                                 return ExecResult::JitError(
                                     "OsrResult::ExitPc without active frame".to_string(),
                                 );
                             };
                             frame.pc = exit_pc;
-                            let result =
-                                self.attach_pending_runtime_transitions(ExecResult::FrameChanged);
-                            if !matches!(result, ExecResult::FrameChanged) {
-                                return result;
+                            if !self.state.pending_runtime_transitions.is_empty() {
+                                return ExecResult::FrameChanged;
                             }
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
                             refetch_after_frame_change!();
                             continue;
                         }
                         jit::OsrResult::Panic => {
-                            let result = self.attach_pending_runtime_transitions(ExecResult::Panic);
-                            if !matches!(result, ExecResult::Panic) {
-                                return result;
-                            }
-                            let fiber = self.scheduler.get_fiber_mut(fiber_id);
                             stack = fiber.stack_ptr();
                             handle_panic_result!(helpers::panic_unwind(
                                 &mut self.state.gc,
@@ -1750,8 +1943,7 @@ impl Vm {
                             ));
                         }
                         jit::OsrResult::JitError(msg) => {
-                            return self
-                                .attach_pending_runtime_transitions(ExecResult::JitError(msg));
+                            return ExecResult::JitError(msg);
                         }
                     }
                 }
@@ -1995,7 +2187,7 @@ impl Vm {
             };
         }
 
-        for _ in 0..TIME_SLICE {
+        while fiber.execution_budget > 0 {
             if self.interrupt_requested() {
                 return ExecResult::Interrupted;
             }
@@ -2016,15 +2208,31 @@ impl Vm {
                         &self.state.resolved_externs,
                     )
                 {
-                    if let Some(jit_func) = self
-                        .jit
-                        .manager()
-                        .and_then(|jit_mgr| jit_mgr.get_entry(func_id))
-                    {
+                    let jit_func = if let Some(jit_mgr) = self.jit.manager_mut() {
+                        let env = vo_jit::JitCompileEnv {
+                            externs: &self.state.resolved_externs,
+                            backend_caps: Default::default(),
+                        };
+                        match jit_mgr.resolve_call(func_id, func, module, env) {
+                            Ok(entry) => entry,
+                            Err(err) => {
+                                return ExecResult::JitError(format!(
+                                    "JIT frame-entry compilation failed for {}: {err}",
+                                    func.name
+                                ));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(jit_func) = jit_func {
                         let result = jit::dispatch_jit_frame(self, fiber, module, jit_func);
                         stack = fiber.stack_ptr();
                         match result {
                             ExecResult::FrameChanged => {
+                                if !self.state.pending_runtime_transitions.is_empty() {
+                                    return ExecResult::FrameChanged;
+                                }
                                 refetch_after_frame_change!();
                                 continue;
                             }
@@ -2033,6 +2241,8 @@ impl Vm {
                     }
                 }
             }
+
+            fiber.execution_budget -= 1;
 
             let frame = unsafe { &mut *frame_ptr };
             let pc = frame.pc;
@@ -2508,52 +2718,6 @@ impl Vm {
 
                 // === FRAME-CHANGING INSTRUCTIONS: must call refetch!() ===
                 Opcode::Call => {
-                    #[cfg(feature = "jit")]
-                    {
-                        let target_func_id = inst.static_call_func_id();
-                        if let Some(jit_mgr) = self.jit.manager_mut() {
-                            let Some(target_func) = module.functions.get(target_func_id as usize)
-                            else {
-                                return ExecResult::JitError(format!(
-                                    "missing call target function id {target_func_id}"
-                                ));
-                            };
-                            let env = vo_jit::JitCompileEnv {
-                                externs: &self.state.resolved_externs,
-                                backend_caps: Default::default(),
-                            };
-                            match jit_mgr.resolve_call(target_func_id, target_func, module, env) {
-                                Ok(Some(jit_func)) => {
-                                    // Execute via JIT
-                                    let result = jit::dispatch_jit_call(
-                                        self,
-                                        fiber,
-                                        &inst,
-                                        module,
-                                        jit_func,
-                                        target_func_id,
-                                    );
-                                    stack = fiber.stack_ptr();
-                                    match result {
-                                        ExecResult::FrameChanged => {
-                                            // JIT returned Ok or panic_unwind needs to execute defer
-                                            refetch_after_frame_change!();
-                                        }
-                                        other => return other,
-                                    }
-                                    continue;
-                                }
-                                Ok(None) => {}
-                                Err(err) => {
-                                    return ExecResult::JitError(format!(
-                                        "JIT call compilation failed for {}: {err}",
-                                        target_func.name
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    // VM continuation for cold or side-exiting calls.
                     handle_panic_result!(exec::exec_call(&mut self.state.gc, fiber, &inst, module));
                 }
                 Opcode::CallExtern => {
@@ -2774,9 +2938,13 @@ impl Vm {
                     let result = if fiber.is_direct_defer_context() {
                         exec::handle_panic_unwind(&mut self.state.gc, fiber, module)
                     } else {
-                        let is_error_return = ReturnFlags::from_bits(inst.flags)
-                            .expect("Return flags must be verified before VM execution")
-                            .is_error_return();
+                        let Some(return_flags) = ReturnFlags::from_bits(inst.flags) else {
+                            return ExecResult::JitError(format!(
+                                "Return at pc {pc} has invalid flags 0x{:02x}",
+                                inst.flags
+                            ));
+                        };
+                        let is_error_return = return_flags.is_error_return();
                         exec::handle_return(
                             &mut self.state.gc,
                             fiber,
@@ -2846,37 +3014,50 @@ impl Vm {
                 Opcode::StrEq => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::eq(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::eq(a, b) }
+                        as u64);
                 }
                 Opcode::StrNe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::ne(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::ne(a, b) }
+                        as u64);
                 }
                 Opcode::StrLt => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::lt(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::lt(a, b) }
+                        as u64);
                 }
                 Opcode::StrLe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::le(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::le(a, b) }
+                        as u64);
                 }
                 Opcode::StrGt => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::gt(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::gt(a, b) }
+                        as u64);
                 }
                 Opcode::StrGe => {
                     let a = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let b = stack_get(stack, bp + inst.c as usize) as GcRef;
-                    stack_set(stack, bp + inst.a as usize, string::ge(a, b) as u64);
+                    // Safety: verified bytecode supplies live string operands.
+                    stack_set(stack, bp + inst.a as usize, unsafe { string::ge(a, b) }
+                        as u64);
                 }
                 Opcode::StrDecodeRune => {
                     let s = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let pos = stack_get(stack, bp + inst.c as usize) as usize;
-                    let (rune, width) = string::decode_rune_at(s, pos);
+                    // Safety: verified bytecode supplies a live string operand.
+                    let (rune, width) = unsafe { string::decode_rune_at(s, pos) };
                     stack_set(stack, bp + inst.a as usize, rune as u64);
                     stack_set(stack, bp + inst.a as usize + 1, width as u64);
                 }
@@ -2888,7 +3069,8 @@ impl Vm {
                 Opcode::ArrayGet => {
                     let arr = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
-                    let len = array::len(arr);
+                    // Safety: verifier guarantees ArrayGet's operand is a live array.
+                    let len = unsafe { array::len(arr) };
                     if idx >= len {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
@@ -2904,7 +3086,7 @@ impl Vm {
                     }
                     let dst = bp + inst.a as usize;
                     let off = idx as isize;
-                    let base = array::data_ptr_bytes(arr);
+                    let base = unsafe { array::data_ptr_bytes(arr) };
                     let val = match inst.flags {
                         1 => unsafe { *base.offset(off) as u64 },
                         2 => unsafe { *(base.offset(off * 2) as *const u16) as u64 },
@@ -2938,7 +3120,8 @@ impl Vm {
                 Opcode::ArraySet => {
                     let arr = stack_get(stack, bp + inst.a as usize) as GcRef;
                     let idx = stack_get(stack, bp + inst.b as usize) as usize;
-                    let len = array::len(arr);
+                    // Safety: verifier guarantees ArraySet's operand is a live array.
+                    let len = unsafe { array::len(arr) };
                     if idx >= len {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
@@ -2954,7 +3137,7 @@ impl Vm {
                     }
                     let src = bp + inst.c as usize;
                     let off = idx as isize;
-                    let base = array::data_ptr_bytes(arr);
+                    let base = unsafe { array::data_ptr_bytes(arr) };
                     let val = stack_get(stack, src);
                     match inst.flags {
                         1 | 129 => unsafe { *base.offset(off) = val as u8 },
@@ -2962,7 +3145,7 @@ impl Vm {
                         4 | 132 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.offset(off * 4) as *mut u32) = val as u32 },
                         8 => {
-                            let em = array::elem_meta(arr);
+                            let em = unsafe { array::elem_meta(arr) };
                             if em.value_kind().may_contain_gc_refs() {
                                 if let Err(err) =
                                     vo_runtime::gc_types::try_typed_write_barrier_by_meta(
@@ -2982,15 +3165,18 @@ impl Vm {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
                             // Write barrier for multi-slot elements that may contain GcRefs
-                            let em = array::elem_meta(arr);
+                            let em = unsafe { array::elem_meta(arr) };
                             if em.value_kind().may_contain_gc_refs() {
-                                let vals: Vec<u64> =
-                                    (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                // Safety: verified ArraySet metadata keeps this source range
+                                // inside the active frame for the duration of the barrier/copy.
+                                let vals = unsafe {
+                                    core::slice::from_raw_parts(stack.add(src), elem_slots)
+                                };
                                 if let Err(err) =
                                     vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                         &mut self.state.gc,
                                         arr,
-                                        &vals,
+                                        vals,
                                         em,
                                         Some(module),
                                     )
@@ -3014,15 +3200,18 @@ impl Vm {
                             let elem_bytes = inst.flags as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
                             // Write barrier for multi-slot elements that may contain GcRefs
-                            let em = array::elem_meta(arr);
+                            let em = unsafe { array::elem_meta(arr) };
                             if elem_bytes >= 8 && em.value_kind().may_contain_gc_refs() {
-                                let vals: Vec<u64> =
-                                    (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
+                                // Safety: verified ArraySet metadata keeps this source range
+                                // inside the active frame for the duration of the barrier/copy.
+                                let vals = unsafe {
+                                    core::slice::from_raw_parts(stack.add(src), elem_slots)
+                                };
                                 if let Err(err) =
                                     vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                         &mut self.state.gc,
                                         arr,
-                                        &vals,
+                                        vals,
                                         em,
                                         Some(module),
                                     )
@@ -3047,7 +3236,8 @@ impl Vm {
                 Opcode::ArrayAddr => {
                     let arr = stack_get(stack, bp + inst.b as usize) as GcRef;
                     let idx = stack_get(stack, bp + inst.c as usize) as usize;
-                    let len = array::len(arr);
+                    // Safety: verifier guarantees ArrayAddr's operand is a live array.
+                    let len = unsafe { array::len(arr) };
                     if idx >= len {
                         handle_panic_result!(runtime_panic(
                             &mut self.state.gc,
@@ -3068,7 +3258,7 @@ impl Vm {
                         0x84 | 0x44 => 4,
                         f => f as usize,
                     };
-                    let base = array::data_ptr_bytes(arr);
+                    let base = unsafe { array::data_ptr_bytes(arr) };
                     let addr = unsafe { base.add(idx * elem_bytes) } as u64;
                     stack_set(stack, bp + inst.a as usize, addr);
                 }
@@ -3161,9 +3351,9 @@ impl Vm {
                         4 | 132 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
                         0x44 => unsafe { *(base.add(idx * 4) as *mut u32) = val as u32 },
                         8 => {
-                            let arr_ref = vo_runtime::objects::slice::array_ref(s);
+                            let arr_ref = unsafe { vo_runtime::objects::slice::array_ref(s) };
                             if !arr_ref.is_null() {
-                                let em = array::elem_meta(arr_ref);
+                                let em = unsafe { array::elem_meta(arr_ref) };
                                 if em.value_kind().may_contain_gc_refs() {
                                     if let Err(err) =
                                         vo_runtime::gc_types::try_typed_write_barrier_by_meta(
@@ -3184,21 +3374,26 @@ impl Vm {
                             let elem_bytes = stack_get(stack, bp + inst.b as usize + 1) as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
                             // Write barrier for multi-slot elements that may contain GcRefs
-                            let arr_ref = vo_runtime::objects::slice::array_ref(s);
+                            let arr_ref = unsafe { vo_runtime::objects::slice::array_ref(s) };
                             let needs_barrier = if arr_ref.is_null() {
                                 false
                             } else {
-                                array::elem_meta(arr_ref).value_kind().may_contain_gc_refs()
+                                unsafe { array::elem_meta(arr_ref) }
+                                    .value_kind()
+                                    .may_contain_gc_refs()
                             };
                             if needs_barrier {
-                                let vals: Vec<u64> =
-                                    (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
-                                let em = array::elem_meta(arr_ref);
+                                // Safety: verified SliceSet metadata keeps this source range
+                                // inside the active frame for the duration of the barrier/copy.
+                                let vals = unsafe {
+                                    core::slice::from_raw_parts(stack.add(src), elem_slots)
+                                };
+                                let em = unsafe { array::elem_meta(arr_ref) };
                                 if let Err(err) =
                                     vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                         &mut self.state.gc,
                                         arr_ref,
-                                        &vals,
+                                        vals,
                                         em,
                                         Some(module),
                                     )
@@ -3222,19 +3417,24 @@ impl Vm {
                             let elem_bytes = inst.flags as usize;
                             let elem_slots = elem_bytes.div_ceil(8);
                             // Write barrier for multi-slot elements that may contain GcRefs
-                            let arr_ref = vo_runtime::objects::slice::array_ref(s);
+                            let arr_ref = unsafe { vo_runtime::objects::slice::array_ref(s) };
                             let needs_barrier = elem_bytes >= 8
                                 && !arr_ref.is_null()
-                                && array::elem_meta(arr_ref).value_kind().may_contain_gc_refs();
+                                && unsafe { array::elem_meta(arr_ref) }
+                                    .value_kind()
+                                    .may_contain_gc_refs();
                             if needs_barrier {
-                                let vals: Vec<u64> =
-                                    (0..elem_slots).map(|i| stack_get(stack, src + i)).collect();
-                                let em = array::elem_meta(arr_ref);
+                                // Safety: verified SliceSet metadata keeps this source range
+                                // inside the active frame for the duration of the barrier/copy.
+                                let vals = unsafe {
+                                    core::slice::from_raw_parts(stack.add(src), elem_slots)
+                                };
+                                let em = unsafe { array::elem_meta(arr_ref) };
                                 if let Err(err) =
                                     vo_runtime::gc_types::try_typed_write_barrier_by_meta(
                                         &mut self.state.gc,
                                         arr_ref,
-                                        &vals,
+                                        vals,
                                         em,
                                         Some(module),
                                     )
@@ -3320,13 +3520,14 @@ impl Vm {
                 Opcode::MapNew => {
                     exec::exec_map_new(stack, bp, &inst, &mut self.state.gc);
                 }
-                Opcode::MapGet => match exec::exec_map_get_with_layout(
+                Opcode::MapGet => match exec::exec_map_get_with_layout_using_scratch(
                     stack,
                     bp,
                     &inst,
                     &self.state.gc,
                     Some(module),
                     map_key_value_layout_for_pc(func, pc),
+                    &mut fiber.map_scratch,
                 ) {
                     Ok(true) => {}
                     Ok(false) => {
@@ -3351,13 +3552,14 @@ impl Vm {
                             RuntimeTrapKind::NilMapWrite
                         ));
                     }
-                    match exec::exec_map_set_with_layout(
+                    match exec::exec_map_set_with_layout_using_scratch(
                         stack,
                         bp,
                         &inst,
                         &mut self.state.gc,
                         Some(module),
                         map_key_value_layout_for_pc(func, pc),
+                        &mut fiber.map_scratch,
                     ) {
                         Ok(true) => {}
                         Ok(false) => {
@@ -3375,13 +3577,14 @@ impl Vm {
                 Opcode::MapDelete => {
                     let m = stack_get(stack, bp + inst.a as usize) as GcRef;
                     if !m.is_null() {
-                        match exec::exec_map_delete_with_layout(
+                        match exec::exec_map_delete_with_layout_using_scratch(
                             stack,
                             bp,
                             &inst,
                             &self.state.gc,
                             Some(module),
                             map_key_layout_for_pc(func, pc),
+                            &mut fiber.map_scratch,
                         ) {
                             Ok(true) => {}
                             Ok(false) => {
@@ -3448,12 +3651,13 @@ impl Vm {
                     let ch = helpers::stack_get(stack, bp + inst.a as usize) as GcRef;
                     let elem_slots = inst.flags as usize;
                     let src_start = bp + inst.b as usize;
-                    let src: Vec<u64> = (0..elem_slots)
-                        .map(|i| helpers::stack_get(stack, src_start + i))
-                        .collect();
+                    // Safety: QueueSend verification guarantees the payload range lies in
+                    // the active frame; queue_send_core snapshots it before suspension.
+                    let src =
+                        unsafe { core::slice::from_raw_parts(stack.add(src_start), elem_slots) };
                     handle_queue_action!(exec::queue_send_core_with_layout(
                         ch,
-                        &src,
+                        src,
                         queue_layout_for_pc(func, pc),
                         self.state.current_island_id,
                         fiber.wake_key_packed(),
@@ -3474,11 +3678,12 @@ impl Vm {
                             Ok(ch) => ch,
                             Err(err) => return ExecResult::JitError(err),
                         };
-                        let elem_meta = vo_runtime::objects::queue_state::elem_meta(ch);
-                        let elem_rttid = vo_runtime::objects::queue_state::elem_rttid(ch);
+                        let elem_meta = unsafe { vo_runtime::objects::queue_state::elem_meta(ch) };
+                        let elem_rttid =
+                            unsafe { vo_runtime::objects::queue_state::elem_rttid(ch) };
                         let elem_slots = inst.recv_elem_slots() as usize;
                         let queue_elem_slots =
-                            vo_runtime::objects::queue_state::elem_slots(ch) as usize;
+                            unsafe { vo_runtime::objects::queue_state::elem_slots(ch) } as usize;
                         if elem_slots != queue_elem_slots {
                             return ExecResult::JitError(format!(
                                 "QueueRecv replay element slot count {elem_slots} does not match queue metadata {queue_elem_slots}"
@@ -3496,10 +3701,11 @@ impl Vm {
                         }
                         let has_ok = inst.recv_has_ok();
                         let dst_start = bp + inst.a as usize;
-                        let recv_response = fiber
-                            .remote_recv_response
-                            .clone()
-                            .expect("remote recv response checked above");
+                        let Some(recv_response) = fiber.remote_recv_response.clone() else {
+                            return ExecResult::JitError(
+                                "QueueRecv replay lost its pending remote response".to_string(),
+                            );
+                        };
                         if let Err(err) = exec::replay_remote_queue_recv_response(
                             &mut self.state.gc,
                             recv_response,
@@ -3544,7 +3750,7 @@ impl Vm {
                         bp,
                         &inst,
                         &self.state.gc,
-                        exec::queue_len
+                        |ch| unsafe { exec::queue_len(ch) }
                     ));
                 }
                 Opcode::QueueCap => {
@@ -3553,7 +3759,7 @@ impl Vm {
                         bp,
                         &inst,
                         &self.state.gc,
-                        vo_runtime::objects::queue_state::capacity,
+                        |ch| unsafe { vo_runtime::objects::queue_state::capacity(ch) },
                     ));
                 }
 
@@ -3926,7 +4132,7 @@ impl Vm {
                 // === ISLAND/CHANNEL: Cross-island operations ===
                 #[cfg(feature = "std")]
                 Opcode::IslandNew => {
-                    let handle = match self.create_island() {
+                    let handle = match self.create_island_for_execution(module) {
                         Ok(handle) => handle,
                         Err(VmError::Jit(msg)) => return ExecResult::JitError(msg),
                         Err(err) => {
@@ -4007,7 +4213,8 @@ impl Vm {
                     }
                     let result =
                         exec::exec_go_island(stack, bp, &inst, island_handle, &closure_target);
-                    let island_id = vo_runtime::island::id(island_handle);
+                    // Safety: `island_handle` was validated by the call target above.
+                    let island_id = unsafe { vo_runtime::island::id(island_handle) };
 
                     if island_id == self.state.current_island_id {
                         let new_fiber = match unsafe {
@@ -4533,7 +4740,7 @@ fn validate_spawn_call_concrete_arg(
         )));
     };
     args[slot_idx] = canonical as u64;
-    let header = Gc::header(canonical);
+    let header = unsafe { Gc::header(canonical) };
     if header.kind() != expected_header_kind {
         return Err(VmError::Jit(format!(
             "spawn_call param object kind {:?} does not match expected {:?} for value kind {:?} func={} name={} slot={}",
@@ -4720,7 +4927,7 @@ fn validate_spawn_call_interface_data_object(
         )));
     };
     args[slot_idx + 1] = canonical as u64;
-    let header = Gc::header(canonical);
+    let header = unsafe { Gc::header(canonical) };
     let Some(expected_meta) =
         module.canonical_value_meta_for_value_rttid(vo_runtime::ValueRttid::new(rttid, value_kind))
     else {
@@ -4924,9 +5131,10 @@ fn validate_spawn_call_interface_array_data(
             )));
         }
     }
-    let actual_len = array::len(array_ref);
-    let actual_elem_meta = array::elem_meta(array_ref);
-    let actual_elem_bytes = array::elem_bytes(array_ref);
+    // Safety: the spawn validator canonicalized the object and checked its array kind.
+    let actual_len = unsafe { array::len(array_ref) };
+    let actual_elem_meta = unsafe { array::elem_meta(array_ref) };
+    let actual_elem_bytes = unsafe { array::elem_bytes(array_ref) };
     if actual_len != expected_len
         || actual_elem_meta != expected_elem_meta
         || actual_elem_bytes != expected_elem_bytes

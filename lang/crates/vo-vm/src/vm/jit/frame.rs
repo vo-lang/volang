@@ -253,7 +253,7 @@ mod tests {
         module.functions.push(function(1, 0));
         vm.load(module).unwrap();
 
-        let module_ptr = vm.module.as_ref().unwrap() as *const Module;
+        let module_ptr = vm.module.as_deref().unwrap() as *const Module;
         let mut fiber = Fiber::new(7);
         fiber.push_frame(0, 1, 0, 0, 0);
         let mut ctx =

@@ -4,13 +4,10 @@
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use vo_runtime::gc::{Gc, GcRef};
 use vo_runtime::objects::slice;
 use vo_runtime::slot::Slot;
-use vo_runtime::ValueMeta;
+use vo_runtime::{ValueKind, ValueMeta};
 
 use crate::instruction::Instruction;
 use crate::vm::helpers::{makeslice_error_message, stack_get, stack_set};
@@ -75,19 +72,21 @@ pub fn exec_slice_slice(stack: *mut Slot, bp: usize, inst: &Instruction, gc: &mu
         return false;
     }
 
+    // Safety: module verification fixes the operand kind and GC roots keep the
+    // handle live; the runtime helpers still validate every slice bound.
     let result = if is_array {
         if has_max {
             let max = stack_get(stack, bp + inst.c as usize + 2) as usize;
-            slice::array_slice_with_cap(gc, s, lo, hi, max)
+            unsafe { slice::array_slice_with_cap(gc, s, lo, hi, max) }
         } else {
-            slice::array_slice(gc, s, lo, hi)
+            unsafe { slice::array_slice(gc, s, lo, hi) }
         }
     } else {
         if has_max {
             let max = stack_get(stack, bp + inst.c as usize + 2) as usize;
-            slice::slice_of_with_cap(gc, s, lo, hi, max)
+            unsafe { slice::slice_of_with_cap(gc, s, lo, hi, max) }
         } else {
-            slice::slice_of(gc, s, lo, hi)
+            unsafe { slice::slice_of(gc, s, lo, hi) }
         }
     };
 
@@ -126,11 +125,21 @@ pub fn exec_slice_append(
 
     let src_start = bp + inst.c as usize + elem_offset;
 
-    // Copy values to a Vec for the append call
-    let val: Vec<u64> = (0..elem_slots)
-        .map(|i| stack_get(stack, src_start + i))
-        .collect();
-    let result = slice::try_append(gc, elem_meta, elem_bytes, s, &val, module)
+    // Safety: verified SliceAppend metadata keeps this range in the active
+    // frame, and try_append consumes it before the destination slot is written.
+    let val = unsafe { core::slice::from_raw_parts(stack.add(src_start), elem_slots) };
+    let s = if s.is_null() {
+        s
+    } else {
+        let Some(s) = gc.canonicalize_ref(s) else {
+            return Err("SliceAppend: invalid slice handle".to_string());
+        };
+        if unsafe { Gc::header(s) }.kind() != ValueKind::Slice {
+            return Err("SliceAppend: expected slice handle".to_string());
+        }
+        s
+    };
+    let result = unsafe { slice::try_append(gc, elem_meta, elem_bytes, s, val, module) }
         .map_err(|err| err.to_string())?;
     stack_set(stack, bp + inst.a as usize, result as u64);
     Ok(())

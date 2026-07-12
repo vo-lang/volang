@@ -216,7 +216,7 @@ fn alloc_string_slice(call: &mut ExternCallContext, strings: &[String]) -> GcRef
     }
 
     call.gc()
-        .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(slice_ref));
+        .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::array_ref(slice_ref) });
     slice_ref
 }
 
@@ -233,7 +233,7 @@ fn alloc_ip_slice(call: &mut ExternCallContext, ips: &[Vec<u8>]) -> GcRef {
     }
 
     call.gc()
-        .mark_allocated_for_scan(vo_runtime::objects::slice::array_ref(slice_ref));
+        .mark_allocated_for_scan(unsafe { vo_runtime::objects::slice::array_ref(slice_ref) });
     slice_ref
 }
 
@@ -242,7 +242,8 @@ fn alloc_bytes(gc: &mut Gc, bytes: &[u8]) -> GcRef {
     let elem_meta = ValueMeta::new(0, ValueKind::Uint8);
     let elem_bytes = 1;
     let slice_ref = slice::create(gc, elem_meta, elem_bytes, len, len);
-    let data_ptr = slice::data_ptr(slice_ref);
+    // Safety: `slice_ref` is freshly allocated above.
+    let data_ptr = unsafe { slice::data_ptr(slice_ref) };
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, len);
     }

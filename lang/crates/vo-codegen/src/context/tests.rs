@@ -2,12 +2,12 @@ use super::CodegenContext;
 use std::collections::{BTreeMap, HashMap};
 use vo_analysis::arena::ArenaKey;
 use vo_common_core::JitInstructionMetadata;
-use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
-use vo_vm::bytecode::{
+use vo_runtime::bytecode::{
     ExtSlotKind, FunctionDef, GlobalDef, InterfaceMeta, NamedTypeMeta, ParamShape, ReturnShape,
     StructMeta,
 };
-use vo_vm::instruction::{Instruction, Opcode};
+use vo_runtime::instruction::{Instruction, Opcode};
+use vo_runtime::{RuntimeType, SlotType, ValueKind, ValueMeta, ValueRttid};
 
 fn minimal_function(code_len: usize) -> FunctionDef {
     let code = (0..code_len)
@@ -45,7 +45,7 @@ fn minimal_function(code_len: usize) -> FunctionDef {
 fn variable_ret_externs_are_keyed_by_ret_slots() {
     let mut ctx = CodegenContext::new("extern-ret-slots");
 
-    let effects = vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
+    let effects = vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
     let typed_call = ctx.get_or_register_variable_ret_extern_with_effects("dyn_call", 4, effects);
     let any_call = ctx.get_or_register_variable_ret_extern_with_effects("dyn_call", 6, effects);
     let typed_call_again =
@@ -63,7 +63,7 @@ fn variable_ret_externs_are_keyed_by_ret_slots() {
 fn variable_ret_externs_are_keyed_by_precise_return_layout_058() {
     let mut ctx = CodegenContext::new("extern-ret-layout");
 
-    let effects = vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
+    let effects = vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
     let value_layout = vec![
         vo_runtime::SlotType::Value,
         vo_runtime::SlotType::Interface0,
@@ -120,7 +120,7 @@ fn variable_ret_externs_are_keyed_by_precise_return_layout_058() {
 fn variable_ret_dynamic_externs_preserve_exact_parameter_abi_058() {
     let mut ctx = CodegenContext::new("dynamic-extern-param-abi");
 
-    let effects = vo_vm::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
+    let effects = vo_runtime::bytecode::ExternEffects::MAY_CALL_CLOSURE_REPLAY;
     let dynamic_returns = ReturnShape::try_with_slot_types_and_interface_metas(
         vec![
             SlotType::Value,
@@ -169,7 +169,6 @@ fn variable_ret_dynamic_externs_preserve_exact_parameter_abi_058() {
 }
 
 #[test]
-#[should_panic(expected = "extern 'pkg_F' registered with incompatible return slot layout")]
 fn extern_return_shape_merge_rejects_slot_count_layout_drift_048() {
     let mut ctx = CodegenContext::new("extern-return-shape-drift");
 
@@ -178,7 +177,7 @@ fn extern_return_shape_merge_rejects_slot_count_layout_drift_048() {
         ReturnShape::slots(2),
         ParamShape::CallSiteVariadic,
         Vec::new(),
-        vo_vm::bytecode::ExternEffects::NONE,
+        vo_runtime::bytecode::ExternEffects::NONE,
     );
     assert_eq!(ctx.module().externs[id as usize].returns.slots, 2);
     assert!(ctx.module().externs[id as usize]
@@ -191,12 +190,15 @@ fn extern_return_shape_merge_rejects_slot_count_layout_drift_048() {
         ReturnShape::with_slot_types(vec![SlotType::GcRef]),
         ParamShape::CallSiteVariadic,
         Vec::new(),
-        vo_vm::bytecode::ExternEffects::NONE,
+        vo_runtime::bytecode::ExternEffects::NONE,
+    );
+    assert_eq!(
+        ctx.check_layout_errors().unwrap_err(),
+        "extern 'pkg_F' registered with incompatible return slot layout"
     );
 }
 
 #[test]
-#[should_panic(expected = "extern 'pkg_F' registered with incompatible return slot layout")]
 fn declared_extern_rejects_same_name_different_precise_return_layout_048() {
     let mut ctx = CodegenContext::new("extern-precise-return-shape-drift");
 
@@ -210,10 +212,13 @@ fn declared_extern_rejects_same_name_different_precise_return_layout_048() {
         vec![SlotType::Value, SlotType::Value],
         Vec::new(),
     );
+    assert_eq!(
+        ctx.check_layout_errors().unwrap_err(),
+        "extern 'pkg_F' registered with incompatible return slot layout"
+    );
 }
 
 #[test]
-#[should_panic(expected = "extern 'pkg_F' registered with incompatible return interface metadata")]
 fn declared_extern_rejects_same_name_different_return_interface_metadata_060() {
     let mut ctx = CodegenContext::new("extern-interface-return-shape-drift");
 
@@ -230,10 +235,13 @@ fn declared_extern_rejects_same_name_different_return_interface_metadata_060() {
 
     ctx.get_or_register_declared_extern_with_return_shape("pkg_F", returns_iface_1, Vec::new());
     ctx.get_or_register_declared_extern_with_return_shape("pkg_F", returns_iface_2, Vec::new());
+    assert_eq!(
+        ctx.check_layout_errors().unwrap_err(),
+        "extern 'pkg_F' registered with incompatible return interface metadata"
+    );
 }
 
 #[test]
-#[should_panic(expected = "extern 'pkg_F' registered with incompatible parameter ABI")]
 fn declared_extern_rejects_same_name_different_parameter_kinds_048() {
     let mut ctx = CodegenContext::new("extern-parameter-shape-drift");
 
@@ -242,19 +250,22 @@ fn declared_extern_rejects_same_name_different_parameter_kinds_048() {
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Bytes],
-        vo_vm::bytecode::ExternEffects::NONE,
+        vo_runtime::bytecode::ExternEffects::NONE,
     );
     ctx.get_or_register_extern_with_slots_and_effects(
         "pkg_F",
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Value],
-        vo_vm::bytecode::ExternEffects::NONE,
+        vo_runtime::bytecode::ExternEffects::NONE,
+    );
+    assert_eq!(
+        ctx.check_layout_errors().unwrap_err(),
+        "extern 'pkg_F' registered with incompatible parameter ABI"
     );
 }
 
 #[test]
-#[should_panic(expected = "extern 'pkg_F' registered with incompatible parameter ABI")]
 fn declared_extern_rejects_same_name_different_exact_parameter_slots_048() {
     let mut ctx = CodegenContext::new("extern-parameter-slot-drift");
 
@@ -263,14 +274,18 @@ fn declared_extern_rejects_same_name_different_exact_parameter_slots_048() {
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 1 },
         vec![ExtSlotKind::Value],
-        vo_vm::bytecode::ExternEffects::NONE,
+        vo_runtime::bytecode::ExternEffects::NONE,
     );
     ctx.get_or_register_extern_with_slots_and_effects(
         "pkg_F",
         ReturnShape::slots(0),
         ParamShape::Exact { slots: 2 },
         vec![ExtSlotKind::Value, ExtSlotKind::Value],
-        vo_vm::bytecode::ExternEffects::NONE,
+        vo_runtime::bytecode::ExternEffects::NONE,
+    );
+    assert_eq!(
+        ctx.check_layout_errors().unwrap_err(),
+        "extern 'pkg_F' registered with incompatible parameter ABI"
     );
 }
 
@@ -354,20 +369,20 @@ fn extern_allowed_effects_merge_unknown_without_invalid_bit_mix() {
         ReturnShape::slots(0),
         ParamShape::CallSiteVariadic,
         Vec::new(),
-        vo_vm::bytecode::ExternEffects::MAY_HOST_REPLAY,
+        vo_runtime::bytecode::ExternEffects::MAY_HOST_REPLAY,
     );
     let same = ctx.get_or_register_extern_with_slots_and_effects(
         "pkg_F",
         ReturnShape::slots(0),
         ParamShape::CallSiteVariadic,
         Vec::new(),
-        vo_vm::bytecode::ExternEffects::UNKNOWN_CONTROL,
+        vo_runtime::bytecode::ExternEffects::UNKNOWN_CONTROL,
     );
 
     assert_eq!(id, same);
     assert_eq!(
         ctx.module().externs[id as usize].allowed_effects,
-        vo_vm::bytecode::ExternEffects::UNKNOWN_CONTROL
+        vo_runtime::bytecode::ExternEffects::UNKNOWN_CONTROL
     );
 }
 
@@ -382,11 +397,11 @@ fn declared_extern_effects_use_manifest_for_known_names_only() {
 
     assert_eq!(
         ctx.module().externs[file_read as usize].allowed_effects,
-        vo_vm::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
+        vo_runtime::bytecode::ExternEffects::MAY_WAIT_IO_REPLAY
     );
     assert_eq!(
         ctx.module().externs[unknown as usize].allowed_effects,
-        vo_vm::bytecode::ExternEffects::UNKNOWN_CONTROL
+        vo_runtime::bytecode::ExternEffects::UNKNOWN_CONTROL
     );
 }
 

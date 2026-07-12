@@ -11,8 +11,6 @@ use alloc::format;
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
 
-use vo_common_core::types::ValueKind;
-
 use super::format::format_interface_with_ctx;
 use crate::ffi::{ExternCallContext, ExternResult};
 
@@ -66,7 +64,7 @@ fn builtin_assert(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
-fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
+unsafe fn builtin_copy_raw(call: &mut ExternCallContext) -> ExternResult {
     use crate::gc::Gc;
     use crate::objects::{array, slice, string as str_obj};
     use vo_common_core::types::ValueKind;
@@ -82,10 +80,11 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     let dst_len = slice::len(dst);
 
     // Check if src is a string (copy([]byte, string) case)
-    let src_kind = Gc::header(src).value_meta.value_kind();
+    let src_kind = unsafe { Gc::header(src) }.value_meta.value_kind();
     let (src_len, src_ptr) = if src_kind == ValueKind::String {
-        let len = str_obj::len(src);
-        let bytes = str_obj::as_bytes(src);
+        // Safety: the GC header above established that `src` is a live string.
+        let len = unsafe { str_obj::len(src) };
+        let bytes = unsafe { str_obj::bytes_unchecked(src) };
         (len, bytes.as_ptr() as *mut u8)
     } else {
         (slice::len(src), slice::data_ptr(src))
@@ -119,9 +118,15 @@ fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+fn builtin_copy(call: &mut ExternCallContext) -> ExternResult {
+    // Safety: builtin dispatch keeps verified slice/string arguments rooted
+    // throughout the call.
+    unsafe { builtin_copy_raw(call) }
+}
+
 /// append(slice, other...) - append all elements from other slice/string
 /// Works for both slice and string sources since they have identical memory layout.
-fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
+unsafe fn builtin_slice_append_slice_raw(call: &mut ExternCallContext) -> ExternResult {
     use crate::objects::{array, slice};
 
     let dst = call.arg_ref(0);
@@ -227,87 +232,39 @@ fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
     ExternResult::Ok
 }
 
+fn builtin_slice_append_slice(call: &mut ExternCallContext) -> ExternResult {
+    // Safety: builtin dispatch keeps both slice arguments rooted and codegen
+    // supplies their verified element layout.
+    unsafe { builtin_slice_append_slice_raw(call) }
+}
+
 /// Interface equality comparison
 /// Args: (left_slot0, left_slot1, right_slot0, right_slot1)
 /// Returns: bool (1 if equal, 0 if not)
-fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
-    use crate::objects::string as str_obj;
-
-    let left_slot0 = call.arg_u64(0);
-    let left_slot1 = call.arg_u64(1);
-    let right_slot0 = call.arg_u64(2);
-    let right_slot1 = call.arg_u64(3);
-
-    // slot0 format: [itab_id:32 | rttid:24 | value_kind:8]
-    let left_vk = ValueKind::from_u8((left_slot0 & 0xFF) as u8);
-    let right_vk = ValueKind::from_u8((right_slot0 & 0xFF) as u8);
-
-    // If value_kinds differ, not equal (different dynamic types)
-    if left_vk != right_vk {
-        call.ret_bool(0, false);
-        return ExternResult::Ok;
+unsafe fn builtin_iface_eq_raw(call: &mut ExternCallContext) -> ExternResult {
+    let result = crate::objects::compare::iface_eq(
+        call.arg_u64(0),
+        call.arg_u64(1),
+        call.arg_u64(2),
+        call.arg_u64(3),
+        call.module(),
+    );
+    match result {
+        0 | 1 => {
+            call.ret_bool(0, result == 1);
+            ExternResult::Ok
+        }
+        2 => ExternResult::Panic(crate::objects::compare::UNCOMPARABLE_INTERFACE_ERROR.to_string()),
+        code => ExternResult::Panic(format!(
+            "internal error: invalid interface equality result {code}"
+        )),
     }
+}
 
-    // Compare based on value_kind
-    let equal = match left_vk {
-        ValueKind::Void => true, // both nil
-        ValueKind::Bool
-        | ValueKind::Int
-        | ValueKind::Int8
-        | ValueKind::Int16
-        | ValueKind::Int32
-        | ValueKind::Int64
-        | ValueKind::Uint
-        | ValueKind::Uint8
-        | ValueKind::Uint16
-        | ValueKind::Uint32
-        | ValueKind::Uint64
-        | ValueKind::Float32
-        | ValueKind::Float64
-        | ValueKind::Pointer
-        | ValueKind::Slice
-        | ValueKind::Map
-        | ValueKind::Channel
-        | ValueKind::Port
-        | ValueKind::Closure
-        | ValueKind::Island => {
-            // Immediate or reference identity comparison
-            left_slot1 == right_slot1
-        }
-        ValueKind::String => {
-            // String content comparison
-            let left_ref = left_slot1 as crate::gc::GcRef;
-            let right_ref = right_slot1 as crate::gc::GcRef;
-            if left_ref == right_ref {
-                true
-            } else if left_ref.is_null() || right_ref.is_null() {
-                false
-            } else {
-                str_obj::as_str(left_ref) == str_obj::as_str(right_ref)
-            }
-        }
-        ValueKind::Struct | ValueKind::Array => {
-            // For struct/array in interface, compare rttid first, then data
-            // rttid is in bits 8-31 of slot0
-            let left_rttid = (left_slot0 >> 8) & 0xFFFFFF;
-            let right_rttid = (right_slot0 >> 8) & 0xFFFFFF;
-            if left_rttid != right_rttid {
-                false
-            } else {
-                // Same type - compare slot1 (GcRef to boxed data)
-                // For now, just compare references (identity)
-                // TODO: deep comparison for value equality
-                left_slot1 == right_slot1
-            }
-        }
-        ValueKind::Interface => {
-            // Nested interface - compare both slots
-            left_slot0 == right_slot0 && left_slot1 == right_slot1
-        }
-    };
-
-    call.ret_bool(0, equal);
-    ExternResult::Ok
+fn builtin_iface_eq(call: &mut ExternCallContext) -> ExternResult {
+    // Safety: interface operands originate from verified VM slots and remain
+    // rooted for comparison.
+    unsafe { builtin_iface_eq_raw(call) }
 }
 
 // ==================== String Conversion Functions ====================
@@ -328,7 +285,8 @@ fn conv_int_str(call: &mut ExternCallContext) -> ExternResult {
 /// []byte -> string (shares underlying array)
 fn conv_bytes_str(call: &mut ExternCallContext) -> ExternResult {
     let slice_ref = call.arg_ref(0);
-    let gc_ref = crate::objects::string::from_slice(call.gc(), slice_ref);
+    // Safety: the builtin ABI supplies a live byte-slice argument.
+    let gc_ref = unsafe { crate::objects::string::from_slice(call.gc(), slice_ref) };
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
@@ -336,7 +294,8 @@ fn conv_bytes_str(call: &mut ExternCallContext) -> ExternResult {
 /// string -> []byte (must copy)
 fn conv_str_bytes(call: &mut ExternCallContext) -> ExternResult {
     let str_ref = call.arg_ref(0);
-    let gc_ref = crate::objects::string::to_byte_slice_obj(call.gc(), str_ref);
+    // Safety: the builtin ABI supplies a live string argument.
+    let gc_ref = unsafe { crate::objects::string::to_byte_slice_obj(call.gc(), str_ref) };
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
@@ -344,7 +303,8 @@ fn conv_str_bytes(call: &mut ExternCallContext) -> ExternResult {
 /// []rune -> string
 fn conv_runes_str(call: &mut ExternCallContext) -> ExternResult {
     let slice_ref = call.arg_ref(0);
-    let gc_ref = crate::objects::string::from_rune_slice_obj(call.gc(), slice_ref);
+    // Safety: the builtin ABI supplies a live rune-slice argument.
+    let gc_ref = unsafe { crate::objects::string::from_rune_slice_obj(call.gc(), slice_ref) };
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
@@ -352,7 +312,8 @@ fn conv_runes_str(call: &mut ExternCallContext) -> ExternResult {
 /// string -> []rune
 fn conv_str_runes(call: &mut ExternCallContext) -> ExternResult {
     let str_ref = call.arg_ref(0);
-    let gc_ref = crate::objects::string::to_rune_slice_obj(call.gc(), str_ref);
+    // Safety: the builtin ABI supplies a live string argument.
+    let gc_ref = unsafe { crate::objects::string::to_rune_slice_obj(call.gc(), str_ref) };
     call.ret_ref(0, gc_ref);
     ExternResult::Ok
 }
@@ -528,7 +489,7 @@ mod tests {
     fn builtin_copy_and_append_barrier_before_existing_array_mutation_052() {
         let source = production_source();
         let builtin_copy = source
-            .split("fn builtin_copy(")
+            .split("unsafe fn builtin_copy_raw(")
             .nth(1)
             .and_then(|rest| rest.split("/// append(slice, other...)").next())
             .expect("builtin_copy section");
@@ -567,7 +528,7 @@ mod tests {
     fn builtin_spread_append_derives_elem_meta_from_containers_057() {
         let source = production_source();
         let append = source
-            .split("fn builtin_slice_append_slice(")
+            .split("unsafe fn builtin_slice_append_slice_raw(")
             .nth(1)
             .and_then(|rest| rest.split("/// Interface equality comparison").next())
             .expect("builtin_slice_append_slice section");

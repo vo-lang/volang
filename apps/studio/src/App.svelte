@@ -1,17 +1,18 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { readable, type Readable } from 'svelte/store';
+  import { get, readable, type Readable } from 'svelte/store';
   import { createServiceRegistry, type ServiceRegistry } from './lib/services/service_registry';
   import type { BootstrapContext, FsEntry, SessionInfo, ShareInfo, StudioMode } from './lib/types';
   import type { GitHubAccountState, ManagedProject } from './lib/project_catalog/types';
   import { ide } from './stores/ide';
   import { route, setModeHash } from './lib/router';
-  import { consolePush } from './stores/console';
+  import { console_, consolePush, type ConsoleLine } from './stores/console';
   import { editor, editorMarkSaved, editorOpen } from './stores/editor';
   import { session, sessionOpen } from './stores/session';
   import { runtime } from './stores/runtime';
   import { buildShareInfo } from './lib/session_share';
   import { BLOCKKART_GITHUB_URL, BLOCKKART_QUICKPLAY_SPEC } from './lib/quickplay';
+  import { quiesceRendererBridgeForSmoke, rendererBridgeSmokeState } from './lib/gui/renderer_bridge';
   import Sidebar from './components/Sidebar.svelte';
   import DevWorkbench from './components/DevWorkbench.svelte';
   import Home from './components/Home.svelte';
@@ -21,8 +22,12 @@
 
   type StudioBrowserSmokeDebugHook = {
     entryPath(): string | null;
+    consoleLines(): ConsoleLine[];
+    runtimeState(): unknown;
     dumpCurrent(): Promise<string>;
     dump(path: string): Promise<string>;
+    quiesceRenderLoop(): { renderers: unknown[]; stopped: number; sessionId: number | null };
+    rendererState(): { active: boolean; renderers: unknown[]; sessionId: number | null };
   };
 
   type StudioBrowserSmokeDebugBackend = {
@@ -225,6 +230,8 @@
     }
     studioBrowserSmokeDebugGlobal().__voStudioBrowserSmoke = {
       entryPath: () => sessionInfo?.entryPath ?? null,
+      consoleLines: () => get(console_).lines,
+      runtimeState: () => get(runtime),
       dumpCurrent: async () => {
         const entryPath = sessionInfo?.entryPath;
         if (!entryPath) {
@@ -233,6 +240,8 @@
         return dumpStudioBrowserSmokeEntry(entryPath);
       },
       dump: async (path: string) => dumpStudioBrowserSmokeEntry(path),
+      quiesceRenderLoop: () => quiesceRendererBridgeForSmoke(),
+      rendererState: () => rendererBridgeSmokeState(),
     };
   }
 
