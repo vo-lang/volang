@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24",
-    "voDevSourceDigest": "sha256:bc122f621490cbd4809f649dfc66f8b3ceb7140c1ef913ef89164833fce9b66f",
+    "voDevSourceDigest": "sha256:fd601be9726dcbe7b5a6c60ccc020851d97621c99d29a065bf563c612ddfb7d8",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
