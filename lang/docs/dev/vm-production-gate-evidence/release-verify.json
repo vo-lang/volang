@@ -3,7 +3,7 @@
   "selector": "release-verify",
   "changed": false,
   "passed": true,
-  "source_state": "vm-production-current-source:32b99637e081fc74c94b2946c593cb9cdd74fa8f2c646eab93822b6a6d869f9a",
+  "source_state": "vm-production-current-source:40eb39ec8ce753caa263fa6dbcef69e98be3b580273e6acbacdcf2a31cd26d0b",
   "tasks": [
     "release-verify-vogui",
     "release-verify-voplay",

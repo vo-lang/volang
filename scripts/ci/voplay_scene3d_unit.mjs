@@ -7,7 +7,7 @@ import { requireRepoRoot } from './repo_roots.mjs';
 import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const suite = argValue('--suite') || 'vehicle-dynamics';
+const suite = argValue('--suite') || 'all';
 const outDir = path.resolve(argValue('--out-dir') || process.env.VOPLAY_SCENE3D_UNIT_OUT_DIR || path.join(root, `target/voplay-${suite}-unit`));
 const gate = argValue('--gate') || path.basename(outDir);
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
@@ -52,9 +52,9 @@ function checkSourceCoverage(source) {
       'scene3d malformed contact packet records backend packet error',
     ],
   };
-  const required = suites[suite];
+  const required = suite === 'all' ? Object.values(suites).flat() : suites[suite];
   if (!required) {
-    fail(`unknown --suite ${suite}; expected ${Object.keys(suites).join(', ')}`);
+    fail(`unknown --suite ${suite}; expected all, ${Object.keys(suites).join(', ')}`);
   }
   const missing = required.filter((token) => !source.includes(token));
   if (missing.length > 0) {

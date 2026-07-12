@@ -7,7 +7,7 @@ import { requireRepoRoot } from './repo_roots.mjs';
 import { sourceBoundEvidence } from './source_bound_evidence.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const outDir = path.resolve(argValue('--out-dir') || process.env.VOPLAY_PHYSICS_STRESS_OUT_DIR || path.join(root, 'target/voplay-physics-stress'));
+const outDir = path.resolve(argValue('--out-dir') || process.env.VOPLAY_PHYSICS_STRESS_OUT_DIR || path.join(root, 'target/voplay-physics-industrial-stress'));
 const voplayRoot = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const voguiRoot = requireRepoRoot('VOGUI_ROOT', 'vogui');
 const vopackRoot = requireRepoRoot('VOPACK_ROOT', 'vopack');
@@ -369,7 +369,7 @@ report.gateIssues = gate.issues;
 report.status = gate.p0 === 0 && gate.p1 === 0 ? 'pass' : 'fail';
 report.generatedAt = generatedAt;
 report.freshEvidence = sourceBoundEvidence({
-  gate: outDir.includes('industrial') ? 'voplay-physics-industrial-stress' : 'voplay-physics-stress',
+  gate: 'voplay-physics-industrial-stress',
   generatedAt,
   root,
   repos: [

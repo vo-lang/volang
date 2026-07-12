@@ -4,6 +4,61 @@ version = 1
 fallback = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test"]
 unknown_path_policy = "fallback"
 
+[[lane]]
+selector = "ci-pr-policy"
+title = "Policy and build hygiene"
+tier = "fast"
+
+[[lane]]
+selector = "ci-pr-vm-jit"
+title = "VM and JIT"
+tier = "contract"
+
+[[lane]]
+selector = "ci-pr-runtime-gc"
+title = "Runtime and GC"
+tier = "contract"
+
+[[lane]]
+selector = "ci-pr-compiler-ffi"
+title = "Compiler and FFI"
+tier = "contract"
+
+[[lane]]
+selector = "ci-pr-language"
+title = "Language targets"
+tier = "contract"
+
+[[lane]]
+selector = "ci-pr-release-smoke"
+title = "Release smoke"
+tier = "release"
+
+[[lane]]
+selector = "ci-pr-studio"
+title = "Studio and quickplay"
+tier = "contract"
+
+[[lane]]
+selector = "ci-pr-voplay-static"
+title = "Voplay architecture"
+tier = "contract"
+
+[[lane]]
+selector = "ci-pr-voplay-scene3d"
+title = "Voplay Scene3D"
+tier = "contract"
+
+[[lane]]
+selector = "ci-pr-voplay-physics"
+title = "Voplay physics"
+tier = "stress"
+
+[[lane]]
+selector = "ci-pr-release-verify"
+title = "Release verification"
+tier = "release"
+
 [[known_prefix]]
 path = "skills/**"
 tasks = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test"]
@@ -46,14 +101,10 @@ tasks = [
   "ci-self-check",
   "voplay-render-architecture-lint",
   "blockkart-engine-boundary-lint",
-  "voplay-render-structure-lint",
   "blockkart-product-boundary-strict",
-  "voplay-framegraph-unit",
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
-  "voplay-vehicle-dynamics-unit",
-  "voplay-physics-backend-contract",
-  "voplay-physics-stress",
+  "voplay-scene3d-contract",
   "voplay-physics-industrial-stress",
   "quickplay-validate",
   "studio-browser-smoke",
@@ -70,13 +121,10 @@ tasks = [
   "quickplay-validate",
   "voplay-render-architecture-lint",
   "blockkart-engine-boundary-lint",
-  "voplay-render-structure-lint",
   "blockkart-product-boundary-strict",
-  "voplay-framegraph-unit",
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
-  "voplay-vehicle-dynamics-unit",
-  "voplay-physics-backend-contract",
+  "voplay-scene3d-contract",
   "voplay-physics-industrial-stress",
 ]
 
@@ -89,10 +137,7 @@ tasks = [
 
 [[known_prefix]]
 path = "eng/perf-budgets/**"
-tasks = [
-  "voplay-physics-stress",
-  "voplay-physics-industrial-stress",
-]
+tasks = ["voplay-physics-industrial-stress"]
 
 [[known_prefix]]
 path = "apps/studio/scripts/package_blockkart_quickplay.mjs"
@@ -102,7 +147,7 @@ tasks = [
 
 [[known_prefix]]
 path = "lang/crates/vo-runtime/**"
-tasks = ["cargo-test-runtime", "cargo-test-gc-runtime", "vo-test-runtime-contract", "vo-test-gc", "cargo-test-vm-hardening", "cargo-test-vm-hardening-jit"]
+tasks = ["cargo-test-runtime", "cargo-test-gc-runtime", "vo-test-runtime-contract", "vo-test-gc", "cargo-test-vm", "cargo-test-vm-hardening-jit"]
 
 [[known_prefix]]
 path = "lang/crates/vo-app-runtime/**"
@@ -141,7 +186,7 @@ tasks = [
   "vo-test-runtime-contract",
   "vo-test-jit-contract",
   "vo-test-gc",
-  "cargo-test-vm-hardening",
+  "cargo-test-vm",
   "cargo-test-vm-hardening-jit",
 ]
 
@@ -154,7 +199,7 @@ tasks = [
   "vo-test-runtime-contract",
   "vo-test-jit-contract",
   "vo-test-osr",
-  "cargo-test-jit-hardening",
+  "cargo-test-jit",
   "cargo-test-vm-hardening-jit",
 ]
 
@@ -164,8 +209,8 @@ tasks = [
   "cargo-test-vo-source-contract",
   "cargo-test-vo-dev",
   "cargo-test-runtime",
-  "cargo-test-jit-hardening",
-  "cargo-test-vm-hardening",
+  "cargo-test-jit",
+  "cargo-test-vm",
   "cargo-test-vm-hardening-jit",
 ]
 

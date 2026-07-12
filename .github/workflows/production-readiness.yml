@@ -122,5 +122,5 @@ jobs:
       - name: Check task tools
         run: cargo run -q -p vo-dev -- tool check --task "${{ matrix.task }}"
 
-      - name: Run gate task
-        run: cargo run -q -p vo-dev -- task run "task:${{ matrix.task }}"
+      - name: Run gate execution unit
+        run: cargo run -q -p vo-dev -- task run "${{ matrix.task }}"

@@ -1,4 +1,6 @@
-use crate::config::{load_tasks, load_toolchains, NodeWorkspace, Task, ToolchainFile};
+use crate::config::{
+    load_ci, load_tasks, load_toolchains, NodeWorkspace, Task, TaskFile, ToolchainFile,
+};
 use crate::first_party::{ci_checkout_for, CiCheckout};
 use crate::github_output::write_github_output;
 use crate::task_graph::{
@@ -102,6 +104,13 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
 #[derive(Debug, Serialize)]
 pub(crate) struct MatrixOutput {
     include: Vec<MatrixRow>,
+}
+
+#[derive(Debug)]
+struct ExecutionUnit {
+    selector: String,
+    title: String,
+    tier: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -289,25 +298,27 @@ fn final_gate_task_names(root: &Path) -> Result<Vec<String>> {
 pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOutput> {
     let config = load_tasks(root)?;
     let task_map = task_map(&config)?;
+    let ci = load_ci(root)?;
     let toolchains = load_toolchains(root)?;
     let python_version = desired_tool_version(&toolchains, "python")?;
     let node_version = desired_tool_version(&toolchains, "node")?;
     let wasm_pack_version = desired_tool_version(&toolchains, "wasm-pack")?;
     let mut include = Vec::new();
-    for name in task_names {
-        let task = task_map
-            .get(name)
-            .ok_or_else(|| anyhow!("unknown task for matrix: {name}"))?;
-        let tools = task_tools_recursive(root, name)?;
-        let repos = task_repos_recursive_from_map(&task_map, name)?;
+    for unit in execution_units(&config, &ci.lanes, task_names)? {
+        let selector_tasks = resolve_selector(&config, &unit.selector)?;
+        let tools = crate::task_graph::selector_tools_recursive(root, &unit.selector)?;
+        let mut repos = BTreeSet::new();
+        for task_name in &selector_tasks {
+            repos.extend(task_repos_recursive_from_map(&task_map, task_name)?);
+        }
         let repo = repos.iter().next().cloned().unwrap_or_default();
         let checkouts = ci_checkouts(root, &repos)?;
         let checkout = legacy_checkout(&checkouts);
         let named_checkouts = NamedCheckoutFields::from_checkouts(&checkouts);
         include.push(MatrixRow {
-            task: name.clone(),
-            title: task.title.clone(),
-            tier: task.tier.clone(),
+            task: unit.selector,
+            title: unit.title,
+            tier: unit.tier,
             repo,
             checkout: checkout.enabled,
             checkout_repository: checkout.repository,
@@ -349,13 +360,7 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
                 String::new()
             },
             node_lockfiles: if tools.contains("node") {
-                node_lockfiles_for_tasks(
-                    root,
-                    &task_map,
-                    &toolchains,
-                    std::slice::from_ref(name),
-                    true,
-                )?
+                node_lockfiles_for_tasks(root, &task_map, &toolchains, &selector_tasks, true)?
             } else {
                 String::new()
             },
@@ -365,12 +370,73 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
             } else {
                 String::new()
             },
-            linux_packages: task.linux_packages.join(" "),
+            linux_packages: selector_tasks
+                .iter()
+                .filter_map(|name| task_map.get(name))
+                .flat_map(|task| task.linux_packages.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(" "),
             tools: tools.into_iter().collect(),
             repos: repos.into_iter().collect(),
         });
     }
     Ok(MatrixOutput { include })
+}
+
+fn execution_units(
+    config: &TaskFile,
+    lanes: &[crate::config::CiLane],
+    task_names: &[String],
+) -> Result<Vec<ExecutionUnit>> {
+    let task_map = task_map(config)?;
+    for name in task_names {
+        if !task_map.contains_key(name) {
+            bail!("unknown task for matrix: {name}");
+        }
+    }
+    let planned = task_names.iter().cloned().collect::<BTreeSet<_>>();
+    let mut covered_by = BTreeMap::<String, String>::new();
+    let mut units = Vec::new();
+    for lane in lanes {
+        let lane_tasks = resolve_selector(config, &lane.selector)?;
+        let selected = lane_tasks
+            .iter()
+            .filter(|task| planned.contains(*task))
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            continue;
+        }
+        for task in selected {
+            if let Some(previous) = covered_by.insert(task.clone(), lane.selector.clone()) {
+                bail!(
+                    "CI task {task} is covered by overlapping lanes {previous} and {}",
+                    lane.selector
+                );
+            }
+        }
+        units.push(ExecutionUnit {
+            selector: lane.selector.clone(),
+            title: lane.title.clone(),
+            tier: lane.tier.clone(),
+        });
+    }
+    for name in task_names {
+        if covered_by.contains_key(name) {
+            continue;
+        }
+        let task = task_map
+            .get(name)
+            .ok_or_else(|| anyhow!("unknown task for matrix: {name}"))?;
+        units.push(ExecutionUnit {
+            selector: name.clone(),
+            title: task.title.clone(),
+            tier: task.tier.clone(),
+        });
+    }
+    Ok(units)
 }
 
 pub(crate) fn ci_metadata_for(root: &Path, task_names: &[String]) -> Result<CiMetadata> {
@@ -562,5 +628,95 @@ impl NamedCheckoutFields {
             }
         }
         fields
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CiLane;
+
+    fn task(name: &str) -> Task {
+        Task {
+            name: name.to_string(),
+            title: name.to_string(),
+            command: vec!["true".to_string()],
+            tools: Vec::new(),
+            node_workspaces: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            tier: "contract".to_string(),
+            tags: Vec::new(),
+            owner: Some("eng".to_string()),
+            cwd: None,
+            env: BTreeMap::new(),
+            needs: Vec::new(),
+            repo: None,
+            repos: Vec::new(),
+            internal: false,
+            timeout_sec: Some(60),
+            platforms: Vec::new(),
+            linux_packages: Vec::new(),
+            shell: false,
+        }
+    }
+
+    fn config(groups: &[(&str, &[&str])], task_names: &[&str]) -> TaskFile {
+        TaskFile {
+            version: 1,
+            final_selectors: Vec::new(),
+            groups: groups
+                .iter()
+                .map(|(name, tasks)| {
+                    (
+                        (*name).to_string(),
+                        tasks.iter().map(|task| (*task).to_string()).collect(),
+                    )
+                })
+                .collect(),
+            group_meta: Vec::new(),
+            tasks: task_names.iter().map(|name| task(name)).collect(),
+        }
+    }
+
+    fn lane(selector: &str) -> CiLane {
+        CiLane {
+            selector: selector.to_string(),
+            title: selector.to_string(),
+            tier: "contract".to_string(),
+        }
+    }
+
+    #[test]
+    fn execution_units_compact_selected_tasks_into_their_lane() {
+        let config = config(&[("lane-a", &["compile", "test"])], &["compile", "test"]);
+        let units = execution_units(&config, &[lane("lane-a")], &["compile".to_string()])
+            .expect("execution lane");
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].selector, "lane-a");
+    }
+
+    #[test]
+    fn execution_units_keep_uncovered_final_gate_tasks_standalone() {
+        let config = config(&[("lane-a", &["compile"])], &["compile", "signoff"]);
+        let units = execution_units(&config, &[lane("lane-a")], &["signoff".to_string()])
+            .expect("standalone final gate");
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].selector, "signoff");
+    }
+
+    #[test]
+    fn execution_units_reject_overlapping_lanes() {
+        let config = config(&[("lane-a", &["test"]), ("lane-b", &["test"])], &["test"]);
+        let err = execution_units(
+            &config,
+            &[lane("lane-a"), lane("lane-b")],
+            &["test".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("covered by overlapping lanes"));
     }
 }

@@ -127,8 +127,8 @@ jobs:
       - name: Check task tools
         run: cargo run -q -p vo-dev -- tool check --task "${{ matrix.task }}"
 
-      - name: Run CI task
-        run: cargo run -q -p vo-dev -- task run "task:${{ matrix.task }}"
+      - name: Run CI lane
+        run: cargo run -q -p vo-dev -- task run "${{ matrix.task }}"
 
   gate:
     name: CI Gate

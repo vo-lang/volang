@@ -455,12 +455,11 @@ browser capture 失败都能定位到 stage 和 owner。
 ./d.py ci task voplay-engineering-quality-readiness
 ./d.py ci task voplay-industrial-readiness
 ./d.py ci task voplay-render-core-unit
-./d.py ci task voplay-framegraph-unit
-./d.py ci task voplay-render-structure-lint
+./d.py ci task voplay-render-architecture-lint
 ./d.py ci task voplay-batch-planner-unit
 ./d.py ci task voplay-render-stress-budgeted
 ./d.py ci task voplay-render-soak-10m
-./d.py ci task voplay-physics-backend-contract
+./d.py ci task voplay-scene3d-contract
 ./d.py ci task voplay-physics-industrial-stress
 ./d.py ci task blockkart-product-boundary-strict
 ./d.py ci task quickplay-source-audit

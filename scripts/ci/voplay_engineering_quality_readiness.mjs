@@ -1134,7 +1134,7 @@ issue(
   'P1',
   'voplay/render',
   'FrameGraph fails before execution when required reads or writes are missing.',
-  './d.py ci task voplay-framegraph-unit',
+  './d.py ci task voplay-render-core-unit',
   '2026-07-06',
   'Add pre-dispatch validation and regression tests for missing reads/writes.',
   frameGraphHardFail,
@@ -1208,7 +1208,7 @@ issue(
   'P2',
   'voplay/render',
   'Render ownership files stay inside file budget with owner tests.',
-  './d.py ci task voplay-render-structure-lint',
+  './d.py ci task voplay-render-architecture-lint',
   '2026-07-12',
   'Keep file-budget lint active; split resident store, batching, upload, cache, and submitters in follow-up slices.',
   renderBudgetReady,
@@ -1247,7 +1247,7 @@ issue(
   'P1',
   'voplay/scene3d',
   'Road-edge constraints, boost state, contact surface, and per-wheel telemetry have a single physics authority path.',
-  './d.py ci task voplay-physics-backend-contract',
+  './d.py ci task voplay-scene3d-contract',
   '2026-07-07',
   'Move edge assist and boost authority into fixed-step dynamics and expose per-wheel contact telemetry.',
   physicsAuthorityReady,
@@ -1393,12 +1393,11 @@ const requiredFinalGateCommands = [
   './d.py ci task voplay-engineering-quality-readiness',
   './d.py ci task voplay-industrial-readiness',
   './d.py ci task voplay-render-core-unit',
-  './d.py ci task voplay-framegraph-unit',
-  './d.py ci task voplay-render-structure-lint',
+  './d.py ci task voplay-render-architecture-lint',
   './d.py ci task voplay-batch-planner-unit',
   './d.py ci task voplay-render-stress-budgeted',
   './d.py ci task voplay-render-soak-10m',
-  './d.py ci task voplay-physics-backend-contract',
+  './d.py ci task voplay-scene3d-contract',
   './d.py ci task voplay-physics-industrial-stress',
   './d.py ci task blockkart-product-boundary-strict',
   './d.py ci task quickplay-source-audit',
@@ -1529,7 +1528,7 @@ const sourceAuditFailures = [
     blockKartFiles,
   }),
 ];
-const physicsContractReport = jsonMaybe('target/voplay-physics-backend-contract/report.json');
+const physicsContractReport = jsonMaybe('target/voplay-scene3d-contract/report.json');
 const blockKartBoundaryReport = jsonMaybe('target/blockkart-product-boundary-strict/report.json');
 const renderStressStructuredReady = renderStressReport?.status === 'pass'
   && renderStressReport?.coverage?.primitive10k === true
@@ -1655,7 +1654,7 @@ const stringOnlyChecks = [
     code: 'Q-P1-PHYSICS-AUTHORITY',
     owner: 'voplay/scene3d',
     reason: 'uses token presence instead of backend consumption behavior',
-    gate: './d.py ci task voplay-physics-backend-contract',
+    gate: './d.py ci task voplay-scene3d-contract',
   } : null,
   !blockKartProductStructuredReady ? {
     code: 'Q-P1-BLOCKKART-PRODUCT-OWNERS',
@@ -1684,7 +1683,7 @@ const hardFailures = [
     severity: 'P0',
     owner: 'voplay/render',
     expected: `${entry.file} must stay within its file budget (${entry.lines}/${entry.budget}, over by ${entry.overBy}).`,
-    gate: './d.py ci task voplay-render-structure-lint',
+    gate: './d.py ci task voplay-render-architecture-lint',
     evidence: entry,
   })),
   ...(!codeOwnershipPass ? [{
@@ -1692,7 +1691,7 @@ const hardFailures = [
     severity: 'P0',
     owner: 'voplay/render',
     expected: 'codeOwnership.status must be pass; owner modules must have real production responsibility and budget compliance.',
-    gate: './d.py ci task voplay-render-structure-lint',
+    gate: './d.py ci task voplay-render-architecture-lint',
     evidence: {
       renderBudgetReady,
       blockKartProductReady,

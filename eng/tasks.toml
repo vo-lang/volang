@@ -6,17 +6,12 @@ quality = [
   "ci-self-check",
   "d-py-smoke",
   "eng-lint-tasks",
-  "eng-lint-artifacts",
-  "eng-lint-repo-boundaries",
-  "eng-lint-release",
-  "eng-lint-layout",
   "docs-lint",
   "eng-lint-examples",
   "eng-lint-benchmarks",
   "node-audit-current",
   "cargo-fmt",
   "cargo-clippy",
-  "cargo-check",
   "wasm-check",
 ]
 
@@ -80,10 +75,10 @@ runtime-surface-contract = [
 ]
 
 vm-hardening = [
-  "cargo-test-common-core-hardening",
-  "cargo-test-jit-hardening",
+  "cargo-test-common-core",
+  "cargo-test-jit",
   "cargo-test-vo-source-contract",
-  "cargo-test-vm-hardening",
+  "cargo-test-vm",
   "cargo-test-vm-hardening-jit",
 ]
 
@@ -198,17 +193,13 @@ app-site = [
   "voplay-sample-validate",
   "voplay-render-architecture-lint",
   "blockkart-engine-boundary-lint",
-  "voplay-render-structure-lint",
   "blockkart-product-boundary-strict",
-  "voplay-framegraph-unit",
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
-  "voplay-vehicle-dynamics-unit",
-  "voplay-physics-backend-contract",
+  "voplay-scene3d-contract",
   "voplay-render-stress",
   "voplay-render-stress-budgeted",
   "voplay-render-soak-10m",
-  "voplay-physics-stress",
   "voplay-physics-industrial-stress",
   "quickplay-source-audit",
   "quickplay-regenerate-check",
@@ -223,6 +214,7 @@ app-site = [
 ]
 
 voplay-industrial = [
+  "eng-lint-artifacts",
   "voplay-industrial-source-audit",
   "voplay-industrial-readiness-report",
   "voplay-industrial-readiness",
@@ -279,14 +271,10 @@ pr = [
   "voplay-sample-validate",
   "voplay-render-architecture-lint",
   "blockkart-engine-boundary-lint",
-  "voplay-render-structure-lint",
   "blockkart-product-boundary-strict",
-  "voplay-framegraph-unit",
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
-  "voplay-vehicle-dynamics-unit",
-  "voplay-physics-backend-contract",
-  "voplay-physics-stress",
+  "voplay-scene3d-contract",
   "voplay-physics-industrial-stress",
   "quickplay-source-audit",
   "quickplay-regenerate-check",
@@ -295,6 +283,92 @@ pr = [
   "blockkart-smoke-static",
   "release-verify",
 ]
+
+# GitHub Actions executes these lanes. Each PR task belongs to exactly one lane,
+# so dependencies are resolved once inside that lane instead of once in the
+# matrix planner and again in every task job.
+ci-pr-policy = [
+  "ci-self-check",
+  "d-py-smoke",
+  "eng-lint-tasks",
+  "docs-lint",
+  "eng-lint-benchmarks",
+  "node-audit-current",
+  "cargo-fmt",
+  "cargo-clippy",
+  "wasm-check",
+]
+
+ci-pr-vm-jit = [
+  "cargo-test-common-core",
+  "cargo-test-jit",
+  "cargo-test-vo-source-contract",
+  "cargo-test-vm",
+  "cargo-test-vm-hardening-jit",
+]
+
+ci-pr-runtime-gc = [
+  "cargo-test-runtime",
+  "cargo-test-gc-runtime",
+  "cargo-test-gc-vm",
+  "cargo-test-gc-vm-jit",
+  "cargo-test-gc-jit",
+  "cargo-check-vo-app-runtime",
+  "cargo-test-vo-app-runtime",
+  "cargo-test-vo-engine",
+  "cargo-test-vo-playground-host-wake",
+]
+
+ci-pr-compiler-ffi = [
+  "cargo-test-stdlib",
+  "cargo-test-web-runtime-wasm",
+  "cargo-test-ffi-macro",
+  "cargo-test-vo-ext",
+  "cargo-check-vo-ext-wasm",
+  "cargo-test-analysis",
+  "cargo-test-codegen",
+  "cargo-test-web-hardening",
+  "cargo-test-studio-wasm-source-contract",
+  "cargo-test-vo-dev",
+  "cargo-test-vo-test",
+]
+
+ci-pr-language = [
+  "vo-test",
+  "vo-test-compile",
+  "vo-test-runtime-contract",
+  "vo-test-runtime-language-contract",
+  "vo-test-jit-contract",
+  "vo-test-osr",
+  "vo-test-nostd",
+  "vo-test-wasm",
+  "vo-test-gc",
+]
+
+ci-pr-release-smoke = [
+  "examples-smoke",
+  "cargo-test-release",
+  "wasm-check-release",
+  "vo-bench-jit-loop-smoke",
+  "vo-gc-perf-root-table-smoke",
+]
+
+ci-pr-studio = [
+  "studio-browser-smoke",
+  "blockkart-smoke-static",
+]
+
+ci-pr-voplay-static = [
+  "voplay-render-architecture-lint",
+  "blockkart-engine-boundary-lint",
+  "blockkart-product-boundary-strict",
+  "voplay-render-core-unit",
+  "voplay-batch-planner-unit",
+]
+
+ci-pr-voplay-scene3d = ["voplay-scene3d-contract"]
+ci-pr-voplay-physics = ["voplay-physics-industrial-stress"]
+ci-pr-release-verify = ["release-verify"]
 
 full = [
   "quality",
@@ -312,7 +386,7 @@ title = "Quality"
 tier_intent = "fast PR policy and source hygiene"
 owner = "eng"
 tags = ["quality", "repo-policy"]
-tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "eng-lint-artifacts", "eng-lint-repo-boundaries", "eng-lint-release", "eng-lint-layout", "docs-lint", "eng-lint-examples", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "cargo-clippy", "cargo-check", "wasm-check"]
+tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "docs-lint", "eng-lint-examples", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "cargo-clippy", "wasm-check"]
 included_in = ["pr", "full"]
 selection_policy = "Selected when the quality validation surface is requested or when a parent group includes it."
 
@@ -422,7 +496,7 @@ title = "VM Hardening"
 tier_intent = "release-blocking VM production readiness blocker regressions"
 owner = "runtime"
 tags = ["vm", "jit", "verifier", "hardening", "contract"]
-tasks = ["cargo-test-common-core-hardening", "cargo-test-jit-hardening", "cargo-test-vo-source-contract", "cargo-test-vm-hardening", "cargo-test-vm-hardening-jit"]
+tasks = ["cargo-test-common-core", "cargo-test-jit", "cargo-test-vo-source-contract", "cargo-test-vm", "cargo-test-vm-hardening-jit"]
 included_in = ["contract", "vm-production", "pr"]
 selection_policy = "Selected by contract and vm-production so blocker-named regression proofs cannot drift out of composed or release gates."
 
@@ -562,7 +636,7 @@ title = "App Site"
 tier_intent = "Studio vo-web quickplay and static site checks"
 owner = "studio"
 tags = ["app-site", "app-build", "app-smoke"]
-tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-physics-backend-contract", "voplay-render-stress", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline", "blockkart-baseline-start-race", "blockkart-baseline-storage-reload", "blockkart-baseline-restart-10", "blockkart-baseline-restart-50", "blockkart-smoke-static"]
+tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "blockkart-product-boundary-strict", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-scene3d-contract", "voplay-render-stress", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline", "blockkart-baseline-start-race", "blockkart-baseline-storage-reload", "blockkart-baseline-restart-10", "blockkart-baseline-restart-50", "blockkart-smoke-static"]
 included_in = ["site"]
 selection_policy = "Selected when the app-site validation surface is requested or when a parent group includes it."
 
@@ -572,7 +646,7 @@ title = "voplay Industrial"
 tier_intent = "explicit voplay industrial readiness final gate"
 owner = "studio"
 tags = ["app-site", "contract", "final-gate", "voplay"]
-tasks = ["voplay-industrial-source-audit", "voplay-industrial-readiness-report", "voplay-industrial-readiness"]
+tasks = ["eng-lint-artifacts", "voplay-industrial-source-audit", "voplay-industrial-readiness-report", "voplay-industrial-readiness"]
 included_in = ["site"]
 selection_policy = "Selected by the site final gate and explicit voplay industrial readiness runs."
 
@@ -593,7 +667,7 @@ tier_intent = "first-party release verification"
 owner = "release"
 tags = ["release-verify"]
 tasks = ["release-verify-vogui", "release-verify-voplay", "release-verify-vopack", "release-verify-vostore"]
-included_in = ["pr", "full"]
+included_in = ["pr", "full", "ci-pr-release-verify"]
 selection_policy = "Selected when the release-verify validation surface is requested or when a parent group includes it."
 
 [[group]]
@@ -622,9 +696,119 @@ title = "PR"
 tier_intent = "normal pull request validation"
 owner = "eng"
 tags = ["pr"]
-tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-physics-backend-contract", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-smoke-static", "release-verify"]
+tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "blockkart-product-boundary-strict", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-scene3d-contract", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-smoke-static", "release-verify"]
 included_in = []
 selection_policy = "Selected when the pr validation surface is requested or when a parent group includes it."
+
+[[group]]
+name = "ci-pr-policy"
+title = "PR Policy"
+tier_intent = "repository policy formatting lint and portable build hygiene"
+owner = "eng"
+tags = ["ci-lane", "pr", "policy"]
+tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "docs-lint", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "cargo-clippy", "wasm-check"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for PR policy and build hygiene tasks."
+
+[[group]]
+name = "ci-pr-vm-jit"
+title = "PR VM and JIT"
+tier_intent = "VM verifier interpreter and JIT crate contracts"
+owner = "runtime"
+tags = ["ci-lane", "pr", "vm", "jit"]
+tasks = ["cargo-test-common-core", "cargo-test-jit", "cargo-test-vo-source-contract", "cargo-test-vm", "cargo-test-vm-hardening-jit"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for VM and JIT crate contracts."
+
+[[group]]
+name = "ci-pr-runtime-gc"
+title = "PR Runtime and GC"
+tier_intent = "runtime GC app-runtime engine and host contracts"
+owner = "runtime"
+tags = ["ci-lane", "pr", "runtime", "gc"]
+tasks = ["cargo-test-runtime", "cargo-test-gc-runtime", "cargo-test-gc-vm", "cargo-test-gc-vm-jit", "cargo-test-gc-jit", "cargo-check-vo-app-runtime", "cargo-test-vo-app-runtime", "cargo-test-vo-engine", "cargo-test-vo-playground-host-wake"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for runtime and GC contracts."
+
+[[group]]
+name = "ci-pr-compiler-ffi"
+title = "PR Compiler and FFI"
+tier_intent = "compiler stdlib web FFI and developer-tool contracts"
+owner = "compiler"
+tags = ["ci-lane", "pr", "compiler", "ffi"]
+tasks = ["cargo-test-stdlib", "cargo-test-web-runtime-wasm", "cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm", "cargo-test-analysis", "cargo-test-codegen", "cargo-test-web-hardening", "cargo-test-studio-wasm-source-contract", "cargo-test-vo-dev", "cargo-test-vo-test"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for compiler FFI web and developer-tool contracts."
+
+[[group]]
+name = "ci-pr-language"
+title = "PR Language"
+tier_intent = "language behavior across VM JIT OSR no-std WASM and GC targets"
+owner = "lang"
+tags = ["ci-lane", "pr", "lang-case"]
+tasks = ["vo-test", "vo-test-compile", "vo-test-runtime-contract", "vo-test-runtime-language-contract", "vo-test-jit-contract", "vo-test-osr", "vo-test-nostd", "vo-test-wasm", "vo-test-gc"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for language behavior across supported targets."
+
+[[group]]
+name = "ci-pr-release-smoke"
+title = "PR Release Smoke"
+tier_intent = "release profile examples WASM and focused performance smoke checks"
+owner = "release"
+tags = ["ci-lane", "pr", "release", "benchmark"]
+tasks = ["examples-smoke", "cargo-test-release", "wasm-check-release", "vo-bench-jit-loop-smoke", "vo-gc-perf-root-table-smoke"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for release-profile smoke checks."
+
+[[group]]
+name = "ci-pr-studio"
+title = "PR Studio"
+tier_intent = "shared Studio build quickplay validation and browser startup"
+owner = "studio"
+tags = ["ci-lane", "pr", "studio", "quickplay"]
+tasks = ["studio-browser-smoke", "blockkart-smoke-static"]
+included_in = []
+selection_policy = "GitHub Actions execution lane that shares one Studio and quickplay build."
+
+[[group]]
+name = "ci-pr-voplay-static"
+title = "PR Voplay Static"
+tier_intent = "render architecture BlockKart boundaries and Rust render units"
+owner = "studio"
+tags = ["ci-lane", "pr", "voplay", "architecture"]
+tasks = ["voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "blockkart-product-boundary-strict", "voplay-render-core-unit", "voplay-batch-planner-unit"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for Voplay architecture and render units."
+
+[[group]]
+name = "ci-pr-voplay-scene3d"
+title = "PR Voplay Scene3D"
+tier_intent = "scene3d vehicle dynamics and physics backend contracts"
+owner = "studio"
+tags = ["ci-lane", "pr", "voplay", "physics"]
+tasks = ["voplay-scene3d-contract"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for the consolidated Scene3D contract."
+
+[[group]]
+name = "ci-pr-voplay-physics"
+title = "PR Voplay Physics"
+tier_intent = "industrial headless physics stress and replay contract"
+owner = "studio"
+tags = ["ci-lane", "pr", "voplay", "physics", "stress"]
+tasks = ["voplay-physics-industrial-stress"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for industrial physics stress."
+
+[[group]]
+name = "ci-pr-release-verify"
+title = "PR Release Verify"
+tier_intent = "first-party package provenance verification"
+owner = "release"
+tags = ["ci-lane", "pr", "release-verify"]
+tasks = ["release-verify"]
+included_in = []
+selection_policy = "GitHub Actions execution lane for first-party package verification."
 
 [[group]]
 name = "full"
@@ -723,18 +907,6 @@ owner = "eng"
 timeout_sec = 600
 
 [[task]]
-name = "eng-lint-repo-boundaries"
-title = "engineering repo boundary lint"
-command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "repo-boundaries"]
-tools = ["rust", "vo-dev"]
-inputs = ["eng/project.toml", "eng/tasks.toml", "cmd/vo-dev/**", "scripts/ci/**", ".github/workflows/**", "d.py", "vo.work", "apps/playground-legacy/vite.config.ts", "apps/playground-legacy/rust/build.rs", "apps/playground-legacy/src/**", "apps/studio/src-tauri/**"]
-outputs = []
-tier = "fast"
-tags = ["repo-policy", "legacy-excluded"]
-owner = "eng"
-timeout_sec = 600
-
-[[task]]
 name = "eng-lint-release"
 title = "engineering release policy lint"
 command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "release"]
@@ -744,18 +916,6 @@ outputs = []
 tier = "fast"
 tags = ["release-verify", "repo-policy"]
 owner = "release"
-timeout_sec = 600
-
-[[task]]
-name = "eng-lint-layout"
-title = "repository layout lint"
-command = ["cargo", "run", "-q", "-p", "vo-dev", "--", "lint", "layout"]
-tools = ["rust", "vo-dev"]
-inputs = ["cmd/vo-dev/**", "Cargo.toml", "eng/**", "examples/manifest.toml", "tests/lang/manifest.toml", "benchmarks/manifest.toml", ".gitignore"]
-outputs = []
-tier = "fast"
-tags = ["repo-policy"]
-owner = "eng"
 timeout_sec = 600
 
 [[task]]
@@ -854,18 +1014,6 @@ inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchai
 outputs = []
 tier = "fast"
 tags = ["crate-unit", "repo-policy"]
-owner = "eng"
-timeout_sec = 3600
-
-[[task]]
-name = "cargo-check"
-title = "cargo check"
-command = ["cargo", "check", "--workspace", "--all-targets", "--exclude", "vo-playground"]
-tools = ["rust"]
-inputs = ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/actions/setup-rust/**"]
-outputs = []
-tier = "fast"
-tags = ["crate-integration", "repo-policy"]
 owner = "eng"
 timeout_sec = 3600
 
@@ -1081,18 +1229,6 @@ tags = ["common-core", "bytecode", "verifier", "crate-unit", "contract"]
 owner = "runtime"
 
 [[task]]
-name = "cargo-test-common-core-hardening"
-title = "cargo common-core VM hardening regressions"
-command = ["cargo", "test", "-p", "vo-common-core"]
-timeout_sec = 600
-tools = ["rust"]
-inputs = ["lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
-outputs = []
-tier = "contract"
-tags = ["common-core", "bytecode", "verifier", "vm", "hardening", "crate-unit", "contract"]
-owner = "runtime"
-
-[[task]]
 name = "cargo-test-jit"
 title = "cargo JIT contract tests"
 command = ["cargo", "test", "-p", "vo-jit"]
@@ -1102,18 +1238,6 @@ inputs = ["lang/crates/vo-jit/**", "lang/crates/vo-runtime/**", "lang/crates/vo-
 outputs = []
 tier = "contract"
 tags = ["jit", "crate-unit", "contract"]
-owner = "jit"
-
-[[task]]
-name = "cargo-test-jit-hardening"
-title = "cargo JIT hardening regressions"
-command = ["cargo", "test", "-p", "vo-jit"]
-timeout_sec = 1800
-tools = ["rust"]
-inputs = ["lang/crates/vo-jit/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
-outputs = []
-tier = "contract"
-tags = ["jit", "hardening", "crate-unit", "contract"]
 owner = "jit"
 
 [[task]]
@@ -1210,18 +1334,6 @@ inputs = ["lang/crates/vo-vm/**", "lang/crates/vo-runtime/**", "lang/crates/vo-c
 outputs = []
 tier = "contract"
 tags = ["runtime", "vm", "crate-unit", "contract"]
-owner = "runtime"
-
-[[task]]
-name = "cargo-test-vm-hardening"
-title = "cargo VM hardening regressions"
-command = ["cargo", "test", "-p", "vo-vm"]
-timeout_sec = 3600
-tools = ["rust"]
-inputs = ["lang/crates/vo-vm/**", "lang/crates/vo-runtime/**", "lang/crates/vo-common-core/**", "Cargo.toml", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
-outputs = []
-tier = "contract"
-tags = ["runtime", "vm", "hardening", "crate-unit", "contract"]
 owner = "runtime"
 
 [[task]]
@@ -1772,20 +1884,6 @@ owner = "studio"
 timeout_sec = 120
 
 [[task]]
-name = "voplay-render-structure-lint"
-title = "lint strict voplay render structure boundaries"
-command = ["node", "scripts/ci/voplay_render_architecture_lint.mjs", "--gate", "voplay-render-structure-lint", "--out-dir", "target/voplay-render-structure-lint"]
-tools = ["node"]
-node_workspaces = ["studio"]
-repo = "voplay"
-inputs = ["scripts/ci/voplay_render_architecture_lint.mjs", "module-cache:voplay", "external:BlockKart"]
-outputs = ["target/voplay-render-structure-lint"]
-tier = "contract"
-tags = ["app-smoke", "contract", "architecture", "perf"]
-owner = "studio"
-timeout_sec = 120
-
-[[task]]
 name = "blockkart-boundary-facts-selftest"
 title = "prove BlockKart boundary facts reject aliases and broad wrappers"
 command = ["node", "scripts/ci/blockkart_boundary_facts_selftest.mjs"]
@@ -1813,21 +1911,6 @@ tier = "contract"
 tags = ["app-smoke", "contract", "architecture", "physics"]
 owner = "studio"
 timeout_sec = 120
-
-[[task]]
-name = "voplay-framegraph-unit"
-title = "run voplay framegraph unit tests"
-command = ["node", "scripts/ci/voplay_rust_unit.mjs", "--suite", "renderer_frame", "--gate", "voplay-framegraph-unit", "--out-dir", "target/voplay-framegraph-unit"]
-linux_packages = ["libasound2-dev"]
-tools = ["node", "rust"]
-node_workspaces = ["studio"]
-repo = "voplay"
-inputs = ["scripts/ci/voplay_rust_unit.mjs", "module-cache:voplay"]
-outputs = ["target/voplay-framegraph-unit"]
-tier = "contract"
-tags = ["app-smoke", "contract", "architecture", "perf"]
-owner = "studio"
-timeout_sec = 900
 
 [[task]]
 name = "voplay-render-core-unit"
@@ -1860,30 +1943,15 @@ owner = "studio"
 timeout_sec = 900
 
 [[task]]
-name = "voplay-vehicle-dynamics-unit"
-title = "run voplay vehicle dynamics unit contract"
-command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "vehicle-dynamics", "--out-dir", "target/voplay-vehicle-dynamics-unit"]
+name = "voplay-scene3d-contract"
+title = "run voplay scene3d and physics contracts"
+command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "all", "--out-dir", "target/voplay-scene3d-contract"]
 linux_packages = ["libasound2-dev"]
 tools = ["node"]
 node_workspaces = ["studio"]
 repo = "voplay"
 inputs = ["scripts/ci/voplay_scene3d_unit.mjs", "module-cache:voplay", "module-cache:vogui", "module-cache:vopack"]
-outputs = ["target/voplay-vehicle-dynamics-unit"]
-tier = "contract"
-tags = ["app-smoke", "contract", "physics"]
-owner = "studio"
-timeout_sec = 3600
-
-[[task]]
-name = "voplay-physics-backend-contract"
-title = "run voplay physics backend contract"
-command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "physics-backend", "--out-dir", "target/voplay-physics-backend-contract"]
-linux_packages = ["libasound2-dev"]
-tools = ["node"]
-node_workspaces = ["studio"]
-repo = "voplay"
-inputs = ["scripts/ci/voplay_scene3d_unit.mjs", "module-cache:voplay", "module-cache:vogui", "module-cache:vopack"]
-outputs = ["target/voplay-physics-backend-contract"]
+outputs = ["target/voplay-scene3d-contract"]
 tier = "contract"
 tags = ["app-smoke", "contract", "physics"]
 owner = "studio"
@@ -1950,21 +2018,6 @@ owner = "studio"
 timeout_sec = 3600
 
 [[task]]
-name = "voplay-physics-stress"
-title = "stress voplay headless vehicle physics scenarios"
-command = ["node", "scripts/ci/voplay_physics_stress.mjs", "--out-dir", "target/voplay-physics-stress"]
-linux_packages = ["libasound2-dev"]
-tools = ["node"]
-node_workspaces = ["studio"]
-repo = "voplay"
-inputs = ["scripts/ci/voplay_physics_stress.mjs", "eng/perf-budgets/blockkart-voplay.schema.json", "eng/perf-budgets/blockkart-voplay.medium.json", "module-cache:voplay", "module-cache:vopack", "module-cache:vogui"]
-outputs = ["target/voplay-physics-stress"]
-tier = "contract"
-tags = ["app-smoke", "contract", "perf", "physics"]
-owner = "studio"
-timeout_sec = 3600
-
-[[task]]
 name = "voplay-physics-industrial-stress"
 title = "stress voplay industrial vehicle physics scenarios"
 command = ["node", "scripts/ci/voplay_physics_stress.mjs", "--out-dir", "target/voplay-physics-industrial-stress"]
@@ -2027,7 +2080,7 @@ timeout_sec = 60
 name = "voplay-industrial-readiness"
 title = "verify voplay industrial readiness final gate"
 command = ["node", "scripts/ci/voplay_industrial_readiness.mjs", "--out-dir", "target/voplay-industrial-readiness"]
-needs = ["eng-lint-artifacts", "source-bound-evidence-selftest", "voplay-render-observability-selftest", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-render-structure-lint", "voplay-batch-planner-unit", "voplay-physics-backend-contract", "blockkart-product-boundary-strict", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
+needs = ["eng-lint-artifacts", "source-bound-evidence-selftest", "voplay-render-observability-selftest", "voplay-render-core-unit", "voplay-render-architecture-lint", "voplay-batch-planner-unit", "voplay-scene3d-contract", "blockkart-product-boundary-strict", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
 tools = ["node"]
 node_workspaces = ["studio"]
 repo = "voplay"
@@ -2042,7 +2095,7 @@ timeout_sec = 120
 name = "voplay-engineering-quality-readiness"
 title = "verify voplay engineering quality readiness final gate"
 command = ["node", "scripts/ci/voplay_engineering_quality_readiness.mjs", "--out-dir", "target/voplay-engineering-quality-readiness"]
-needs = ["eng-lint-artifacts", "source-bound-evidence-selftest", "node-audit-current", "voplay-industrial-readiness", "voplay-render-observability-selftest", "voplay-render-core-unit", "voplay-framegraph-unit", "voplay-render-structure-lint", "voplay-batch-planner-unit", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-backend-contract", "voplay-physics-industrial-stress", "blockkart-product-boundary-strict", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
+needs = ["eng-lint-artifacts", "source-bound-evidence-selftest", "node-audit-current", "voplay-industrial-readiness", "voplay-render-observability-selftest", "voplay-render-core-unit", "voplay-render-architecture-lint", "voplay-batch-planner-unit", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-scene3d-contract", "voplay-physics-industrial-stress", "blockkart-product-boundary-strict", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "blockkart-baseline", "blockkart-baseline-restart-50"]
 tools = ["node", "npm"]
 node_workspaces = ["studio", "vogui-js"]
 repo = "voplay"

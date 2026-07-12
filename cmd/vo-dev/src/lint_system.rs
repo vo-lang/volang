@@ -430,18 +430,15 @@ fn lint_vo_dev_source_contract_consumer_inputs(task_map: &BTreeMap<String, Task>
 
 const VM_HARDENING_UNFILTERED_CRATE_TESTS: &[(&str, &[&str])] = &[
     (
-        "cargo-test-common-core-hardening",
+        "cargo-test-common-core",
         &["cargo", "test", "-p", "vo-common-core"],
     ),
-    (
-        "cargo-test-jit-hardening",
-        &["cargo", "test", "-p", "vo-jit"],
-    ),
+    ("cargo-test-jit", &["cargo", "test", "-p", "vo-jit"]),
     (
         "cargo-test-vo-source-contract",
         &["cargo", "test", "-p", "vo-source-contract"],
     ),
-    ("cargo-test-vm-hardening", &["cargo", "test", "-p", "vo-vm"]),
+    ("cargo-test-vm", &["cargo", "test", "-p", "vo-vm"]),
     (
         "cargo-test-vm-hardening-jit",
         &["cargo", "test", "-p", "vo-vm", "--features", "jit"],
@@ -764,6 +761,36 @@ fn lint_ci_file(root: &Path, config: &TaskFile, task_map: &BTreeMap<String, Task
             validate_ci_route_task(task_map, &format!("known_prefix {}", prefix.path), task)?;
         }
     }
+    if ci.lanes.is_empty() {
+        bail!("eng/ci.toml must declare at least one CI execution lane");
+    }
+    let mut lane_names = HashSet::new();
+    let mut task_lanes = BTreeMap::<String, String>::new();
+    for lane in &ci.lanes {
+        validate_ascii_slug("ci lane selector", &lane.selector, &['-'])?;
+        if !lane_names.insert(lane.selector.clone()) {
+            bail!(
+                "eng/ci.toml has duplicate CI lane selector {}",
+                lane.selector
+            );
+        }
+        if lane.title.trim().is_empty() || lane.tier.trim().is_empty() {
+            bail!("CI lane {} must declare title and tier", lane.selector);
+        }
+        for task in resolve_selector(config, &lane.selector)? {
+            if let Some(previous) = task_lanes.insert(task.clone(), lane.selector.clone()) {
+                bail!(
+                    "CI task {task} is covered by overlapping lanes {previous} and {}",
+                    lane.selector
+                );
+            }
+        }
+    }
+    for task in resolve_selector(config, "pr")? {
+        if !task_lanes.contains_key(&task) {
+            bail!("PR task {task} is not assigned to a CI execution lane");
+        }
+    }
     lint_vm_readiness_changed_prefixes(&ci.known_prefix)?;
     lint_vm_readiness_changed_prefix_scopes(&ci.known_prefix, config)?;
     Ok(())
@@ -775,7 +802,7 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
         &[
             "vo-test-runtime-contract",
             "vo-test-jit-contract",
-            "cargo-test-vm-hardening",
+            "cargo-test-vm",
             "cargo-test-vm-hardening-jit",
         ],
     ),
@@ -786,7 +813,7 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
             "cargo-test-gc-runtime",
             "vo-test-runtime-contract",
             "vo-test-gc",
-            "cargo-test-vm-hardening",
+            "cargo-test-vm",
             "cargo-test-vm-hardening-jit",
         ],
     ),
@@ -795,7 +822,7 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
         &[
             "vo-test-runtime-contract",
             "vo-test-jit-contract",
-            "cargo-test-jit-hardening",
+            "cargo-test-jit",
             "cargo-test-vm-hardening-jit",
         ],
     ),
@@ -805,8 +832,8 @@ const VM_READINESS_CHANGED_PREFIX_TASKS: &[(&str, &[&str])] = &[
             "cargo-test-vo-source-contract",
             "cargo-test-vo-dev",
             "cargo-test-runtime",
-            "cargo-test-jit-hardening",
-            "cargo-test-vm-hardening",
+            "cargo-test-jit",
+            "cargo-test-vm",
             "cargo-test-vm-hardening-jit",
         ],
     ),

@@ -1830,14 +1830,6 @@ function passStatusReport(report, detail) {
 }
 
 checkReport(
-  path.join(root, 'target/voplay-framegraph-unit/report.json'),
-  'phase-2',
-  'gate.voplay_framegraph_unit',
-  (report) => passStatusReport(report, 'voplay framegraph unit report passes'),
-  'voplay-framegraph-unit',
-);
-
-checkReport(
   path.join(root, 'target/voplay-render-core-unit/report.json'),
   'phase-2',
   'gate.voplay_render_core_unit',
@@ -1846,11 +1838,11 @@ checkReport(
 );
 
 checkReport(
-  path.join(root, 'target/voplay-render-structure-lint/report.json'),
+  path.join(root, 'target/voplay-render-architecture-lint/report.json'),
   'phase-2',
-  'gate.voplay_render_structure_lint',
-  (report) => passStatusReport(report, 'voplay render structure lint report passes'),
-  'voplay-render-structure-lint',
+  'gate.voplay_render_architecture_lint',
+  (report) => passStatusReport(report, 'voplay render architecture lint report passes'),
+  'voplay-render-architecture-lint',
 );
 
 checkReport(
@@ -1862,11 +1854,11 @@ checkReport(
 );
 
 checkReport(
-  path.join(root, 'target/voplay-physics-backend-contract/report.json'),
+  path.join(root, 'target/voplay-scene3d-contract/report.json'),
   'phase-4',
-  'gate.voplay_physics_backend_contract',
-  (report) => passStatusReport(report, 'voplay physics backend contract report passes'),
-  'voplay-physics-backend-contract',
+  'gate.voplay_scene3d_contract',
+  (report) => passStatusReport(report, 'voplay Scene3D contract report passes'),
+  'voplay-scene3d-contract',
 );
 
 checkReport(

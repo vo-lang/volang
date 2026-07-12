@@ -17,7 +17,7 @@ shell snippets. Add the data here and route execution through `vo-dev`.
   workspaces, and Node/npm workspace lockfile policy.
 - `tests.toml`: language test targets, aliases, default selections, target
   commands, target environments, and test policy constants.
-- `ci.toml`: changed-file planning policy and fallback task routing.
+- `ci.toml`: changed-file routing and the small set of GitHub execution lanes.
 - `project.toml`: Volang repo identity, first-party sibling repos, external
   project hints, CI checkout policy, and first-party workspaces.
 - `artifacts.toml`: checked-in generated artifact registry, generator commands,
@@ -32,6 +32,9 @@ shell snippets. Add the data here and route execution through `vo-dev`.
   maps, tool versions, or task behavior.
 - GitHub workflow YAML should request matrix and metadata from `vo-dev` instead
   of hard-coding task-specific tool setup.
+- PR planning stays task-granular. The generated GitHub matrix compacts selected
+  tasks into disjoint `ci-pr-*` groups, then resolves each dependency once inside
+  its lane. Final signoff selectors remain standalone matrix jobs.
 - First-party repo layout is declared in `project.toml`; task commands should
   reference declared workspaces instead of embedding subdirectory paths.
 - Checked-in generated artifacts must be listed in `artifacts.toml` and have a

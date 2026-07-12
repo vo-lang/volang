@@ -149,6 +149,15 @@ pub(crate) struct CiFile {
     pub(crate) changed_files: ChangedFiles,
     #[serde(default)]
     pub(crate) known_prefix: Vec<KnownPrefix>,
+    #[serde(default, rename = "lane")]
+    pub(crate) lanes: Vec<CiLane>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CiLane {
+    pub(crate) selector: String,
+    pub(crate) title: String,
+    pub(crate) tier: String,
 }
 
 #[derive(Debug, Deserialize)]

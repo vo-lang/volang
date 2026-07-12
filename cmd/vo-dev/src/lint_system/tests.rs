@@ -1790,24 +1790,22 @@ fn lint_vm_readiness_changed_prefixes_requires_vo_dev_contract_route() {
 }
 
 #[test]
-fn lint_vm_readiness_changed_prefixes_requires_runtime_vm_hardening_route() {
+fn lint_vm_readiness_changed_prefixes_requires_runtime_vm_route() {
     let mut prefixes = vm_readiness_prefixes();
     let runtime = prefixes
         .iter_mut()
         .find(|prefix| prefix.path == "lang/crates/vo-runtime/**")
         .expect("runtime prefix fixture");
-    runtime
-        .tasks
-        .retain(|task| task != "cargo-test-vm-hardening");
+    runtime.tasks.retain(|task| task != "cargo-test-vm");
 
     let err = lint_vm_readiness_changed_prefixes(&prefixes).unwrap_err();
 
     assert!(
-            format!("{err:#}").contains(
-                "eng/ci.toml known_prefix lang/crates/vo-runtime/** must select cargo-test-vm-hardening"
-            ),
-            "{err:#}"
-        );
+        format!("{err:#}").contains(
+            "eng/ci.toml known_prefix lang/crates/vo-runtime/** must select cargo-test-vm"
+        ),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -1853,8 +1851,8 @@ fn lint_vm_readiness_changed_prefixes_requires_source_contract_consumers_062() {
     for required in [
         "cargo-test-runtime",
         "cargo-test-vo-dev",
-        "cargo-test-jit-hardening",
-        "cargo-test-vm-hardening",
+        "cargo-test-jit",
+        "cargo-test-vm",
         "cargo-test-vm-hardening-jit",
     ] {
         let mut prefixes = vm_readiness_prefixes();
@@ -2102,8 +2100,8 @@ fn lint_vm_hardening_tasks_accepts_unfiltered_crate_tests_059() {
 fn lint_vm_hardening_tasks_rejects_name_filtered_crate_tests_059() {
     let mut task_map = vm_hardening_task_map();
     task_map
-        .get_mut("cargo-test-vm-hardening")
-        .expect("vm hardening task")
+        .get_mut("cargo-test-vm")
+        .expect("vm task")
         .command
         .push("vm_".to_string());
 
