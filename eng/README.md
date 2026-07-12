@@ -35,6 +35,8 @@ shell snippets. Add the data here and route execution through `vo-dev`.
 - PR planning stays task-granular. The generated GitHub matrix compacts selected
   tasks into disjoint `ci-pr-*` groups, then resolves each dependency once inside
   its lane. Final signoff selectors remain standalone matrix jobs.
+- Long industrial soak and replay workloads live in `site`/production readiness;
+  PR lanes keep the corresponding source, unit, Scene3D, and browser contracts.
 - First-party repo layout is declared in `project.toml`; task commands should
   reference declared workspaces instead of embedding subdirectory paths.
 - Checked-in generated artifacts must be listed in `artifacts.toml` and have a

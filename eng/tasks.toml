@@ -275,7 +275,6 @@ pr = [
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
   "voplay-scene3d-contract",
-  "voplay-physics-industrial-stress",
   "quickplay-source-audit",
   "quickplay-regenerate-check",
   "quickplay-validate",
@@ -367,7 +366,6 @@ ci-pr-voplay-static = [
 ]
 
 ci-pr-voplay-scene3d = ["voplay-scene3d-contract"]
-ci-pr-voplay-physics = ["voplay-physics-industrial-stress"]
 ci-pr-release-verify = ["release-verify"]
 
 full = [
@@ -696,7 +694,7 @@ title = "PR"
 tier_intent = "normal pull request validation"
 owner = "eng"
 tags = ["pr"]
-tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "blockkart-product-boundary-strict", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-scene3d-contract", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-smoke-static", "release-verify"]
+tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "blockkart-product-boundary-strict", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-scene3d-contract", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-smoke-static", "release-verify"]
 included_in = []
 selection_policy = "Selected when the pr validation surface is requested or when a parent group includes it."
 
@@ -789,16 +787,6 @@ tags = ["ci-lane", "pr", "voplay", "physics"]
 tasks = ["voplay-scene3d-contract"]
 included_in = []
 selection_policy = "GitHub Actions execution lane for the consolidated Scene3D contract."
-
-[[group]]
-name = "ci-pr-voplay-physics"
-title = "PR Voplay Physics"
-tier_intent = "industrial headless physics stress and replay contract"
-owner = "studio"
-tags = ["ci-lane", "pr", "voplay", "physics", "stress"]
-tasks = ["voplay-physics-industrial-stress"]
-included_in = []
-selection_policy = "GitHub Actions execution lane for industrial physics stress."
 
 [[group]]
 name = "ci-pr-release-verify"

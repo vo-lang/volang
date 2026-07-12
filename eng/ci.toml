@@ -50,11 +50,6 @@ title = "Voplay Scene3D"
 tier = "contract"
 
 [[lane]]
-selector = "ci-pr-voplay-physics"
-title = "Voplay physics"
-tier = "stress"
-
-[[lane]]
 selector = "ci-pr-release-verify"
 title = "Release verification"
 tier = "release"
