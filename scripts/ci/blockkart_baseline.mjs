@@ -623,6 +623,52 @@ function findBrowserBinary() {
   return null;
 }
 
+function browserWindowModeFlags() {
+  const headfulLinux = process.platform === 'linux'
+    && Boolean(process.env.DISPLAY)
+    && process.env.BLOCKKART_BASELINE_HEADLESS !== '1';
+  return headfulLinux
+    ? [`--window-size=${viewportWidth},${viewportHeight}`, '--force-device-scale-factor=1']
+    : ['--headless=new'];
+}
+
+async function ensureVirtualDisplay() {
+  const requested = process.platform === 'linux'
+    && process.env.BLOCKKART_BASELINE_HEADLESS !== '1'
+    && (process.env.CI === 'true' || process.env.BLOCKKART_BASELINE_HEADFUL === '1');
+  if (!requested || process.env.DISPLAY) return;
+  const xvfb = ['/usr/bin/Xvfb', '/usr/local/bin/Xvfb'].find((candidate) => existsSync(candidate));
+  if (!xvfb) {
+    fail('headful Linux WebGPU capture requires Xvfb; install the xvfb task package or set BLOCKKART_BASELINE_HEADLESS=1');
+  }
+  const display = `:${90 + (process.pid % 100)}`;
+  let log = '';
+  const child = spawn(xvfb, [
+    display,
+    '-screen', '0', `${viewportWidth}x${viewportHeight}x24`,
+    '-ac',
+    '+extension', 'GLX',
+    '+render',
+    '-noreset',
+  ], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => {
+    log = appendLog(log, chunk);
+  });
+  child.stderr.on('data', (chunk) => {
+    log = appendLog(log, chunk);
+  });
+  cleanupCallbacks.push(() => stopProcess(child));
+  process.env.DISPLAY = display;
+  await sleep(750);
+  if (child.exitCode != null || child.signalCode != null) {
+    fail(`Xvfb exited before browser startup with ${child.signalCode ?? child.exitCode}\n${log}`);
+  }
+  progress(`virtual display ready display=${display}`);
+}
+
 function stopProcess(child) {
   if (!child) {
     return;
@@ -724,7 +770,7 @@ async function startBrowser(debugPort) {
   const child = spawn(
     browserBin,
     [
-      '--headless=new',
+      ...browserWindowModeFlags(),
       '--disable-dev-shm-usage',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
@@ -1652,7 +1698,7 @@ async function captureFreshBrowserCanvas(url, viewportFile, canvasFile, browserB
   const child = spawn(
     bin,
     [
-      '--headless=new',
+      ...browserWindowModeFlags(),
       '--disable-dev-shm-usage',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
@@ -3128,6 +3174,8 @@ async function main() {
   const depsPackage = readJson(path.join(quickplayDir, 'deps.json'));
   const provenance = readJson(path.join(quickplayDir, 'provenance.json'));
   const simulation = installSimulatedFailure(simulatedFailure);
+
+  await ensureVirtualDisplay();
 
   const previewPort = await reservePort();
   const debugPort = await reservePort();
