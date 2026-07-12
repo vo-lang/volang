@@ -320,7 +320,7 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
       issues.push({ code: `baseline.${issue.severity}`, severity: issue.severity === 'P0' ? 0 : 1, detail: `${issue.owner}: ${issue.title}: ${issue.detail ?? ''}` });
     }
   }
-  if (!baseline.visual?.canvas?.nonEmpty) {
+  if (baseline.visual?.enabled !== false && !baseline.visual?.canvas?.nonEmpty) {
     issues.push({ code: 'canvas.blank', severity: 0, detail: JSON.stringify(baseline.visual?.canvas ?? {}) });
   }
   if (baseline.lifecycle?.state !== 'Running' || baseline.lifecycle?.reachedRunning !== true) {

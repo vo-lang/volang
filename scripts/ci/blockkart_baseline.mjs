@@ -56,6 +56,11 @@ const renderStressKeys = {
 };
 const requireWebGpuAdapter = process.env.BLOCKKART_BASELINE_REQUIRE_WEBGPU === '1';
 const failOnIssues = !process.argv.includes('--no-fail-on-issues') && process.env.BLOCKKART_BASELINE_NO_FAIL !== '1';
+const visualCaptureEnabled = boolOption(
+  '--visual-capture',
+  process.env.BLOCKKART_BASELINE_VISUAL_CAPTURE,
+  !parseBool(process.env.CI, false),
+);
 const noWebGpuAdapterPattern = /no suitable GPU adapter|requestAdapter returned null|navigator\.gpu is unavailable/i;
 const simulatedFailure = argValue('--simulate-failure') || process.env.BLOCKKART_BASELINE_SIMULATE_FAILURE || '';
 const expectedLifecycleState = argValue('--expect-lifecycle-state') || process.env.BLOCKKART_BASELINE_EXPECT_LIFECYCLE || (simulatedFailure ? 'Failed' : 'Running');
@@ -657,62 +662,8 @@ function findBrowserBinary() {
   return null;
 }
 
-function usesHeadfulLinuxCapture() {
-  return process.platform === 'linux'
-    && Boolean(process.env.DISPLAY)
-    && process.env.BLOCKKART_BASELINE_HEADLESS !== '1';
-}
-
-function primaryBrowserWindowModeFlags() {
+function browserWindowModeFlags() {
   return ['--headless=new'];
-}
-
-function captureBrowserWindowModeFlags() {
-  return usesHeadfulLinuxCapture()
-    ? [
-        `--window-size=${viewportWidth},${viewportHeight}`,
-        '--force-device-scale-factor=1',
-        '--disable-gpu-vsync',
-        '--disable-frame-rate-limit',
-      ]
-    : ['--headless=new'];
-}
-
-async function ensureVirtualDisplay() {
-  const requested = process.platform === 'linux'
-    && process.env.BLOCKKART_BASELINE_HEADLESS !== '1'
-    && (process.env.CI === 'true' || process.env.BLOCKKART_BASELINE_HEADFUL === '1');
-  if (!requested || process.env.DISPLAY) return;
-  const xvfb = ['/usr/bin/Xvfb', '/usr/local/bin/Xvfb'].find((candidate) => existsSync(candidate));
-  if (!xvfb) {
-    fail('headful Linux WebGPU capture requires Xvfb; install the xvfb task package or set BLOCKKART_BASELINE_HEADLESS=1');
-  }
-  const display = `:${90 + (process.pid % 100)}`;
-  let log = '';
-  const child = spawn(xvfb, [
-    display,
-    '-screen', '0', `${viewportWidth}x${viewportHeight}x24`,
-    '-ac',
-    '+extension', 'GLX',
-    '+render',
-    '-noreset',
-  ], {
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (chunk) => {
-    log = appendLog(log, chunk);
-  });
-  child.stderr.on('data', (chunk) => {
-    log = appendLog(log, chunk);
-  });
-  cleanupCallbacks.push(() => stopProcess(child));
-  process.env.DISPLAY = display;
-  await sleep(750);
-  if (child.exitCode != null || child.signalCode != null) {
-    fail(`Xvfb exited before browser startup with ${child.signalCode ?? child.exitCode}\n${log}`);
-  }
-  progress(`virtual display ready display=${display}`);
 }
 
 function stopProcess(child) {
@@ -816,7 +767,7 @@ async function startBrowser(debugPort) {
   const child = spawn(
     browserBin,
     [
-      ...primaryBrowserWindowModeFlags(),
+      ...browserWindowModeFlags(),
       '--disable-dev-shm-usage',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
@@ -1738,96 +1689,6 @@ async function captureCanvasDataUrl(client, file) {
     }
   }
   throw new Error(`canvas toDataURL capture failed after ${canvasDataUrlAttempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error')}`);
-}
-
-async function captureFreshBrowserCanvas(url, viewportFile, canvasFile, browserBin) {
-  const bin = browserBin ?? findBrowserBinary();
-  if (!bin) {
-    throw new Error('could not find Chrome/Chromium for fresh browser canvas capture');
-  }
-  await ensureVirtualDisplay();
-  const debugPort = await reservePort();
-  const profileDir = mkdtempSync(path.join(os.tmpdir(), 'volang-blockkart-fresh-capture-'));
-  let log = '';
-  const child = spawn(
-    bin,
-    [
-      ...captureBrowserWindowModeFlags(),
-      '--disable-dev-shm-usage',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-      '--disable-features=CalculateNativeWinOcclusion',
-      '--enable-unsafe-webgpu',
-      '--ignore-gpu-blocklist',
-      '--no-sandbox',
-      `--remote-debugging-port=${debugPort}`,
-      `--user-data-dir=${profileDir}`,
-      'about:blank',
-    ],
-    {
-      detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  cleanupCallbacks.push(() => rmSync(profileDir, { recursive: true, force: true }));
-  cleanupCallbacks.push(() => stopProcess(child));
-  child.stdout.on('data', (chunk) => {
-    log = appendLog(log, chunk);
-  });
-  child.stderr.on('data', (chunk) => {
-    log = appendLog(log, chunk);
-  });
-  let client = null;
-  let targetId = null;
-  try {
-    await fetchOk(`http://127.0.0.1:${debugPort}/json/version`);
-    ({ targetId, client } = await openPage(debugPort));
-    await client.send('Page.enable');
-    await client.send('Runtime.enable');
-    await client.send('Log.enable');
-    await client.send('Network.enable');
-    await client.send('Emulation.setDeviceMetricsOverride', {
-      width: viewportWidth,
-      height: viewportHeight,
-      deviceScaleFactor: 1,
-      mobile: false,
-      screenWidth: viewportWidth,
-      screenHeight: viewportHeight,
-    });
-    await navigate(client, url);
-    const firstFrame = await waitForQuickplayFirstFrame(client, firstFrameTimeoutMs);
-    if (!firstFrame.ok || firstFrame.skipped) {
-      throw new Error(firstFrame.reason ?? 'fresh browser did not reach first frame');
-    }
-    await sleep(1000);
-    const state = await client.evaluate(quickplayStateExpression(), 30000).catch(() => firstFrame.state ?? {});
-    const viewportAnalysis = await captureScreenshot(client, viewportFile);
-    let canvasAnalysis = null;
-    let canvasMode = 'fresh-browser-crop';
-    if (state.canvasRect && state.canvasRect.width > 0 && state.canvasRect.height > 0) {
-      const canvasBytes = cropPng(readFileSync(viewportFile), state.canvasRect, viewportWidth, viewportHeight);
-      writeFileSync(canvasFile, canvasBytes);
-      canvasAnalysis = analyzePng(canvasBytes);
-    }
-    if (!canvasAnalysis?.nonEmpty) {
-      canvasAnalysis = await captureCanvasDataUrl(client, canvasFile);
-      canvasMode = 'fresh-browser-data-url';
-    }
-    return { viewportAnalysis, canvasAnalysis, viewportMode: 'fresh-browser', canvasMode };
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(log ? `${detail}\nfresh browser log:\n${log}` : detail);
-  } finally {
-    client?.close();
-    await closePage(debugPort, targetId).catch(() => undefined);
-    stopProcess(child);
-    try {
-      rmSync(profileDir, { recursive: true, force: true });
-    } catch {
-      // Chrome may release profile files after the fallback screenshot is already usable.
-    }
-  }
 }
 
 async function captureViewportScreencast(client, file) {
@@ -2859,13 +2720,13 @@ function isIgnoredResourceFailure(failure) {
   return /\/favicon\.ico(?:[?#]|$)/i.test(failure?.url ?? '');
 }
 
-function buildIssueList({ firstFrame, canvasAnalysis, errors, warnings, resourceFailures, startupPhases, slowFrames, perfReports, lifecycle, expectedLifecycleState, diagnostics, restartScenario, startRaceScenario, storageReloadScenario, renderStressScenario, resizeScenario, performanceAttribution, captureTelemetry }) {
+function buildIssueList({ firstFrame, visualCaptureEnabled, canvasAnalysis, errors, warnings, resourceFailures, startupPhases, slowFrames, perfReports, lifecycle, expectedLifecycleState, diagnostics, restartScenario, startRaceScenario, storageReloadScenario, renderStressScenario, resizeScenario, performanceAttribution, captureTelemetry }) {
   const issues = [];
   const add = (severity, owner, title, evidence) => issues.push({ severity, owner, title, evidence });
   if (!firstFrame.ok) {
     add('P0', 'voplay/studio', 'BlockKart quickplay did not reach first frame', firstFrame.reason ?? 'first frame wait failed');
   }
-  if (firstFrame.ok && !firstFrame.skipped && !canvasAnalysis?.nonEmpty) {
+  if (visualCaptureEnabled && firstFrame.ok && !firstFrame.skipped && !canvasAnalysis?.nonEmpty) {
     add('P0', 'voplay', 'BlockKart canvas is blank or visually uniform', canvasAnalysis ? JSON.stringify(canvasAnalysis) : 'canvas screenshot unavailable');
   }
   if (errors.length > 0) {
@@ -3056,16 +2917,19 @@ function markdownReport(report) {
   lines.push(`- URL: ${report.url}`);
   lines.push(`- Viewport: ${report.viewport.width}x${report.viewport.height}`);
   lines.push(`- Project: ${report.project.module}@${report.project.commit}`);
-  lines.push(`- Screenshot: ${path.relative(root, report.artifacts.viewportScreenshot)}`);
-  lines.push(`- Canvas crop: ${path.relative(root, report.artifacts.canvasScreenshot)}`);
+  lines.push(`- Visual capture: ${report.visual.enabled ? 'enabled' : 'disabled'}`);
+  if (report.visual.enabled) {
+    lines.push(`- Screenshot: ${path.relative(root, report.artifacts.viewportScreenshot)}`);
+    lines.push(`- Canvas crop: ${path.relative(root, report.artifacts.canvasScreenshot)}`);
+  }
   lines.push('');
   lines.push('## Smoke And Visual');
   lines.push('');
   lines.push(`- First frame: ${report.firstFrame.ok ? 'ok' : 'failed'}${report.firstFrame.skipped ? ' (skipped)' : ''}`);
   lines.push(`- Canvas: ${report.finalState.canvasWidth}x${report.finalState.canvasHeight}`);
-  lines.push(`- Canvas non-empty: ${report.visual.canvas.nonEmpty}`);
-  lines.push(`- Canvas luma stddev: ${report.visual.canvas.lumaStdDev}`);
-  lines.push(`- Canvas sampled colors: ${report.visual.canvas.uniqueSampledColors}`);
+  lines.push(`- Canvas non-empty: ${report.visual.enabled ? report.visual.canvas.nonEmpty : 'not evaluated'}`);
+  lines.push(`- Canvas luma stddev: ${report.visual.enabled ? report.visual.canvas.lumaStdDev : 'not evaluated'}`);
+  lines.push(`- Canvas sampled colors: ${report.visual.enabled ? report.visual.canvas.uniqueSampledColors : 'not evaluated'}`);
   lines.push(`- Capture modes: viewport=${report.visual.capture.viewportMode}, canvas=${report.visual.capture.canvasMode}`);
   for (const warning of report.visual.capture.warnings) {
     lines.push(`- Capture warning: ${warning}`);
@@ -3487,54 +3351,60 @@ async function main() {
 
     const viewportScreenshot = path.join(outDir, 'blockkart-baseline-viewport.png');
     const canvasScreenshot = path.join(outDir, 'blockkart-baseline-canvas.png');
+    rmSync(viewportScreenshot, { force: true });
     rmSync(canvasScreenshot, { force: true });
     const captureWarnings = [];
     let viewportAnalysis = null;
     let viewportCapture = null;
-    let viewportCaptureMode = 'cdp-page';
-    let viewportCdpFailed = false;
-    const primaryCdpUnavailable = [rendererState.reason]
+    let viewportCaptureMode = visualCaptureEnabled ? 'cdp-page' : 'skipped';
+    let viewportCdpFailed = !visualCaptureEnabled;
+    let canvasCaptureMode = visualCaptureEnabled ? 'viewport-crop' : 'skipped';
+    const primaryCdpUnavailable = !visualCaptureEnabled || [rendererState.reason]
       .some((reason) => /CDP (?:websocket closed|Runtime\.evaluate timed out)/i.test(String(reason ?? '')));
-    try {
-      if (primaryCdpUnavailable) {
-        throw new Error('primary CDP websocket is already closed');
-      }
-      progress('viewport capture cdp start');
-      viewportAnalysis = await captureScreenshot(client, viewportScreenshot);
-      viewportCapture = {
-        bytes: readFileSync(viewportScreenshot),
-        analysis: viewportAnalysis,
-        metadata: { source: 'cdp-page' },
-      };
-      if (!viewportAnalysis.nonEmpty) {
-        throw new Error(`CDP viewport screenshot was visually blank: ${JSON.stringify(viewportAnalysis)}`);
-      }
-      progress('viewport capture cdp done');
-    } catch (error) {
-      viewportCdpFailed = true;
-      viewportCapture = null;
-      viewportAnalysis = null;
-      viewportCaptureMode = 'screencast';
-      captureWarnings.push(`viewport CDP screenshot failed: ${error instanceof Error ? error.message : String(error)}`);
-      if (primaryCdpUnavailable) {
-        viewportCaptureMode = 'failed';
-        progress('viewport capture skipped closed-cdp');
-      } else {
-        try {
-          progress('viewport capture screencast start');
-          viewportCapture = await captureViewportScreencast(client, viewportScreenshot);
-          viewportAnalysis = viewportCapture.analysis;
-          progress('viewport capture screencast done');
-        } catch (screencastError) {
+    if (!visualCaptureEnabled) {
+      captureWarnings.push('visual capture disabled; runtime, lifecycle, telemetry, and error gates remain active');
+      progress('visual capture skipped');
+    } else {
+      try {
+        if (primaryCdpUnavailable) {
+          throw new Error('primary CDP websocket is already closed');
+        }
+        progress('viewport capture cdp start');
+        viewportAnalysis = await captureScreenshot(client, viewportScreenshot);
+        viewportCapture = {
+          bytes: readFileSync(viewportScreenshot),
+          analysis: viewportAnalysis,
+          metadata: { source: 'cdp-page' },
+        };
+        if (!viewportAnalysis.nonEmpty) {
+          throw new Error(`CDP viewport screenshot was visually blank: ${JSON.stringify(viewportAnalysis)}`);
+        }
+        progress('viewport capture cdp done');
+      } catch (error) {
+        viewportCdpFailed = true;
+        viewportCapture = null;
+        viewportAnalysis = null;
+        viewportCaptureMode = 'screencast';
+        captureWarnings.push(`viewport CDP screenshot failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (primaryCdpUnavailable) {
           viewportCaptureMode = 'failed';
-          captureWarnings.push(`viewport screencast failed: ${screencastError instanceof Error ? screencastError.message : String(screencastError)}`);
-          progress('viewport capture failed');
+          progress('viewport capture skipped closed-cdp');
+        } else {
+          try {
+            progress('viewport capture screencast start');
+            viewportCapture = await captureViewportScreencast(client, viewportScreenshot);
+            viewportAnalysis = viewportCapture.analysis;
+            progress('viewport capture screencast done');
+          } catch (screencastError) {
+            viewportCaptureMode = 'failed';
+            captureWarnings.push(`viewport screencast failed: ${screencastError instanceof Error ? screencastError.message : String(screencastError)}`);
+            progress('viewport capture failed');
+          }
         }
       }
     }
     let canvasAnalysis = null;
-    let canvasCaptureMode = 'viewport-crop';
-    if (viewportCapture && finalState.canvasRect && finalState.canvasRect.width > 0 && finalState.canvasRect.height > 0) {
+    if (visualCaptureEnabled && viewportCapture && finalState.canvasRect && finalState.canvasRect.width > 0 && finalState.canvasRect.height > 0) {
       try {
         progress('canvas viewport crop start');
         const canvasBytes = cropPng(viewportCapture.bytes, finalState.canvasRect, viewportWidth, viewportHeight);
@@ -3545,7 +3415,7 @@ async function main() {
         canvasCaptureMode = 'failed';
         captureWarnings.push(`canvas viewport crop failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-    } else if (!viewportCdpFailed && finalState.canvasRect && finalState.canvasRect.width > 0 && finalState.canvasRect.height > 0) {
+    } else if (visualCaptureEnabled && !viewportCdpFailed && finalState.canvasRect && finalState.canvasRect.width > 0 && finalState.canvasRect.height > 0) {
       try {
         progress('canvas cdp crop start');
         canvasAnalysis = await captureScreenshot(client, canvasScreenshot, finalState.canvasRect);
@@ -3555,16 +3425,16 @@ async function main() {
         canvasCaptureMode = 'failed';
         captureWarnings.push(`canvas CDP crop failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-    } else if (!viewportCapture) {
+    } else if (visualCaptureEnabled && !viewportCapture) {
       canvasCaptureMode = 'not-captured';
       if (viewportCdpFailed) {
         captureWarnings.push('canvas CDP crop skipped because viewport CDP screenshot timed out or failed');
       }
-    } else {
+    } else if (visualCaptureEnabled) {
       canvasCaptureMode = 'not-found';
       captureWarnings.push('canvas crop skipped because no canvas rect was available');
     }
-    if (!canvasAnalysis?.nonEmpty && !viewportCdpFailed) {
+    if (visualCaptureEnabled && !canvasAnalysis?.nonEmpty && !viewportCdpFailed) {
       try {
         progress('canvas data-url capture start');
         const dataUrlAnalysis = await captureCanvasDataUrl(client, canvasScreenshot);
@@ -3574,28 +3444,13 @@ async function main() {
       } catch (error) {
         captureWarnings.push(`canvas data-url capture failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-    } else if (!canvasAnalysis?.nonEmpty && viewportCdpFailed) {
+    } else if (visualCaptureEnabled && !canvasAnalysis?.nonEmpty && viewportCdpFailed) {
       captureWarnings.push('canvas data-url capture skipped because viewport CDP screenshot timed out or failed');
     }
-    if (!canvasAnalysis?.nonEmpty) {
-      try {
-        progress('fresh browser capture start');
-        const freshCapture = await captureFreshBrowserCanvas(quickplayUrl.toString(), viewportScreenshot, canvasScreenshot, browser?.browserBin);
-        if (!viewportAnalysis?.nonEmpty) {
-          viewportAnalysis = freshCapture.viewportAnalysis;
-          viewportCapture = { bytes: readFileSync(viewportScreenshot), analysis: viewportAnalysis };
-          viewportCaptureMode = freshCapture.viewportMode;
-        }
-        canvasAnalysis = freshCapture.canvasAnalysis;
-        canvasCaptureMode = freshCapture.canvasMode;
-        progress(`fresh browser capture done canvasNonEmpty=${canvasAnalysis?.nonEmpty === true}`);
-      } catch (error) {
-        captureWarnings.push(`fresh browser canvas capture failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
 
-    progress('renderer quiesce start');
-    rendererQuiesce = await client.evaluate(`(() => {
+    if (visualCaptureEnabled) {
+      progress('renderer quiesce start');
+      rendererQuiesce = await client.evaluate(`(() => {
       const hook = globalThis.__voStudioBrowserSmoke ?? globalThis.__voStudioBrowserSmokeRenderer;
       if (!hook || typeof hook.quiesceRenderLoop !== 'function') {
         return { ok: false, reason: 'debug hook missing' };
@@ -3605,11 +3460,14 @@ async function main() {
       } catch (error) {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };
       }
-    })()`, 10000).catch((error) => ({
-      ok: false,
-      reason: error instanceof Error ? error.message : String(error),
-    }));
-    progress(`renderer quiesce done ok=${rendererQuiesce.ok === true} stopped=${rendererQuiesce.stopped ?? 0} reason=${rendererQuiesce.reason ?? ''}`);
+      })()`, 10000).catch((error) => ({
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      }));
+      progress(`renderer quiesce done ok=${rendererQuiesce.ok === true} stopped=${rendererQuiesce.stopped ?? 0} reason=${rendererQuiesce.reason ?? ''}`);
+    } else {
+      rendererQuiesce = { ok: true, stopped: 0, reason: 'visual capture disabled' };
+    }
 
     const startupPhases = classifyStartupPhases([
       ...(debugSnapshot.consoleLines ?? []),
@@ -3641,6 +3499,7 @@ async function main() {
     const status = firstFrame.skipped ? 'skipped' : 'ok';
     const issues = buildIssueList({
       firstFrame,
+      visualCaptureEnabled,
       canvasAnalysis,
       errors,
       warnings,
@@ -3683,8 +3542,8 @@ async function main() {
       artifacts: [
         quickplayDir,
         studioDistIndex,
-        viewportScreenshot,
-        canvasScreenshot,
+        visualCaptureEnabled ? viewportScreenshot : null,
+        visualCaptureEnabled ? canvasScreenshot : null,
       ],
     });
     const report = {
@@ -3711,8 +3570,8 @@ async function main() {
       })),
       artifacts: {
         directory: outDir,
-        viewportScreenshot,
-        canvasScreenshot,
+        viewportScreenshot: visualCaptureEnabled ? viewportScreenshot : null,
+        canvasScreenshot: visualCaptureEnabled ? canvasScreenshot : null,
       },
       hookState,
       firstFrame,
@@ -3730,8 +3589,9 @@ async function main() {
       performanceAttribution,
       captureTelemetry,
       visual: {
-        viewport: viewportAnalysis ?? { nonEmpty: false, reason: 'viewport screenshot was not captured' },
-        canvas: canvasAnalysis ?? { nonEmpty: false, reason: 'canvas crop was not captured' },
+        enabled: visualCaptureEnabled,
+        viewport: viewportAnalysis ?? { nonEmpty: false, reason: visualCaptureEnabled ? 'viewport screenshot was not captured' : 'visual capture disabled' },
+        canvas: canvasAnalysis ?? { nonEmpty: false, reason: visualCaptureEnabled ? 'canvas crop was not captured' : 'visual capture disabled' },
         capture: {
           viewportMode: viewportCaptureMode,
           canvasMode: canvasCaptureMode,
@@ -3754,6 +3614,9 @@ async function main() {
       remainingRisks: [
         'Baseline covers the checked-in quickplay package, not a local BlockKart source checkout.',
         'Headless WebGPU timing is machine-dependent; slow-frame thresholds are diagnostic, not a final product FPS promise.',
+        visualCaptureEnabled
+          ? 'Pixel output was checked in this local run.'
+          : 'Pixel output is intentionally owned by local browser validation; CI accepts runtime and structured renderer evidence.',
         captureTelemetry.required
           ? 'Long-run capture acceptance requires fresh endpoint telemetry, sufficient observed span, and advancing frame indices.'
           : 'The baseline capture window is short; the dedicated 10-minute soak owns long-run stability evidence.',
@@ -3769,8 +3632,7 @@ async function main() {
     console.log(`BlockKart baseline: ${report.status}`);
     console.log(`BlockKart baseline: report ${path.relative(root, markdownPath)}`);
     console.log(`BlockKart baseline: json ${path.relative(root, jsonPath)}`);
-    console.log(`BlockKart baseline: screenshot ${path.relative(root, viewportScreenshot)}`);
-    console.log(`BlockKart baseline: canvas ${finalState.canvasWidth ?? 0}x${finalState.canvasHeight ?? 0} nonEmpty=${report.visual.canvas.nonEmpty}`);
+    console.log(`BlockKart baseline: visual capture ${visualCaptureEnabled ? `enabled screenshot=${path.relative(root, viewportScreenshot)} canvasNonEmpty=${report.visual.canvas.nonEmpty}` : 'disabled'}`);
     console.log(`BlockKart baseline: lifecycle ${lifecycle.state ?? 'not-reported'} expected=${expectedLifecycleState} reachedRunning=${lifecycle.reachedRunning}`);
     console.log(`BlockKart baseline: diagnostics assetReports=${diagnostics.assetReports.length} sceneReports=${diagnostics.sceneReports.length} vehicleReports=${diagnostics.vehicleReports.length} raceReports=${diagnostics.raceReports.length} startRace=${startRaceScenario.completed ? 'yes' : 'no'} storageReload=${storageReloadScenario.completed ? 'yes' : 'no'} restarts=${restartScenario.completed}/${restartScenario.requested}`);
     console.log(`BlockKart baseline: startup phases ${startupPhases.length}, perf reports ${perf.count}, slow frames ${voplaySlowFrames.length}, warnings ${warnings.length}, errors ${errors.length}, resource failures ${resourceFailures.length}`);
