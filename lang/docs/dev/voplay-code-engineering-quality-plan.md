@@ -60,7 +60,7 @@ artifact 或 target report 的任务。
 当前 checkout snapshot:
 
 ```text
-volang    788c63e2b732c1a677091e8a0fb0bc84436568fd
+volang    64ff7308d5477e35c4a2ff2c2c476500e7a5bba8
 voplay    d829949475086be7041b48f08cb81b06f60eaa03
 BlockKart 2105f64328b66b8f2ebd444ea281658743b352f3
 ```
