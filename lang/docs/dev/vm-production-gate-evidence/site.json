@@ -3,7 +3,7 @@
   "selector": "site",
   "changed": false,
   "passed": true,
-  "source_state": "vm-production-current-source:370e802ee2f7819bc4fe4272856bf47321cbb4df781bd1afd134995966519cd2",
+  "source_state": "vm-production-current-source:08c5d965fd99226cf12c76df2412d56870e4d0bc049d93d86add29cd40762ac6",
   "tasks": [
     "node-audit-current",
     "vo-web-wasm-build",
@@ -30,6 +30,7 @@
     "voplay-current-wasm-selftest",
     "voplay-current-wasm-build",
     "quickplay-source-audit",
+    "quickplay-module-cache",
     "quickplay-regenerate-check",
     "quickplay-validate",
     "voplay-render-stress",
