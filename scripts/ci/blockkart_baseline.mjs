@@ -657,11 +657,14 @@ function findBrowserBinary() {
   return null;
 }
 
-function browserWindowModeFlags() {
-  const headfulLinux = process.platform === 'linux'
+function usesHeadfulLinuxBrowser() {
+  return process.platform === 'linux'
     && Boolean(process.env.DISPLAY)
     && process.env.BLOCKKART_BASELINE_HEADLESS !== '1';
-  return headfulLinux
+}
+
+function browserWindowModeFlags() {
+  return usesHeadfulLinuxBrowser()
     ? [
         `--window-size=${viewportWidth},${viewportHeight}`,
         '--force-device-scale-factor=1',
@@ -3271,8 +3274,9 @@ async function main() {
     if (perfDiag) {
       quickplayUrl.searchParams.set('voplayPerfDiag', perfDiag);
     }
-    if (pulseMode) {
-      quickplayUrl.searchParams.set('voplayPulseMode', pulseMode);
+    const effectivePulseMode = pulseMode || (usesHeadfulLinuxBrowser() ? 'timer' : '');
+    if (effectivePulseMode) {
+      quickplayUrl.searchParams.set('voplayPulseMode', effectivePulseMode);
     }
     if (perfGpuProbe) {
       quickplayUrl.searchParams.set('voplayPerfGpu', '1');
