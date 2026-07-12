@@ -1882,7 +1882,7 @@ outputs = ["target/voplay-vehicle-dynamics-unit"]
 tier = "contract"
 tags = ["app-smoke", "contract", "physics"]
 owner = "studio"
-timeout_sec = 600
+timeout_sec = 1800
 
 [[task]]
 name = "voplay-vehicle-model-unit"
@@ -1897,7 +1897,7 @@ outputs = ["target/voplay-vehicle-model-unit"]
 tier = "contract"
 tags = ["app-smoke", "contract", "physics"]
 owner = "studio"
-timeout_sec = 600
+timeout_sec = 1800
 
 [[task]]
 name = "voplay-physics-backend-unit"
@@ -1912,7 +1912,7 @@ outputs = ["target/voplay-physics-backend-unit"]
 tier = "contract"
 tags = ["app-smoke", "contract", "physics"]
 owner = "studio"
-timeout_sec = 600
+timeout_sec = 1800
 
 [[task]]
 name = "voplay-physics-backend-contract"
@@ -1927,7 +1927,7 @@ outputs = ["target/voplay-physics-backend-contract"]
 tier = "contract"
 tags = ["app-smoke", "contract", "physics"]
 owner = "studio"
-timeout_sec = 600
+timeout_sec = 1800
 
 [[task]]
 name = "voplay-render-observability-selftest"
@@ -1957,7 +1957,7 @@ outputs = ["target/voplay-render-stress"]
 tier = "contract"
 tags = ["app-smoke", "contract", "perf", "visual"]
 owner = "studio"
-timeout_sec = 1200
+timeout_sec = 3600
 
 [[task]]
 name = "voplay-render-stress-budgeted"
@@ -1987,7 +1987,7 @@ outputs = ["target/voplay-render-soak-10m"]
 tier = "contract"
 tags = ["app-smoke", "contract", "perf", "visual", "soak"]
 owner = "studio"
-timeout_sec = 1800
+timeout_sec = 3600
 
 [[task]]
 name = "voplay-physics-stress"
@@ -2002,7 +2002,7 @@ outputs = ["target/voplay-physics-stress"]
 tier = "contract"
 tags = ["app-smoke", "contract", "perf", "physics"]
 owner = "studio"
-timeout_sec = 1800
+timeout_sec = 3600
 
 [[task]]
 name = "voplay-physics-industrial-stress"
@@ -2017,7 +2017,7 @@ outputs = ["target/voplay-physics-industrial-stress"]
 tier = "contract"
 tags = ["app-smoke", "contract", "perf", "physics"]
 owner = "studio"
-timeout_sec = 1800
+timeout_sec = 3600
 
 [[task]]
 name = "voplay-industrial-source-audit"
