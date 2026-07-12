@@ -657,14 +657,18 @@ function findBrowserBinary() {
   return null;
 }
 
-function usesHeadfulLinuxBrowser() {
+function usesHeadfulLinuxCapture() {
   return process.platform === 'linux'
     && Boolean(process.env.DISPLAY)
     && process.env.BLOCKKART_BASELINE_HEADLESS !== '1';
 }
 
-function browserWindowModeFlags() {
-  return usesHeadfulLinuxBrowser()
+function primaryBrowserWindowModeFlags() {
+  return ['--headless=new'];
+}
+
+function captureBrowserWindowModeFlags() {
+  return usesHeadfulLinuxCapture()
     ? [
         `--window-size=${viewportWidth},${viewportHeight}`,
         '--force-device-scale-factor=1',
@@ -812,7 +816,7 @@ async function startBrowser(debugPort) {
   const child = spawn(
     browserBin,
     [
-      ...browserWindowModeFlags(),
+      ...primaryBrowserWindowModeFlags(),
       '--disable-dev-shm-usage',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
@@ -1741,13 +1745,14 @@ async function captureFreshBrowserCanvas(url, viewportFile, canvasFile, browserB
   if (!bin) {
     throw new Error('could not find Chrome/Chromium for fresh browser canvas capture');
   }
+  await ensureVirtualDisplay();
   const debugPort = await reservePort();
   const profileDir = mkdtempSync(path.join(os.tmpdir(), 'volang-blockkart-fresh-capture-'));
   let log = '';
   const child = spawn(
     bin,
     [
-      ...browserWindowModeFlags(),
+      ...captureBrowserWindowModeFlags(),
       '--disable-dev-shm-usage',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
@@ -3224,8 +3229,6 @@ async function main() {
   const provenance = readJson(path.join(quickplayDir, 'provenance.json'));
   const simulation = installSimulatedFailure(simulatedFailure);
 
-  await ensureVirtualDisplay();
-
   const previewPort = await reservePort();
   const debugPort = await reservePort();
   const baseUrl = `http://127.0.0.1:${previewPort}/`;
@@ -3274,9 +3277,8 @@ async function main() {
     if (perfDiag) {
       quickplayUrl.searchParams.set('voplayPerfDiag', perfDiag);
     }
-    const effectivePulseMode = pulseMode || (usesHeadfulLinuxBrowser() ? 'timer' : '');
-    if (effectivePulseMode) {
-      quickplayUrl.searchParams.set('voplayPulseMode', effectivePulseMode);
+    if (pulseMode) {
+      quickplayUrl.searchParams.set('voplayPulseMode', pulseMode);
     }
     if (perfGpuProbe) {
       quickplayUrl.searchParams.set('voplayPerfGpu', '1');
