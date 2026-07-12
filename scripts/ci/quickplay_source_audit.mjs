@@ -873,6 +873,15 @@ writeFileSync(join(outDir, 'quickplay-source-audit.json'), `${JSON.stringify(rep
 writeFileSync(join(outDir, 'quickplay-source-audit.md'), markdown(report));
 
 if (issues.length > 0) {
+  for (const item of issues) {
+    console.error(JSON.stringify({
+      owner: item.owner,
+      subsystem: item.subsystem,
+      severity: item.severity,
+      message: item.message,
+      evidence: item.evidence ?? null,
+    }));
+  }
   console.error(`quickplay source audit: failed with ${issues.length} issue(s); wrote ${outDir}`);
   process.exit(1);
 }
