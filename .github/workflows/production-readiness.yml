@@ -48,6 +48,7 @@ jobs:
           repository: ${{ matrix.checkout_vogui_repository }}
           path: ${{ matrix.checkout_vogui_path }}
           ref: ${{ matrix.checkout_vogui_expected_commit }}
+          fetch-depth: 0
 
       - name: Checkout voplay
         if: matrix.checkout_voplay
@@ -56,6 +57,7 @@ jobs:
           repository: ${{ matrix.checkout_voplay_repository }}
           path: ${{ matrix.checkout_voplay_path }}
           ref: ${{ matrix.checkout_voplay_expected_commit }}
+          fetch-depth: 0
 
       - name: Checkout vopack
         if: matrix.checkout_vopack
@@ -64,6 +66,7 @@ jobs:
           repository: ${{ matrix.checkout_vopack_repository }}
           path: ${{ matrix.checkout_vopack_path }}
           ref: ${{ matrix.checkout_vopack_expected_commit }}
+          fetch-depth: 0
 
       - name: Checkout vostore
         if: matrix.checkout_vostore
@@ -72,6 +75,7 @@ jobs:
           repository: ${{ matrix.checkout_vostore_repository }}
           path: ${{ matrix.checkout_vostore_path }}
           ref: ${{ matrix.checkout_vostore_expected_commit }}
+          fetch-depth: 0
 
       - name: Checkout BlockKart
         if: matrix.checkout_blockkart
@@ -80,6 +84,7 @@ jobs:
           repository: ${{ matrix.checkout_blockkart_repository }}
           path: ${{ matrix.checkout_blockkart_path }}
           ref: ${{ matrix.checkout_blockkart_expected_commit }}
+          fetch-depth: 0
 
       - name: Install Linux task dependencies
         if: matrix.linux_packages != ''

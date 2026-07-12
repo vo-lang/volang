@@ -109,7 +109,45 @@ impl LintArgs {
 
 fn lint_tasks(root: &Path, strict: bool) -> Result<()> {
     let config = load_tasks(root)?;
-    lint_task_file_with_options(root, &config, strict)
+    lint_task_file_with_options(root, &config, strict)?;
+    lint_first_party_checkout_history(root, &config)
+}
+
+const FIRST_PARTY_HISTORY_WORKFLOWS: [&str; 3] = [
+    ".github/workflows/module-system-enforcement.yml",
+    ".github/workflows/production-readiness.yml",
+    ".github/workflows/deploy-site.yml",
+];
+
+fn lint_first_party_checkout_history(root: &Path, config: &TaskFile) -> Result<()> {
+    let eng_lint_tasks = config
+        .tasks
+        .iter()
+        .find(|task| task.name == "eng-lint-tasks")
+        .ok_or_else(|| anyhow!("eng/tasks.toml missing required task eng-lint-tasks"))?;
+    for relative in FIRST_PARTY_HISTORY_WORKFLOWS {
+        if !eng_lint_tasks.inputs.iter().any(|input| input == relative) {
+            bail!("eng-lint-tasks inputs must include {relative} because task lint validates first-party checkout history");
+        }
+        let source = fs::read_to_string(root.join(relative))
+            .map_err(|error| anyhow!("could not read {relative}: {error}"))?;
+        lint_first_party_checkout_history_source(relative, &source)?;
+    }
+    Ok(())
+}
+
+fn lint_first_party_checkout_history_source(relative: &str, source: &str) -> Result<()> {
+    for repo in ["vogui", "voplay", "vopack", "vostore", "BlockKart"] {
+        let marker = format!("      - name: Checkout {repo}\n");
+        let (_, tail) = source
+            .split_once(&marker)
+            .ok_or_else(|| anyhow!("{relative} is missing first-party checkout {repo}"))?;
+        let block = tail.split("\n      - name:").next().unwrap_or(tail);
+        if !block.lines().any(|line| line.trim() == "fetch-depth: 0") {
+            bail!("{relative} checkout {repo} must use fetch-depth: 0 so provenance can verify locked historical commits");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn lint_task_file(root: &Path, config: &TaskFile) -> Result<()> {

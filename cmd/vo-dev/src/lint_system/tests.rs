@@ -44,6 +44,39 @@ fn final_selectors() -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn first_party_checkout_history_accepts_full_history_063() {
+    let source = ["vogui", "voplay", "vopack", "vostore", "BlockKart"]
+        .into_iter()
+        .map(|repo| {
+            format!(
+                "      - name: Checkout {repo}\n        uses: actions/checkout@v5\n        with:\n          fetch-depth: 0\n"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    lint_first_party_checkout_history_source("workflow.yml", &source).unwrap();
+}
+
+#[test]
+fn first_party_checkout_history_rejects_shallow_dependency_checkout_063() {
+    let source = ["vogui", "voplay", "vopack", "vostore", "BlockKart"]
+        .into_iter()
+        .map(|repo| {
+            let depth = if repo == "vogui" { "1" } else { "0" };
+            format!(
+                "      - name: Checkout {repo}\n        uses: actions/checkout@v5\n        with:\n          fetch-depth: {depth}\n"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let error = lint_first_party_checkout_history_source("workflow.yml", &source).unwrap_err();
+
+    assert!(format!("{error:#}").contains("checkout vogui must use fetch-depth: 0"));
+}
+
 fn task_group(name: &str, tasks: &[&str], included_in: &[&str]) -> TaskGroup {
     TaskGroup {
         name: name.to_string(),

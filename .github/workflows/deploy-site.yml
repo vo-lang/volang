@@ -37,6 +37,7 @@ jobs:
           repository: ${{ steps.ci_metadata.outputs.checkout_vogui_repository }}
           path: ${{ steps.ci_metadata.outputs.checkout_vogui_path }}
           ref: ${{ steps.ci_metadata.outputs.checkout_vogui_expected_commit }}
+          fetch-depth: 0
 
       - name: Checkout voplay
         if: steps.ci_metadata.outputs.checkout_voplay == 'true'
@@ -45,6 +46,7 @@ jobs:
           repository: ${{ steps.ci_metadata.outputs.checkout_voplay_repository }}
           path: ${{ steps.ci_metadata.outputs.checkout_voplay_path }}
           ref: ${{ steps.ci_metadata.outputs.checkout_voplay_expected_commit }}
+          fetch-depth: 0
 
       - name: Checkout vopack
         if: steps.ci_metadata.outputs.checkout_vopack == 'true'
@@ -53,6 +55,7 @@ jobs:
           repository: ${{ steps.ci_metadata.outputs.checkout_vopack_repository }}
           path: ${{ steps.ci_metadata.outputs.checkout_vopack_path }}
           ref: ${{ steps.ci_metadata.outputs.checkout_vopack_expected_commit }}
+          fetch-depth: 0
 
       - name: Checkout vostore
         if: steps.ci_metadata.outputs.checkout_vostore == 'true'
@@ -61,6 +64,7 @@ jobs:
           repository: ${{ steps.ci_metadata.outputs.checkout_vostore_repository }}
           path: ${{ steps.ci_metadata.outputs.checkout_vostore_path }}
           ref: ${{ steps.ci_metadata.outputs.checkout_vostore_expected_commit }}
+          fetch-depth: 0
 
       - name: Checkout BlockKart
         if: steps.ci_metadata.outputs.checkout_blockkart == 'true'
@@ -69,6 +73,7 @@ jobs:
           repository: ${{ steps.ci_metadata.outputs.checkout_blockkart_repository }}
           path: ${{ steps.ci_metadata.outputs.checkout_blockkart_path }}
           ref: ${{ steps.ci_metadata.outputs.checkout_blockkart_expected_commit }}
+          fetch-depth: 0
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
