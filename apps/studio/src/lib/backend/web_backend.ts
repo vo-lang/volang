@@ -82,6 +82,7 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 let studioWasmPromise: Promise<StudioWasm> | null = null;
 let vfsBindingsInstalled = false;
 let blockKartDepsInstallPromise: Promise<void> | null = null;
+let runtimePersistLifecycleInstalled = false;
 
 interface GitHubRepoInput {
   owner: string;
@@ -231,6 +232,7 @@ const ERR_INVALID = 'invalid argument';
 const ERR_BAD_FD = 'invalid file descriptor';
 
 resetWorkspaceState();
+installRuntimeVfsPersistenceLifecycle();
 
 function percentile(sorted: number[], fraction: number): number {
   if (sorted.length === 0) return 0;
@@ -1308,6 +1310,16 @@ function persistRuntimeVfsSnapshot(): void {
   } catch (error) {
     console.warn('Studio runtime VFS persistence could not be saved:', error);
   }
+}
+
+function installRuntimeVfsPersistenceLifecycle(): void {
+  if (runtimePersistLifecycleInstalled || typeof window === 'undefined') {
+    return;
+  }
+  runtimePersistLifecycleInstalled = true;
+  const flush = () => persistRuntimeVfsSnapshot();
+  window.addEventListener('pagehide', flush);
+  window.addEventListener('beforeunload', flush);
 }
 
 function hasVfsFile(path: string): boolean {
