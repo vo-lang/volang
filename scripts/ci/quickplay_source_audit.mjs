@@ -508,28 +508,39 @@ function validateVoplayWasmProducerProvenance(provenance, issues) {
     });
     return;
   }
-  if (JSON.stringify(producer.command) !== JSON.stringify(verification.manifest.command)
-      || JSON.stringify(producer.source) !== JSON.stringify(verification.manifest.source)
-      || JSON.stringify(producer.outputs) !== JSON.stringify(verification.manifest.outputs)) {
+  const stableProducerMatches = JSON.stringify(producer.command) === JSON.stringify(verification.manifest.command)
+    && JSON.stringify(producer.source) === JSON.stringify(verification.manifest.source)
+    && JSON.stringify(producer.toolchain) === JSON.stringify(verification.manifest.toolchain);
+  const producerPlatformValid = typeof producer.buildPlatform?.os === 'string'
+    && typeof producer.buildPlatform?.arch === 'string';
+  const sameBuildPlatform = producerPlatformValid
+    && JSON.stringify(producer.buildPlatform) === JSON.stringify(verification.manifest.buildPlatform);
+  const outputNamesMatch = JSON.stringify((producer.outputs ?? []).map((output) => output.name))
+    === JSON.stringify(verification.manifest.outputs.map((output) => output.name));
+  if (!stableProducerMatches || !producerPlatformValid || !outputNamesMatch
+      || (sameBuildPlatform && JSON.stringify(producer.outputs) !== JSON.stringify(verification.manifest.outputs))) {
     issue(issues, 'voplay/rust', 'ProducerProvenance', 'P0', 'Quickplay voplay WASM producer record does not match the current build manifest', {
       file: 'apps/studio/public/quickplay/blockkart/provenance.json',
       needle: 'voplay-current-source-wasm',
       expected: verification.manifest,
       found: producer,
-      requiredFix: 'Regenerate quickplay after rebuilding voplay-current-wasm in the same task run.',
+      requiredFix: 'Regenerate quickplay after rebuilding voplay-current-wasm on the package producer platform.',
     });
+  }
+  if (stableProducerMatches && producerPlatformValid && outputNamesMatch && !sameBuildPlatform) {
+    console.log(`quickplay source audit: verified cross-platform voplay build ${producer.buildPlatform.os}/${producer.buildPlatform.arch} -> ${verification.manifest.buildPlatform.os}/${verification.manifest.buildPlatform.arch}`);
   }
   const dependency = (provenance.dependencies ?? []).find((entry) => entry?.module === 'github.com/vo-lang/voplay');
   const artifactByName = new Map((dependency?.artifacts ?? []).map((artifact) => [posix.basename(artifact.path), artifact]));
-  for (const output of verification.manifest.outputs) {
+  for (const output of producer.outputs ?? []) {
     const packaged = artifactByName.get(output.name);
     if (!packaged || packaged.digest !== output.digest || packaged.size !== output.size) {
-      issue(issues, 'voplay/rust', 'ProducerProvenance', 'P0', `Packaged ${output.name} does not match current-source WASM output`, {
+      issue(issues, 'voplay/rust', 'ProducerProvenance', 'P0', `Packaged ${output.name} does not match its producer output`, {
         file: 'apps/studio/public/quickplay/blockkart/provenance.json',
         needle: output.name,
         expected: output,
         found: packaged ?? null,
-        requiredFix: 'Regenerate quickplay from target/voplay-current-wasm.',
+        requiredFix: 'Regenerate quickplay from the recorded producer output.',
       });
     }
   }

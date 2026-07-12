@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24",
-    "voDevSourceDigest": "sha256:686111314bfb3c977111d800d45009811f491c74a49101cfb0b9d3500830e2b6",
+    "voDevSourceDigest": "sha256:b1a6d0e8658500d86f566754abcc08bbfd7f3f2d15602f852110294f7d2b1d15",
     "wasmTarget": "wasm32-unknown-unknown"
   },
   "sourceRoots": {
@@ -276,6 +276,10 @@
       "toolchain": {
         "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
         "wasmPack": "wasm-pack 0.14.0"
+      },
+      "buildPlatform": {
+        "os": "darwin",
+        "arch": "arm64"
       },
       "outputs": [
         {

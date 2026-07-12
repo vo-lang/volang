@@ -895,6 +895,7 @@ async function buildRuntimeAssetProducerProvenance() {
       command: currentWasm.manifest.command,
       source: currentWasm.manifest.source,
       toolchain: currentWasm.manifest.toolchain,
+      buildPlatform: currentWasm.manifest.buildPlatform,
       outputs: currentWasm.manifest.outputs,
     },
     {

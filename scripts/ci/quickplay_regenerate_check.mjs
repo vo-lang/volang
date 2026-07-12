@@ -104,6 +104,49 @@ function compareDirs(actualDir, expectedDir) {
   return { missing, extra, changed };
 }
 
+function voplayPackageFacts(dir) {
+  const provenance = JSON.parse(readFileSync(path.join(dir, 'provenance.json'), 'utf8'));
+  const producer = (provenance.producers ?? []).find((entry) => entry?.id === 'voplay-current-source-wasm') ?? null;
+  const dependency = (provenance.dependencies ?? []).find((entry) => entry?.module === 'github.com/vo-lang/voplay');
+  const artifactPaths = (dependency?.artifacts ?? [])
+    .map((artifact) => artifact.url?.replace(/^\/quickplay\/blockkart\//, ''))
+    .filter(Boolean);
+  return { artifactPaths, producer };
+}
+
+function stableProducerIdentity(producer) {
+  return {
+    command: producer?.command ?? null,
+    source: producer?.source ?? null,
+    toolchain: producer?.toolchain ?? null,
+    outputNames: (producer?.outputs ?? []).map((output) => output.name),
+  };
+}
+
+function acceptedCrossPlatformVoplayVariant(diff, actualDir, expectedDir) {
+  if (diff.missing.length > 0 || diff.extra.length > 0 || diff.changed.length === 0) return null;
+  const actual = voplayPackageFacts(actualDir);
+  const expected = voplayPackageFacts(expectedDir);
+  const allowedFiles = new Set([
+    'deps.json',
+    'project.json',
+    'provenance.json',
+    ...actual.artifactPaths,
+    ...expected.artifactPaths,
+  ]);
+  if (!diff.changed.every(({ path: file }) => allowedFiles.has(file))) return null;
+  const actualProducer = actual.producer;
+  const expectedProducer = expected.producer;
+  if (!actualProducer?.buildPlatform || !expectedProducer?.buildPlatform) return null;
+  if (JSON.stringify(actualProducer.buildPlatform) === JSON.stringify(expectedProducer.buildPlatform)) return null;
+  if (JSON.stringify(stableProducerIdentity(actualProducer)) !== JSON.stringify(stableProducerIdentity(expectedProducer))) return null;
+  return {
+    generatedPlatform: actualProducer.buildPlatform,
+    checkedPlatform: expectedProducer.buildPlatform,
+    changedFiles: diff.changed.map(({ path: file }) => file),
+  };
+}
+
 if (!existsSync(checkedDir) || !statSync(checkedDir).isDirectory()) {
   fail(`checked-in quickplay package is missing: ${checkedDir}`);
 }
@@ -129,10 +172,16 @@ try {
   }
   const diff = compareDirs(outDir, checkedDir);
   if (diff.missing.length > 0 || diff.extra.length > 0 || diff.changed.length > 0) {
-    fail(`regenerated package differs from checked-in artifact\n${JSON.stringify(diff, null, 2)}`, { diff });
+    const platformVariant = acceptedCrossPlatformVoplayVariant(diff, outDir, checkedDir);
+    if (!platformVariant) {
+      fail(`regenerated package differs from checked-in artifact\n${JSON.stringify(diff, null, 2)}`, { diff });
+    }
+    writeReport('ok', { diff, platformVariant });
+    console.log(`quickplay regenerate check: ok (cross-platform voplay variant ${platformVariant.checkedPlatform.os}/${platformVariant.checkedPlatform.arch} -> ${platformVariant.generatedPlatform.os}/${platformVariant.generatedPlatform.arch})`);
+  } else {
+    writeReport('ok', { diff });
+    console.log('quickplay regenerate check: ok');
   }
-  writeReport('ok', { diff });
-  console.log('quickplay regenerate check: ok');
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }

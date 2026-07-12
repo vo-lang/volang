@@ -36,6 +36,10 @@ export const VOPLAY_WASM_PRODUCER_COMMAND = [
 ];
 export const VOPLAY_WASM_REQUIRED_OUTPUTS = ['voplay_island.js', 'voplay_island_bg.wasm'];
 
+export function currentVoplayWasmBuildPlatform() {
+  return { os: process.platform, arch: process.arch };
+}
+
 function sha256(bytes) {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
@@ -71,6 +75,9 @@ export function verifyCurrentVoplayWasm({
   if (manifest.schemaVersion !== 1) issues.push('schemaVersion must be 1');
   if (JSON.stringify(manifest.command) !== JSON.stringify(VOPLAY_WASM_PRODUCER_COMMAND)) {
     issues.push('producer command does not match canonical wasm-pack command');
+  }
+  if (JSON.stringify(manifest.buildPlatform) !== JSON.stringify(currentVoplayWasmBuildPlatform())) {
+    issues.push('buildPlatform does not match the current build host');
   }
   if (expectedCiRunId && manifest.ciRunId !== expectedCiRunId) {
     issues.push(`ciRunId ${manifest.ciRunId ?? '(missing)'} did not match ${expectedCiRunId}`);
@@ -132,6 +139,7 @@ function buildCurrentVoplayWasm() {
       rustc: toolVersion('rustc', ['--version']),
       wasmPack: toolVersion('wasm-pack', ['--version']),
     },
+    buildPlatform: currentVoplayWasmBuildPlatform(),
     outputs: VOPLAY_WASM_REQUIRED_OUTPUTS.map((name) => outputEntry(outDir, name)),
   };
   writeFileSync(path.join(outDir, 'producer-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);

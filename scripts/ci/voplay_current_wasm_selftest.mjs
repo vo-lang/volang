@@ -11,6 +11,7 @@ import {
   sourceTreeDigest,
 } from './source_bound_evidence.mjs';
 import {
+  currentVoplayWasmBuildPlatform,
   verifyCurrentVoplayWasm,
   VOPLAY_WASM_PRODUCER_COMMAND,
   VOPLAY_WASM_REQUIRED_OUTPUTS,
@@ -54,6 +55,7 @@ try {
       digest: sourceTreeDigest(fixtureRoot),
     },
     toolchain: { rustc: 'fixture', wasmPack: 'fixture' },
+    buildPlatform: currentVoplayWasmBuildPlatform(),
     outputs,
   }, null, 2)}\n`);
 
