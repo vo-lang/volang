@@ -28,7 +28,7 @@ jobs:
 
       - name: Read CI metadata
         id: ci_metadata
-        run: cargo run -q -p vo-dev -- ci metadata site --github-output
+        run: cargo run -q -p vo-dev -- ci metadata studio-browser-smoke --github-output
 
       - name: Install Linux task dependencies
         if: steps.ci_metadata.outputs.linux_packages != ''
@@ -98,14 +98,14 @@ jobs:
           cache: "npm"
           cache-dependency-path: ${{ steps.ci_metadata.outputs.node_lockfiles }}
 
-      - name: Bootstrap site tools
-        run: cargo run -q -p vo-dev -- tool bootstrap --task site --apply
+      - name: Bootstrap deployment tools
+        run: cargo run -q -p vo-dev -- tool bootstrap --task studio-browser-smoke --apply
 
-      - name: Check site tools
-        run: cargo run -q -p vo-dev -- tool check --task site
+      - name: Check deployment tools
+        run: cargo run -q -p vo-dev -- tool check --task studio-browser-smoke
 
       - name: Build Studio site
-        run: cargo run -q -p vo-dev -- task run site
+        run: cargo run -q -p vo-dev -- task run studio-browser-smoke
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
