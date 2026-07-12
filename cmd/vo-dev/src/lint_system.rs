@@ -1159,7 +1159,8 @@ fn lint_voplay_industrial_gate_sources(
             "'summary.p99_over_budget'",
             "'summary.slow_frames_over_budget'",
             "p1 += summaryIssues.filter((issue) => issue.severity === 1).length",
-            "status: p0 === 0 && p1 === 0 ? 'pass' : 'fail'",
+            "p1Enforced: !runtimeProbeOnly",
+            "status: p0 === 0 && (runtimeProbeOnly || p1 === 0) ? 'pass' : 'fail'",
             "if (report.status !== 'pass')",
         ],
     )?;
