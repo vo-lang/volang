@@ -1576,29 +1576,34 @@ async function captureScreenshot(client, file, clip = null) {
     { format: 'png', fromSurface: false, captureBeyondViewport: false },
     { format: 'png', fromSurface: true, captureBeyondViewport: false },
   ];
-  let result = null;
+  let best = null;
   let lastError = null;
   await client.send('Page.bringToFront', {}, 5000).catch(() => undefined);
-  for (let attemptIndex = 1; attemptIndex <= cdpScreenshotAttempts && !result; attemptIndex++) {
+  for (let attemptIndex = 1; attemptIndex <= cdpScreenshotAttempts && !best?.analysis.nonEmpty; attemptIndex++) {
     for (const attempt of attempts) {
       const params = normalizedClip ? { ...attempt, clip: normalizedClip } : attempt;
       try {
-        result = await client.send('Page.captureScreenshot', params, cdpScreenshotTimeoutMs);
-        break;
+        const result = await client.send('Page.captureScreenshot', params, cdpScreenshotTimeoutMs);
+        const bytes = Buffer.from(result.data, 'base64');
+        const analysis = analyzePng(bytes);
+        const candidate = { analysis, bytes };
+        if (!best || visualScore(candidate.analysis) > visualScore(best.analysis)) {
+          best = candidate;
+        }
+        if (analysis.nonEmpty) break;
       } catch (error) {
         lastError = error;
       }
     }
-    if (!result && attemptIndex < cdpScreenshotAttempts) {
+    if (!best?.analysis.nonEmpty && attemptIndex < cdpScreenshotAttempts) {
       await sleep(500);
     }
   }
-  if (!result) {
+  if (!best) {
     throw new Error(`Page.captureScreenshot failed after ${cdpScreenshotAttempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error')}`);
   }
-  const bytes = Buffer.from(result.data, 'base64');
-  writeFileSync(file, bytes);
-  return analyzePng(bytes);
+  writeFileSync(file, best.bytes);
+  return best.analysis;
 }
 
 async function captureCanvasDataUrl(client, file) {
@@ -3356,22 +3361,7 @@ async function main() {
       sessionId: null,
     }));
     progress(`renderer state active=${rendererState.active === true} renderers=${rendererState.renderers?.length ?? 0} quiesce=${(rendererState.renderers ?? []).filter((entry) => entry?.quiesceForCapture === true).length} reason=${rendererState.reason ?? ''}`);
-    progress('renderer quiesce start');
-    const rendererQuiesce = await client.evaluate(`(() => {
-      const hook = globalThis.__voStudioBrowserSmoke ?? globalThis.__voStudioBrowserSmokeRenderer;
-      if (!hook || typeof hook.quiesceRenderLoop !== 'function') {
-        return { ok: false, reason: 'debug hook missing' };
-      }
-      try {
-        return { ok: true, ...hook.quiesceRenderLoop() };
-      } catch (error) {
-        return { ok: false, reason: error instanceof Error ? error.message : String(error) };
-      }
-    })()`, 10000).catch((error) => ({
-      ok: false,
-      reason: error instanceof Error ? error.message : String(error),
-    }));
-    progress(`renderer quiesce done ok=${rendererQuiesce.ok === true} stopped=${rendererQuiesce.stopped ?? 0} reason=${rendererQuiesce.reason ?? ''}`);
+    let rendererQuiesce = { ok: false, stopped: 0, reason: 'visual capture has not completed' };
     progress('debug snapshot evaluate start');
     const debugSnapshot = await client.evaluate(debugSnapshotExpression(), 15000).catch(() => ({
       entryPath: hookState.entryPath,
@@ -3398,7 +3388,7 @@ async function main() {
     let viewportCapture = null;
     let viewportCaptureMode = 'cdp-page';
     let viewportCdpFailed = false;
-    const primaryCdpUnavailable = [rendererState.reason, rendererQuiesce.reason]
+    const primaryCdpUnavailable = [rendererState.reason]
       .some((reason) => /CDP (?:websocket closed|Runtime\.evaluate timed out)/i.test(String(reason ?? '')));
     try {
       if (primaryCdpUnavailable) {
@@ -3498,6 +3488,23 @@ async function main() {
         captureWarnings.push(`fresh browser canvas capture failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+
+    progress('renderer quiesce start');
+    rendererQuiesce = await client.evaluate(`(() => {
+      const hook = globalThis.__voStudioBrowserSmoke ?? globalThis.__voStudioBrowserSmokeRenderer;
+      if (!hook || typeof hook.quiesceRenderLoop !== 'function') {
+        return { ok: false, reason: 'debug hook missing' };
+      }
+      try {
+        return { ok: true, ...hook.quiesceRenderLoop() };
+      } catch (error) {
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      }
+    })()`, 10000).catch((error) => ({
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    progress(`renderer quiesce done ok=${rendererQuiesce.ok === true} stopped=${rendererQuiesce.stopped ?? 0} reason=${rendererQuiesce.reason ?? ''}`);
 
     const startupPhases = classifyStartupPhases([
       ...(debugSnapshot.consoleLines ?? []),
