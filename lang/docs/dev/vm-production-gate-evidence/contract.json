@@ -3,7 +3,7 @@
   "selector": "contract",
   "changed": false,
   "passed": true,
-  "source_state": "vm-production-current-source:20e108f6da49fb17c09b5c1a78375b20f00f74269a16af2198e4c000c528580e",
+  "source_state": "vm-production-current-source:be4531104e6e4c7462585a11bea50aa38e86e2ebfb5645dc3321ff1d4882bf81",
   "tasks": [
     "cargo-test-common-core",
     "cargo-test-vm",

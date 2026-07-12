@@ -35,8 +35,9 @@ shell snippets. Add the data here and route execution through `vo-dev`.
 - PR planning stays task-granular. The generated GitHub matrix compacts selected
   tasks into disjoint `ci-pr-*` groups, then resolves each dependency once inside
   its unit.
-- Long industrial soak and replay workloads live in `site`/qualification;
-  PR units keep the corresponding source, unit, Scene3D, and browser contracts.
+- Vehicle/physics integration, industrial soak, and replay workloads live in
+  `site`/qualification; PR units keep source, focused unit, and browser-startup
+  contracts.
 - The `qualification` matrix runs weekly at UTC 03:37 and remains manually
   triggerable for releases. Its VM, Voplay, and release units are disjoint.
 - Rust cache workspaces may belong to a declared first-party repo; matrix

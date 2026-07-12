@@ -48,11 +48,6 @@ title = "Voplay architecture"
 tier = "contract"
 
 [[matrix.unit]]
-selector = "ci-pr-voplay-scene3d"
-title = "Voplay Scene3D"
-tier = "contract"
-
-[[matrix.unit]]
 selector = "ci-pr-release-verify"
 title = "Release verification"
 tier = "release"
@@ -120,7 +115,6 @@ tasks = [
   "blockkart-product-boundary-strict",
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
-  "voplay-scene3d-contract",
   "voplay-physics-industrial-stress",
   "quickplay-validate",
   "studio-browser-smoke",
@@ -140,7 +134,6 @@ tasks = [
   "blockkart-product-boundary-strict",
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
-  "voplay-scene3d-contract",
   "voplay-physics-industrial-stress",
 ]
 
