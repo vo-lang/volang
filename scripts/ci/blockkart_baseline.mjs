@@ -523,6 +523,40 @@ async function waitForVoplayRendererReady(baseUrl, timeoutMs) {
   };
 }
 
+async function probeBrowserDisplayPulse(client) {
+  return client.evaluate(`(() => new Promise((resolve) => {
+    const startedAt = performance.now();
+    let count = 0;
+    let firstTimestamp = null;
+    let lastTimestamp = null;
+    let settled = false;
+    const finish = (ok, reason) => {
+      if (settled) return;
+      settled = true;
+      resolve({
+        ok,
+        reason,
+        count,
+        spanMs: firstTimestamp == null || lastTimestamp == null ? 0 : lastTimestamp - firstTimestamp,
+        elapsedMs: performance.now() - startedAt,
+        visibility: document.visibilityState,
+      });
+    };
+    const tick = (timestamp) => {
+      count++;
+      if (firstTimestamp == null) firstTimestamp = timestamp;
+      lastTimestamp = timestamp;
+      if (count >= 4) {
+        finish(true, null);
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    setTimeout(() => finish(false, 'requestAnimationFrame did not advance four pulses'), 5000);
+  }))()`, 10000);
+}
+
 function perfEndpointTelemetryFacts(records) {
   let firstReportAt = null;
   let lastReportAt = null;
@@ -628,7 +662,12 @@ function browserWindowModeFlags() {
     && Boolean(process.env.DISPLAY)
     && process.env.BLOCKKART_BASELINE_HEADLESS !== '1';
   return headfulLinux
-    ? [`--window-size=${viewportWidth},${viewportHeight}`, '--force-device-scale-factor=1']
+    ? [
+        `--window-size=${viewportWidth},${viewportHeight}`,
+        '--force-device-scale-factor=1',
+        '--disable-gpu-vsync',
+        '--disable-frame-rate-limit',
+      ]
     : ['--headless=new'];
 }
 
@@ -3266,6 +3305,11 @@ async function main() {
       failure: firstFrame.reason ?? 'first frame did not complete',
     };
     if (firstFrame.ok && !firstFrame.skipped && expectedLifecycleState === 'Running') {
+      const displayPulse = await probeBrowserDisplayPulse(client);
+      progress(`display pulse ok=${displayPulse.ok === true} count=${displayPulse.count ?? 0} spanMs=${Number(displayPulse.spanMs ?? 0).toFixed(1)} visibility=${displayPulse.visibility ?? 'unknown'}`);
+      if (!displayPulse.ok) {
+        throw new Error(`browser display pulse failed: ${displayPulse.reason ?? 'unknown failure'}`);
+      }
       progress('renderer readiness wait start');
       rendererReadiness = await waitForVoplayRendererReady(baseUrl, firstFrameTimeoutMs);
       progress(`renderer readiness wait done ready=${rendererReadiness.ready} frame=${rendererReadiness.frame ?? 'none'} reports=${rendererReadiness.reportCount}`);
