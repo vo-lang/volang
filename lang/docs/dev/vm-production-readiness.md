@@ -2,7 +2,7 @@
 
 Status, 2026-06-30 aggressive readiness pass: VM production-readiness signoff
 evidence is current for source state
-`vm-production-current-source:8c64364f2ac5bc9cdc9dd8fc531f4adb2bd35b9104025c91b2d001e5f4d77e43`.
+`vm-production-current-source:370e802ee2f7819bc4fe4272856bf47321cbb4df781bd1afd134995966519cd2`.
 The declared final selectors `contract`, `vm-production`, `site`, and
 `release-verify` passed through `vo-dev task run` and recorded machine evidence
 under `lang/docs/dev/vm-production-gate-evidence/`.
