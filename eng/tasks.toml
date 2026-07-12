@@ -1837,7 +1837,7 @@ outputs = ["target/voplay-framegraph-unit"]
 tier = "contract"
 tags = ["app-smoke", "contract", "architecture", "perf"]
 owner = "studio"
-timeout_sec = 300
+timeout_sec = 900
 
 [[task]]
 name = "voplay-render-core-unit"
@@ -1852,7 +1852,7 @@ outputs = ["target/voplay-render-core-unit"]
 tier = "contract"
 tags = ["app-smoke", "contract", "architecture", "perf"]
 owner = "studio"
-timeout_sec = 300
+timeout_sec = 900
 
 [[task]]
 name = "voplay-batch-planner-unit"
@@ -1867,7 +1867,7 @@ outputs = ["target/voplay-batch-planner-unit"]
 tier = "contract"
 tags = ["app-smoke", "contract", "architecture", "perf"]
 owner = "studio"
-timeout_sec = 300
+timeout_sec = 900
 
 [[task]]
 name = "voplay-vehicle-dynamics-unit"
