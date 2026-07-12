@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   plan:
     name: Plan CI
@@ -127,7 +131,7 @@ jobs:
       - name: Check task tools
         run: cargo run -q -p vo-dev -- tool check --task "${{ matrix.task }}"
 
-      - name: Run CI lane
+      - name: Run CI unit
         run: cargo run -q -p vo-dev -- task run "${{ matrix.task }}"
 
   gate:

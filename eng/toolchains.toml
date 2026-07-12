@@ -45,6 +45,11 @@ target = "target"
 path = "apps/studio/wasm"
 target = "target"
 
+[[rust_cache_workspace]]
+repo = "voplay"
+path = "rust"
+target = "target"
+
 [[node_workspace]]
 name = "studio"
 path = "apps/studio"

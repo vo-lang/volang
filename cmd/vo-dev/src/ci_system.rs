@@ -1,5 +1,6 @@
 use crate::config::{
-    load_ci, load_tasks, load_toolchains, NodeWorkspace, Task, TaskFile, ToolchainFile,
+    load_ci, load_tasks, load_toolchains, CiMatrixUnit, NodeWorkspace, Task, TaskFile,
+    ToolchainFile,
 };
 use crate::first_party::{ci_checkout_for, CiCheckout};
 use crate::github_output::write_github_output;
@@ -18,7 +19,7 @@ use std::path::Path;
 
 pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
     let Some(subcommand) = args.first().cloned() else {
-        bail!("usage: vo-dev ci matrix|metadata <selector> [--github-output]\n       vo-dev ci final-matrix [--github-output]");
+        bail!("usage: vo-dev ci matrix|full-matrix|metadata <selector> [--github-output]\n       vo-dev ci final-matrix [--github-output]");
     };
     args.remove(0);
     let mut github_output = false;
@@ -37,7 +38,7 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
             bail!("usage: vo-dev ci final-matrix [--github-output]");
         }
         let task_names = final_gate_task_names(root)?;
-        let matrix = matrix_for(root, &task_names)?;
+        let matrix = matrix_for(root, "pr", &task_names)?;
         if github_output {
             write_github_output(&[
                 ("tasks", serde_json::to_string(&task_names)?),
@@ -66,8 +67,8 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
     }
     let (task_names, _) = plan_tasks(root, &opts)?;
     match subcommand.as_str() {
-        "matrix" => {
-            let matrix = matrix_for(root, &task_names)?;
+        "matrix" | "full-matrix" => {
+            let matrix = matrix_for(root, &opts.selector, &task_names)?;
             if github_output {
                 write_github_output(&[
                     ("tasks", serde_json::to_string(&task_names)?),
@@ -95,7 +96,7 @@ pub(crate) fn cmd_ci(root: &Path, mut args: Vec<String>) -> Result<()> {
             }
         }
         _ => bail!(
-            "usage: vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]\n       vo-dev ci metadata <selector> [--github-output]\n       vo-dev ci final-matrix [--github-output]"
+            "usage: vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]\n       vo-dev ci full-matrix <selector> [--github-output]\n       vo-dev ci metadata <selector> [--github-output]\n       vo-dev ci final-matrix [--github-output]"
         ),
     }
     Ok(())
@@ -295,7 +296,11 @@ fn final_gate_task_names(root: &Path) -> Result<Vec<String>> {
     Ok(tasks)
 }
 
-pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOutput> {
+pub(crate) fn matrix_for(
+    root: &Path,
+    matrix_name: &str,
+    task_names: &[String],
+) -> Result<MatrixOutput> {
     let config = load_tasks(root)?;
     let task_map = task_map(&config)?;
     let ci = load_ci(root)?;
@@ -304,7 +309,12 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
     let node_version = desired_tool_version(&toolchains, "node")?;
     let wasm_pack_version = desired_tool_version(&toolchains, "wasm-pack")?;
     let mut include = Vec::new();
-    for unit in execution_units(&config, &ci.lanes, task_names)? {
+    let matrix = ci
+        .matrices
+        .iter()
+        .find(|matrix| matrix.name == matrix_name)
+        .ok_or_else(|| anyhow!("eng/ci.toml has no execution matrix {matrix_name}"))?;
+    for unit in execution_units(&config, &matrix.units, task_names)? {
         let selector_tasks = resolve_selector(&config, &unit.selector)?;
         let tools = crate::task_graph::selector_tools_recursive(root, &unit.selector)?;
         let mut repos = BTreeSet::new();
@@ -364,7 +374,7 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
             } else {
                 String::new()
             },
-            rust_cache_workspaces: rust_cache_workspaces_for_workflow(root, &toolchains)?,
+            rust_cache_workspaces: rust_cache_workspaces_for_workflow(root, &toolchains, &repos)?,
             wasm_pack_version: if tools.contains("wasm-pack") {
                 wasm_pack_version.clone()
             } else {
@@ -387,7 +397,7 @@ pub(crate) fn matrix_for(root: &Path, task_names: &[String]) -> Result<MatrixOut
 
 fn execution_units(
     config: &TaskFile,
-    lanes: &[crate::config::CiLane],
+    configured_units: &[CiMatrixUnit],
     task_names: &[String],
 ) -> Result<Vec<ExecutionUnit>> {
     let task_map = task_map(config)?;
@@ -398,10 +408,10 @@ fn execution_units(
     }
     let planned = task_names.iter().cloned().collect::<BTreeSet<_>>();
     let mut covered_by = BTreeMap::<String, String>::new();
-    let mut units = Vec::new();
-    for lane in lanes {
-        let lane_tasks = resolve_selector(config, &lane.selector)?;
-        let selected = lane_tasks
+    let mut execution_units = Vec::new();
+    for unit in configured_units {
+        let unit_tasks = resolve_selector(config, &unit.selector)?;
+        let selected = unit_tasks
             .iter()
             .filter(|task| planned.contains(*task))
             .cloned()
@@ -410,17 +420,17 @@ fn execution_units(
             continue;
         }
         for task in selected {
-            if let Some(previous) = covered_by.insert(task.clone(), lane.selector.clone()) {
+            if let Some(previous) = covered_by.insert(task.clone(), unit.selector.clone()) {
                 bail!(
-                    "CI task {task} is covered by overlapping lanes {previous} and {}",
-                    lane.selector
+                    "CI task {task} is covered by overlapping units {previous} and {}",
+                    unit.selector
                 );
             }
         }
-        units.push(ExecutionUnit {
-            selector: lane.selector.clone(),
-            title: lane.title.clone(),
-            tier: lane.tier.clone(),
+        execution_units.push(ExecutionUnit {
+            selector: unit.selector.clone(),
+            title: unit.title.clone(),
+            tier: unit.tier.clone(),
         });
     }
     for name in task_names {
@@ -430,13 +440,13 @@ fn execution_units(
         let task = task_map
             .get(name)
             .ok_or_else(|| anyhow!("unknown task for matrix: {name}"))?;
-        units.push(ExecutionUnit {
+        execution_units.push(ExecutionUnit {
             selector: name.clone(),
             title: task.title.clone(),
             tier: task.tier.clone(),
         });
     }
-    Ok(units)
+    Ok(execution_units)
 }
 
 pub(crate) fn ci_metadata_for(root: &Path, task_names: &[String]) -> Result<CiMetadata> {
@@ -479,7 +489,7 @@ pub(crate) fn ci_metadata_for(root: &Path, task_names: &[String]) -> Result<CiMe
         } else {
             String::new()
         },
-        rust_cache_workspaces: rust_cache_workspaces_for_workflow(root, &toolchains)?,
+        rust_cache_workspaces: rust_cache_workspaces_for_workflow(root, &toolchains, &repos)?,
         wasm_pack_version: if wasm_pack {
             desired_tool_version(&toolchains, "wasm-pack")?
         } else {
@@ -552,14 +562,38 @@ fn node_lockfiles_for_tasks(
     Ok(lockfiles.join("\n"))
 }
 
-fn rust_cache_workspaces_for_workflow(root: &Path, toolchains: &ToolchainFile) -> Result<String> {
+fn rust_cache_workspaces_for_workflow(
+    root: &Path,
+    toolchains: &ToolchainFile,
+    repos: &BTreeSet<String>,
+) -> Result<String> {
     if toolchains.rust_cache_workspace.is_empty() {
         bail!("eng/toolchains.toml must declare at least one rust_cache_workspace");
     }
     let mut lines = Vec::new();
     for workspace in &toolchains.rust_cache_workspace {
         validate_rust_cache_workspace(root, workspace)?;
-        lines.push(format!("{} -> {}", workspace.path, workspace.target));
+        let path = if let Some(repo) = &workspace.repo {
+            if !repos.contains(repo) {
+                continue;
+            }
+            let checkout = ci_checkout_for(root, repo)?;
+            if !checkout.enabled {
+                bail!("rust cache workspace references repo {repo} without CI checkout");
+            }
+            if workspace.path == "." {
+                checkout.path
+            } else {
+                format!(
+                    "{}/{}",
+                    checkout.path.trim_end_matches('/'),
+                    workspace.path.trim_start_matches('/')
+                )
+            }
+        } else {
+            workspace.path.clone()
+        };
+        lines.push(format!("{path} -> {}", workspace.target));
     }
     Ok(lines.join("\n"))
 }
@@ -634,7 +668,7 @@ impl NamedCheckoutFields {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CiLane;
+    use crate::config::CiMatrixUnit;
 
     fn task(name: &str) -> Task {
         Task {
@@ -679,8 +713,8 @@ mod tests {
         }
     }
 
-    fn lane(selector: &str) -> CiLane {
-        CiLane {
+    fn unit(selector: &str) -> CiMatrixUnit {
+        CiMatrixUnit {
             selector: selector.to_string(),
             title: selector.to_string(),
             tier: "contract".to_string(),
@@ -688,10 +722,10 @@ mod tests {
     }
 
     #[test]
-    fn execution_units_compact_selected_tasks_into_their_lane() {
+    fn execution_units_compact_selected_tasks_into_their_unit() {
         let config = config(&[("lane-a", &["compile", "test"])], &["compile", "test"]);
-        let units = execution_units(&config, &[lane("lane-a")], &["compile".to_string()])
-            .expect("execution lane");
+        let units = execution_units(&config, &[unit("lane-a")], &["compile".to_string()])
+            .expect("execution unit");
 
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].selector, "lane-a");
@@ -700,7 +734,7 @@ mod tests {
     #[test]
     fn execution_units_keep_uncovered_final_gate_tasks_standalone() {
         let config = config(&[("lane-a", &["compile"])], &["compile", "signoff"]);
-        let units = execution_units(&config, &[lane("lane-a")], &["signoff".to_string()])
+        let units = execution_units(&config, &[unit("lane-a")], &["signoff".to_string()])
             .expect("standalone final gate");
 
         assert_eq!(units.len(), 1);
@@ -708,15 +742,15 @@ mod tests {
     }
 
     #[test]
-    fn execution_units_reject_overlapping_lanes() {
+    fn execution_units_reject_overlapping_units() {
         let config = config(&[("lane-a", &["test"]), ("lane-b", &["test"])], &["test"]);
         let err = execution_units(
             &config,
-            &[lane("lane-a"), lane("lane-b")],
+            &[unit("lane-a"), unit("lane-b")],
             &["test".to_string()],
         )
         .unwrap_err();
 
-        assert!(format!("{err:#}").contains("covered by overlapping lanes"));
+        assert!(format!("{err:#}").contains("covered by overlapping units"));
     }
 }

@@ -283,8 +283,8 @@ pr = [
   "release-verify",
 ]
 
-# GitHub Actions executes these lanes. Each PR task belongs to exactly one lane,
-# so dependencies are resolved once inside that lane instead of once in the
+# GitHub Actions executes these units. Each PR task belongs to exactly one unit,
+# so dependencies are resolved once inside that unit instead of once in the
 # matrix planner and again in every task job.
 ci-pr-policy = [
   "ci-self-check",
@@ -367,6 +367,16 @@ ci-pr-voplay-static = [
 
 ci-pr-voplay-scene3d = ["voplay-scene3d-contract"]
 ci-pr-release-verify = ["release-verify"]
+
+qualification-vm = ["stress"]
+qualification-voplay = ["voplay-engineering-quality-readiness"]
+qualification-release = ["release-verify"]
+
+qualification = [
+  "qualification-vm",
+  "qualification-voplay",
+  "qualification-release",
+]
 
 full = [
   "quality",
@@ -615,7 +625,7 @@ tier_intent = "explicit heavier stress and repeat checks"
 owner = "eng"
 tags = ["stress"]
 tasks = ["vo-test-gc-stress-repeat", "vo-test-jit-osr-stress-repeat", "cargo-test-runtime-model"]
-included_in = ["vm-production"]
+included_in = ["vm-production", "qualification-vm"]
 selection_policy = "Selected when the stress validation surface is requested or when a parent group includes it."
 
 [[group]]
@@ -665,7 +675,7 @@ tier_intent = "first-party release verification"
 owner = "release"
 tags = ["release-verify"]
 tasks = ["release-verify-vogui", "release-verify-voplay", "release-verify-vopack", "release-verify-vostore"]
-included_in = ["pr", "full", "ci-pr-release-verify"]
+included_in = ["pr", "full", "ci-pr-release-verify", "qualification-release"]
 selection_policy = "Selected when the release-verify validation surface is requested or when a parent group includes it."
 
 [[group]]
@@ -706,7 +716,7 @@ owner = "eng"
 tags = ["ci-lane", "pr", "policy"]
 tasks = ["ci-self-check", "d-py-smoke", "eng-lint-tasks", "docs-lint", "eng-lint-benchmarks", "node-audit-current", "cargo-fmt", "cargo-clippy", "wasm-check"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for PR policy and build hygiene tasks."
+selection_policy = "GitHub Actions execution unit for PR policy and build hygiene tasks."
 
 [[group]]
 name = "ci-pr-vm-jit"
@@ -716,7 +726,7 @@ owner = "runtime"
 tags = ["ci-lane", "pr", "vm", "jit"]
 tasks = ["cargo-test-common-core", "cargo-test-jit", "cargo-test-vo-source-contract", "cargo-test-vm", "cargo-test-vm-hardening-jit"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for VM and JIT crate contracts."
+selection_policy = "GitHub Actions execution unit for VM and JIT crate contracts."
 
 [[group]]
 name = "ci-pr-runtime-gc"
@@ -726,7 +736,7 @@ owner = "runtime"
 tags = ["ci-lane", "pr", "runtime", "gc"]
 tasks = ["cargo-test-runtime", "cargo-test-gc-runtime", "cargo-test-gc-vm", "cargo-test-gc-vm-jit", "cargo-test-gc-jit", "cargo-check-vo-app-runtime", "cargo-test-vo-app-runtime", "cargo-test-vo-engine", "cargo-test-vo-playground-host-wake"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for runtime and GC contracts."
+selection_policy = "GitHub Actions execution unit for runtime and GC contracts."
 
 [[group]]
 name = "ci-pr-compiler-ffi"
@@ -736,7 +746,7 @@ owner = "compiler"
 tags = ["ci-lane", "pr", "compiler", "ffi"]
 tasks = ["cargo-test-stdlib", "cargo-test-web-runtime-wasm", "cargo-test-ffi-macro", "cargo-test-vo-ext", "cargo-check-vo-ext-wasm", "cargo-test-analysis", "cargo-test-codegen", "cargo-test-web-hardening", "cargo-test-studio-wasm-source-contract", "cargo-test-vo-dev", "cargo-test-vo-test"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for compiler FFI web and developer-tool contracts."
+selection_policy = "GitHub Actions execution unit for compiler FFI web and developer-tool contracts."
 
 [[group]]
 name = "ci-pr-language"
@@ -746,7 +756,7 @@ owner = "lang"
 tags = ["ci-lane", "pr", "lang-case"]
 tasks = ["vo-test", "vo-test-compile", "vo-test-runtime-contract", "vo-test-runtime-language-contract", "vo-test-jit-contract", "vo-test-osr", "vo-test-nostd", "vo-test-wasm", "vo-test-gc"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for language behavior across supported targets."
+selection_policy = "GitHub Actions execution unit for language behavior across supported targets."
 
 [[group]]
 name = "ci-pr-release-smoke"
@@ -756,7 +766,7 @@ owner = "release"
 tags = ["ci-lane", "pr", "release", "benchmark"]
 tasks = ["examples-smoke", "cargo-test-release", "wasm-check-release", "vo-bench-jit-loop-smoke", "vo-gc-perf-root-table-smoke"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for release-profile smoke checks."
+selection_policy = "GitHub Actions execution unit for release-profile smoke checks."
 
 [[group]]
 name = "ci-pr-studio"
@@ -766,7 +776,7 @@ owner = "studio"
 tags = ["ci-lane", "pr", "studio", "quickplay"]
 tasks = ["studio-browser-smoke", "blockkart-smoke-static"]
 included_in = []
-selection_policy = "GitHub Actions execution lane that shares one Studio and quickplay build."
+selection_policy = "GitHub Actions execution unit that shares one Studio and quickplay build."
 
 [[group]]
 name = "ci-pr-voplay-static"
@@ -776,7 +786,7 @@ owner = "studio"
 tags = ["ci-lane", "pr", "voplay", "architecture"]
 tasks = ["voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "blockkart-product-boundary-strict", "voplay-render-core-unit", "voplay-batch-planner-unit"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for Voplay architecture and render units."
+selection_policy = "GitHub Actions execution unit for Voplay architecture and render checks."
 
 [[group]]
 name = "ci-pr-voplay-scene3d"
@@ -786,7 +796,7 @@ owner = "studio"
 tags = ["ci-lane", "pr", "voplay", "physics"]
 tasks = ["voplay-scene3d-contract"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for the consolidated Scene3D contract."
+selection_policy = "GitHub Actions execution unit for the consolidated Scene3D contract."
 
 [[group]]
 name = "ci-pr-release-verify"
@@ -796,7 +806,47 @@ owner = "release"
 tags = ["ci-lane", "pr", "release-verify"]
 tasks = ["release-verify"]
 included_in = []
-selection_policy = "GitHub Actions execution lane for first-party package verification."
+selection_policy = "GitHub Actions execution unit for first-party package verification."
+
+[[group]]
+name = "qualification-vm"
+title = "VM Qualification"
+tier_intent = "scheduled VM GC JIT and runtime-model stress qualification"
+owner = "runtime"
+tags = ["qualification", "stress", "vm", "jit", "gc"]
+tasks = ["stress"]
+included_in = ["qualification"]
+selection_policy = "Selected by the scheduled qualification matrix for repeat VM stress coverage."
+
+[[group]]
+name = "qualification-voplay"
+title = "Voplay Qualification"
+tier_intent = "scheduled render soak physics stress provenance and engineering-quality signoff"
+owner = "studio"
+tags = ["qualification", "stress", "voplay", "site"]
+tasks = ["voplay-engineering-quality-readiness"]
+included_in = ["qualification"]
+selection_policy = "Selected by the scheduled qualification matrix for full Voplay and BlockKart signoff."
+
+[[group]]
+name = "qualification-release"
+title = "Release Qualification"
+tier_intent = "scheduled first-party package release verification"
+owner = "release"
+tags = ["qualification", "release-verify"]
+tasks = ["release-verify"]
+included_in = ["qualification"]
+selection_policy = "Selected by the scheduled qualification matrix for first-party release verification."
+
+[[group]]
+name = "qualification"
+title = "Scheduled and Release Qualification"
+tier_intent = "scheduled and manually triggered release-grade incremental qualification"
+owner = "eng"
+tags = ["qualification", "stress", "release-verify"]
+tasks = ["qualification-vm", "qualification-voplay", "qualification-release"]
+included_in = []
+selection_policy = "Selected by the Scheduled and Release Qualification workflow."
 
 [[group]]
 name = "full"

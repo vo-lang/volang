@@ -23,7 +23,7 @@
   },
   "toolchain": {
     "node": "v24",
-    "voDevSourceDigest": "sha256:d353f4caf33b1cdd9fa86b7cd063ef248869b9e28296afa2062cd75acacb795a"
+    "voDevSourceDigest": "sha256:624a7cafe57d9086ac0b060a153437fa65b91dd6024c43f31e6c4383f5bfad49"
   },
   "sourceRoots": {
     "volang": "."

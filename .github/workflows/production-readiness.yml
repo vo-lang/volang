@@ -1,14 +1,20 @@
-name: Production Readiness
+name: Scheduled / Release Qualification
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "37 3 * * 6"
 
 permissions:
   contents: read
 
+concurrency:
+  group: qualification-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   plan:
-    name: Plan production gates
+    name: Plan qualification
     runs-on: ubuntu-latest
     outputs:
       has_tasks: ${{ steps.plan.outputs.has_tasks }}
@@ -23,9 +29,9 @@ jobs:
       - name: Install Rust
         uses: ./.github/actions/setup-rust
 
-      - name: Plan final gate tasks
+      - name: Plan qualification units
         id: plan
-        run: cargo run -q -p vo-dev -- ci final-matrix --github-output
+        run: cargo run -q -p vo-dev -- ci full-matrix qualification --github-output
 
   readiness-gate:
     name: ${{ matrix.title }}

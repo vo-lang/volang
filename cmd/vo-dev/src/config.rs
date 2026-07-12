@@ -81,6 +81,7 @@ pub(crate) struct ToolchainFile {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RustCacheWorkspace {
+    pub(crate) repo: Option<String>,
     pub(crate) path: String,
     pub(crate) target: String,
 }
@@ -149,12 +150,19 @@ pub(crate) struct CiFile {
     pub(crate) changed_files: ChangedFiles,
     #[serde(default)]
     pub(crate) known_prefix: Vec<KnownPrefix>,
-    #[serde(default, rename = "lane")]
-    pub(crate) lanes: Vec<CiLane>,
+    #[serde(default, rename = "matrix")]
+    pub(crate) matrices: Vec<CiMatrix>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CiLane {
+pub(crate) struct CiMatrix {
+    pub(crate) name: String,
+    #[serde(default, rename = "unit")]
+    pub(crate) units: Vec<CiMatrixUnit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CiMatrixUnit {
     pub(crate) selector: String,
     pub(crate) title: String,
     pub(crate) tier: String,

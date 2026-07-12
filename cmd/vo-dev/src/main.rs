@@ -89,6 +89,7 @@ fn print_usage() {
   vo-dev task plan <selector> [--changed] [--base <sha>] [--head <sha>] [--format text|json] [--explain]
   vo-dev task run <selector> [--changed] [--base <sha>] [--head <sha>]
   vo-dev ci matrix <selector> [--base <sha>] [--head <sha>] [--github-output]
+  vo-dev ci full-matrix <selector> [--github-output]
   vo-dev ci metadata <selector> [--github-output]
   vo-dev ci final-matrix [--github-output]
   vo-dev lint tasks|artifacts|repo-boundaries|layout|docs|examples|benchmarks|release|all [--strict]

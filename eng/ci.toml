@@ -4,54 +4,75 @@ version = 1
 fallback = ["cargo-fmt", "ci-self-check", "test-data-lint", "vo-test"]
 unknown_path_policy = "fallback"
 
-[[lane]]
+[[matrix]]
+name = "pr"
+
+[[matrix.unit]]
 selector = "ci-pr-policy"
 title = "Policy and build hygiene"
 tier = "fast"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-vm-jit"
 title = "VM and JIT"
 tier = "contract"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-runtime-gc"
 title = "Runtime and GC"
 tier = "contract"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-compiler-ffi"
 title = "Compiler and FFI"
 tier = "contract"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-language"
 title = "Language targets"
 tier = "contract"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-release-smoke"
 title = "Release smoke"
 tier = "release"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-studio"
 title = "Studio and quickplay"
 tier = "contract"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-voplay-static"
 title = "Voplay architecture"
 tier = "contract"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-voplay-scene3d"
 title = "Voplay Scene3D"
 tier = "contract"
 
-[[lane]]
+[[matrix.unit]]
 selector = "ci-pr-release-verify"
 title = "Release verification"
+tier = "release"
+
+[[matrix]]
+name = "qualification"
+
+[[matrix.unit]]
+selector = "qualification-vm"
+title = "VM stress qualification"
+tier = "stress"
+
+[[matrix.unit]]
+selector = "qualification-voplay"
+title = "Voplay industrial qualification"
+tier = "stress"
+
+[[matrix.unit]]
+selector = "qualification-release"
+title = "Release qualification"
 tier = "release"
 
 [[known_prefix]]

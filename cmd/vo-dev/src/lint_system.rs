@@ -761,34 +761,63 @@ fn lint_ci_file(root: &Path, config: &TaskFile, task_map: &BTreeMap<String, Task
             validate_ci_route_task(task_map, &format!("known_prefix {}", prefix.path), task)?;
         }
     }
-    if ci.lanes.is_empty() {
-        bail!("eng/ci.toml must declare at least one CI execution lane");
+    if ci.matrices.is_empty() {
+        bail!("eng/ci.toml must declare at least one CI execution matrix");
     }
-    let mut lane_names = HashSet::new();
-    let mut task_lanes = BTreeMap::<String, String>::new();
-    for lane in &ci.lanes {
-        validate_ascii_slug("ci lane selector", &lane.selector, &['-'])?;
-        if !lane_names.insert(lane.selector.clone()) {
-            bail!(
-                "eng/ci.toml has duplicate CI lane selector {}",
-                lane.selector
-            );
+    let mut matrix_names = HashSet::new();
+    for matrix in &ci.matrices {
+        validate_ascii_slug("ci matrix name", &matrix.name, &['-'])?;
+        if !matrix_names.insert(matrix.name.clone()) {
+            bail!("eng/ci.toml has duplicate CI matrix {}", matrix.name);
         }
-        if lane.title.trim().is_empty() || lane.tier.trim().is_empty() {
-            bail!("CI lane {} must declare title and tier", lane.selector);
+        if matrix.units.is_empty() {
+            bail!("CI matrix {} must declare at least one unit", matrix.name);
         }
-        for task in resolve_selector(config, &lane.selector)? {
-            if let Some(previous) = task_lanes.insert(task.clone(), lane.selector.clone()) {
+        let expected = resolve_selector(config, &matrix.name)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut unit_names = HashSet::new();
+        let mut task_units = BTreeMap::<String, String>::new();
+        for unit in &matrix.units {
+            validate_ascii_slug("ci matrix unit selector", &unit.selector, &['-'])?;
+            if !unit_names.insert(unit.selector.clone()) {
                 bail!(
-                    "CI task {task} is covered by overlapping lanes {previous} and {}",
-                    lane.selector
+                    "CI matrix {} has duplicate unit selector {}",
+                    matrix.name,
+                    unit.selector
                 );
             }
+            if unit.title.trim().is_empty() || unit.tier.trim().is_empty() {
+                bail!(
+                    "CI matrix {} unit {} must declare title and tier",
+                    matrix.name,
+                    unit.selector
+                );
+            }
+            for task in resolve_selector(config, &unit.selector)? {
+                if !expected.contains(&task) {
+                    bail!(
+                        "CI matrix {} unit {} selects out-of-scope task {task}",
+                        matrix.name,
+                        unit.selector
+                    );
+                }
+                if let Some(previous) = task_units.insert(task.clone(), unit.selector.clone()) {
+                    bail!(
+                        "CI matrix {} task {task} is covered by overlapping units {previous} and {}",
+                        matrix.name,
+                        unit.selector
+                    );
+                }
+            }
         }
-    }
-    for task in resolve_selector(config, "pr")? {
-        if !task_lanes.contains_key(&task) {
-            bail!("PR task {task} is not assigned to a CI execution lane");
+        for task in expected {
+            if !task_units.contains_key(&task) {
+                bail!(
+                    "CI matrix {} task {task} is not assigned to an execution unit",
+                    matrix.name
+                );
+            }
         }
     }
     lint_vm_readiness_changed_prefixes(&ci.known_prefix)?;
@@ -1321,6 +1350,7 @@ const REQUIRED_GROUPS: &[&str] = &[
     "vm-production",
     "test",
     "site",
+    "qualification",
     "full",
     "pr",
 ];
@@ -1334,6 +1364,7 @@ const TOP_LEVEL_GROUPS: &[&str] = &[
     "stress",
     "vm-production",
     "site",
+    "qualification",
     "release-verify",
     "legacy-excluded",
 ];

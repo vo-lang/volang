@@ -66,9 +66,18 @@ pub(crate) fn lint_toolchain_file(root: &Path, config: &ToolchainFile) -> Result
     let mut rust_cache_workspaces = HashSet::new();
     for workspace in &config.rust_cache_workspace {
         validate_rust_cache_workspace(root, workspace)?;
-        if !rust_cache_workspaces.insert((workspace.path.clone(), workspace.target.clone())) {
+        if !rust_cache_workspaces.insert((
+            workspace.repo.clone(),
+            workspace.path.clone(),
+            workspace.target.clone(),
+        )) {
             bail!(
-                "duplicate rust cache workspace: {} -> {}",
+                "duplicate rust cache workspace: {}{} -> {}",
+                workspace
+                    .repo
+                    .as_deref()
+                    .map(|repo| format!("{repo}:"))
+                    .unwrap_or_default(),
                 workspace.path,
                 workspace.target
             );
@@ -313,12 +322,19 @@ pub(crate) fn validate_rust_cache_workspace(
             false,
         )?;
     }
-    let workspace_path = root.join(&workspace.path);
-    if !workspace_path.is_dir() {
-        bail!(
-            "rust cache workspace path is not a directory: {}",
-            workspace.path
-        );
+    if let Some(repo) = &workspace.repo {
+        let project = load_project(root)?;
+        if project_repo_entry(&project, repo).is_none() {
+            bail!("rust cache workspace references undeclared repo {repo}");
+        }
+    } else {
+        let workspace_path = root.join(&workspace.path);
+        if !workspace_path.is_dir() {
+            bail!(
+                "rust cache workspace path is not a directory: {}",
+                workspace.path
+            );
+        }
     }
     validate_repo_path_like(
         "rust cache workspace",
