@@ -258,6 +258,8 @@ test = [
   "wasm-check-release",
 ]
 
+# Browser WebGPU baselines belong to app-site/full runs on a real local GPU.
+# The portable PR surface keeps source, unit, package, physics, and browser-startup checks.
 pr = [
   "quality",
   "test",
@@ -286,20 +288,12 @@ pr = [
   "voplay-vehicle-dynamics-unit",
   "voplay-physics-backend-unit",
   "voplay-physics-backend-contract",
-  "voplay-render-stress",
-  "voplay-render-stress-budgeted",
-  "voplay-render-soak-10m",
   "voplay-physics-stress",
   "voplay-physics-industrial-stress",
   "quickplay-source-audit",
   "quickplay-regenerate-check",
   "quickplay-validate",
   "studio-browser-smoke",
-  "blockkart-baseline",
-  "blockkart-baseline-start-race",
-  "blockkart-baseline-storage-reload",
-  "blockkart-baseline-restart-10",
-  "blockkart-baseline-restart-50",
   "blockkart-smoke-static",
   "release-verify",
 ]
@@ -630,7 +624,7 @@ title = "PR"
 tier_intent = "normal pull request validation"
 owner = "eng"
 tags = ["pr"]
-tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-physics-backend-unit", "voplay-physics-backend-contract", "voplay-render-stress", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline", "blockkart-baseline-start-race", "blockkart-baseline-storage-reload", "blockkart-baseline-restart-10", "blockkart-baseline-restart-50", "blockkart-smoke-static", "release-verify"]
+tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-physics-backend-unit", "voplay-physics-backend-contract", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-smoke-static", "release-verify"]
 included_in = []
 selection_policy = "Selected when the pr validation surface is requested or when a parent group includes it."
 

@@ -2195,8 +2195,7 @@ fn voplay_gate_source_fixture() -> (String, String, String, String) {
         "'summary.p99_over_budget'",
         "'summary.slow_frames_over_budget'",
         "p1 += summaryIssues.filter((issue) => issue.severity === 1).length",
-        "p1Enforced: !runtimeProbeOnly",
-        "status: p0 === 0 && (runtimeProbeOnly || p1 === 0) ? 'pass' : 'fail'",
+        "status: p0 === 0 && p1 === 0 ? 'pass' : 'fail'",
         "if (report.status !== 'pass')",
     ]
     .join("\n");

@@ -18,7 +18,7 @@ tasks = ["docs-lint"]
 
 [[known_prefix]]
 path = "lang/docs/dev/voplay*.md"
-tasks = ["docs-lint", "ci-self-check", "voplay-engineering-quality-readiness"]
+tasks = ["docs-lint", "ci-self-check"]
 
 [[known_prefix]]
 path = "lang/docs/**"
@@ -38,6 +38,8 @@ tasks = ["docs-lint", "ci-self-check"]
 
 [[known_prefix]]
 path = "scripts/ci/**"
+# GitHub's Ubuntu runners do not provide a stable WebGPU adapter. Browser render
+# baselines stay available through the local app-site/full task surfaces.
 tasks = [
   "eng-lint-tasks",
   "docs-lint",
@@ -52,21 +54,11 @@ tasks = [
   "voplay-vehicle-dynamics-unit",
   "voplay-physics-backend-unit",
   "voplay-physics-backend-contract",
-  "voplay-render-stress",
-  "voplay-render-stress-budgeted",
-  "voplay-render-soak-10m",
   "voplay-physics-stress",
   "voplay-physics-industrial-stress",
   "quickplay-validate",
   "studio-browser-smoke",
-  "blockkart-baseline",
-  "blockkart-baseline-start-race",
-  "blockkart-baseline-storage-reload",
-  "blockkart-baseline-restart-10",
-  "blockkart-baseline-restart-50",
   "blockkart-smoke-static",
-  "voplay-industrial-readiness",
-  "voplay-engineering-quality-readiness",
 ]
 
 [[known_prefix]]
@@ -87,10 +79,7 @@ tasks = [
   "voplay-vehicle-dynamics-unit",
   "voplay-physics-backend-unit",
   "voplay-physics-backend-contract",
-  "voplay-render-stress-budgeted",
   "voplay-physics-industrial-stress",
-  "voplay-industrial-readiness",
-  "voplay-engineering-quality-readiness",
 ]
 
 [[known_prefix]]
@@ -98,15 +87,11 @@ path = "eng/artifacts.toml"
 tasks = [
   "eng-lint-artifacts",
   "quickplay-validate",
-  "voplay-engineering-quality-readiness",
 ]
 
 [[known_prefix]]
 path = "eng/perf-budgets/**"
 tasks = [
-  "voplay-render-stress",
-  "voplay-render-stress-budgeted",
-  "voplay-render-soak-10m",
   "voplay-physics-stress",
   "voplay-physics-industrial-stress",
 ]
@@ -115,7 +100,6 @@ tasks = [
 path = "apps/studio/scripts/package_blockkart_quickplay.mjs"
 tasks = [
   "quickplay-validate",
-  "voplay-engineering-quality-readiness",
 ]
 
 [[known_prefix]]
@@ -209,7 +193,7 @@ tasks = ["wasm-check", "vo-test-wasm", "vo-web-wasm-build", "cargo-test-web-hard
 
 [[known_prefix]]
 path = "apps/studio/**"
-tasks = ["docs-lint", "studio-build", "studio-browser-smoke", "blockkart-baseline", "cargo-test-studio-wasm-source-contract", "quickplay-validate", "blockkart-smoke-static"]
+tasks = ["docs-lint", "studio-build", "studio-browser-smoke", "cargo-test-studio-wasm-source-contract", "quickplay-validate", "blockkart-smoke-static"]
 
 [[known_prefix]]
 path = "apps/playground-legacy/rust/**"
@@ -245,7 +229,6 @@ tasks = [
   "studio-wasm-build",
   "studio-build",
   "studio-browser-smoke",
-  "blockkart-baseline",
   "quickplay-validate",
   "blockkart-smoke-static",
 ]

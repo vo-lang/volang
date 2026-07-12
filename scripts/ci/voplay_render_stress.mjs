@@ -17,7 +17,6 @@ const budgetAllScenes = boolOption('--budget-all', process.env.VOPLAY_RENDER_STR
 const coverageCaptureDefaultMs = budgetAllScenes ? captureMs : Math.min(captureMs, 14000);
 const coverageCaptureMs = positiveInt(argValue('--coverage-capture-ms') || process.env.VOPLAY_RENDER_STRESS_COVERAGE_CAPTURE_MS, coverageCaptureDefaultMs);
 const soakOnly = budgetAllScenes && restartCount === 0 && captureMs >= 600000 && coverageCaptureMs >= 600000;
-const runtimeProbeOnly = boolOption('--runtime-probe-only', process.env.VOPLAY_RENDER_STRESS_RUNTIME_PROBE_ONLY, parseBool(process.env.CI, false));
 const budgetPath = path.resolve(argValue('--budget') || process.env.VOPLAY_RENDER_STRESS_BUDGET || path.join(root, 'eng/perf-budgets/blockkart-voplay.medium.json'));
 if (!existsSync(budgetPath)) fail(`budget file missing: ${budgetPath}`);
 const perfBudget = readJson(budgetPath);
@@ -313,7 +312,6 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
   const slowestPass = Object.entries(passTimings)
     .sort((a, b) => Number(b[1] ?? 0) - Number(a[1] ?? 0))[0] ?? ['', 0];
   const issues = [];
-  const runtimeAvailable = baseline.firstFrame?.skipped !== true;
   for (const issue of baseline.issues ?? []) {
     if (shouldIgnoreBaselineIssue(issue, options)) {
       continue;
@@ -325,7 +323,7 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
   if (baseline.visual?.enabled !== false && !baseline.visual?.canvas?.nonEmpty) {
     issues.push({ code: 'canvas.blank', severity: 0, detail: JSON.stringify(baseline.visual?.canvas ?? {}) });
   }
-  if (runtimeAvailable && (baseline.lifecycle?.state !== 'Running' || baseline.lifecycle?.reachedRunning !== true)) {
+  if (baseline.lifecycle?.state !== 'Running' || baseline.lifecycle?.reachedRunning !== true) {
     issues.push({ code: 'lifecycle.not_running', severity: 0, detail: JSON.stringify(baseline.lifecycle ?? {}) });
   }
   const warnings = baseline.warnings?.length ?? 0;
@@ -334,10 +332,10 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
   if (warnings > 0) issues.push({ code: 'console.warning', severity: 1, detail: `${warnings} warnings` });
   if (errors > 0) issues.push({ code: 'console.error', severity: 0, detail: `${errors} errors` });
   if (resourceFailures > 0) issues.push({ code: 'resource.failure', severity: 0, detail: `${resourceFailures} resource failures` });
-  if (runtimeAvailable && (!Number.isFinite(frameP90Ms) || !Number.isFinite(frameP99Ms))) {
+  if (!Number.isFinite(frameP90Ms) || !Number.isFinite(frameP99Ms)) {
     issues.push({ code: 'render.missing_real_samples', severity: 1, detail: 'baseline did not expose frame p90/p99 samples' });
   }
-  if (runtimeAvailable && requirePerfSummary && !perfSummary) {
+  if (requirePerfSummary && !perfSummary) {
     issues.push({ code: 'render.missing_perf_summary', severity: 1, detail: 'BlockKart did not emit a perf-summary report with renderer pass diagnostics' });
   }
   const budgetP90Ms = numberOr(sceneBudget.p90Ms, renderBudget.p90Ms, targetFrameMs);
@@ -366,7 +364,7 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
   if (strictBudget && perfSummary && perfSummary.gatePassed === false) {
     issues.push({ code: 'render.perf_gate_failed', severity: 1, detail: `status=${perfSummary.status ?? 'unknown'} failure=${perfSummary.failure ?? 'unknown'} hostPacingOnly=${hostPacingOnly}` });
   }
-  if (runtimeAvailable && requirePerfSummary && ((workload.frameGraphPasses ?? 0) <= 0 || (workload.frameGraphResources ?? 0) <= 0)) {
+  if (requirePerfSummary && ((workload.frameGraphPasses ?? 0) <= 0 || (workload.frameGraphResources ?? 0) <= 0)) {
     issues.push({ code: 'render.missing_frame_graph_diagnostics', severity: 1, detail: JSON.stringify(workload) });
   }
   if (p90OverBudget) {
@@ -409,7 +407,7 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
   }
   return {
     name,
-    status: issues.some((issue) => issue.severity === 0 || (!runtimeProbeOnly && issue.severity === 1)) ? 'fail' : 'pass',
+    status: issues.some((issue) => issue.severity <= 1) ? 'fail' : 'pass',
     command: meta.command,
     budgetApplied: strictBudget,
     budget: sceneBudget,
@@ -428,7 +426,6 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
     },
     viewport: baseline.viewport,
     canvas: {
-      evaluated: baseline.visual?.enabled !== false,
       width: baseline.finalState?.canvasWidth ?? 0,
       height: baseline.finalState?.canvasHeight ?? 0,
       nonEmpty: baseline.visual?.canvas?.nonEmpty === true,
@@ -641,8 +638,6 @@ function markdownReport(report) {
   lines.push(`- Target: ${report.target.width}x${report.target.height} @ ${report.target.fps} FPS`);
   lines.push(`- Budget: ${path.relative(root, report.budget.path)} p90=${formatMs(report.budget.render.p90Ms)} p99=${formatMs(report.budget.render.p99Ms)} slowFrames=${report.budget.render.maxSlowFrames}`);
   lines.push(`- Budget all scenes: ${report.budgetAllScenes === true}`);
-  lines.push(`- Runtime probe only: ${report.runtimeProbeOnly === true}`);
-  lines.push(`- P1 enforced: ${report.p1Enforced === true}`);
   lines.push(`- Scene count: ${report.summary.sceneCount}`);
   lines.push(`- P0/P1: ${report.summary.p0}/${report.summary.p1}`);
   lines.push(`- Frame p90/p99: ${formatMs(report.summary.frameP90Ms)} / ${formatMs(report.summary.frameP99Ms)}`);
@@ -775,7 +770,7 @@ const coverageBudgetOptions = {
 const scenes = [
   await runBaseline(soakOnly ? 'blockkart-quickplay-baseline-soak-10m' : 'blockkart-quickplay-baseline', baselinePerfArgs, { strictBudget: true, captureMs }),
 ];
-if (!soakOnly && !runtimeProbeOnly) {
+if (!soakOnly) {
   scenes.push(await runBaseline('blockkart-primitive-10k', [...coverageArgs, '--stress-profile', 'primitive10k'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
   scenes.push(await runBaseline('blockkart-water', [...coverageArgs, '--stress-profile', 'water'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
   scenes.push(await runBaseline('blockkart-resource-churn-soak', [...coverageArgs, '--stress-profile', 'resource-churn'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
@@ -783,7 +778,7 @@ if (!soakOnly && !runtimeProbeOnly) {
   scenes.push(await runBaseline('blockkart-shadow-post-matrix', [...coverageArgs, '--stress-profile', 'shadow-post-matrix'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
   scenes.push(await runBaseline('blockkart-resize-recreate-targets', [...coverageArgs, '--resize-cycle'], { ...coverageBudgetOptions, captureMs: coverageCaptureMs }));
 }
-if (!soakOnly && !runtimeProbeOnly && restartCount > 0) {
+if (!soakOnly && restartCount > 0) {
   scenes.push(await runBaseline(`blockkart-restart-${restartCount}`, ['--no-fail-on-issues', ...baselinePerfArgs, '--restart-count', String(restartCount)], { ...coverageBudgetOptions, requirePerfSummary: false, allowBaselineFailureWithJson: true }));
 }
 
@@ -803,14 +798,10 @@ const coverage = {
   restart50: restartCount >= 50 && scenes.some((scene) => scene.diagnostics?.restart?.requested === restartCount && scene.diagnostics?.restart?.completed === restartCount),
   resizeRecreateTargets: scenes.some((scene) => scene.diagnostics?.resize?.completed === true || scene.diagnostics?.latestSceneReport?.resizeRecreateTargets === true),
   resourceChurnSoak: scenes.some((scene) => scene.name === 'blockkart-resource-churn-soak' && scene.diagnostics?.renderStress?.completed === true && Number(scene.workload?.resourceChurnEvents ?? 0) > 0),
-  realCanvasCapture: scenes.every((scene) => scene.canvas?.evaluated === false || scene.canvas?.nonEmpty === true),
+  realCanvasCapture: scenes.every((scene) => scene.canvas?.nonEmpty === true),
   realPerfSamples: scenes.every((scene) => Number.isFinite(scene.timings?.frameP90Ms) && Number.isFinite(scene.timings?.frameP99Ms)),
 };
-const requiredCoverage = runtimeProbeOnly
-  ? new Set(['blockKartBaseline', 'realCanvasCapture', 'realPerfSamples'])
-  : new Set(Object.keys(coverage));
 const coverageIssues = soakOnly ? [] : Object.entries(coverage)
-  .filter(([name]) => requiredCoverage.has(name))
   .filter(([, covered]) => covered !== true)
   .map(([name]) => ({ code: 'coverage.missing', severity: 1, detail: name }));
 p1 += coverageIssues.length;
@@ -864,8 +855,6 @@ const report = {
   target: { width: perfBudget?.target?.width ?? 1280, height: perfBudget?.target?.height ?? 720, fps: targetFps, frameBudgetMs: Number(targetFrameMs.toFixed(4)) },
   budget: { path: budgetPath, render: renderBudget },
   budgetAllScenes,
-  runtimeProbeOnly,
-  p1Enforced: !runtimeProbeOnly,
   scenes,
   summary: {
     sceneCount: scenes.length,
@@ -879,12 +868,12 @@ const report = {
   coverage,
   coverageIssues,
   summaryIssues,
-  status: p0 === 0 && (runtimeProbeOnly || p1 === 0) ? 'pass' : 'fail',
+  status: p0 === 0 && p1 === 0 ? 'pass' : 'fail',
 };
 writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
 writeFileSync(path.join(outDir, 'report.md'), markdownReport(report));
 
 if (report.status !== 'pass') {
-  fail(`stress thresholds failed: p0=${p0} p1=${p1} p1Enforced=${report.p1Enforced}; see ${path.join(outDir, 'report.json')}`);
+  fail(`stress thresholds failed: p0=${p0} p1=${p1}; see ${path.join(outDir, 'report.json')}`);
 }
 console.log(`voplay render stress: ok ${path.join(outDir, 'report.json')}`);
