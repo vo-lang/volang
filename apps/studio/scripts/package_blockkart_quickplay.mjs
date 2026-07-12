@@ -9,7 +9,9 @@ import { verifyCurrentVoplayWasm } from '../../../scripts/ci/voplay_current_wasm
 const STUDIO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const VOLANG_ROOT = requireVolangRoot(path.resolve(STUDIO_ROOT, '../..'));
 const BLOCKKART_ROOT = requireRepoRoot('BLOCKKART_ROOT', 'BlockKart');
-const MOD_CACHE_ROOT = path.resolve(process.env.VO_MOD_CACHE ?? path.join(os.homedir(), '.vo', 'mod'));
+const MOD_CACHE_ROOT = path.resolve(
+  process.env.VO_MOD_CACHE ?? path.join(VOLANG_ROOT, 'target', 'quickplay-module-cache', 'mod'),
+);
 const VOPLAY_ROOT = requireRepoRoot('VOPLAY_ROOT', 'voplay');
 const VOPLAY_CURRENT_WASM_ROOT = path.resolve(
   process.env.VOPLAY_CURRENT_WASM_OUT_DIR ?? path.join(VOLANG_ROOT, 'target', 'voplay-current-wasm'),

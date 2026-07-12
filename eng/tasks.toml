@@ -1659,11 +1659,27 @@ owner = "studio"
 timeout_sec = 120
 
 [[task]]
+name = "quickplay-module-cache"
+title = "provision locked BlockKart quickplay module cache"
+command = ["node", "scripts/ci/quickplay_module_cache.mjs"]
+tools = ["node", "rust"]
+node_workspaces = ["studio"]
+repo = "BlockKart"
+repos = ["vopack"]
+internal = true
+inputs = ["scripts/ci/quickplay_module_cache.mjs", "scripts/ci/repo_roots.mjs", "lang/crates/vo-engine/src/compile/mod.rs", "external:BlockKart/vo.mod", "external:BlockKart/vo.lock", "first-party:vopack"]
+outputs = ["target/quickplay-module-cache"]
+tier = "contract"
+tags = ["app-smoke", "contract", "provenance"]
+owner = "studio"
+timeout_sec = 600
+
+[[task]]
 name = "quickplay-blockkart-package"
 title = "package BlockKart quickplay package"
 cwd = "apps/studio"
 command = ["npm", "run", "package:blockkart"]
-needs = ["voplay-current-wasm-build", "blockkart-vpak-provenance-selftest"]
+needs = ["voplay-current-wasm-build", "blockkart-vpak-provenance-selftest", "quickplay-module-cache"]
 tools = ["node", "npm"]
 node_workspaces = ["studio"]
 repo = "BlockKart"
@@ -1679,7 +1695,7 @@ timeout_sec = 900
 name = "quickplay-regenerate-check"
 title = "regenerate and compare BlockKart quickplay package"
 command = ["node", "scripts/ci/quickplay_regenerate_check.mjs"]
-needs = ["voplay-current-wasm-build"]
+needs = ["voplay-current-wasm-build", "quickplay-module-cache"]
 tools = ["node", "npm"]
 node_workspaces = ["studio"]
 repo = "BlockKart"

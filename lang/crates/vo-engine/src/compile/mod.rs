@@ -733,6 +733,9 @@ pub fn default_mod_cache_root() -> PathBuf {
     if let Some(root) = MOD_CACHE_ROOT_OVERRIDE.with(|slot| slot.borrow().clone()) {
         return root;
     }
+    if let Some(root) = std::env::var_os("VO_MOD_CACHE") {
+        return PathBuf::from(root);
+    }
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join(MOD_CACHE_DIR))
