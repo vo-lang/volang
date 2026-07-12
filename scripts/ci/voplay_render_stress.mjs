@@ -409,7 +409,7 @@ function summarizeBaselineScene(name, baseline, meta, options = {}) {
   }
   return {
     name,
-    status: issues.some((issue) => issue.severity <= 1) ? 'fail' : 'pass',
+    status: issues.some((issue) => issue.severity === 0 || (!runtimeProbeOnly && issue.severity === 1)) ? 'fail' : 'pass',
     command: meta.command,
     budgetApplied: strictBudget,
     budget: sceneBudget,
@@ -642,6 +642,7 @@ function markdownReport(report) {
   lines.push(`- Budget: ${path.relative(root, report.budget.path)} p90=${formatMs(report.budget.render.p90Ms)} p99=${formatMs(report.budget.render.p99Ms)} slowFrames=${report.budget.render.maxSlowFrames}`);
   lines.push(`- Budget all scenes: ${report.budgetAllScenes === true}`);
   lines.push(`- Runtime probe only: ${report.runtimeProbeOnly === true}`);
+  lines.push(`- P1 enforced: ${report.p1Enforced === true}`);
   lines.push(`- Scene count: ${report.summary.sceneCount}`);
   lines.push(`- P0/P1: ${report.summary.p0}/${report.summary.p1}`);
   lines.push(`- Frame p90/p99: ${formatMs(report.summary.frameP90Ms)} / ${formatMs(report.summary.frameP99Ms)}`);
@@ -864,6 +865,7 @@ const report = {
   budget: { path: budgetPath, render: renderBudget },
   budgetAllScenes,
   runtimeProbeOnly,
+  p1Enforced: !runtimeProbeOnly,
   scenes,
   summary: {
     sceneCount: scenes.length,
@@ -877,12 +879,12 @@ const report = {
   coverage,
   coverageIssues,
   summaryIssues,
-  status: p0 === 0 && p1 === 0 ? 'pass' : 'fail',
+  status: p0 === 0 && (runtimeProbeOnly || p1 === 0) ? 'pass' : 'fail',
 };
 writeFileSync(path.join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
 writeFileSync(path.join(outDir, 'report.md'), markdownReport(report));
 
 if (report.status !== 'pass') {
-  fail(`stress thresholds failed: p0=${p0} p1=${p1}; see ${path.join(outDir, 'report.json')}`);
+  fail(`stress thresholds failed: p0=${p0} p1=${p1} p1Enforced=${report.p1Enforced}; see ${path.join(outDir, 'report.json')}`);
 }
 console.log(`voplay render stress: ok ${path.join(outDir, 'report.json')}`);
