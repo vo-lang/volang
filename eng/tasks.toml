@@ -204,7 +204,6 @@ app-site = [
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
   "voplay-vehicle-dynamics-unit",
-  "voplay-physics-backend-unit",
   "voplay-physics-backend-contract",
   "voplay-render-stress",
   "voplay-render-stress-budgeted",
@@ -286,7 +285,6 @@ pr = [
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
   "voplay-vehicle-dynamics-unit",
-  "voplay-physics-backend-unit",
   "voplay-physics-backend-contract",
   "voplay-physics-stress",
   "voplay-physics-industrial-stress",
@@ -564,7 +562,7 @@ title = "App Site"
 tier_intent = "Studio vo-web quickplay and static site checks"
 owner = "studio"
 tags = ["app-site", "app-build", "app-smoke"]
-tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-physics-backend-unit", "voplay-physics-backend-contract", "voplay-render-stress", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline", "blockkart-baseline-start-race", "blockkart-baseline-storage-reload", "blockkart-baseline-restart-10", "blockkart-baseline-restart-50", "blockkart-smoke-static"]
+tasks = ["node-audit-current", "vo-web-wasm-build", "vogui-build", "studio-wasm-build", "studio-install-local-vogui", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-physics-backend-contract", "voplay-render-stress", "voplay-render-stress-budgeted", "voplay-render-soak-10m", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-baseline", "blockkart-baseline-start-race", "blockkart-baseline-storage-reload", "blockkart-baseline-restart-10", "blockkart-baseline-restart-50", "blockkart-smoke-static"]
 included_in = ["site"]
 selection_policy = "Selected when the app-site validation surface is requested or when a parent group includes it."
 
@@ -624,7 +622,7 @@ title = "PR"
 tier_intent = "normal pull request validation"
 owner = "eng"
 tags = ["pr"]
-tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-physics-backend-unit", "voplay-physics-backend-contract", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-smoke-static", "release-verify"]
+tasks = ["quality", "test", "runtime-contract", "runtime-surface-contract", "jit-contract", "vm-hardening", "typechecker-contract", "codegen-contract", "ffi-contract", "vo-dev-contract", "docs", "examples", "benchmarks", "app-contract", "studio-build", "quickplay-validate-selftest", "voplay-sample-validate", "voplay-render-architecture-lint", "blockkart-engine-boundary-lint", "voplay-render-structure-lint", "blockkart-product-boundary-strict", "voplay-framegraph-unit", "voplay-render-core-unit", "voplay-batch-planner-unit", "voplay-vehicle-dynamics-unit", "voplay-physics-backend-contract", "voplay-physics-stress", "voplay-physics-industrial-stress", "quickplay-source-audit", "quickplay-regenerate-check", "quickplay-validate", "studio-browser-smoke", "blockkart-smoke-static", "release-verify"]
 included_in = []
 selection_policy = "Selected when the pr validation surface is requested or when a parent group includes it."
 
@@ -1877,21 +1875,6 @@ owner = "studio"
 timeout_sec = 3600
 
 [[task]]
-name = "voplay-physics-backend-unit"
-title = "run voplay physics backend unit contract"
-command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "physics-backend", "--out-dir", "target/voplay-physics-backend-unit"]
-linux_packages = ["libasound2-dev"]
-tools = ["node"]
-node_workspaces = ["studio"]
-repo = "voplay"
-inputs = ["scripts/ci/voplay_scene3d_unit.mjs", "module-cache:voplay", "module-cache:vogui", "module-cache:vopack"]
-outputs = ["target/voplay-physics-backend-unit"]
-tier = "contract"
-tags = ["app-smoke", "contract", "physics"]
-owner = "studio"
-timeout_sec = 3600
-
-[[task]]
 name = "voplay-physics-backend-contract"
 title = "run voplay physics backend contract"
 command = ["node", "scripts/ci/voplay_scene3d_unit.mjs", "--suite", "physics-backend", "--out-dir", "target/voplay-physics-backend-contract"]
@@ -1904,7 +1887,7 @@ outputs = ["target/voplay-physics-backend-contract"]
 tier = "contract"
 tags = ["app-smoke", "contract", "physics"]
 owner = "studio"
-timeout_sec = 1800
+timeout_sec = 3600
 
 [[task]]
 name = "voplay-render-observability-selftest"

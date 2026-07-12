@@ -52,7 +52,6 @@ tasks = [
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
   "voplay-vehicle-dynamics-unit",
-  "voplay-physics-backend-unit",
   "voplay-physics-backend-contract",
   "voplay-physics-stress",
   "voplay-physics-industrial-stress",
@@ -77,7 +76,6 @@ tasks = [
   "voplay-render-core-unit",
   "voplay-batch-planner-unit",
   "voplay-vehicle-dynamics-unit",
-  "voplay-physics-backend-unit",
   "voplay-physics-backend-contract",
   "voplay-physics-industrial-stress",
 ]
