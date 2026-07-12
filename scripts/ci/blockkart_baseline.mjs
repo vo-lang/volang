@@ -964,6 +964,7 @@ async function closePage(debugPort, targetId) {
 }
 
 async function navigate(client, url) {
+  await client.send('Page.bringToFront', {}, 5000).catch(() => undefined);
   const loaded = client.waitFor('Page.loadEventFired', () => true, 45000).catch(() => null);
   await client.send('Page.navigate', { url });
   await loaded;
@@ -974,6 +975,12 @@ async function navigate(client, url) {
     (value) => value === true,
     45000,
   );
+  await client.send('Page.bringToFront', {}, 5000);
+  const visibility = await client.evaluate('(() => { window.focus(); return document.visibilityState; })()', 5000);
+  if (process.platform === 'linux' && process.env.DISPLAY && visibility !== 'visible') {
+    throw new Error(`headful browser page remained ${visibility ?? 'unknown'} after Page.bringToFront`);
+  }
+  return visibility;
 }
 
 async function waitForPredicate(client, label, expression, predicate, timeoutMs) {
@@ -3240,8 +3247,8 @@ async function main() {
     const startedAt = new Date().toISOString();
     const monotonicStartMs = Date.now();
     progress(`navigate ${quickplayUrl.toString()}`);
-    await navigate(client, quickplayUrl.toString());
-    progress('navigate complete');
+    const pageVisibility = await navigate(client, quickplayUrl.toString());
+    progress(`navigate complete visibility=${pageVisibility ?? 'unknown'}`);
     const hookState = await waitForPredicate(
       client,
       'BlockKart debug hook',
