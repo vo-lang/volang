@@ -5,6 +5,10 @@ import (
 	"math"
 )
 
+func near(got float64, want float64, tolerance float64) bool {
+	return math.Abs(got - want) <= tolerance
+}
+
 func main() {
 	fmt.Println("Starting math tests...")
 	// Basic functions
@@ -54,8 +58,35 @@ func main() {
 	// Test Copysign
 	cs1 := math.Copysign(5.0, -1.0)
 	assert(cs1 == -5.0, "Copysign(5, -1) should be -5")
+	testTranscendentalsAndFMA()
 	testIEEEBoundaries()
 	fmt.Println("All math tests passed!")
+}
+
+func testTranscendentalsAndFMA() {
+	assert(near(math.Cbrt(27), 3, 1e-14), "Cbrt")
+	assert(near(math.Exp(1), 2.718281828459045, 1e-14), "Exp")
+	assert(math.Exp2(10) == 1024, "Exp2")
+	assert(near(math.Expm1(1e-8), 1.0000000050000001e-8, 1e-20), "Expm1")
+	assert(near(math.Log(2.718281828459045), 1, 1e-14), "Log")
+	assert(math.Log2(8) == 3, "Log2")
+	assert(math.Log10(1000) == 3, "Log10")
+	assert(near(math.Log1p(1e-8), 9.999999950000001e-9, 1e-20), "Log1p")
+	assert(near(math.Tan(0.25), 0.25534192122103627, 1e-14), "Tan")
+	assert(near(math.Asin(0.5), 0.5235987755982989, 1e-14), "Asin")
+	assert(near(math.Acos(0.5), 1.0471975511965979, 1e-14), "Acos")
+	assert(near(math.Atan(1), 0.7853981633974483, 1e-14), "Atan")
+	assert(near(math.Atan2(1, -1), 2.356194490192345, 1e-14), "Atan2")
+	assert(near(math.Sinh(1), 1.1752011936438014, 1e-14), "Sinh")
+	assert(near(math.Cosh(1), 1.5430806348152437, 1e-14), "Cosh")
+	assert(near(math.Tanh(1), 0.7615941559557649, 1e-14), "Tanh")
+	assert(near(math.Asinh(1), 0.881373587019543, 1e-14), "Asinh")
+	assert(near(math.Acosh(2), 1.3169578969248166, 1e-14), "Acosh")
+	assert(near(math.Atanh(0.5), 0.5493061443340548, 1e-14), "Atanh")
+	// The separate multiply and add round to zero. A fused operation retains
+	// the exact -2^-54 residual, proving that FMA has one rounding step.
+	epsilon := 7.450580596923828125e-9
+	assert(math.FMA(1 + epsilon, 1 - epsilon, -1) == -5.551115123125783e-17, "FMA is fused")
 }
 
 func testIEEEBoundaries() {

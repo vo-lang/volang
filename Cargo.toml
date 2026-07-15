@@ -28,6 +28,9 @@ homepage = "https://volang.dev"
 readme = "README.md"
 
 [workspace.dependencies]
+# Keep host, alloc-only, and WASM math builtins on one audited implementation.
+# Updating this exact pin requires the cross-target language math matrix.
+libm = "=0.2.16"
 vo-common-core = { path = "lang/crates/vo-common-core", version = "=0.1.1", default-features = false }
 vo-common = { path = "lang/crates/vo-common", version = "=0.1.1", default-features = false }
 vo-syntax = { path = "lang/crates/vo-syntax", version = "=0.1.1", default-features = false }

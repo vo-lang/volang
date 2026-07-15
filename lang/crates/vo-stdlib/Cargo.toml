@@ -19,6 +19,7 @@ source = ["dep:vo-common", "dep:vo-stdlib-source"]
 std = ["source", "vo-runtime/std", "memchr/std", "regex/std", "regex-syntax/std", "dep:vo-module", "dep:lazy_static", "dep:dirs", "dep:hostname", "dep:linkme", "dep:libc", "dep:nix", "dep:ureq", "dep:chrono", "dep:chrono-tz"]
 
 [dependencies]
+libm.workspace = true
 vo-runtime = { workspace = true, default-features = false }
 vo-common = { workspace = true, default-features = false, optional = true }
 vo-common-core = { workspace = true, default-features = false }

@@ -315,27 +315,30 @@ fn panic_with_error(call: &mut ExternCallContext) -> ExternResult {
 }
 
 fn math_sqrt(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_f64(0, call.arg_f64(0).sqrt());
+    call.ret_f64(0, libm::sqrt(call.arg_f64(0)));
     ExternResult::Ok
 }
 
 fn math_floor(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_f64(0, call.arg_f64(0).floor());
+    call.ret_f64(0, libm::floor(call.arg_f64(0)));
     ExternResult::Ok
 }
 
 fn math_ceil(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_f64(0, call.arg_f64(0).ceil());
+    call.ret_f64(0, libm::ceil(call.arg_f64(0)));
     ExternResult::Ok
 }
 
 fn math_trunc(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_f64(0, call.arg_f64(0).trunc());
+    call.ret_f64(0, libm::trunc(call.arg_f64(0)));
     ExternResult::Ok
 }
 
 fn math_fma(call: &mut ExternCallContext) -> ExternResult {
-    call.ret_f64(0, call.arg_f64(0).mul_add(call.arg_f64(1), call.arg_f64(2)));
+    call.ret_f64(
+        0,
+        libm::fma(call.arg_f64(0), call.arg_f64(1), call.arg_f64(2)),
+    );
     ExternResult::Ok
 }
 

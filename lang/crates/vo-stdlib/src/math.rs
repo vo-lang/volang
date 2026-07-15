@@ -10,150 +10,150 @@ use vo_ffi_macro::vostd_fn;
 
 #[vostd_fn("math", "Floor")]
 fn floor(x: f64) -> f64 {
-    x.floor()
+    libm::floor(x)
 }
 
 #[vostd_fn("math", "Ceil")]
 fn ceil(x: f64) -> f64 {
-    x.ceil()
+    libm::ceil(x)
 }
 
 #[vostd_fn("math", "Round")]
 fn round(x: f64) -> f64 {
-    x.round()
+    libm::round(x)
 }
 
 #[vostd_fn("math", "Trunc")]
 fn trunc(x: f64) -> f64 {
-    x.trunc()
+    libm::trunc(x)
 }
 
 // ==================== Power and root (libm) ====================
 
 #[vostd_fn("math", "Sqrt")]
 fn sqrt(x: f64) -> f64 {
-    x.sqrt()
+    libm::sqrt(x)
 }
 
 #[vostd_fn("math", "Cbrt")]
 fn cbrt(x: f64) -> f64 {
-    x.cbrt()
+    libm::cbrt(x)
 }
 
 #[vostd_fn("math", "Pow")]
 fn pow(x: f64, y: f64) -> f64 {
-    x.powf(y)
+    libm::pow(x, y)
 }
 
 #[vostd_fn("math", "Hypot")]
 fn hypot(x: f64, y: f64) -> f64 {
-    x.hypot(y)
+    libm::hypot(x, y)
 }
 
 // ==================== Exponential and logarithm (libm) ====================
 
 #[vostd_fn("math", "Exp")]
 fn exp(x: f64) -> f64 {
-    x.exp()
+    libm::exp(x)
 }
 
 #[vostd_fn("math", "Exp2")]
 fn exp2(x: f64) -> f64 {
-    x.exp2()
+    libm::exp2(x)
 }
 
 #[vostd_fn("math", "Expm1")]
 fn expm1(x: f64) -> f64 {
-    x.exp_m1()
+    libm::expm1(x)
 }
 
 #[vostd_fn("math", "Log")]
 fn log(x: f64) -> f64 {
-    x.ln()
+    libm::log(x)
 }
 
 #[vostd_fn("math", "Log2")]
 fn log2(x: f64) -> f64 {
-    x.log2()
+    libm::log2(x)
 }
 
 #[vostd_fn("math", "Log10")]
 fn log10(x: f64) -> f64 {
-    x.log10()
+    libm::log10(x)
 }
 
 #[vostd_fn("math", "Log1p")]
 fn log1p(x: f64) -> f64 {
-    x.ln_1p()
+    libm::log1p(x)
 }
 
 // ==================== Trigonometric (libm) ====================
 
 #[vostd_fn("math", "Sin")]
 fn sin(x: f64) -> f64 {
-    x.sin()
+    libm::sin(x)
 }
 
 #[vostd_fn("math", "Cos")]
 fn cos(x: f64) -> f64 {
-    x.cos()
+    libm::cos(x)
 }
 
 #[vostd_fn("math", "Tan")]
 fn tan(x: f64) -> f64 {
-    x.tan()
+    libm::tan(x)
 }
 
 #[vostd_fn("math", "Asin")]
 fn asin(x: f64) -> f64 {
-    x.asin()
+    libm::asin(x)
 }
 
 #[vostd_fn("math", "Acos")]
 fn acos(x: f64) -> f64 {
-    x.acos()
+    libm::acos(x)
 }
 
 #[vostd_fn("math", "Atan")]
 fn atan(x: f64) -> f64 {
-    x.atan()
+    libm::atan(x)
 }
 
 #[vostd_fn("math", "Atan2")]
 fn atan2(y: f64, x: f64) -> f64 {
-    y.atan2(x)
+    libm::atan2(y, x)
 }
 
 // ==================== Hyperbolic (libm) ====================
 
 #[vostd_fn("math", "Sinh")]
 fn sinh(x: f64) -> f64 {
-    x.sinh()
+    libm::sinh(x)
 }
 
 #[vostd_fn("math", "Cosh")]
 fn cosh(x: f64) -> f64 {
-    x.cosh()
+    libm::cosh(x)
 }
 
 #[vostd_fn("math", "Tanh")]
 fn tanh(x: f64) -> f64 {
-    x.tanh()
+    libm::tanh(x)
 }
 
 #[vostd_fn("math", "Asinh")]
 fn asinh(x: f64) -> f64 {
-    x.asinh()
+    libm::asinh(x)
 }
 
 #[vostd_fn("math", "Acosh")]
 fn acosh(x: f64) -> f64 {
-    x.acosh()
+    libm::acosh(x)
 }
 
 #[vostd_fn("math", "Atanh")]
 fn atanh(x: f64) -> f64 {
-    x.atanh()
+    libm::atanh(x)
 }
 
 // ==================== IEEE 754 operations ====================
@@ -165,7 +165,7 @@ fn mod_fn(x: f64, y: f64) -> f64 {
 
 #[vostd_fn("math", "Modf")]
 fn modf(x: f64) -> (f64, f64) {
-    let int_part = x.trunc();
+    let int_part = libm::trunc(x);
     let frac_part = (x - int_part).copysign(x);
     (int_part, frac_part)
 }
@@ -241,7 +241,7 @@ fn ldexp(frac: f64, exp: i64) -> f64 {
 
 #[vostd_fn("math", "FMA")]
 fn fma(x: f64, y: f64, z: f64) -> f64 {
-    x.mul_add(y, z)
+    libm::fma(x, y, z)
 }
 
 #[vostd_fn("math", "Inf")]

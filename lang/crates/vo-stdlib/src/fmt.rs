@@ -863,7 +863,7 @@ fn format_with_spec(
                     let exp = if f == 0.0 {
                         0i32
                     } else {
-                        f.abs().log10().floor() as i32
+                        libm::floor(libm::log10(f.abs())) as i32
                     };
                     let s = if exp < -4 || exp >= prec as i32 {
                         // Use %e format with prec-1 decimal places, then strip trailing zeros.

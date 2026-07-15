@@ -16,6 +16,7 @@ std = ["vo-common-core/std", "linkme", "regex", "libloading", "lazy_static", "di
 gc-debug = ["std"]  # GC 验证模式，需要 std
 
 [dependencies]
+libm.workspace = true
 vo-common-core.workspace = true
 vo-ffi-macro.workspace = true  # Always available (macro generates cfg-gated code)
 hashbrown = "0.15"
