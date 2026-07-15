@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/channel.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:2672a36f30d7f38576fccc78d04adb607891a643e8d14041d8e3c595809ed6b2
-Generated-At: 2026-03-13T21:05:33+08:00
+Generated-At: 2026-07-15T20:42:22+08:00
 -->
 # Channel and Port Specification
 

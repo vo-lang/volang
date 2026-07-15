@@ -2,7 +2,7 @@
 Generated from lang/docs/spec/dynamic.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:b772f19f8b6df75774bfdc2c7d4e713fbcf2091d6b4dd2b510af2892f92abe37
-Generated-At: 2026-01-20T20:35:05+08:00
+Generated-At: 2026-07-15T20:42:22+08:00
 -->
 # Dynamic Access Specification
 

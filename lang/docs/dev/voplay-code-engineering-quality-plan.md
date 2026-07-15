@@ -68,9 +68,9 @@ artifact 或 target report 的任务。
 当前 checkout snapshot:
 
 ```text
-volang    2c2f256805b4fa22e17b1fafc3840e86297a62f6
+volang    ba23fb19e3c12c64c73ff1a7551c42972f76b35a
 vogui     5223b37f0be4f7880148fbf8f9700f0589a056c7
-voplay    bdcac0cfc7bb36bd99fee60bb82934070fe84642
+voplay    7b4039fe0ba24779632e7ab5b24791bdc28723c7
 vopack    7a6e63880a4359a623ae9620c9691fa7e1d6c7ad
 BlockKart 87eca51f2439e48aa6b883cae8dd30a3d292e0f4
 ```
@@ -172,7 +172,7 @@ Volang 生成器输入稳定后运行 package、strict source audit、regenerate
 
 #### first-party 协同状态（2026-07-15）
 
-1. `voplay` 已在 `bdcac0cfc7bb36bd99fee60bb82934070fe84642` 提交依赖锁、格式修复与 LF 源码边界，工作树 clean；
+1. `voplay` 已在 `7b4039fe0ba24779632e7ab5b24791bdc28723c7` 提交依赖锁、格式修复与 LF 源码边界，工作树 clean；
    `cargo metadata --locked --offline` 与 `wasm32-unknown-unknown` 的 `wasm-island` locked/offline check 通过。
 2. `vopack` 已在 `7a6e63880a4359a623ae9620c9691fa7e1d6c7ad` 将 CRC32 结果显式转换为 `uint64`，
    工作树 clean。BlockKart 的 source `vo.lock` 仍是 packager 接受的一次性 v1 migration 输入；最终
@@ -181,9 +181,9 @@ Volang 生成器输入稳定后运行 package、strict source audit、regenerate
    工作树 clean；`voplay` 的 locked Cargo graph 已绑定该本地源码。
 4. BlockKart 已在 `87eca51f2439e48aa6b883cae8dd30a3d292e0f4` 完成 VPAK fail-closed provenance 与 portable runtime pack，且工作树 clean。Volang
    `eng/project.toml` 的四个 pin 与以上 HEAD 精确一致。
-5. checked-in Quickplay `provenance.json` 仍为 schema v2 / generator v8，并引用旧 voplay、vopack
-   commits；这是最终 current-source package 生成前的显式 stale 边界，artifact lint 应持续失败，直至
-   generator v15 / provenance v3 / sourceClosure v1 三件套完成原子替换。
+5. checked-in Quickplay 产物采用 provenance v3 / generator v18 / sourceClosure v1，由正式 package
+   任务从 clean pinned commits 原子生成；provenance 同时绑定 Volang、voplay、vogui、vopack 与
+   BlockKart 的精确提交。任何旧 schema、旧生成器或来源漂移都必须由 artifact lint 拒绝。
 
 禁止通过改写 `target/quickplay-module-cache`、放宽 typed numeric assignment、移除 `--locked` 或伪造
 producer manifest 来绕过生成协议。Quickplay package、regenerate、source-audit 与 validate 必须从 clean

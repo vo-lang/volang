@@ -2,7 +2,7 @@
 Generated from lang/docs/vo-for-gophers.md
 Generator: node scripts/ci/docs_sync.mjs
 Source-Digest: sha256:838f1c1bbfa7b2f20a4a5c422927c1158a4e2b3d93f4082bcd26adcc090f45fa
-Generated-At: 2026-01-20T20:35:05+08:00
+Generated-At: 2026-07-15T20:42:22+08:00
 -->
 # Vo for Go Programmers
 
